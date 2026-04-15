@@ -3,10 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R reversal with 1d volume confirmation and 1w EMA trend filter
-# Designed for low trade frequency (target 15-30/year) with clear mean-reversion logic
-# Works in both bull (sell at overbought in uptrend) and bear (buy at oversold in downtrend) markets
-# Uses Williams %R from daily, volume spike to confirm interest, and weekly EMA for trend alignment
+# Hypothesis: 4h Donchian breakout with 12h EMA trend and volume confirmation
+# Designed for low trade frequency (target 20-40/year) with clear trend-following logic
+# Uses 4h price channel breakouts, confirmed by 12h EMA trend and volume spikes
+# Works in trending markets (both bull and bear) by following the 12h trend direction
+# Avoids choppy markets through volume confirmation and trend alignment
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,48 +19,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data (primary timeframe) for price action
+    # Load 4h data (primary timeframe) for price action
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
+    
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # Load 12h data for trend filter (EMA50)
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 30:
         return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     
-    # Load 1d data for Williams %R calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
-        return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Donchian channels (20-period) on 4h
+    highest_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Load 1w data for trend filter (EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 60:
-        return np.zeros(n)
-    close_1w = df_1w['close'].values
+    # Calculate EMA50 on 12h for trend filter
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Williams %R (14-period) from previous day to avoid look-ahead
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14) * -100
+    # Volume average (20-period on 4h)
+    vol_avg = pd.Series(df_4h['volume'].values).rolling(window=20, min_periods=20).mean().values
     
-    # Use previous day's Williams %R to avoid look-ahead
-    williams_r_prev = np.concatenate([[np.nan], williams_r[:-1]])
-    
-    # Volume average (20-period on 1d)
-    vol_avg = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    
-    # EMA50 on 1w for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align all indicators to 12h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r_prev)
-    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Align all indicators to 4h timeframe
+    highest_20_aligned = align_htf_to_ltf(prices, df_4h, highest_20)
+    lowest_20_aligned = align_htf_to_ltf(prices, df_4h, lowest_20)
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_4h, vol_avg)
     
     signals = np.zeros(n)
     position = 0
@@ -67,36 +56,36 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(vol_avg_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i])):
+        if (np.isnan(highest_20_aligned[i]) or np.isnan(lowest_20_aligned[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_avg_aligned[i])):
             continue
         
-        # Long entry: Williams %R oversold (< -80) + downtrend + volume spike
-        if (williams_r_aligned[i] < -80 and 
-            close[i] < ema50_1w_aligned[i] and 
-            volume[i] > 1.8 * vol_avg_aligned[i] and 
+        # Long entry: price breaks above Donchian upper band + uptrend + volume spike
+        if (high[i] > highest_20_aligned[i] and 
+            close[i] > ema50_12h_aligned[i] and 
+            volume[i] > 2.0 * vol_avg_aligned[i] and 
             position <= 0):
             position = 1
             signals[i] = position_size
         
-        # Short entry: Williams %R overbought (> -20) + uptrend + volume spike
-        elif (williams_r_aligned[i] > -20 and 
-              close[i] > ema50_1w_aligned[i] and 
-              volume[i] > 1.8 * vol_avg_aligned[i] and 
+        # Short entry: price breaks below Donchian lower band + downtrend + volume spike
+        elif (low[i] < lowest_20_aligned[i] and 
+              close[i] < ema50_12h_aligned[i] and 
+              volume[i] > 2.0 * vol_avg_aligned[i] and 
               position >= 0):
             position = -1
             signals[i] = -position_size
         
-        # Exit: reverse signal or Williams %R returns to neutral range (-50 to -50)
-        elif position == 1 and williams_r_aligned[i] > -50:
+        # Exit: reverse signal or price returns to middle of channel
+        elif position == 1 and close[i] < (highest_20_aligned[i] + lowest_20_aligned[i]) / 2:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and williams_r_aligned[i] < -50:
+        elif position == -1 and close[i] > (highest_20_aligned[i] + lowest_20_aligned[i]) / 2:
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "12h_WilliamsR_1dVolume_1wEMA_Reversal"
-timeframe = "12h"
+name = "4h_Donchian_12hEMA_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
