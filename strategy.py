@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + volume confirmation + KAMA trend filter
-# Uses Donchian breakouts for trend capture, volume to confirm breakout strength,
-# and Kaufman Adaptive Moving Average (KAMA) to filter for trending markets.
-# Works in both bull and bear by only taking breakouts in the direction of KAMA.
-# Target: 80-180 total trades over 4 years (20-45/year) with disciplined entries.
+# Hypothesis: 12h Donchian(20) breakout + volume confirmation + 1d Choppiness regime filter
+# Uses Donchian channel breakouts for trend capture, volume to confirm breakout strength,
+# and Choppiness Index to avoid ranging markets. Works in both bull and bear by
+# only taking breakouts in the direction of the 12h trend (EMA50).
+# Target: 50-150 total trades over 4 years (12-37/year) with disciplined entries.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,44 +19,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data (primary timeframe)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load 12h data (primary timeframe) for price action and trend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Load 1d data for KAMA calculation
+    # Load 1d data for Choppiness Index calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Donchian channels (20-period) on 4h
-    donch_high_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donch_low_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian channels (20-period) on 12h
+    donch_high_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donch_low_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate KAMA (10-period ER, 2 and 30 for fast/slow SC) on 1d
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.abs(np.diff(close_1d))
-    er = np.zeros_like(close_1d)
-    er[1:] = change[1:] / (np.sum(volatility[np.arange(1, len(close_1d))[:, None] <= np.arange(1, len(close_1d))[None, :]], axis=1) + 1e-10)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Calculate EMA50 on 12h for trend filter
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Calculate Choppiness Index (14-period) on 1d
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Highest high and lowest low over 14 periods
+    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    
+    # Chop = 100 * log10(sum(TR14) / (HH14 - LL14)) / log10(14)
+    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    chop = 100 * np.log10(sum_tr_14 / (hh_14 - ll_14 + 1e-10)) / np.log10(14)
     
     # Volume average (20-period on 1d)
     vol_avg_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     
-    # Align all indicators to 4h timeframe
-    donch_high_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_high_4h)
-    donch_low_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_low_4h)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    # Align all indicators to 12h timeframe
+    donch_high_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_high_12h)
+    donch_low_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_low_12h)
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
@@ -65,36 +76,39 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(donch_high_4h_aligned[i]) or np.isnan(donch_low_4h_aligned[i]) or
-            np.isnan(kama_aligned[i]) or np.isnan(vol_avg_aligned[i])):
+        if (np.isnan(donch_high_12h_aligned[i]) or np.isnan(donch_low_12h_aligned[i]) or
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(chop_aligned[i]) or
+            np.isnan(vol_avg_aligned[i])):
             continue
         
-        # Long entry: price breaks above Donchian high + volume spike + price above KAMA
-        if (close[i] > donch_high_4h_aligned[i] and
+        # Long entry: price breaks above Donchian high + volume spike + chop < 61.8 (trending) + price above EMA50
+        if (close[i] > donch_high_12h_aligned[i] and
             volume[i] > 1.5 * vol_avg_aligned[i] and
-            close[i] > kama_aligned[i] and
+            chop_aligned[i] < 61.8 and
+            close[i] > ema50_12h_aligned[i] and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below Donchian low + volume spike + price below KAMA
-        elif (close[i] < donch_low_4h_aligned[i] and
+        # Short entry: price breaks below Donchian low + volume spike + chop < 61.8 (trending) + price below EMA50
+        elif (close[i] < donch_low_12h_aligned[i] and
               volume[i] > 1.5 * vol_avg_aligned[i] and
-              close[i] < kama_aligned[i] and
+              chop_aligned[i] < 61.8 and
+              close[i] < ema50_12h_aligned[i] and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse signal
-        elif position == 1 and close[i] < donch_low_4h_aligned[i]:
+        # Exit: reverse signal or chop > 61.8 (ranging market)
+        elif position == 1 and (close[i] < donch_low_12h_aligned[i] or chop_aligned[i] > 61.8):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > donch_high_4h_aligned[i]:
+        elif position == -1 and (close[i] > donch_high_12h_aligned[i] or chop_aligned[i] > 61.8):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian_Volume_KAMA_Filter"
-timeframe = "4h"
+name = "12h_Donchian_Volume_Chop_Filter"
+timeframe = "12h"
 leverage = 1.0
