@@ -1,12 +1,13 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h ADX trend strength + 12h EMA crossover + volume confirmation
-# Uses ADX to filter for trending markets, EMA crossover for entry signals,
-# and volume to confirm momentum. Works in both bull and bear by only trading
-# when ADX > 25 (strong trend). Target: 60-120 total trades over 4 years (15-30/year).
+# Hypothesis: 4h Donchian(20) breakout + volume confirmation + ADX trend filter
+# Uses Donchian channel breakouts for trend capture, volume to confirm breakout strength,
+# and ADX to filter for trending markets. Works in both bull and bear by
+# only taking breakouts in the direction of the 4h trend (ADX > 25).
+# Target: 80-180 total trades over 4 years (20-45/year) with disciplined entries.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,7 +19,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data (primary timeframe) for price action and ADX
+    # Load 4h data (primary timeframe) for price action and trend
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 50:
         return np.zeros(n)
@@ -26,51 +27,56 @@ def generate_signals(prices):
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
     
-    # Load 12h data for EMA crossover
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 1d data for ADX calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate ADX (14-period) on 4h
+    # Calculate Donchian channels (20-period) on 4h
+    donch_high_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donch_low_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate ADX (14-period) on 1d
     # True Range
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First value
     
     # Directional Movement
-    up_move = high_4h - np.roll(high_4h, 1)
-    down_move = np.roll(low_4h, 1) - low_4h
-    up_move[0] = 0
-    down_move[0] = 0
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
     # Smoothed values
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_di_14 = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_14 * 100
-    minus_di_14 = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_14 * 100
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus14 / (tr14 + 1e-10)
+    di_minus = 100 * dm_minus14 / (tr14 + 1e-10)
     
     # DX and ADX
-    dx = np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10) * 100
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate EMA crossover on 12h (9 and 21 periods)
-    ema9_12h = pd.Series(close_12h).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Volume average (20-period on 4h)
-    vol_avg_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    # Volume average (20-period on 1d)
+    vol_avg_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     
     # Align all indicators to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
-    ema9_12h_aligned = align_htf_to_ltf(prices, df_12h, ema9_12h)
-    ema21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema21_12h)
-    vol_avg_aligned = align_htf_to_ltf(prices, df_4h, vol_avg_4h)
+    donch_high_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_high_4h)
+    donch_low_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_low_4h)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
     position = 0
@@ -78,36 +84,36 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx_aligned[i]) or np.isnan(ema9_12h_aligned[i]) or
-            np.isnan(ema21_12h_aligned[i]) or np.isnan(vol_avg_aligned[i])):
+        if (np.isnan(donch_high_4h_aligned[i]) or np.isnan(donch_low_4h_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_avg_aligned[i])):
             continue
         
-        # Long entry: ADX > 25 (trending) + EMA9 crosses above EMA21 + volume confirmation
-        if (adx_aligned[i] > 25 and
-            ema9_12h_aligned[i] > ema21_12h_aligned[i] and
-            volume[i] > 1.3 * vol_avg_aligned[i] and
+        # Long entry: price breaks above Donchian high + volume spike + ADX > 25 (trending)
+        if (close[i] > donch_high_4h_aligned[i] and
+            volume[i] > 1.5 * vol_avg_aligned[i] and
+            adx_aligned[i] > 25 and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: ADX > 25 (trending) + EMA9 crosses below EMA21 + volume confirmation
-        elif (adx_aligned[i] > 25 and
-              ema9_12h_aligned[i] < ema21_12h_aligned[i] and
-              volume[i] > 1.3 * vol_avg_aligned[i] and
+        # Short entry: price breaks below Donchian low + volume spike + ADX > 25 (trending)
+        elif (close[i] < donch_low_4h_aligned[i] and
+              volume[i] > 1.5 * vol_avg_aligned[i] and
+              adx_aligned[i] > 25 and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: ADX < 20 (weak trend) or reverse EMA crossover
-        elif position == 1 and (adx_aligned[i] < 20 or ema9_12h_aligned[i] < ema21_12h_aligned[i]):
+        # Exit: reverse signal or ADX < 20 (non-trending)
+        elif position == 1 and (close[i] < donch_low_4h_aligned[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (adx_aligned[i] < 20 or ema9_12h_aligned[i] > ema21_12h_aligned[i]):
+        elif position == -1 and (close[i] > donch_high_4h_aligned[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_ADX_EMA_Volume_Trend"
+name = "4h_Donchian_Volume_ADX_Filter"
 timeframe = "4h"
 leverage = 1.0
