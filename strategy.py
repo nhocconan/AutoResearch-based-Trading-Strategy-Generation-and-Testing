@@ -30,22 +30,11 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate daily RSI(14) for momentum filter
-    delta = pd.Series(df_1d['close'].values).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14_1d = 100 - (100 / (1 + rs))
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
-    
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(rsi_14_1d_aligned[i])):
+        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_34_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -54,26 +43,20 @@ def generate_signals(prices):
         
         # Long conditions:
         # 1. Price above daily EMA34 (bullish bias)
-        # 2. Daily RSI between 40 and 60 (neutral momentum, avoids extremes)
-        # 3. Volatility filter
-        if (close[i] > ema_34_1d_aligned[i] and
-            40 <= rsi_14_1d_aligned[i] <= 60 and
-            vol_filter):
+        # 2. Volatility filter
+        if (close[i] > ema_34_1d_aligned[i] and vol_filter):
             signals[i] = 0.25
             
         # Short conditions:
         # 1. Price below daily EMA34 (bearish bias)
-        # 2. Daily RSI between 40 and 60 (neutral momentum, avoids extremes)
-        # 3. Volatility filter
-        elif (close[i] < ema_34_1d_aligned[i] and
-              40 <= rsi_14_1d_aligned[i] <= 60 and
-              vol_filter):
+        # 2. Volatility filter
+        elif (close[i] < ema_34_1d_aligned[i] and vol_filter):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "4h_EMA34_RSI14_VolFilter_v1"
+name = "4h_EMA34_VolFilter_v1"
 timeframe = "4h"
 leverage = 1.0
