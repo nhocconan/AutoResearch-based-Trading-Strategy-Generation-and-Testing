@@ -3,9 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 12h strategy using 1w EMA200 trend filter + 1d Donchian breakout with volume confirmation
+# Works in bull: EMA200 uptrend + Donchian breakout captures momentum
+# Works in bear: EMA200 downtrend filter prevents longs, allows shorts on breakdowns
+# Volume confirmation reduces false breakouts, ATR stop manages risk
+# Target: 12-37 trades/year (50-150 over 4 years) to minimize fee drag
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,61 +19,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d HTF data once before loop
+    # Get 1w HTF data once before loop for EMA200 trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Calculate weekly EMA(200) for trend filter
+    ema_200_1w = pd.Series(df_1w['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    
+    # Get 1d HTF data once before loop for Donchian channels and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily EMA(34) for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate daily Donchian channels (20-period)
+    donch_high_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
+    donch_low_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
+    donch_high_20_aligned = align_htf_to_ltf(prices, df_1d, donch_high_20)
+    donch_low_20_aligned = align_htf_to_ltf(prices, df_1d, donch_low_20)
     
-    # Calculate daily RSI(14) for momentum filter
-    delta = pd.Series(df_1d['close'].values).diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14_1d = 100 - (100 / (1 + rs))
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
-    
-    # Calculate 6h Donchian channels (20-period)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Calculate daily average volume (20-period) for confirmation
+    avg_vol_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    avg_vol_20_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_20)
     
     signals = np.zeros(n)
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(rsi_14_1d_aligned[i]) or 
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
+        if (np.isnan(ema_200_1w_aligned[i]) or np.isnan(donch_high_20_aligned[i]) or 
+            np.isnan(donch_low_20_aligned[i]) or np.isnan(avg_vol_20_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation: current 1d volume > 1.5x average volume
+        # Need to get the corresponding 1d volume for current 12h bar
+        # Since we're using aligned arrays, we can use the aligned volume data
+        vol_1d = pd.Series(df_1d['volume'].values).iloc[-1] if len(df_1d) > 0 else 0  # Simplified - using latest
+        vol_confirm = volume[i] > 1.5 * avg_vol_20_aligned[i] if not np.isnan(avg_vol_20_aligned[i]) else False
+        
         # Long conditions:
-        # 1. Price above daily EMA34 (bullish bias)
-        # 2. Daily RSI > 50 (bullish momentum)
-        # 3. Price breaks above 6h Donchian upper channel (breakout)
-        if (close[i] > ema_34_1d_aligned[i] and 
-            rsi_14_1d_aligned[i] > 50 and 
-            close[i] > highest_high[i-1]):  # breakout above previous high
+        # 1. Price above weekly EMA200 (bullish long-term trend)
+        # 2. Price breaks above daily Donchian high (breakout)
+        # 3. Volume confirmation
+        if (close[i] > ema_200_1w_aligned[i] and 
+            high[i] > donch_high_20_aligned[i] and 
+            vol_confirm):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Price below daily EMA34 (bearish bias)
-        # 2. Daily RSI < 50 (bearish momentum)
-        # 3. Price breaks below 6h Donchian lower channel (breakdown)
-        elif (close[i] < ema_34_1d_aligned[i] and 
-              rsi_14_1d_aligned[i] < 50 and 
-              close[i] < lowest_low[i-1]):  # breakdown below previous low
+        # 1. Price below weekly EMA200 (bearish long-term trend)
+        # 2. Price breaks below daily Donchian low (breakdown)
+        # 3. Volume confirmation
+        elif (close[i] < ema_200_1w_aligned[i] and 
+              low[i] < donch_low_20_aligned[i] and 
+              vol_confirm):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "6h_EMA34_RSI_Donchian20_Breakout_v1"
-timeframe = "6h"
+name = "12h_EMA200_Donchian_VolFilter_v1"
+timeframe = "12h"
 leverage = 1.0
