@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator + Elder Ray Bear Power with volume confirmation
-# Long when: Alligator bullish alignment (jaw < teeth < lips) AND Elder Ray Bear Power < 0 (bullish) AND volume > 1.3x 20-bar avg
-# Short when: Alligator bearish alignment (jaw > teeth > lips) AND Elder Ray Bull Power > 0 (bearish) AND volume > 1.3x 20-bar avg
-# Uses 1d ATR for volatility filter to avoid whipsaws in low volatility
-# Designed for low trade frequency (15-30/year) with strong trend-following edge in both bull and bear markets
+# Hypothesis: 1d Donchian(20) breakout with volume confirmation and 1w HMA trend filter
+# Long when price breaks above 1d Donchian high + volume > 1.5x avg + 1w HMA rising
+# Short when price breaks below 1d Donchian low + volume > 1.5x avg + 1w HMA falling
+# Uses 1d ATR for volume SMA calculation to avoid look-ahead
+# Designed for low trade frequency (7-25/year) to minimize fee drag while capturing breakouts in trending markets
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,50 +19,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h and 1d HTF data once before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1d and 1w HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 50 or len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 30 or len(df_1w) < 30:
         return np.zeros(n)
     
-    # === 4h Indicators: Williams Alligator (13,8,5) ===
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # === 1d Indicators: Donchian Channel (20) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Alligator lines: Jaw (13,8), Teeth (8,5), Lips (5,3)
-    jaw = pd.Series(close_4h).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(close_4h).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(close_4h).rolling(window=5, min_periods=5).mean().shift(3).values
-    
-    jaw_aligned = align_htf_to_ltf(prices, df_4h, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_4h, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_4h, lips)
-    
-    # === 1d Indicators: Elder Ray (EMA13) and ATR for volatility filter ===
+    # === 1d Indicators: ATR for volume SMA calculation ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # EMA13 for Elder Ray
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high_1d - ema13_1d
-    bear_power = low_1d - ema13_1d
-    
-    # ATR(14) for volatility filter
+    # True Range calculation
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Set first TR to high-low (no previous close)
     tr[0] = high_1d[0] - low_1d[0]
+    
     atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align 1d indicators to 4h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Volume SMA using ATR period for stability
+    vol_sma = pd.Series(volume).rolling(window=14, min_periods=14).mean().values
+    
+    # === 1w Indicators: HMA(21) for trend filter ===
+    close_1w = df_1w['close'].values
+    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
+    half_len = 21 // 2
+    sqrt_len = int(np.sqrt(21))
+    
+    def wma(values, window):
+        weights = np.arange(1, window + 1)
+        return np.convolve(values, weights, mode='valid') / weights.sum()
+    
+    # Calculate WMA components
+    wma_half = np.array([np.nan] * len(close_1w))
+    wma_full = np.array([np.nan] * len(close_1w))
+    
+    for i in range(half_len, len(close_1w)):
+        wma_half[i] = wma(close_1w[i-half_len+1:i+1], half_len)
+    
+    for i in range(21, len(close_1w)):
+        wma_full[i] = wma(close_1w[i-21+1:i+1], 21)
+    
+    # HMA = 2*WMA(half) - WMA(full)
+    raw_hma = 2 * wma_half - wma_full
+    # Final WMA of sqrt(n) on raw HMA
+    hma_1w = np.array([np.nan] * len(close_1w))
+    for i in range(sqrt_len, len(raw_hma)):
+        if not np.isnan(raw_hma[i-sqrt_len+1:i+1]).any():
+            hma_1w[i] = wma(raw_hma[i-sqrt_len+1:i+1], sqrt_len)
+    
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    
+    # HMA slope (rising/falling)
+    hma_slope = np.diff(hma_1w_aligned, prepend=hma_1w_aligned[0])
+    hma_rising = hma_slope > 0
+    hma_falling = hma_slope < 0
     
     signals = np.zeros(n)
     
@@ -70,41 +92,27 @@ def generate_signals(prices):
     warmup = 100
     
     for i in range(warmup, n):
-        # Volume filter: current volume > 1.3x 20-period volume SMA
-        vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.3)
-        
-        # Volatility filter: avoid low ATR environments (choppy, low momentum)
-        atr_ma_20 = pd.Series(atr_1d_aligned).rolling(window=20, min_periods=20).mean().values
-        vol_filter = atr_1d_aligned[i] > (atr_ma_20[i] * 0.8)  # Only trade when volatility is above 80% of MA
-        
         # Skip if any required data is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
-            np.isnan(vol_sma_20[i]) or np.isnan(atr_ma_20[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(vol_sma[i]) or np.isnan(hma_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation: current volume > 1.5x 14-period volume SMA
+        vol_confirm = volume[i] > (vol_sma[i] * 1.5)
+        
         # === LONG CONDITIONS ===
-        # 1. Alligator bullish alignment: jaw < teeth < lips (mouth opening up)
-        # 2. Elder Ray Bear Power < 0 (indicates bullish momentum)
-        # 3. Volume confirmation
-        # 4. Sufficient volatility
-        if (jaw_aligned[i] < teeth_aligned[i] < lips_aligned[i]) and \
-           (bear_power_aligned[i] < 0) and \
-           vol_confirm and \
-           vol_filter:
+        # 1. Price breaks above 1d upper Donchian
+        # 2. Volume confirmation
+        # 3. 1w HMA rising (uptrend)
+        if (close[i] > donchian_high_aligned[i]) and vol_confirm and hma_rising[i]:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Alligator bearish alignment: jaw > teeth > lips (mouth opening down)
-        # 2. Elder Ray Bull Power > 0 (indicates bearish momentum)
-        # 3. Volume confirmation
-        # 4. Sufficient volatility
-        elif (jaw_aligned[i] > teeth_aligned[i] > lips_aligned[i]) and \
-             (bull_power_aligned[i] > 0) and \
-             vol_confirm and \
-             vol_filter:
+        # 1. Price breaks below 1d lower Donchian
+        # 2. Volume confirmation
+        # 3. 1w HMA falling (downtrend)
+        elif (close[i] < donchian_low_aligned[i]) and vol_confirm and hma_falling[i]:
             signals[i] = -0.25
         
         else:
@@ -112,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Alligator_ElderRay_Volume_Filter_v1"
-timeframe = "4h"
+name = "1d_Donchian20_Volume_HMA_Trend_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
