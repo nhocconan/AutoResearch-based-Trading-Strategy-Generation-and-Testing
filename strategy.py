@@ -1,16 +1,20 @@
+# 4h_MultiFactor_Breakout_Trend
+# Hypothesis: 4h strategy combining Donchian breakouts (20-period) with volume confirmation and ADX trend filter.
+# Donchian breakouts provide clear entry/exit levels based on price extremes.
+# Volume confirmation ensures breakouts are supported by participation.
+# ADX > 25 filters for trending markets, avoiding false breakouts in ranging conditions.
+# Works in bull markets (long breakouts) and bear markets (short breakdowns).
+# Target: 20-50 trades/year per symbol (80-200 total over 4 years).
+# Timeframe: 4h
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Daily Pivot + Volume + ADX Trend Filter
-# Uses daily pivot points (support/resistance) as key levels. Long when price > R1 with volume confirmation and ADX > 25 (trending).
-# Short when price < S1 with volume confirmation and ADX > 25. Works in bull/bear markets by trading with the trend.
-# Target: 50-150 total trades over 4 years. Timeframe: 4h, HTF: 1d
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,51 +22,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for pivot points
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate daily pivot points: P = (H + L + C)/3
-    # R1 = 2*P - L, S1 = 2*P - H
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    
-    # Previous day's pivot levels (shifted by 1 to avoid look-ahead)
-    pivot_prev = np.roll(pivot, 1)
-    r1_prev = np.roll(r1, 1)
-    s1_prev = np.roll(s1, 1)
-    pivot_prev[0] = np.nan
-    r1_prev[0] = np.nan
-    s1_prev[0] = np.nan
-    
-    # Align to 4h timeframe
-    pivot_prev_aligned = align_htf_to_ltf(prices, df_1d, pivot_prev)
-    r1_prev_aligned = align_htf_to_ltf(prices, df_1d, r1_prev)
-    s1_prev_aligned = align_htf_to_ltf(prices, df_1d, s1_prev)
-    
-    # Load 4h data for ADX trend filter (using same timeframe)
-    high_4h = high
-    low_4h = low
-    close_4h = close
-    
-    # Calculate ADX (14-period) on 4h
+    # ADX (14-period) for trend strength
     # True Range
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # First value
     
     # Directional Movement
-    dm_plus = np.where((high_4h - np.roll(high_4h, 1)) > (np.roll(low_4h, 1) - low_4h), 
-                       np.maximum(high_4h - np.roll(close_4h, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_4h, 1) - low_4h) > (high_4h - np.roll(close_4h, 1)), 
-                        np.maximum(np.roll(close_4h, 1) - low_4h, 0), 0)
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(close, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(close, 1)), 
+                        np.maximum(np.roll(close, 1) - low, 0), 0)
     dm_plus[0] = 0
     dm_minus[0] = 0
     
@@ -81,40 +57,40 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25  # Position size
+    base_size = 0.25  # Position size (25% of capital)
     
-    for i in range(100, n):
+    for i in range(20, n):  # Start after Donchian warmup
         # Skip if any required data is NaN
-        if (np.isnan(r1_prev_aligned[i]) or np.isnan(s1_prev_aligned[i]) or
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(adx[i])):
             continue
         
-        # Long entry: price above R1 + volume confirmation + ADX > 25
-        if (close[i] > r1_prev_aligned[i] and
+        # Long entry: price breaks above Donchian high + volume confirmation + ADX > 25
+        if (close[i] > donchian_high[i] and
             volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
             adx[i] > 25 and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price below S1 + volume confirmation + ADX > 25
-        elif (close[i] < s1_prev_aligned[i] and
+        # Short entry: price breaks below Donchian low + volume confirmation + ADX > 25
+        elif (close[i] < donchian_low[i] and
               volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
               adx[i] > 25 and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse to opposite level or ADX < 20 (ranging market)
-        elif position == 1 and (close[i] < s1_prev_aligned[i] or adx[i] < 20):
+        # Exit: reverse breakout or ADX < 20 (ranging market)
+        elif position == 1 and (close[i] < donchian_low[i] or adx[i] < 20):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > r1_prev_aligned[i] or adx[i] < 20):
+        elif position == -1 and (close[i] > donchian_high[i] or adx[i] < 20):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_DailyPivot_Volume_ADX"
+name = "4h_MultiFactor_Breakout_Trend"
 timeframe = "4h"
 leverage = 1.0
