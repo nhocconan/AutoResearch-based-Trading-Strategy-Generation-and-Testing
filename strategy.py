@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla pivot breakout with volume confirmation and weekly trend filter
-# Long when price breaks above R1 + volume > 1.3x avg + weekly close > weekly open (bullish week)
-# Short when price breaks below S1 + volume > 1.3x avg + weekly close < weekly open (bearish week)
-# Uses discrete position sizing (0.25) to minimize fee drag. Target: 15-25 trades/year.
-# Works in bull/bear: weekly trend filter ensures we only trade with higher-timeframe momentum
+# Hypothesis: 6h Williams %R + 12h EMA trend filter + volume confirmation
+# Long when Williams %R < -80 (oversold) + price > 12h EMA50 (uptrend) + volume > 1.3x avg
+# Short when Williams %R > -20 (overbought) + price < 12h EMA50 (downtrend) + volume > 1.3x avg
+# Uses discrete position sizing (0.25) to minimize fee churn
+# Williams %R identifies exhaustion points in ranging markets, EMA filter ensures trend alignment
+# Designed for low trade frequency (15-30/year) to avoid fee drag while capturing mean reversion within trends
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,41 +20,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d and 1w HTF data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 30 or len(df_1w) < 10:
+    # Get 6h and 12h HTF data once before loop
+    df_6h = get_htf_data(prices, '6h')
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_6h < 50) or len(df_12h < 50):
         return np.zeros(n)
     
-    # === 1d Indicators: Camarilla Pivot Levels (R1, S1) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 6h Indicators: Williams %R (14) ===
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * ((highest_high_14 - close) / (highest_high_14 - lowest_low_14))
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
     
-    # Calculate pivot point (PP)
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    # Calculate R1 and S1
-    r1 = pp + (high_1d - low_1d) * 1.1 / 12
-    s1 = pp - (high_1d - low_1d) * 1.1 / 12
-    
-    # Align to 15m timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # === 1w Indicators: Weekly Trend (bullish/bearish week) ===
-    open_1w = df_1w['open'].values
-    close_1w = df_1w['close'].values
-    weekly_bullish = close_1w > open_1w  # True for bullish weekly candle
-    weekly_bearish = close_1w < open_1w  # True for bearish weekly candle
-    
-    # Align weekly trend to 15m timeframe
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
+    # === 12h Indicators: EMA50 for trend filter ===
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 50
+    warmup = 100
     
     for i in range(warmup, n):
         # Volume filter: current volume > 1.3x 20-period volume SMA
@@ -61,24 +49,22 @@ def generate_signals(prices):
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.3)
         
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]) or
-            np.isnan(vol_sma_20[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 1d Camarilla R1
-        # 2. Volume confirmation
-        # 3. Weekly trend is bullish (weekly close > weekly open)
-        if (close[i] > r1_aligned[i]) and vol_confirm and weekly_bullish_aligned[i] > 0.5:
+        # 1. Williams %R indicates oversold (< -80)
+        # 2. Price above 12h EMA50 (uptrend filter)
+        # 3. Volume confirmation
+        if (williams_r[i] < -80) and (close[i] > ema_50_12h_aligned[i]) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 1d Camarilla S1
-        # 2. Volume confirmation
-        # 3. Weekly trend is bearish (weekly close < weekly open)
-        elif (close[i] < s1_aligned[i]) and vol_confirm and weekly_bearish_aligned[i] > 0.5:
+        # 1. Williams %R indicates overbought (> -20)
+        # 2. Price below 12h EMA50 (downtrend filter)
+        # 3. Volume confirmation
+        elif (williams_r[i] > -20) and (close[i] < ema_50_12h_aligned[i]) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -86,6 +72,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1S1_Volume_WeeklyTrend_Filter_v1"
-timeframe = "1d"
+name = "6h_WilliamsR_12hEMA50_Volume_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
