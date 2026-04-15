@@ -49,24 +49,24 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade when daily ATR is elevated (> 0.35% of price)
-        vol_filter = atr_14_1d_aligned[i] > 0.0035 * close[i]
+        # Regime filter: only trade when daily ATR is elevated (> 0.4% of price)
+        vol_filter = atr_14_1d_aligned[i] > 0.004 * close[i]
         
         # Long conditions:
         # 1. Price above daily EMA20 (bullish bias)
-        # 2. Daily RSI between 45 and 55 (tight neutral momentum, reduces trades)
+        # 2. Daily RSI between 40 and 60 (neutral momentum, avoids extremes)
         # 3. Volatility filter
         if (close[i] > ema_20_1d_aligned[i] and
-            45 <= rsi_14_1d_aligned[i] <= 55 and
+            40 <= rsi_14_1d_aligned[i] <= 60 and
             vol_filter):
             signals[i] = 0.25
             
         # Short conditions:
         # 1. Price below daily EMA20 (bearish bias)
-        # 2. Daily RSI between 45 and 55 (tight neutral momentum, reduces trades)
+        # 2. Daily RSI between 40 and 60 (neutral momentum, avoids extremes)
         # 3. Volatility filter
         elif (close[i] < ema_20_1d_aligned[i] and
-              45 <= rsi_14_1d_aligned[i] <= 55 and
+              40 <= rsi_14_1d_aligned[i] <= 60 and
               vol_filter):
             signals[i] = -0.25
         else:
@@ -74,6 +74,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA20_RSI14_VolFilter_Tight_v1"
-timeframe = "12h"
+name = "1d_EMA20_RSI14_VolFilter_v1"
+timeframe = "1d"
 leverage = 1.0
