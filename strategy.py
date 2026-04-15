@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 1d Regime Filter
-# Long when Bull Power > 0 AND Bear Power < 0 (bullish momentum) AND price > 1d EMA50 (uptrend regime)
-# Short when Bear Power < 0 AND Bull Power > 0 (bearish momentum) AND price < 1d EMA50 (downtrend regime)
-# Uses Elder Ray (Bull/Bear Power) to measure bull/bear strength relative to EMA13
-# 1d EMA50 provides regime filter to avoid counter-trend trades
-# Discrete sizing 0.25 to limit drawdown and minimize fee churn
-# Target: 50-150 total trades over 4 years on BTC/ETH/SOL
+# Hypothesis: 12h Camarilla pivot R1/S1 breakout with 1d volume-weighted average price (VWAP) trend filter
+# Long when price breaks above Camarilla R1 + close > 1d VWAP + volume spike
+# Short when price breaks below Camarilla S1 + close < 1d VWAP + volume spike
+# Uses discrete position sizing (0.25) to control drawdown and minimize fee drag.
+# 1d VWAP provides strong institutional trend filter that adapts to both bull and bear markets.
+# Volume threshold (2.0x) targets ~15-35 trades/year on 12h timeframe to avoid overtrading.
+# Camarilla pivots calculated from prior 12h bar's high/low/close for structure-based entries.
 
 def generate_signals(prices):
     n = len(prices)
@@ -27,26 +27,42 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # === 1d Indicator: EMA50 for regime filter ===
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # === 1d Indicator: VWAP (Volume Weighted Average Price) ===
+    # VWAP = cumulative(volume * price) / cumulative(volume)
+    # Reset daily, so we need to compute it per day
+    # For simplicity, we'll use a rolling approximation that resets at day boundaries
+    # Using typical price * volume / volume cumulative
+    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
+    vwap_1d = (typical_price_1d * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap_1d_values = vwap_1d.values
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d_values)
     
-    # === 6h Elder Ray Components ===
-    # EMA13 as the reference
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    # Bull Power = High - EMA13
-    bull_power = high - ema_13
-    # Bear Power = Low - EMA13
-    bear_power = low - ema_13
+    # === 12h Camarilla Pivot Levels (based on prior bar) ===
+    # Pivot = (H + L + C) / 3
+    # R1 = Pivot + (H - L) * 1.1 / 12
+    # S1 = Pivot - (H - L) * 1.1 / 12
+    # Using prior bar's OHLC to avoid look-ahead
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    camarilla_r1 = pivot + (prev_high - prev_low) * 1.1 / 12.0
+    camarilla_s1 = pivot - (prev_high - prev_low) * 1.1 / 12.0
+    
+    # Volume SMA for confirmation (using 20-period)
+    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(50, 13) + 5  # EMA50 + EMA13 + buffer
+    warmup = max(20, 1) + 5  # volume(20) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -55,23 +71,28 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or
+            np.isnan(vwap_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
+        # Volume filter: current volume > 2.0x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
+        
         # === LONG CONDITIONS ===
-        # 1. Bull Power > 0 (strong bullish momentum)
-        # 2. Bear Power < 0 (weak bearish momentum)
-        # 3. Price > 1d EMA50 (uptrend regime)
-        if (bull_power[i] > 0) and (bear_power[i] < 0) and (close[i] > ema_50_1d_aligned[i]):
+        # 1. Price breaks above Camarilla R1 (close > R1)
+        # 2. Close > 1d VWAP (institutional bullish trend)
+        # 3. Volume confirmation
+        if (close[i] > camarilla_r1[i]) and \
+           (close[i] > vwap_1d_aligned[i]) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Bear Power < 0 (strong bearish momentum)
-        # 2. Bull Power > 0 (weak bullish momentum)
-        # 3. Price < 1d EMA50 (downtrend regime)
-        elif (bear_power[i] < 0) and (bull_power[i] > 0) and (close[i] < ema_50_1d_aligned[i]):
+        # 1. Price breaks below Camarilla S1 (close < S1)
+        # 2. Close < 1d VWAP (institutional bearish trend)
+        # 3. Volume confirmation
+        elif (close[i] < camarilla_s1[i]) and \
+             (close[i] < vwap_1d_aligned[i]) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -79,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_1dEMA50_Regime_Filter_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_1dVWAP_Volume_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
