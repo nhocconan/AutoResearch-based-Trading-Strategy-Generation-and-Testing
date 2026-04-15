@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,30 +15,18 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily KAMA(14, 2, 30) for trend
-    close_1d = pd.Series(df_1d['close'].values)
-    change = abs(close_1d.diff(10))
-    volatility = close_1d.diff().abs().rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    er = er.fillna(0).clip(0, 1)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
-    kama = [close_1d.iloc[0]]
-    for i in range(1, len(close_1d)):
-        kama.append(kama[-1] + sc.iloc[i] * (close_1d.iloc[i] - kama[-1]))
-    kama_1d = np.array(kama)
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+    # Calculate daily EMA(34) for trend
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate daily RSI(14) for momentum
-    delta = close_1d.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
-    rs = gain / loss.replace(0, np.nan)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d = rsi_1d.fillna(50).values
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Calculate daily Donchian(10) channels for breakout
+    donchian_high_10 = pd.Series(df_1d['high'].values).rolling(window=10, min_periods=10).max().values
+    donchian_low_10 = pd.Series(df_1d['low'].values).rolling(window=10, min_periods=10).min().values
+    donchian_high_10_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_10)
+    donchian_low_10_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_10)
     
     # Calculate daily ATR(14) for volatility filter
     tr1 = df_1d['high'] - df_1d['low']
@@ -50,31 +38,31 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(atr_14_1d_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(donchian_high_10_aligned[i]) or 
+            np.isnan(donchian_low_10_aligned[i]) or np.isnan(atr_14_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when daily ATR is elevated (> 0.3% of price)
-        vol_filter = atr_14_1d_aligned[i] > 0.003 * close[i]
+        # Volatility filter: only trade when daily ATR is elevated (> 0.4% of price)
+        vol_filter = atr_14_1d_aligned[i] > 0.004 * close[i]
         
         # Long conditions:
-        # 1. Price above daily KAMA (bullish bias)
-        # 2. Daily RSI > 50 (bullish momentum)
+        # 1. Price above daily EMA34 (bullish bias)
+        # 2. Price breaks above daily Donchian(10) high
         # 3. Volatility filter
-        if (close[i] > kama_1d_aligned[i] and
-            rsi_1d_aligned[i] > 50 and
+        if (close[i] > ema_34_1d_aligned[i] and
+            close[i] > donchian_high_10_aligned[i] and
             vol_filter):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Price below daily KAMA (bearish bias)
-        # 2. Daily RSI < 50 (bearish momentum)
+        # 1. Price below daily EMA34 (bearish bias)
+        # 2. Price breaks below daily Donchian(10) low
         # 3. Volatility filter
-        elif (close[i] < kama_1d_aligned[i] and
-              rsi_1d_aligned[i] < 50 and
+        elif (close[i] < ema_34_1d_aligned[i] and
+              close[i] < donchian_low_10_aligned[i] and
               vol_filter):
             signals[i] = -0.25
         else:
@@ -82,6 +70,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_RSI_VolFilter_v1"
-timeframe = "1d"
+name = "12h_EMA34_Donchian10_VolFilter_v1"
+timeframe = "12h"
 leverage = 1.0
