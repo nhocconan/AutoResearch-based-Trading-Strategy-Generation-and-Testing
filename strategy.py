@@ -3,11 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Donchian channel (20) for trend direction and 1d RSI(14) for mean reversion timing.
-# In 4h uptrend (price > upper Donchian), wait for 1d RSI < 30 to go long (pullback entry).
-# In 4h downtrend (price < lower Donchian), wait for 1d RSI > 70 to go short (bounce entry).
-# Volume confirmation ensures momentum validity. Session filter (08-20 UTC) reduces noise.
-# Designed for low trade frequency (15-30/year) to minimize fee drag while adapting to trend and mean reversion.
+# Hypothesis: 1h mean reversion strategy using 4h Bollinger Bands (20,2) for structure and 1d RSI(2) for extreme mean reversion timing.
+# In 4h ranging markets (price within BB), wait for 1d RSI < 10 to go long (deep pullback) or > 90 to go short (extreme bounce).
+# Volume confirmation filters weak moves. Session filter (08-20 UTC) reduces off-hours noise.
+# Designed for low trade frequency (15-25/year) to minimize fee drag while capturing mean reversion in both bull and bear regimes.
 
 def generate_signals(prices):
     n = len(prices)
@@ -29,24 +28,25 @@ def generate_signals(prices):
     if len(df_4h) < 30 or len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 4h Indicators: Donchian Channel (20) ===
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    # === 4h Indicators: Bollinger Bands (20,2) ===
+    close_4h = df_4h['close'].values
+    sma_20 = pd.Series(close_4h).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_4h).rolling(window=20, min_periods=20).std().values
+    bb_upper = sma_20 + (2 * std_20)
+    bb_lower = sma_20 - (2 * std_20)
+    bb_upper_aligned = align_htf_to_ltf(prices, df_4h, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_4h, bb_lower)
     
-    # === 1d Indicators: RSI(14) ===
+    # === 1d Indicators: RSI(2) for extreme mean reversion ===
     close_1d = df_1d['close'].values
     delta = pd.Series(close_1d).diff().values
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
     rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    rsi_2 = 100 - (100 / (1 + rs))
+    rsi_2_aligned = align_htf_to_ltf(prices, df_1d, rsi_2)
     
     signals = np.zeros(n)
     
@@ -65,23 +65,25 @@ def generate_signals(prices):
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(rsi_1d_aligned[i])):
+        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or
+            np.isnan(rsi_2_aligned[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. In 4h uptrend (price > 4h upper Donchian)
-        # 2. 1d RSI < 30 (oversold pullback)
+        # 1. Price within 4h Bollinger Bands (ranging market structure)
+        # 2. 1d RSI(2) < 10 (extremely oversold)
         # 3. Volume confirmation
-        if (close[i] > donchian_high_aligned[i]) and (rsi_1d_aligned[i] < 30) and vol_confirm:
+        if (close[i] >= bb_lower_aligned[i]) and (close[i] <= bb_upper_aligned[i]) and \
+           (rsi_2_aligned[i] < 10) and vol_confirm:
             signals[i] = 0.20
         
         # === SHORT CONDITIONS ===
-        # 1. In 4h downtrend (price < 4h lower Donchian)
-        # 2. 1d RSI > 70 (overbought bounce)
+        # 1. Price within 4h Bollinger Bands (ranging market structure)
+        # 2. 1d RSI(2) > 90 (extremely overbought)
         # 3. Volume confirmation
-        elif (close[i] < donchian_low_aligned[i]) and (rsi_1d_aligned[i] > 70) and vol_confirm:
+        elif (close[i] >= bb_lower_aligned[i]) and (close[i] <= bb_upper_aligned[i]) and \
+             (rsi_2_aligned[i] > 90) and vol_confirm:
             signals[i] = -0.20
         
         else:
@@ -89,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_Donchian20_RSI14_VolumeFilter_v1"
+name = "1h_BB20_2_RSI2_VolumeFilter_v1"
 timeframe = "1h"
 leverage = 1.0
