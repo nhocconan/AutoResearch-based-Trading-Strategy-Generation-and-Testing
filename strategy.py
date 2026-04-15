@@ -3,39 +3,33 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Bollinger Band Squeeze + Volume Spike + 1d Close Trend
-# Uses Bollinger Band width percentile to detect low volatility squeezes,
-# breaks out with volume confirmation, and follows 1d close trend for direction.
-# Designed to work in both bull and bear markets by capturing volatility breakouts.
+# Hypothesis: 4h Donchian breakout with volume confirmation and ATR filter
+# Uses Donchian(20) channels for breakout direction, volume > 1.5x 20-bar median for confirmation,
+# and ATR-based stoploss to limit downside. Works in both bull and bear markets by
+# capturing breakouts in trending regimes while avoiding false signals in ranging markets.
+# Target: 20-40 trades/year per symbol to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2) for squeeze detection
-    sma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper = sma + 2 * std
-    lower = sma - 2 * std
-    bb_width = (upper - lower) / sma  # Normalized width
+    # Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Bollinger Band width percentile (50-period) to identify squeezes
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
-    
-    # 1-day close trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    sma_1d = pd.Series(close_1d).rolling(window=10, min_periods=10).mean().values
-    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
+    # ATR for volatility filtering and stop
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[0], tr])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     # Volume confirmation: current > 1.5x median of last 20 bars
     vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
@@ -43,36 +37,36 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(bb_width_percentile[i]) or np.isnan(sma_1d_aligned[i]) or 
-            np.isnan(vol_threshold[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_threshold[i])):
             continue
         
-        # Squeeze condition: BB width in lowest 20% percentile
-        is_squeeze = bb_width_percentile[i] <= 20
-        
-        # Breakout condition: price outside Bollinger Bands
-        breakout_up = close[i] > upper[i]
-        breakout_down = close[i] < lower[i]
-        
-        # Direction from 1d SMA: above = bullish bias, below = bearish bias
-        bullish_bias = close[i] > sma_1d_aligned[i]
-        bearish_bias = close[i] < sma_1d_aligned[i]
-        
-        # Long: squeeze breakout up + volume + bullish bias
-        if (is_squeeze and breakout_up and volume[i] > vol_threshold[i] and bullish_bias):
+        # Long: price breaks above upper Donchian band + volume confirmation
+        if (close[i] > highest_high[i] and volume[i] > vol_threshold[i]):
             signals[i] = 0.25
         
-        # Short: squeeze breakout down + volume + bearish bias
-        elif (is_squeeze and breakout_down and volume[i] > vol_threshold[i] and bearish_bias):
+        # Short: price breaks below lower Donchian band + volume confirmation
+        elif (close[i] < lowest_low[i] and volume[i] > vol_threshold[i]):
             signals[i] = -0.25
         
-        # Exit: volatility expands or price returns to mean
-        elif (i > 0 and 
-              ((signals[i-1] == 0.25 and (bb_width_percentile[i] > 40 or close[i] < sma[i])) or
-               (signals[i-1] == -0.25 and (bb_width_percentile[i] > 40 or close[i] > sma[i])))):
-            signals[i] = 0.0
+        # Exit: ATR-based stoploss or opposite breakout
+        elif i > 0 and signals[i-1] != 0:
+            if signals[i-1] == 0.25:  # Long position
+                # Stop if price drops below entry - 2*ATR or opposite breakout
+                if (close[i] < highest_high[i-1] - 2.0 * atr[i] or 
+                    close[i] < lowest_low[i]):
+                    signals[i] = 0.0
+                else:
+                    signals[i] = signals[i-1]
+            else:  # Short position
+                # Stop if price rises above entry + 2*ATR or opposite breakout
+                if (close[i] > lowest_low[i-1] + 2.0 * atr[i] or 
+                    close[i] > highest_high[i]):
+                    signals[i] = 0.0
+                else:
+                    signals[i] = signals[i-1]
         
         # Otherwise, hold previous position
         else:
@@ -80,6 +74,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_BB_Squeeze_Volume_1dTrend"
+name = "4h_Donchian_Breakout_Volume_ATR"
 timeframe = "4h"
 leverage = 1.0
