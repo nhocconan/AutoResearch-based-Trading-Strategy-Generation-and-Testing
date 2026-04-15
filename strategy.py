@@ -13,55 +13,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily high/low for range
+    # Load 1d data once before loop
     daily = get_htf_data(prices, '1d')
+    close_d = daily['close'].values
     high_d = daily['high'].values
     low_d = daily['low'].values
+    volume_d = daily['volume'].values
     
-    # Daily high/low range (previous day)
-    range_high = high_d
-    range_low = low_d
-    range_high_aligned = align_htf_to_ltf(prices, daily, range_high)
-    range_low_aligned = align_htf_to_ltf(prices, daily, range_low)
+    # 1d EMA(20) for trend filter
+    ema_20d = pd.Series(close_d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20d_aligned = align_htf_to_ltf(prices, daily, ema_20d)
     
-    # Daily ATR for volatility filter
-    tr1 = np.maximum(high_d[1:] - low_d[1:], np.abs(high_d[1:] - daily['close'].values[:-1]))
-    tr2 = np.maximum(np.abs(low_d[1:] - daily['close'].values[:-1]), tr1)
+    # 1d ATR(14) for volatility filter
+    tr1 = np.maximum(high_d[1:] - low_d[1:], np.abs(high_d[1:] - close_d[:-1]))
+    tr2 = np.maximum(np.abs(low_d[1:] - close_d[:-1]), tr1)
     tr = np.concatenate([[np.nan], tr2])
-    atr_d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_d_aligned = align_htf_to_ltf(prices, daily, atr_d)
+    atr_14d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14d_aligned = align_htf_to_ltf(prices, daily, atr_14d)
     
-    # Volume filter: 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_threshold = 1.5 * vol_ma
+    # Volume threshold: 2.5x median of last 30 bars (more selective than before)
+    vol_median = pd.Series(volume).rolling(window=30, min_periods=30).median()
+    vol_threshold = 2.5 * vol_median
+    
+    # ATR median for volatility regime filter (longer window for stability)
+    atr_median = pd.Series(atr_14d_aligned).rolling(window=100, min_periods=100).median()
+    
+    # Donchian(20) for breakout confirmation
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max()
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min()
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(range_high_aligned[i]) or np.isnan(range_low_aligned[i]) or
-            np.isnan(atr_d_aligned[i]) or np.isnan(vol_threshold[i])):
+        if (np.isnan(ema_20d_aligned[i]) or np.isnan(atr_14d_aligned[i]) or
+            np.isnan(vol_threshold[i]) or np.isnan(atr_median[i]) or
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
             continue
         
-        # Volatility filter: avoid low volatility (< 0.5 * ATR)
-        vol_filter = atr_d_aligned[i] > 0.5 * np.nanmedian(atr_d_aligned[max(0, i-50):i+1])
+        # Volatility filter: avoid extremes (0.7x to 2.5x of median ATR)
+        vol_filter = (atr_14d_aligned[i] > 0.7 * atr_median[i]) and (atr_14d_aligned[i] < 2.5 * atr_median[i])
         
-        # Long: Break above daily high + volume spike + volatility filter
-        if (close[i] > range_high_aligned[i] and 
+        # Long: Price above daily EMA20 + above Donchian high + volume spike + volatility filter
+        if (close[i] > ema_20d_aligned[i] and 
+            close[i] > donchian_high[i] and 
             volume[i] > vol_threshold[i] and 
             vol_filter):
-            signals[i] = 0.20
+            signals[i] = 0.25
         
-        # Short: Break below daily low + volume spike + volatility filter
-        elif (close[i] < range_low_aligned[i] and 
+        # Short: Price below daily EMA20 + below Donchian low + volume spike + volatility filter
+        elif (close[i] < ema_20d_aligned[i] and 
+              close[i] < donchian_low[i] and 
               volume[i] > vol_threshold[i] and 
               vol_filter):
-            signals[i] = -0.20
+            signals[i] = -0.25
         
-        # Exit: price returns to mid-range of daily range
+        # Exit: price crosses back below/above daily EMA20
         elif (i > 0 and 
-              ((signals[i-1] == 0.20 and close[i] < (range_high_aligned[i] + range_low_aligned[i]) / 2) or
-               (signals[i-1] == -0.20 and close[i] > (range_high_aligned[i] + range_low_aligned[i]) / 2))):
+              ((signals[i-1] == 0.25 and close[i] < ema_20d_aligned[i]) or
+               (signals[i-1] == -0.25 and close[i] > ema_20d_aligned[i]))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -70,6 +80,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_DailyRangeBreakout_Vol1.5x_VolFilter_v1"
-timeframe = "1h"
+name = "4h_DailyEMA20_Donchian20_Vol2.5x_ATR14dFilter_v1"
+timeframe = "4h"
 leverage = 1.0
