@@ -13,47 +13,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d HTF data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 1w HTF data once before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA(34) for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate weekly EMA(34) for trend filter
+    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate daily Williams %R(14) for momentum/overbought-oversold
-    highest_high = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - df_1d['close']) / (highest_high - lowest_low + 1e-10)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r.values)
+    # Calculate weekly ATR(14) for volatility filter
+    tr1 = df_1w['high'] - df_1w['low']
+    tr2 = np.abs(df_1w['high'] - np.concatenate([[df_1w['close'].iloc[0]], df_1w['close'].iloc[:-1]]))
+    tr3 = np.abs(df_1w['low'] - np.concatenate([[df_1w['close'].iloc[0]], df_1w['close'].iloc[:-1]]))
+    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14_1w = pd.Series(tr_1w).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_14_1w)
+    
+    # Calculate 12h Donchian(20) for breakout signals
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r_aligned[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr_14_1w_aligned[i]) or 
+            np.isnan(highest_20[i]) or np.isnan(lowest_20[i])):
             signals[i] = 0.0
             continue
         
+        # Volatility filter: only trade when weekly ATR is elevated (> 0.8% of price)
+        vol_filter = atr_14_1w_aligned[i] > 0.008 * close[i]
+        
         # Long conditions:
-        # 1. Price above daily EMA34 (bullish bias)
-        # 2. Daily Williams %R below -80 (oversold)
-        if (close[i] > ema_34_1d_aligned[i] and
-            williams_r_aligned[i] < -80):
+        # 1. Price breaks above 20-period high (Donchian breakout)
+        # 2. Price above weekly EMA34 (bullish bias)
+        # 3. Volatility filter
+        if (close[i] > highest_20[i] and
+            close[i] > ema_34_1w_aligned[i] and
+            vol_filter):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Price below daily EMA34 (bearish bias)
-        # 2. Daily Williams %R above -20 (overbought)
-        elif (close[i] < ema_34_1d_aligned[i] and
-              williams_r_aligned[i] > -20):
+        # 1. Price breaks below 20-period low (Donchian breakdown)
+        # 2. Price below weekly EMA34 (bearish bias)
+        # 3. Volatility filter
+        elif (close[i] < lowest_20[i] and
+              close[i] < ema_34_1w_aligned[i] and
+              vol_filter):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "6h_EMA34_WilliamsR_v1"
-timeframe = "6h"
+name = "12h_Donchian20_WeeklyEMA34_VolFilter_v1"
+timeframe = "12h"
 leverage = 1.0
