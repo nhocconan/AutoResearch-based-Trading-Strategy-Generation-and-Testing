@@ -3,13 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h momentum strategy using 4h RSI divergence with volume confirmation
-# Uses 4h RSI(14) for momentum direction and 1h volume spike for entry timing
-# Enters long when 4h RSI < 40 (bullish momentum) and 1h volume > 2x 20-period average
-# Enters short when 4h RSI > 60 (bearish momentum) and 1h volume > 2x 20-period average
-# Designed for low trade frequency (target 15-30/year) to avoid fee drag
-# Works in trending markets (momentum continuation) and avoids ranging markets
-# Uses discrete position sizing (0.20) to minimize churn
+# Hypothesis: 1h trend-following strategy using 1d trend filter (EMA50) with 1h ADX for trend strength
+# and volume confirmation. Only trades in strong trends (ADX > 25) with price above/below 1d EMA50.
+# Uses volume spike (1.5x 20-period average) for entry confirmation. Targets 15-30 trades/year
+# by combining 1d trend filter + 1h ADX + volume spike. Works in both bull and bear markets
+# by following the higher timeframe trend. Uses discrete position sizing (0.20) to minimize churn.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,20 +19,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data once
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Load 1d data once for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 4h RSI(14) for momentum
-    close_4h = df_4h['close'].values
-    delta = np.diff(close_4h, prepend=close_4h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_4h = 100 - (100 / (1 + rs))
+    # 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # 1h ADX(14) for trend strength
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    plus_dm = np.insert(plus_dm, 0, 0)
+    minus_dm = np.insert(minus_dm, 0, 0)
+    
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(low, 1)), np.abs(low - np.roll(high, 1))))
+    tr[0] = high[0] - low[0]
+    
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr + 1e-10)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     # 1h volume moving average for confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,34 +59,31 @@ def generate_signals(prices):
         if not (8 <= hours[i] <= 20):
             continue
         
-        # Get aligned 4h RSI
-        rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)[i]
-        
         # Skip if not enough data
-        if np.isnan(rsi_4h_aligned) or np.isnan(volume_ma[i]):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(adx[i]) or np.isnan(volume_ma[i]):
             continue
         
-        # Volume confirmation: current volume > 2.0x 20-period average
-        vol_confirm = volume[i] > 2.0 * volume_ma[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume[i] > 1.5 * volume_ma[i]
         
-        # Long conditions: 4h RSI < 40 (bullish momentum) AND volume spike
-        if rsi_4h_aligned < 40 and vol_confirm and position <= 0:
+        # Long conditions: price above 1d EMA50, ADX > 25, volume spike
+        if close[i] > ema_50_1d_aligned[i] and adx[i] > 25 and vol_confirm and position <= 0:
             position = 1
             signals[i] = position_size
-        # Short conditions: 4h RSI > 60 (bearish momentum) AND volume spike
-        elif rsi_4h_aligned > 60 and vol_confirm and position >= 0:
+        # Short conditions: price below 1d EMA50, ADX > 25, volume spike
+        elif close[i] < ema_50_1d_aligned[i] and adx[i] > 25 and vol_confirm and position >= 0:
             position = -1
             signals[i] = -position_size
-        # Exit: 4h RSI returns to neutral zone (40-60)
-        elif position == 1 and rsi_4h_aligned >= 50:
+        # Exit: ADX falls below 20 (weakening trend) or price crosses back over EMA50
+        elif position == 1 and (adx[i] < 20 or close[i] < ema_50_1d_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and rsi_4h_aligned <= 50:
+        elif position == -1 and (adx[i] < 20 or close[i] > ema_50_1d_aligned[i]):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "1h_4h_RSI_Momentum_Volume"
+name = "1h_1d_EMA50_ADX_Volume"
 timeframe = "1h"
 leverage = 1.0
