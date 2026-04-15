@@ -23,36 +23,25 @@ def generate_signals(prices):
     daily_low = df_1d['low'].values
     daily_volume = df_1d['volume'].values
     
-    # Calculate daily EMA34 for trend filter
-    ema34_daily = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate daily pivot points (standard floor trader's pivots)
+    pivot = (daily_high + daily_low + daily_close) / 3.0
+    r1 = 2 * pivot - daily_low
+    s1 = 2 * pivot - daily_high
     
-    # Calculate daily ATR(14) for volatility normalization
-    tr1 = pd.Series(daily_high - daily_low)
-    tr2 = pd.Series(np.abs(daily_high - np.concatenate([[daily_close[0]], daily_close[:-1]])))
-    tr3 = pd.Series(np.abs(daily_low - np.concatenate([[daily_close[0]], daily_close[:-1]])))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14_daily = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate daily ATR(14) for volatility filter
+    tr1 = daily_high - daily_low
+    tr2 = np.abs(daily_high - np.concatenate([[daily_close[0]], daily_close[:-1]]))
+    tr3 = np.abs(daily_low - np.concatenate([[daily_close[0]], daily_close[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate daily Donchian channels (20-period) for structure
-    highest_20_daily = pd.Series(daily_high).rolling(window=20, min_periods=20).max().values
-    lowest_20_daily = pd.Series(daily_low).rolling(window=20, min_periods=20).min().values
+    # Align HTF indicators to 12h timeframe with proper delay
+    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    atr_14_12h = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Align HTF indicators to 6h timeframe with proper delay
-    ema34_6h = align_htf_to_ltf(prices, df_1d, ema34_daily)
-    atr_14_6h = align_htf_to_ltf(prices, df_1d, atr_14_daily)
-    highest_20_6h = align_htf_to_ltf(prices, df_1d, highest_20_daily)
-    lowest_20_6h = align_htf_to_ltf(prices, df_1d, lowest_20_daily)
-    
-    # Calculate 6h RSI(14) for mean reversion signals
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_6h = (100 - (100 / (1 + rs))).values
-    
-    # Calculate 6h volume ratio (current vs 20-period average)
+    # Calculate 12h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
@@ -60,34 +49,34 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema34_6h[i]) or np.isnan(atr_14_6h[i]) or 
-            np.isnan(highest_20_6h[i]) or np.isnan(lowest_20_6h[i]) or 
-            np.isnan(rsi_6h[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
+            np.isnan(atr_14_12h[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Entry logic:
-        # In uptrend (price > daily EMA34): look for RSI oversold bounces
-        # In downtrend (price < daily EMA34): look for RSI overbought reversals
-        # Volume confirmation required
-        # Discrete position sizing: 0.25
+        # Entry conditions:
+        # 1. 12h price breaks above R1 with volume confirmation → long
+        # 2. 12h price breaks below S1 with volume confirmation → short
+        # 3. Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
+        # 4. Volume confirmation: volume > 1.5x average (stricter for 12h)
+        # 5. Discrete position sizing: 0.25
         
-        # Long conditions: price above daily EMA34 + RSI oversold + volume
-        if (close[i] > ema34_6h[i] and            # Uptrend filter
-            rsi_6h[i] < 30 and                   # Oversold
-            volume_ratio[i] > 1.5):              # Volume confirmation
+        # Long conditions: 12h breakout above R1
+        if (close[i] > r1_12h[i] and            # 12h price above R1 pivot
+            volume_ratio[i] > 1.5 and          # Volume confirmation
+            atr_14_12h[i] > 0.005 * close[i]):  # Volatility filter
             signals[i] = 0.25
             
-        # Short conditions: price below daily EMA34 + RSI overbought + volume
-        elif (close[i] < ema34_6h[i] and         # Downtrend filter
-              rsi_6h[i] > 70 and                 # Overbought
-              volume_ratio[i] > 1.5):            # Volume confirmation
+        # Short conditions: 12h breakdown below S1
+        elif (close[i] < s1_12h[i] and          # 12h price below S1 pivot
+              volume_ratio[i] > 1.5 and        # Volume confirmation
+              atr_14_12h[i] > 0.005 * close[i]): # Volatility filter
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "6h_EMA34_RSI_MeanReversion_Volume_Filter"
-timeframe = "6h"
+name = "12h_Pivot_R1_S1_Breakout_Volume_ATR_Filter"
+timeframe = "12h"
 leverage = 1.0
