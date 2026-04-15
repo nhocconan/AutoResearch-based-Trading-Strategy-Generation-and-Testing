@@ -28,19 +28,19 @@ def generate_signals(prices):
     weekly_r1 = 2 * weekly_pivot - weekly_low
     weekly_s1 = 2 * weekly_pivot - weekly_high
     
-    # Align weekly pivot levels to 6h timeframe
+    # Align weekly pivot levels to 12h timeframe
     weekly_pivot_aligned = align_htf_to_ltf(prices, daily, weekly_pivot)
     weekly_r1_aligned = align_htf_to_ltf(prices, daily, weekly_r1)
     weekly_s1_aligned = align_htf_to_ltf(prices, daily, weekly_s1)
     
-    # Volume filter: current 6h volume > 1.5x 20-period average volume
+    # Volume filter: current 12h volume > 1.8x 20-period average volume
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    volume_filter = volume > (1.8 * vol_ma)
     
-    # Range filter: avoid trading when price is within 0.3% of weekly pivot
+    # Range filter: avoid trading when price is within 0.5% of weekly pivot
     price_to_pivot = np.abs(close - weekly_pivot_aligned) / weekly_pivot_aligned
-    range_filter = price_to_pivot > 0.003
+    range_filter = price_to_pivot > 0.005
     
     # Session filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -70,6 +70,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R1_S1_Breakout_Volume_RangeFilter_Session"
-timeframe = "6h"
+name = "12h_WeeklyPivot_R1_S1_Breakout_Volume_RangeFilter_Session"
+timeframe = "12h"
 leverage = 1.0
