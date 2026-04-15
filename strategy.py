@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,46 +13,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d HTF data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    # Calculate 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Get 1w HTF data for weekly pivot points
+    # Get 1w HTF data once before loop
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (using previous week's OHLC)
+    # Calculate 1w Williams Alligator components
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Weekly pivot: P = (H + L + C) / 3
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    # Weekly R1: R1 = 2*P - L
-    r1_1w = 2 * pivot_1w - low_1w
-    # Weekly S1: S1 = 2*P - H
-    s1_1w = 2 * pivot_1w - high_1w
+    # Jaw (13-period SMMA, 8 bars ahead)
+    jaw_1w = pd.Series(close_1w).rolling(window=13, min_periods=13).mean().shift(8).values
+    # Teeth (8-period SMMA, 5 bars ahead)
+    teeth_1w = pd.Series(close_1w).rolling(window=8, min_periods=8).mean().shift(5).values
+    # Lips (5-period SMMA, 3 bars ahead)
+    lips_1w = pd.Series(close_1w).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Align weekly pivot levels to 6h
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    # Align Alligator to 12h
+    jaw_12h = align_htf_to_ltf(prices, df_1w, jaw_1w)
+    teeth_12h = align_htf_to_ltf(prices, df_1w, teeth_1w)
+    lips_12h = align_htf_to_ltf(prices, df_1w, lips_1w)
     
-    # Calculate 6h ATR(14) for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Get 1d HTF data for Elder Ray
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Calculate 6h volume ratio (current vs 20-period average)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power_1d = high_1d - ema_13_1d
+    bear_power_1d = low_1d - ema_13_1d
+    
+    # Align Elder Ray to 12h
+    bull_power_12h = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_12h = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    
+    # Calculate 12h TRIX (15-period)
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    trix = 100 * (ema3 - ema3.shift(1)) / ema3.shift(1)
+    trix = trix.fillna(0).values
+    
+    # Calculate 12h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
@@ -62,40 +70,40 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(pivot_1w_aligned[i]) or 
-            np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or 
-            np.isnan(atr_14[i]) or np.isnan(volume_ratio[i]) or not in_session[i]):
+        if (np.isnan(jaw_12h[i]) or np.isnan(teeth_12h[i]) or np.isnan(lips_12h[i]) or
+            np.isnan(bull_power_12h[i]) or np.isnan(bear_power_12h[i]) or
+            np.isnan(trix[i]) or np.isnan(volume_ratio[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
         # Long conditions:
-        # 1. 6h price crosses above weekly R1 (breakout)
-        # 2. 1d EMA(50) trend filter: price above EMA50 (bullish bias)
-        # 3. Volume confirmation: volume > 1.3x average
-        # 4. Volatility filter: ATR > 0.4% of price (avoid low volatility chop)
-        if (close[i] > r1_1w_aligned[i] and
-            close[i] > ema_50_1d_aligned[i] and
-            volume_ratio[i] > 1.3 and
-            atr_14[i] > 0.004 * close[i]):
+        # 1. Alligator aligned (JAW > TEETH > LIPS) - bullish alignment
+        # 2. Elder Ray Bull Power > 0 (buying pressure)
+        # 3. TRIX turning up (positive slope) - momentum confirmation
+        # 4. Volume confirmation: volume > 1.3x average
+        if (jaw_12h[i] > teeth_12h[i] > lips_12h[i] and
+            bull_power_12h[i] > 0 and
+            trix[i] > trix[i-1] and
+            volume_ratio[i] > 1.3):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. 6h price crosses below weekly S1 (breakdown)
-        # 2. 1d EMA(50) trend filter: price below EMA50 (bearish bias)
-        # 3. Volume confirmation: volume > 1.3x average
-        # 4. Volatility filter: ATR > 0.4% of price
-        elif (close[i] < s1_1w_aligned[i] and
-              close[i] < ema_50_1d_aligned[i] and
-              volume_ratio[i] > 1.3 and
-              atr_14[i] > 0.004 * close[i]):
+        # 1. Alligator inverted (JAW < TEETH < LIPS) - bearish alignment
+        # 2. Elder Ray Bear Power < 0 (selling pressure)
+        # 3. TRIX turning down (negative slope) - momentum confirmation
+        # 4. Volume confirmation: volume > 1.3x average
+        elif (jaw_12h[i] < teeth_12h[i] < lips_12h[i] and
+              bear_power_12h[i] < 0 and
+              trix[i] < trix[i-1] and
+              volume_ratio[i] > 1.3):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "6h_WeeklyPivot_R1S1_Breakout_Volume_Filter_v1"
-timeframe = "6h"
+name = "12h_Alligator_ElderRay_TRIX_Volume_Filter"
+timeframe = "12h"
 leverage = 1.0
