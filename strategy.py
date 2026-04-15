@@ -13,61 +13,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for HTF context
+    # Get weekly data for HTF trend context
+    weekly = get_htf_data(prices, '1w')
+    weekly_close = weekly['close'].values
+    
+    # Calculate weekly EMA40 for trend filter
+    ema_40 = pd.Series(weekly_close).ewm(span=40, adjust=False, min_periods=40).mean().values
+    weekly_trend = align_htf_to_ltf(prices, weekly, ema_40)
+    
+    # Get daily data for Camarilla pivot levels
     daily = get_htf_data(prices, '1d')
     daily_high = daily['high'].values
     daily_low = daily['low'].values
     daily_close = daily['close'].values
+    
+    # Calculate Camarilla pivot levels (R1, S1) from previous day
+    # Pivot = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    pivot = (daily_high + daily_low + daily_close) / 3.0
+    r1 = daily_close + (daily_high - daily_low) * 1.1 / 12.0
+    s1 = daily_close - (daily_high - daily_low) * 1.1 / 12.0
+    
+    # Align pivot levels to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, daily, r1)
+    s1_4h = align_htf_to_ltf(prices, daily, s1)
+    
+    # Calculate daily volume for volume confirmation
     daily_volume = daily['volume'].values
+    avg_volume_20 = pd.Series(daily_volume).rolling(window=20, min_periods=20).mean().values
+    volume_ratio = align_htf_to_ltf(prices, daily, avg_volume_20)
     
-    # Calculate 12h Donchian channels (20-period) for breakout signals
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Calculate daily ADX for trend strength filter (regime filter)
+    # Simplified ADX calculation using daily data
+    daily_tr = np.maximum(daily_high - daily_low,
+                          np.maximum(np.abs(daily_high - np.concatenate([[daily_close[0]], daily_close[:-1]])),
+                                     np.abs(daily_low - np.concatenate([[daily_close[0]], daily_close[:-1]]))))
+    atr_14 = pd.Series(daily_tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate daily ATR for volatility filter
-    daily_close_prev = np.concatenate([[daily_close[0]], daily_close[:-1]])
-    tr = np.maximum(daily_high - daily_low,
-                    np.maximum(np.abs(daily_high - daily_close_prev),
-                               np.abs(daily_low - daily_close_prev)))
-    atr_daily = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ratio_daily = atr_daily / daily_close
+    # +DM and -DM
+    up_move = daily_high - np.concatenate([[daily_high[0]], daily_high[:-1]])
+    down_move = np.concatenate([[daily_low[0]], daily_low[:-1]]) - daily_low
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Align daily ATR ratio to 12h timeframe
-    atr_ratio_12h = align_htf_to_ltf(prices, daily, atr_ratio_daily)
+    # Smoothed +DM and -DM
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate daily volume ratio (current vs 20-period average)
-    vol_ma_20 = pd.Series(daily_volume).rolling(window=20, min_periods=20).mean().values
-    volume_ratio_daily = daily_volume / (vol_ma_20 + 1e-10)
+    # +DI and -DI
+    plus_di = 100 * (plus_dm_smooth / (atr_14 + 1e-10))
+    minus_di = 100 * (minus_dm_smooth / (atr_14 + 1e-10))
     
-    # Align daily volume ratio to 12h timeframe
-    volume_ratio_12h = align_htf_to_ltf(prices, daily, volume_ratio_daily)
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_4h = align_htf_to_ltf(prices, daily, adx)
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(atr_ratio_12h[i]) or np.isnan(volume_ratio_12h[i])):
+        if (np.isnan(weekly_trend[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
+            np.isnan(volume_ratio[i]) or np.isnan(adx_4h[i])):
             signals[i] = 0.0
             continue
         
-        # Breakout strategy with volatility and volume filters
-        # Long when price breaks above Donchian high in high volatility + high volume
-        if (close[i] > highest_high[i] and 
-            atr_ratio_12h[i] > 0.015 and  # Volatility filter
-            volume_ratio_12h[i] > 1.5):   # Volume confirmation
+        # Volume confirmation: current volume > 1.5 * average daily volume
+        # Note: volume_ratio contains the 20-day average volume aligned to 4h
+        # We need to compare current 4h volume to this daily average
+        # Approximate: current 4h volume > 0.5 * daily average volume (since 4h is 1/6 of day)
+        if volume[i] < 0.5 * volume_ratio[i]:
+            signals[i] = 0.0
+            continue
+        
+        # Regime filter: only trade when ADX > 25 (trending market)
+        if adx_4h[i] < 25:
+            signals[i] = 0.0
+            continue
+        
+        # Long when price touches S1 support in uptrend (weekly close > weekly EMA40)
+        if (close[i] <= s1_4h[i] and 
+            weekly_trend[i] < close[i]):  # Uptrend: price above weekly EMA40
             signals[i] = 0.25
-        # Short when price breaks below Donchian low in high volatility + high volume
-        elif (close[i] < lowest_low[i] and 
-              atr_ratio_12h[i] > 0.015 and  # Volatility filter
-              volume_ratio_12h[i] > 1.5):   # Volume confirmation
+        # Short when price touches R1 resistance in downtrend (weekly close < weekly EMA40)
+        elif (close[i] >= r1_4h[i] and 
+              weekly_trend[i] > close[i]):  # Downtrend: price below weekly EMA40
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "12h_Donchian_Breakout_Volume_Volatility_Filter"
-timeframe = "12h"
+name = "4h_WeeklyEMA40_Camarilla_Pivot_Volume_ADX_Filter"
+timeframe = "4h"
 leverage = 1.0
