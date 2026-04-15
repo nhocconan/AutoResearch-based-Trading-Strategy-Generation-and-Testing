@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h timeframe with 4h trend filter (EMA200) and 1d volume filter
-# Uses 1h price action with 4h EMA200 for trend direction and 1d volume surge for confirmation.
-# Designed to work in both bull and bear markets by only taking trades in the direction
-# of the 4h trend, reducing whipsaws. Volume filter ensures momentum behind moves.
-# Target: 60-150 total trades over 4 years (15-37/year) with disciplined entries.
+# Hypothesis: 6h EMA crossover with 1w trend filter and volume confirmation
+# Uses 6h EMA(12) and EMA(26) for crossover signals, filtered by 1w EMA(50) trend direction.
+# Volume confirmation (1.5x average) ensures breakout strength. Works in bull by taking
+# longs in uptrend, works in bear by taking shorts in downtrend.
+# Target: 60-120 total trades over 4 years (15-30/year) with disciplined entries.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,62 +19,81 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 200:
+    # Load 6h data (primary timeframe) for EMA crossover
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
     
-    # Load 1d data for volume filter
+    # Load 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    close_1w = df_1w['close'].values
+    
+    # Load 1d data for volume average
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
-    vol_1d = df_1d['volume'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate EMA200 on 4h for trend
-    ema200_4h = pd.Series(close_4h).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate EMA12 and EMA26 on 6h
+    ema12_6h = pd.Series(close_6h).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema26_6h = pd.Series(close_6h).ewm(span=26, adjust=False, min_periods=26).mean().values
     
-    # Calculate 20-period average volume on 1d
-    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate EMA50 on 1w for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align all indicators to 1h timeframe
-    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
+    # Calculate volume average (20-period on 1d)
+    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all indicators to 6h timeframe
+    ema12_6h_aligned = align_htf_to_ltf(prices, df_6h, ema12_6h)
+    ema26_6h_aligned = align_htf_to_ltf(prices, df_6h, ema26_6h)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.20  # Position size (20%)
+    base_size = 0.25  # Position size
     
-    for i in range(200, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema200_4h_aligned[i]) or np.isnan(vol_avg_aligned[i])):
+        if (np.isnan(ema12_6h_aligned[i]) or np.isnan(ema26_6h_aligned[i]) or
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_avg_aligned[i])):
             continue
         
-        # Long entry: price above 4h EMA200 + volume surge
-        if (close[i] > ema200_4h_aligned[i] and
-            volume[i] > 2.0 * vol_avg_aligned[i] and
+        # Long entry: EMA12 crosses above EMA26 + volume spike + price above 1w EMA50 (uptrend)
+        if (ema12_6h_aligned[i] > ema26_6h_aligned[i] and
+            ema12_6h_aligned[i-1] <= ema26_6h_aligned[i-1] and  # crossover confirmation
+            volume[i] > 1.5 * vol_avg_aligned[i] and
+            close[i] > ema50_1w_aligned[i] and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price below 4h EMA200 + volume surge
-        elif (close[i] < ema200_4h_aligned[i] and
-              volume[i] > 2.0 * vol_avg_aligned[i] and
+        # Short entry: EMA12 crosses below EMA26 + volume spike + price below 1w EMA50 (downtrend)
+        elif (ema12_6h_aligned[i] < ema26_6h_aligned[i] and
+              ema12_6h_aligned[i-1] >= ema26_6h_aligned[i-1] and  # crossover confirmation
+              volume[i] > 1.5 * vol_avg_aligned[i] and
+              close[i] < ema50_1w_aligned[i] and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
         # Exit: reverse signal
-        elif position == 1 and close[i] < ema200_4h_aligned[i]:
+        elif position == 1 and ema12_6h_aligned[i] < ema26_6h_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > ema200_4h_aligned[i]:
+        elif position == -1 and ema12_6h_aligned[i] > ema26_6h_aligned[i]:
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "1h_EMA200_Trend_Volume_Surge"
-timeframe = "1h"
+name = "6h_EMA_Crossover_1wTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
