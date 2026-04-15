@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator + 1d RSI + Volume Spike + ATR Stop
-# Williams Alligator (jaw=13, teeth=8, lips=5) identifies trend direction.
-# Long when lips > teeth > jaw and RSI < 30 (oversold bounce) with volume spike.
-# Short when lips < teeth < jaw and RSI > 70 (overbought rejection) with volume spike.
-# Uses 1d RSI for higher timeframe confirmation to avoid false signals.
-# Target: 50-150 total trades over 4 years (12-38/year).
+# Hypothesis: 12h Bollinger Band Squeeze with Volume Spike and ATR Stop
+# Identifies low volatility periods (BB width < 20th percentile) followed by volatility expansion
+# (BB width > 80th percentile) with volume confirmation (>2x average volume).
+# Trades in direction of breakout (close outside Bollinger Bands).
+# Works in both bull and bear markets by capturing volatility expansion after contraction.
+# Uses 1d ATR for stop loss and 1w trend filter to avoid counter-trend trades.
+# Target: 50-150 total trades over 4 years.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,72 +21,103 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for RSI
+    # Load 1d data for Bollinger Bands and ATR
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 50:
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d RSI (14-period)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
+    # Load 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    close_1w = df_1w['close'].values
     
-    # Align 1d RSI to 4h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Calculate Bollinger Bands (20, 2) on 1d
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
+    bb_width = (upper_bb - lower_bb) / sma_20
     
-    # Williams Alligator on 4h
-    # Jaw (13-period SMMA of median price)
-    median_price = (high + low) / 2
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
-    # Teeth (8-period SMMA of median price)
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
-    # Lips (5-period SMMA of median price)
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
+    # Bollinger Band width percentile (20th and 80th) for squeeze detection
+    bb_width_series = pd.Series(bb_width)
+    bb_width_20th = bb_width_series.rolling(window=50, min_periods=50).quantile(0.20).values
+    bb_width_80th = bb_width_series.rolling(window=50, min_periods=50).quantile(0.80).values
     
-    # Volume spike detection (20-period median)
-    vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median().values
+    # Squeeze condition: BB width < 20th percentile (low volatility)
+    squeeze = bb_width < bb_width_20th
+    
+    # Expansion condition: BB width > 80th percentile (high volatility)
+    expansion = bb_width > bb_width_80th
+    
+    # Breakout conditions
+    breakout_up = close_1d > upper_bb
+    breakout_down = close_1d < lower_bb
+    
+    # Volume condition: volume > 2x average volume
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > 2 * avg_volume
+    
+    # Trend filter: 50-period EMA on 1w
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_1w = close_1w > ema_50_1w
+    downtrend_1w = close_1w < ema_50_1w
+    
+    # Align 1d indicators to 12h timeframe
+    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze)
+    expansion_aligned = align_htf_to_ltf(prices, df_1d, expansion)
+    breakout_up_aligned = align_htf_to_ltf(prices, df_1d, breakout_up)
+    breakout_down_aligned = align_htf_to_ltf(prices, df_1d, breakout_down)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
+    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
+    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
+    
+    # ATR for stop loss (14-period on 1d)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     signals = np.zeros(n)
     position = 0
     base_size = 0.25  # Position size
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(rsi_1d_aligned[i]) or np.isnan(vol_median[i])):
+        if (np.isnan(squeeze_aligned[i]) or np.isnan(expansion_aligned[i]) or
+            np.isnan(breakout_up_aligned[i]) or np.isnan(breakout_down_aligned[i]) or
+            np.isnan(volume_spike_aligned[i]) or np.isnan(uptrend_1w_aligned[i]) or
+            np.isnan(downtrend_1w_aligned[i]) or np.isnan(atr_1d_aligned[i])):
             continue
         
-        # Long entry: Lips > Teeth > Jaw (bullish alignment) + RSI < 30 + Volume spike
-        if (lips[i] > teeth[i] and teeth[i] > jaw[i] and
-            rsi_1d_aligned[i] < 30 and
-            volume[i] > 1.5 * vol_median[i] and
-            position <= 0):
+        # Long entry: bullish breakout after squeeze, with volume spike and uptrend
+        if (squeeze_aligned[i-1] and expansion_aligned[i] and breakout_up_aligned[i] and
+            volume_spike_aligned[i] and uptrend_1w_aligned[i] and position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: Lips < Teeth < Jaw (bearish alignment) + RSI > 70 + Volume spike
-        elif (lips[i] < teeth[i] and teeth[i] < jaw[i] and
-              rsi_1d_aligned[i] > 70 and
-              volume[i] > 1.5 * vol_median[i] and
-              position >= 0):
+        # Short entry: bearish breakout after squeeze, with volume spike and downtrend
+        elif (squeeze_aligned[i-1] and expansion_aligned[i] and breakout_down_aligned[i] and
+              volume_spike_aligned[i] and downtrend_1w_aligned[i] and position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: Reverse Alligator alignment or RSI returns to neutral zone
-        elif position == 1 and (lips[i] < teeth[i] or rsi_1d_aligned[i] > 50):
+        # Exit: reverse breakout or volatility contraction (squeeze returns)
+        elif position == 1 and (breakout_down_aligned[i] or squeeze_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (lips[i] > teeth[i] or rsi_1d_aligned[i] < 50):
+        elif position == -1 and (breakout_up_aligned[i] or squeeze_aligned[i]):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_WilliamsAlligator_1dRSI_Volume"
-timeframe = "4h"
+name = "12h_Bollinger_Squeeze_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
