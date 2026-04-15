@@ -3,94 +3,92 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Bollinger Band Breakout with 1-week EMA Trend Filter and Volume Confirmation
-# Uses Bollinger Bands (20, 2) on daily timeframe for breakout signals.
-# Trend filter: price above/below 50-period EMA on weekly timeframe.
-# Volume confirmation: current day's volume > 1.5x 20-day average volume.
-# Works in bull markets (breakouts above upper band) and bear markets (breakouts below lower band).
-# Target: 30-100 total trades over 4 years (7-25/year).
+# Hypothesis: 4h Bollinger Band squeeze breakout with volume and 12h EMA trend filter
+# Combines volatility contraction (BB squeeze) with breakout direction confirmed by volume
+# and higher timeframe trend (12h EMA). Works in both bull and bear markets by
+# capturing explosive moves after low volatility periods. Target: 50-150 total trades.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for Bollinger Bands
+    # Load 1d data for Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
     
-    # Load weekly data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Bollinger Bands (20, 2) on daily
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_band = sma_20 + 2 * std_20
-    lower_band = sma_20 - 2 * std_20
+    # Calculate Bollinger Bands (20, 2.0) on daily
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean()
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std()
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
     
-    # Calculate 50-period EMA on weekly
-    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Bollinger Band Width (squeeze indicator)
+    bb_width = (upper_bb - lower_bb) / sma_20
+    bb_width = bb_width.values
     
-    # Align Bollinger Bands to daily timeframe (no shift needed as they are for same day)
-    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
+    # Calculate 12h EMA (50-period)
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align weekly EMA to daily timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
-    
-    # Calculate 20-day average volume on daily
-    avg_vol_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    avg_vol_20_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_20)
+    # Align indicators to 4h timeframe
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb.values)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb.values)
+    bb_width_aligned = align_htf_to_ltf(prices, df_1d, bb_width)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     position = 0
     base_size = 0.25  # Position size
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or
-            np.isnan(ema_50_aligned[i]) or np.isnan(avg_vol_20_aligned[i])):
+        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or
+            np.isnan(bb_width_aligned[i]) or np.isnan(ema_50_12h_aligned[i])):
             continue
         
-        # Long entry: price breaks above upper Bollinger Band + price above weekly EMA + volume confirmation
-        if (close[i] > upper_band_aligned[i] and
-            close[i] > ema_50_aligned[i] and
-            volume[i] > 1.5 * avg_vol_20_aligned[i] and
+        # Bollinger squeeze condition: BB width below 20-period median (low volatility)
+        bb_width_median = np.median(bb_width_aligned[max(0, i-40):i+1])
+        is_squeeze = bb_width_aligned[i] < 0.8 * bb_width_median
+        
+        # Long entry: squeeze breakout above upper BB + volume + 12h EMA uptrend
+        if (is_squeeze and close[i] > upper_bb_aligned[i] and
+            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
+            close[i] > ema_50_12h_aligned[i] and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below lower Bollinger Band + price below weekly EMA + volume confirmation
-        elif (close[i] < lower_band_aligned[i] and
-              close[i] < ema_50_aligned[i] and
-              volume[i] > 1.5 * avg_vol_20_aligned[i] and
+        # Short entry: squeeze breakout below lower BB + volume + 12h EMA downtrend
+        elif (is_squeeze and close[i] < lower_bb_aligned[i] and
+              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
+              close[i] < ema_50_12h_aligned[i] and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse breakout or price crosses back below/above weekly EMA
-        elif position == 1 and (close[i] < ema_50_aligned[i] or close[i] < lower_band_aligned[i]):
+        # Exit: reverse squeeze breakout or volatility expansion (end of squeeze)
+        elif position == 1 and close[i] < lower_bb_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > ema_50_aligned[i] or close[i] > upper_band_aligned[i]):
+        elif position == -1 and close[i] > upper_bb_aligned[i]:
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "1d_Bollinger_Breakout_1wEMA_Volume"
-timeframe = "1d"
+name = "4h_Bollinger_Squeeze_12hEMA_Volume"
+timeframe = "4h"
 leverage = 1.0
