@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Donchian breakout with 4h EMA(34) trend filter and volume confirmation.
-# In 1d uptrend (price > 1d upper Donchian) and 4h EMA rising, go long on pullback to 4h EMA.
-# In 1d downtrend (price < 1d lower Donchian) and 4h EMA falling, go short on bounce to 4h EMA.
-# Volume confirmation ensures momentum validity. Designed for low trade frequency (20-40/year) to minimize fee drag.
-# Works in bull via breakouts and in bear via mean reversion to EMA within HTF trend.
+# Hypothesis: 4h Donchian breakout with volume confirmation and choppiness regime filter
+# Long when price breaks above Donchian(20) high + volume > 1.5x avg + choppy market (CHOP > 61.8)
+# Short when price breaks below Donchian(20) low + volume > 1.5x avg + choppy market (CHOP > 61.8)
+# Uses 1d ATR for choppy market calculation to avoid look-ahead
+# Designed for low trade frequency (20-40/year) to minimize fee drag while capturing breakouts in ranging markets
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,29 +18,47 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Pre-compute session hours to avoid datetime operations in loop
-    hours = pd.DatetimeIndex(open_time).hour
-    
-    # Get 1d and 4h HTF data once before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Get 4h and 1d HTF data once before loop
     df_4h = get_htf_data(prices, '4h')
-    if len(df_1d) < 30 or len(df_4h) < 30:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_4h) < 30 or len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d Indicators: Donchian Channel (20) ===
+    # === 4h Indicators: Donchian Channel (20) ===
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    
+    # === 1d Indicators: ATR for Choppy Market Calculation ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    donchian_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_1d)
-    donchian_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_1d)
+    close_1d = df_1d['close'].values
     
-    # === 4h Indicators: EMA(34) ===
-    close_4h = df_4h['close'].values
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    # True Range calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Set first TR to high-low (no previous close)
+    tr[0] = high_1d[0] - low_1d[0]
+    
+    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Choppy Market Calculation: CHOP = 100 * log10(sum(ATR14) / (max(high)-min(low))) / log10(14)
+    # We'll calculate rolling max(high) and min(low) over 14 periods
+    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+    
+    # Avoid division by zero and invalid values
+    denominator = max_high_14 - min_low_14
+    chop_raw = np.where(denominator > 0, sum_atr_14 / denominator, 1.0)
+    choppy_market = 100 * np.log10(np.maximum(chop_raw, 1e-10)) / np.log10(14)
+    choppy_market_aligned = align_htf_to_ltf(prices, df_1d, choppy_market)
     
     signals = np.zeros(n)
     
@@ -48,42 +66,28 @@ def generate_signals(prices):
     warmup = 100
     
     for i in range(warmup, n):
-        # Session filter: 08-20 UTC only
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
-            
         # Volume filter: current volume > 1.5x 20-period volume SMA
         vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_1d_aligned[i]) or np.isnan(donchian_low_1d_aligned[i]) or
-            np.isnan(ema_34_4h_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(choppy_market_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. In 1d uptrend (price > 1d upper Donchian)
-        # 2. 4h EMA rising (EMA > EMA_prev)
-        # 3. Price near 4h EMA (pullback entry)
-        # 4. Volume confirmation
-        if (close[i] > donchian_high_1d_aligned[i]) and \
-           (ema_34_4h_aligned[i] > ema_34_4h_aligned[i-1]) and \
-           (abs(close[i] - ema_34_4h_aligned[i]) / ema_34_4h_aligned[i] < 0.02) and \
-           vol_confirm:
+        # 1. Price breaks above 4h upper Donchian
+        # 2. Volume confirmation
+        # 3. Choppy market regime (CHOP > 61.8 = ranging/mean reverting)
+        if (close[i] > donchian_high_aligned[i]) and vol_confirm and (choppy_market_aligned[i] > 61.8):
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. In 1d downtrend (price < 1d lower Donchian)
-        # 2. 4h EMA falling (EMA < EMA_prev)
-        # 3. Price near 4h EMA (bounce entry)
-        # 4. Volume confirmation
-        elif (close[i] < donchian_low_1d_aligned[i]) and \
-             (ema_34_4h_aligned[i] < ema_34_4h_aligned[i-1]) and \
-             (abs(close[i] - ema_34_4h_aligned[i]) / ema_34_4h_aligned[i] < 0.02) and \
-             vol_confirm:
+        # 1. Price breaks below 4h lower Donchian
+        # 2. Volume confirmation
+        # 3. Choppy market regime (CHOP > 61.8 = ranging/mean reverting)
+        elif (close[i] < donchian_low_aligned[i]) and vol_confirm and (choppy_market_aligned[i] > 61.8):
             signals[i] = -0.25
         
         else:
@@ -91,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dDonchian20_4hEMA34_VolumeFilter_v1"
+name = "4h_Donchian20_Volume_Chop_Filter_v1"
 timeframe = "4h"
 leverage = 1.0
