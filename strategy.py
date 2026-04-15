@@ -13,11 +13,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for context
+    # Get weekly data for HTF context (1w)
     weekly = get_htf_data(prices, '1w')
     weekly_high = weekly['high'].values
     weekly_low = weekly['low'].values
     weekly_close = weekly['close'].values
+    
+    # Calculate weekly Donchian channels (20-period)
+    donchian_high = pd.Series(weekly_high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(weekly_low).rolling(window=20, min_periods=20).min().values
+    
+    # Align weekly Donchian channels to daily timeframe
+    donchian_high_daily = align_htf_to_ltf(prices, weekly, donchian_high)
+    donchian_low_daily = align_htf_to_ltf(prices, weekly, donchian_low)
     
     # Calculate weekly ATR for volatility filter
     weekly_close_prev = np.concatenate([[weekly_close[0]], weekly_close[:-1]])
@@ -27,8 +35,8 @@ def generate_signals(prices):
     atr_weekly = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_ratio_weekly = atr_weekly / weekly_close
     
-    # Align weekly ATR ratio to 4h timeframe
-    atr_ratio_4h = align_htf_to_ltf(prices, weekly, atr_ratio_weekly)
+    # Align weekly ATR ratio to daily timeframe
+    atr_ratio_daily = align_htf_to_ltf(prices, weekly, atr_ratio_weekly)
     
     # Calculate weekly RSI for momentum filter
     delta = np.diff(weekly_close, prepend=weekly_close[0])
@@ -39,44 +47,34 @@ def generate_signals(prices):
     rs = avg_gain / (avg_loss + 1e-10)
     rsi_weekly = 100 - (100 / (1 + rs))
     
-    # Align weekly RSI to 4h timeframe
-    rsi_4h = align_htf_to_ltf(prices, weekly, rsi_weekly)
-    
-    # Calculate weekly Bollinger Bands for mean reversion signals
-    sma_20 = pd.Series(weekly_close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(weekly_close).rolling(window=20, min_periods=20).std().values
-    upper_band = sma_20 + (2 * std_20)
-    lower_band = sma_20 - (2 * std_20)
-    
-    # Align Bollinger Bands to 4h timeframe
-    upper_band_4h = align_htf_to_ltf(prices, weekly, upper_band)
-    lower_band_4h = align_htf_to_ltf(prices, weekly, lower_band)
+    # Align weekly RSI to daily timeframe
+    rsi_daily = align_htf_to_ltf(prices, weekly, rsi_weekly)
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_ratio_4h[i]) or np.isnan(rsi_4h[i]) or 
-            np.isnan(upper_band_4h[i]) or np.isnan(lower_band_4h[i])):
+        if (np.isnan(donchian_high_daily[i]) or np.isnan(donchian_low_daily[i]) or
+            np.isnan(atr_ratio_daily[i]) or np.isnan(rsi_daily[i])):
             signals[i] = 0.0
             continue
         
-        # Mean reversion strategy with volatility and momentum filters
-        # Long when price touches lower BB in low volatility + oversold RSI
-        if (close[i] <= lower_band_4h[i] and 
-            atr_ratio_4h[i] < 0.015 and  # Low volatility filter
-            rsi_4h[i] < 30):  # Oversold filter
+        # Breakout strategy with volatility and momentum filters
+        # Long when price breaks above weekly Donchian high in high volatility + bullish RSI
+        if (close[i] > donchian_high_daily[i] and 
+            atr_ratio_daily[i] > 0.02 and  # High volatility filter
+            rsi_daily[i] > 50):  # Bullish momentum filter
             signals[i] = 0.25
-        # Short when price touches upper BB in low volatility + overbought RSI
-        elif (close[i] >= upper_band_4h[i] and 
-              atr_ratio_4h[i] < 0.015 and  # Low volatility filter
-              rsi_4h[i] > 70):  # Overbought filter
+        # Short when price breaks below weekly Donchian low in high volatility + bearish RSI
+        elif (close[i] < donchian_low_daily[i] and 
+              atr_ratio_daily[i] > 0.02 and  # High volatility filter
+              rsi_daily[i] < 50):  # Bearish momentum filter
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "4h_WeeklyBB_RSI_Volatility_MeanReversion"
-timeframe = "4h"
+name = "1d_WeeklyDonchian_RSI_Volatility_Breakout"
+timeframe = "1d"
 leverage = 1.0
