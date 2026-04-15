@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -40,72 +40,33 @@ def generate_signals(prices):
     rsi_14_1d = 100 - (100 / (1 + rs))
     rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
     
-    # Get 1w HTF data for regime filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Calculate weekly ADX(14) for trend strength filter
-    # TR calculation
-    tr1_w = df_1w['high'] - df_1w['low']
-    tr2_w = np.abs(df_1w['high'] - np.concatenate([[df_1w['close'].iloc[0]], df_1w['close'].iloc[:-1]]))
-    tr3_w = np.abs(df_1w['low'] - np.concatenate([[df_1w['close'].iloc[0]], df_1w['close'].iloc[:-1]]))
-    tr_1w = np.maximum(tr1_w, np.maximum(tr2_w, tr3_w))
-    
-    # +DM and -DM calculation
-    up_move = df_1w['high'].diff()
-    down_move = df_1w['low'].diff()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed TR, +DM, -DM
-    tr_14_1w = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_dm_14_1w = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_14_1w = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # DI calculation
-    plus_di_14_1w = 100 * plus_dm_14_1w / (tr_14_1w + 1e-10)
-    minus_di_14_1w = 100 * minus_dm_14_1w / (tr_14_1w + 1e-10)
-    
-    # DX and ADX
-    dx_14_1w = 100 * np.abs(plus_di_14_1w - minus_di_14_1w) / (plus_di_14_1w + minus_di_14_1w + 1e-10)
-    adx_14_1w = pd.Series(dx_14_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_14_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_14_1w)
-    
     signals = np.zeros(n)
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
         if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_20_1d_aligned[i]) or 
-            np.isnan(rsi_14_1d_aligned[i]) or np.isnan(adx_14_1w_aligned[i])):
+            np.isnan(rsi_14_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade when weekly ADX > 25 (trending market)
-        trend_filter = adx_14_1w_aligned[i] > 25
-        
-        # Volatility filter: only trade when daily ATR is elevated (> 0.4% of price)
+        # Regime filter: only trade when daily ATR is elevated (> 0.4% of price)
         vol_filter = atr_14_1d_aligned[i] > 0.004 * close[i]
         
         # Long conditions:
         # 1. Price above daily EMA20 (bullish bias)
         # 2. Daily RSI between 40 and 60 (neutral momentum, avoids extremes)
-        # 3. Trend filter
-        # 4. Volatility filter
+        # 3. Volatility filter
         if (close[i] > ema_20_1d_aligned[i] and
             40 <= rsi_14_1d_aligned[i] <= 60 and
-            trend_filter and
             vol_filter):
             signals[i] = 0.25
             
         # Short conditions:
         # 1. Price below daily EMA20 (bearish bias)
         # 2. Daily RSI between 40 and 60 (neutral momentum, avoids extremes)
-        # 3. Trend filter
-        # 4. Volatility filter
+        # 3. Volatility filter
         elif (close[i] < ema_20_1d_aligned[i] and
               40 <= rsi_14_1d_aligned[i] <= 60 and
-              trend_filter and
               vol_filter):
             signals[i] = -0.25
         else:
@@ -113,6 +74,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA20_RSI14_ADX_VolFilter_v1"
-timeframe = "12h"
+name = "4h_EMA20_RSI14_VolFilter_v1"
+timeframe = "4h"
 leverage = 1.0
