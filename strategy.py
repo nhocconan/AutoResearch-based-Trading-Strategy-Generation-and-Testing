@@ -3,9 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 1d timeframe with 1w trend filter, Donchian channel breakout, volume confirmation
+# Weekly trend filter reduces false breakouts in sideways markets
+# Volume confirmation ensures breakouts have conviction
+# Designed to work in both bull (breakouts continue) and bear (false breakouts filtered) markets
+# Target: 15-25 trades/year to stay under fee drag limits
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,72 +19,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily high/low for volatility regime
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
         return np.zeros(n)
     
-    # Daily ATR(14) for volatility measurement
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly EMA50 for trend filter
+    weekly_close = df_1w['close'].values
+    weekly_ema = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
     
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with 1d index
+    # Daily Donchian channel (20-period)
+    high_rolling = pd.Series(high).rolling(window=20, min_periods=20).max()
+    low_rolling = pd.Series(low).rolling(window=20, min_periods=20).min()
+    upper_donchian = high_rolling.values
+    lower_donchian = low_rolling.values
     
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    
-    # Daily range (high - low) for volatility regime
-    daily_range = high_1d - low_1d
-    daily_range_aligned = align_htf_to_ltf(prices, df_1d, daily_range)
-    
-    # Volatility regime: high volatility when daily range > 1.5 * ATR(14)
-    vol_regime = daily_range_aligned > (1.5 * atr_14_aligned)
-    
-    # 12-period RSI on close for mean reversion signals
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).rolling(window=12, min_periods=12).mean()
-    avg_loss = pd.Series(loss).rolling(window=12, min_periods=12).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
-    
-    # Volume confirmation: current > 1.3x median of last 24 periods
-    vol_median = pd.Series(volume).rolling(window=24, min_periods=1).median()
-    vol_threshold = 1.3 * vol_median
+    # Volume confirmation: current > 1.8x median of last 20 days
+    vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
+    vol_threshold = 1.8 * vol_median
     
     signals = np.zeros(n)
     
-    for i in range(24, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi_values[i]) or np.isnan(vol_threshold[i]) or 
-            np.isnan(vol_regime[i]) or np.isnan(daily_range_aligned[i])):
+        if (np.isnan(weekly_ema_aligned[i]) or np.isnan(upper_donchian[i]) or 
+            np.isnan(lower_donchian[i]) or np.isnan(vol_threshold[i])):
             continue
         
-        # Only trade in high volatility regimes
-        if not vol_regime[i]:
-            signals[i] = 0.0
-            continue
-        
-        # Long: RSI oversold (< 30) + volume mean reversion
-        if rsi_values[i] < 30 and volume[i] > vol_threshold[i]:
+        # Long: price breaks above weekly EMA AND above Donchian upper + volume
+        if (close[i] > weekly_ema_aligned[i] and 
+            close[i] > upper_donchian[i] and 
+            volume[i] > vol_threshold[i]):
             signals[i] = 0.25
         
-        # Short: RSI overbought (> 70) + volume mean reversion
-        elif rsi_values[i] > 70 and volume[i] > vol_threshold[i]:
+        # Short: price breaks below weekly EMA AND below Donchian lower + volume
+        elif (close[i] < weekly_ema_aligned[i] and 
+              close[i] < lower_donchian[i] and 
+              volume[i] > vol_threshold[i]):
             signals[i] = -0.25
         
-        # Exit: RSI returns to neutral zone (40-60)
+        # Exit: price crosses back below/above weekly EMA (trend change)
         elif (i > 0 and 
-              ((signals[i-1] == 0.25 and rsi_values[i] >= 40) or
-               (signals[i-1] == -0.25 and rsi_values[i] <= 60))):
+              ((signals[i-1] == 0.25 and close[i] < weekly_ema_aligned[i]) or
+               (signals[i-1] == -0.25 and close[i] > weekly_ema_aligned[i]))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -87,6 +71,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_VolRegime_RSI_MeanReversion"
-timeframe = "12h"
+name = "1d_WeeklyEMA_Donchian_Breakout_Volume"
+timeframe = "1d"
 leverage = 1.0
