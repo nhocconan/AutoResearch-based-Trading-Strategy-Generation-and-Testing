@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ADX trend filter and volume confirmation
-# Long when price breaks above 4h Donchian upper (20-period) + 1d ADX > 25 + volume > 1.5x 20-period avg
-# Short when price breaks below 4h Donchian lower (20-period) + 1d ADX > 25 + volume > 1.5x 20-period avg
-# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (20-40/year).
-# Donchian channels provide objective breakout levels. ADX filter ensures we only trade strong trends, avoiding chop.
-# Works in bull markets (trend continuation) and bear markets (strong downtrends) by requiring ADX > 25.
-# This variant uses 1d ADX (more stable) instead of 12h ADX to reduce whipsaw and improve generalization.
+# Hypothesis: 12h Donchian(20) breakout with 1d ADX > 25 and volume confirmation (>1.5x 20-period avg)
+# Designed for 12h timeframe to achieve low trade frequency (12-37/year) and avoid fee drag.
+# Donchian breakouts capture strong momentum moves. ADX filter ensures we only trade in trending markets,
+# avoiding choppy conditions that cause whipsaws. Volume confirmation adds conviction to breakouts.
+# Works in both bull and bear markets by requiring ADX > 25 (strong trend) regardless of direction.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -91,7 +89,7 @@ def generate_signals(prices):
     
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # === 4h Indicator: Donchian Channel (20-period) ===
+    # === 12h Indicator: Donchian Channel (20-period) ===
     donchian_window = 20
     donchian_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
     donchian_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
@@ -120,7 +118,7 @@ def generate_signals(prices):
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 4h Donchian upper (20-period)
+        # 1. Price breaks above 12h Donchian upper (20-period)
         # 2. Trend (1d ADX > 25)
         # 3. Volume confirmation
         if (close[i] > donchian_high[i]) and \
@@ -128,7 +126,7 @@ def generate_signals(prices):
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 4h Donchian lower (20-period)
+        # 1. Price breaks below 12h Donchian lower (20-period)
         # 2. Trend (1d ADX > 25)
         # 3. Volume confirmation
         elif (close[i] < donchian_low[i]) and \
@@ -140,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dADX25_Volume_Filter_v1"
-timeframe = "4h"
+name = "12h_Donchian20_1dADX25_Volume_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
