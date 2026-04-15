@@ -13,109 +13,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h HTF data once before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly HTF data once before loop (6h primary, 1w HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Get 1d HTF data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    weekly_close = df_1w['close'].values
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_volume = df_1w['volume'].values
     
-    # Calculate 4h Donchian channels (20-period) for breakout signals
+    # Calculate 6h Donchian channels (20-period) for breakout signals
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 4h volume ratio (current vs 20-period average)
+    # Calculate 6h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
-    # Calculate 1d EMA20 for trend filter
-    ema_20 = pd.Series(df_1d['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate weekly pivot points (based on previous week)
+    # Standard pivot: P = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    prev_weekly_close = np.concatenate([[weekly_close[0]], weekly_close[:-1]])
+    prev_weekly_high = np.concatenate([[weekly_high[0]], weekly_high[:-1]])
+    prev_weekly_low = np.concatenate([[weekly_low[0]], weekly_low[:-1]])
     
-    # Calculate 1d RSI(14) for momentum filter
-    delta = np.diff(df_1d['close'].values, prepend=df_1d['close'].values[0])
+    weekly_pivot = (prev_weekly_high + prev_weekly_low + prev_weekly_close) / 3.0
+    weekly_range = prev_weekly_high - prev_weekly_low
+    weekly_r1 = 2 * weekly_pivot - prev_weekly_low
+    weekly_s1 = 2 * weekly_pivot - prev_weekly_high
+    weekly_r2 = weekly_pivot + weekly_range
+    weekly_s2 = weekly_pivot - weekly_range
+    
+    # Calculate weekly EMA20 for trend filter
+    weekly_ema_20 = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Calculate weekly RSI(14) for momentum filter
+    delta = np.diff(weekly_close, prepend=weekly_close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
     avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
     rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14 = 100 - (100 / (1 + rs))
+    weekly_rsi_14 = 100 - (100 / (1 + rs))
     
-    # Calculate 1d ATR(14) for volatility filter
-    tr1 = np.abs(np.diff(df_1d['high'].values, prepend=df_1d['high'].values[0]))
-    tr2 = np.abs(np.diff(df_1d['low'].values, prepend=df_1d['low'].values[0]))
-    tr3 = np.abs(df_1d['high'].values - np.roll(df_1d['close'].values, 1))
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Calculate 1d Camarilla pivot levels (based on previous day)
-    prev_close = np.concatenate([[df_1d['close'].values[0]], df_1d['close'].values[:-1]])
-    prev_high = np.concatenate([[df_1d['high'].values[0]], df_1d['high'].values[:-1]])
-    prev_low = np.concatenate([[df_1d['low'].values[0]], df_1d['low'].values[:-1]])
-    
-    camarilla_range = prev_high - prev_low
-    camarilla_r4 = prev_close + (camarilla_range * 1.1 / 2)
-    camarilla_r3 = prev_close + (camarilla_range * 1.1 / 4)
-    camarilla_s3 = prev_close - (camarilla_range * 1.1 / 4)
-    camarilla_s4 = prev_close - (camarilla_range * 1.1 / 2)
-    
-    # Align HTF indicators to 1h timeframe with proper delay
-    ema_20_1h = align_htf_to_ltf(prices, df_1d, ema_20)
-    rsi_14_1h = align_htf_to_ltf(prices, df_1d, rsi_14)
-    atr_14_1h = align_htf_to_ltf(prices, df_1d, atr_14)
-    camarilla_r4_1h = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_r3_1h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_1h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_s4_1h = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Align HTF indicators to 6h timeframe with proper delay
+    weekly_ema_20_6h = align_htf_to_ltf(prices, df_1w, weekly_ema_20)
+    weekly_rsi_14_6h = align_htf_to_ltf(prices, df_1w, weekly_rsi_14)
+    weekly_r1_6h = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_6h = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    weekly_r2_6h = align_htf_to_ltf(prices, df_1w, weekly_r2)
+    weekly_s2_6h = align_htf_to_ltf(prices, df_1w, weekly_s2)
     
     signals = np.zeros(n)
     
     for i in range(100, n):
-        # Skip if any required data is NaN or outside session
-        if (np.isnan(ema_20_1h[i]) or np.isnan(rsi_14_1h[i]) or 
-            np.isnan(atr_14_1h[i]) or np.isnan(camarilla_r4_1h[i]) or
-            np.isnan(camarilla_r3_1h[i]) or np.isnan(camarilla_s3_1h[i]) or
-            np.isnan(camarilla_s4_1h[i]) or np.isnan(highest_20[i]) or 
-            np.isnan(lowest_20[i]) or np.isnan(volume_ratio[i]) or
-            not in_session[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(weekly_ema_20_6h[i]) or np.isnan(weekly_rsi_14_6h[i]) or 
+            np.isnan(weekly_r1_6h[i]) or np.isnan(weekly_s1_6h[i]) or
+            np.isnan(weekly_r2_6h[i]) or np.isnan(weekly_s2_6h[i]) or
+            np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
         # Entry conditions:
-        # 1. 1d trend filter: price above/below daily EMA20
-        # 2. 1d momentum filter: RSI not extreme (avoid overbought/oversold)
-        # 3. 1h Donchian breakout: price breaks 20-period channel
-        # 4. 4h volume confirmation: volume > 1.5x average
-        # 5. 1d volatility filter: ATR > 0.5% of price (avoid low volatility chop)
-        # 6. Discrete position sizing: 0.20
+        # 1. Weekly trend filter: price above/below weekly EMA20
+        # 2. Weekly momentum filter: RSI not extreme (avoid overbought/oversold)
+        # 3. 6h Donchian breakout: price breaks 20-period high/low
+        # 4. Weekly pivot confirmation: price near R1/S1 for continuation
+        # 5. Volume confirmation: volume > 1.3x average
+        # 6. Discrete position sizing: 0.25
         
-        # Long conditions: break above Donchian high in uptrend
-        if (close[i] > ema_20_1h[i] and          # Daily uptrend filter
-            rsi_14_1h[i] < 70 and                # Not overbought
-            close[i] > highest_20[i] and         # 1h Donchian breakout
-            volume_ratio[i] > 1.5 and            # 4h volume confirmation
-            atr_14_1h[i] > 0.005 * close[i]):    # Volatility filter
-            signals[i] = 0.20
+        # Long conditions: break above Donchian high in uptrend, near weekly R1
+        if (close[i] > weekly_ema_20_6h[i] and          # Weekly uptrend filter
+            weekly_rsi_14_6h[i] < 70 and                # Not overbought
+            close[i] > highest_20[i] and                # Donchian breakout
+            close[i] >= weekly_r1_6h[i] * 0.995 and     # Near weekly R1 (within 0.5%)
+            volume_ratio[i] > 1.3):                     # Volume confirmation
+            signals[i] = 0.25
             
-        # Short conditions: break below Donchian low in downtrend
-        elif (close[i] < ema_20_1h[i] and        # Daily downtrend filter
-              rsi_14_1h[i] > 30 and              # Not oversold
-              close[i] < lowest_20[i] and        # 1h Donchian breakdown
-              volume_ratio[i] > 1.5 and          # 4h volume confirmation
-              atr_14_1h[i] > 0.005 * close[i]):  # Volatility filter
-            signals[i] = -0.20
+        # Short conditions: break below Donchian low in downtrend, near weekly S1
+        elif (close[i] < weekly_ema_20_6h[i] and       # Weekly downtrend filter
+              weekly_rsi_14_6h[i] > 30 and              # Not oversold
+              close[i] < lowest_20[i] and               # Donchian breakdown
+              close[i] <= weekly_s1_6h[i] * 1.005 and   # Near weekly S1 (within 0.5%)
+              volume_ratio[i] > 1.3):                   # Volume confirmation
+            signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1h_4h_1d_Donchian_Breakout_Volume_Trend_Session"
-timeframe = "1h"
+name = "6h_WeeklyPivot_R1_S1_Donchian_Breakout_Volume_Trend"
+timeframe = "6h"
 leverage = 1.0
