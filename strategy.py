@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 350:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,62 +13,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for context
+    # Get weekly data for context
+    weekly = get_htf_data(prices, '1w')
+    weekly_high = weekly['high'].values
+    weekly_low = weekly['low'].values
+    weekly_close = weekly['close'].values
+    
+    # Calculate weekly pivot points
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    
+    # Align weekly levels to 12h timeframe (wait for weekly close)
+    weekly_pivot_12h = align_htf_to_ltf(prices, weekly, weekly_pivot)
+    weekly_r1_12h = align_htf_to_ltf(prices, weekly, weekly_r1)
+    weekly_s1_12h = align_htf_to_ltf(prices, weekly, weekly_s1)
+    
+    # Get daily data for volume filter
     daily = get_htf_data(prices, '1d')
-    daily_high = daily['high'].values
-    daily_low = daily['low'].values
-    daily_close = daily['close'].values
+    daily_volume = daily['volume'].values
+    daily_volume_ma = pd.Series(daily_volume).rolling(window=20, min_periods=20).mean().values
+    daily_volume_ma_12h = align_htf_to_ltf(prices, daily, daily_volume_ma)
     
-    # Calculate daily pivot points (standard)
-    daily_pivot = (daily_high + daily_low + daily_close) / 3.0
-    daily_r1 = 2 * daily_pivot - daily_low
-    daily_s1 = 2 * daily_pivot - daily_high
-    daily_r2 = daily_pivot + (daily_high - daily_low)
-    daily_s2 = daily_pivot - (daily_high - daily_low)
+    # Volume filter: current volume > 1.5x daily average
+    volume_filter = volume > (1.5 * daily_volume_ma_12h)
     
-    # Align daily levels to 4h timeframe (wait for daily close)
-    daily_pivot_4h = align_htf_to_ltf(prices, daily, daily_pivot)
-    daily_r1_4h = align_htf_to_ltf(prices, daily, daily_r1)
-    daily_s1_4h = align_htf_to_ltf(prices, daily, daily_s1)
-    daily_r2_4h = align_htf_to_ltf(prices, daily, daily_r2)
-    daily_s2_4h = align_htf_to_ltf(prices, daily, daily_s2)
-    
-    # Volume filter: current volume > 2x 20-period average (stricter)
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma)
-    
-    # Range filter: avoid trading near pivot (±1.0%)
-    price_to_pivot = np.abs(close - daily_pivot_4h) / daily_pivot_4h
-    range_filter = price_to_pivot > 0.01
-    
-    # Additional filter: avoid trading in low volatility regime (ATR-based)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ratio = atr / close
-    volatility_filter = atr_ratio > 0.01  # Avoid very low volatility periods
+    # Trend filter: price above/below weekly pivot
+    trend_filter = np.abs(close - weekly_pivot_12h) / weekly_pivot_12h > 0.005
     
     signals = np.zeros(n)
     
-    for i in range(200, n):
+    for i in range(350, n):
         # Skip if any required data is NaN
-        if (np.isnan(daily_pivot_4h[i]) or np.isnan(daily_r1_4h[i]) or 
-            np.isnan(daily_s1_4h[i]) or np.isnan(daily_r2_4h[i]) or 
-            np.isnan(daily_s2_4h[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(atr_ratio[i])):
+        if (np.isnan(weekly_pivot_12h[i]) or np.isnan(weekly_r1_12h[i]) or 
+            np.isnan(weekly_s1_12h[i]) or np.isnan(daily_volume_ma_12h[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade when all filters pass
-        if volume_filter[i] and range_filter[i] and volatility_filter[i]:
-            # Long: break above R2 with volume
-            if close[i] > daily_r2_4h[i]:
+        # Only trade when filters pass
+        if volume_filter[i] and trend_filter[i]:
+            # Long: break above weekly R1 with volume
+            if close[i] > weekly_r1_12h[i]:
                 signals[i] = 0.25
-            # Short: break below S2 with volume
-            elif close[i] < daily_s2_4h[i]:
+            # Short: break below weekly S1 with volume
+            elif close[i] < weekly_s1_12h[i]:
                 signals[i] = -0.25
             else:
                 signals[i] = signals[i-1]
@@ -77,6 +65,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyPivot_R2_S2_Breakout_Volume_RangeVolatilityFilter"
-timeframe = "4h"
+name = "12h_WeeklyPivot_R1_S1_Breakout_Volume_TrendFilter"
+timeframe = "12h"
 leverage = 1.0
