@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,16 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w HTF data once before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Calculate 1w EMA(21) for trend direction
-    ema_21_1w = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
-    
-    # Get 1d HTF data once before loop for Camarilla levels
+    # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -43,61 +34,65 @@ def generate_signals(prices):
     camarilla_pivot = (prior_high + prior_low + prior_close) / 3.0
     camarilla_r3 = camarilla_pivot + 1.1 * (prior_high - prior_low)
     camarilla_s3 = camarilla_pivot - 1.1 * (prior_high - prior_low)
+    camarilla_r4 = camarilla_pivot + 1.5 * (prior_high - prior_low)
+    camarilla_s4 = camarilla_pivot - 1.5 * (prior_high - prior_low)
     
-    # Align Camarilla levels to 12h
-    camarilla_pivot_12h = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    camarilla_r3_12h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_12h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align Camarilla levels to 6h
+    camarilla_pivot_6h = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    camarilla_r3_6h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_6h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_r4_6h = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_6h = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # Calculate 12h ATR(14) for volatility entry filter
-    tr1_12h = high - low
-    tr2_12h = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3_12h = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
-    atr_14_12h = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate 6h ATR(14) for volatility entry filter
+    tr1_6h = high - low
+    tr2_6h = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    tr3_6h = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr_6h = np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))
+    atr_14_6h = pd.Series(tr_6h).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 12h volume ratio (current vs 20-period average)
+    # Calculate 6h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
     signals = np.zeros(n)
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_21_1w_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(camarilla_pivot_12h[i]) or np.isnan(camarilla_r3_12h[i]) or 
-            np.isnan(camarilla_s3_12h[i]) or np.isnan(atr_14_12h[i]) or 
-            np.isnan(volume_ratio[i])):
+        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(camarilla_pivot_6h[i]) or 
+            np.isnan(camarilla_r3_6h[i]) or np.isnan(camarilla_s3_6h[i]) or 
+            np.isnan(camarilla_r4_6h[i]) or np.isnan(camarilla_s4_6h[i]) or 
+            np.isnan(atr_14_6h[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility regime filter: only trade when daily ATR is elevated (> 0.6% of price)
+        # Volatility regime filter: only trade when daily ATR is elevated (> 0.8% of price)
         # This avoids low-volatility chop and focuses on momentum/trend days
-        vol_regime = atr_14_1d_aligned[i] > 0.006 * close[i]
+        vol_regime = atr_14_1d_aligned[i] > 0.008 * close[i]
         
         # Long conditions:
-        # 1. Price above 1w EMA21 (bullish weekly trend)
+        # 1. Price above Camarilla pivot (bullish bias)
         # 2. Price breaks above Camarilla R3 with volume (bullish continuation)
-        # 3. Volume confirmation: volume > 1.5x average
-        # 4. 12h ATR > 0.3% of price (ensure sufficient volatility for move)
+        # 3. Volume confirmation: volume > 1.3x average
+        # 4. 6h ATR > 0.4% of price (ensure sufficient volatility for move)
         # 5. Daily volatility regime filter (avoid chop)
-        if (close[i] > ema_21_1w_aligned[i] and
-            close[i] > camarilla_r3_12h[i] and
-            volume_ratio[i] > 1.5 and
-            atr_14_12h[i] > 0.003 * close[i] and
+        if (close[i] > camarilla_pivot_6h[i] and
+            close[i] > camarilla_r3_6h[i] and
+            volume_ratio[i] > 1.3 and
+            atr_14_6h[i] > 0.004 * close[i] and
             vol_regime):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Price below 1w EMA21 (bearish weekly trend)
+        # 1. Price below Camarilla pivot (bearish bias)
         # 2. Price breaks below Camarilla S3 with volume (bearish continuation)
-        # 3. Volume confirmation: volume > 1.5x average
-        # 4. 12h ATR > 0.3% of price
+        # 3. Volume confirmation: volume > 1.3x average
+        # 4. 6h ATR > 0.4% of price
         # 5. Daily volatility regime filter
-        elif (close[i] < ema_21_1w_aligned[i] and
-              close[i] < camarilla_s3_12h[i] and
-              volume_ratio[i] > 1.5 and
-              atr_14_12h[i] > 0.003 * close[i] and
+        elif (close[i] < camarilla_pivot_6h[i] and
+              close[i] < camarilla_s3_6h[i] and
+              volume_ratio[i] > 1.3 and
+              atr_14_6h[i] > 0.004 * close[i] and
               vol_regime):
             signals[i] = -0.25
         else:
@@ -105,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Vol_Regime_Camarilla_Pivot_R3S3_Breakout_v1"
-timeframe = "12h"
+name = "6h_Vol_Regime_Camarilla_Pivot_R3S3_Breakout_v1"
+timeframe = "6h"
 leverage = 1.0
