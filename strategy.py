@@ -3,6 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 1h strategy using 4h/1d multi-timeframe confluence with volume confirmation
+# Uses 4h trend (EMA50), 1d Donchian breakout, and 1h volume spike for entry timing
+# Designed to work in both bull/bear by requiring strong volume confirmation on breakouts
+# Target: 15-30 trades/year (60-120 over 4 years) to minimize fee drag
+# Signal size: 0.20 (discrete levels to reduce churn)
+
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
@@ -13,79 +19,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h HTF data once before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
-    
-    # Calculate 12h ATR(14) for volatility regime filter
-    tr1 = df_12h['high'] - df_12h['low']
-    tr2 = np.abs(df_12h['high'] - np.concatenate([[df_12h['close'].iloc[0]], df_12h['close'].iloc[:-1]]))
-    tr3 = np.abs(df_12h['low'] - np.concatenate([[df_12h['close'].iloc[0]], df_12h['close'].iloc[:-1]]))
-    tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_12h = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_14_12h)
-    
-    # Calculate 12h EMA(50) for trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Calculate 4h Donchian(20) channels for entry timing
+    # Get HTF data ONCE before loop
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_4h) < 50 or len(df_1d) < 20:
         return np.zeros(n)
     
-    donchian_high_20_4h = pd.Series(df_4h['high'].values).rolling(window=20, min_periods=20).max().values
-    donchian_low_20_4h = pd.Series(df_4h['low'].values).rolling(window=20, min_periods=20).min().values
-    donchian_high_20_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_20_4h)
-    donchian_low_20_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_20_4h)
+    # 4h EMA50 for trend direction
+    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate 4h volume ratio (current vs 20-period average)
-    vol_ma_20_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ratio_4h = volume / (vol_ma_20_4h + 1e-10)
+    # 1d Donchian(20) channels for breakout levels
+    donchian_high_20_1d = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
+    donchian_low_20_1d = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
+    donchian_high_20_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20_1d)
+    donchian_low_20_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20_1d)
+    
+    # 1h volume ratio (current vs 20-period average) for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ratio = volume / (vol_ma_20 + 1e-10)
+    
+    # Session filter: 08-20 UTC (precompute hours array)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_12h_aligned[i]) or np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(donchian_high_20_4h_aligned[i]) or np.isnan(donchian_low_20_4h_aligned[i]) or 
-            np.isnan(volume_ratio_4h[i])):
+        if (np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(donchian_high_20_1d_aligned[i]) or 
+            np.isnan(donchian_low_20_1d_aligned[i]) or 
+            np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility regime filter: only trade when 12h ATR is elevated (> 0.8% of price)
-        vol_regime = atr_14_12h_aligned[i] > 0.008 * close[i]
-        
-        # Trend filter: price relative to 12h EMA50
-        trend_filter = close[i] > ema_50_12h_aligned[i]
+        # Session filter
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
         
         # Long conditions:
-        # 1. Price above 12h EMA50 (bullish bias)
-        # 2. Price breaks above 4h Donchian(20) high with volume (bullish breakout)
+        # 1. Price above 4h EMA50 (bullish bias)
+        # 2. Price breaks above 1d Donchian(20) high
         # 3. Volume confirmation: volume > 2.0x average
-        # 4. 12h volatility regime filter
-        if (trend_filter and
-            close[i] > donchian_high_20_4h_aligned[i] and
-            volume_ratio_4h[i] > 2.0 and
-            vol_regime):
-            signals[i] = 0.25
+        if (close[i] > ema_50_4h_aligned[i] and
+            close[i] > donchian_high_20_1d_aligned[i] and
+            volume_ratio[i] > 2.0):
+            signals[i] = 0.20
             
         # Short conditions:
-        # 1. Price below 12h EMA50 (bearish bias)
-        # 2. Price breaks below 4h Donchian(20) low with volume (bearish breakdown)
+        # 1. Price below 4h EMA50 (bearish bias)
+        # 2. Price breaks below 1d Donchian(20) low
         # 3. Volume confirmation: volume > 2.0x average
-        # 4. 12h volatility regime filter
-        elif (not trend_filter and
-              close[i] < donchian_low_20_4h_aligned[i] and
-              volume_ratio_4h[i] > 2.0 and
-              vol_regime):
-            signals[i] = -0.25
+        elif (close[i] < ema_50_4h_aligned[i] and
+              close[i] < donchian_low_20_1d_aligned[i] and
+              volume_ratio[i] > 2.0):
+            signals[i] = -0.20
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian20_Volume_Spike_12hEMA50_ATRRegime_v1"
-timeframe = "4h"
+name = "1h_4hEMA50_1dDonchian20_VolumeBreakout_v1"
+timeframe = "1h"
 leverage = 1.0
