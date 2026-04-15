@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R1/S1 breakout with 4h volume spike filter and 1d ADX trend filter
-# Long when price breaks above 1h Camarilla R1 + 1d ADX > 20 + volume > 2x 20-period avg
-# Short when price breaks below 1h Camarilla S1 + 1d ADX > 20 + volume > 2x 20-period avg
-# Uses discrete position sizing (0.20) to minimize fee churn. Target: 60-120 trades over 4 years.
-# Camarilla pivots provide precise intraday support/resistance. ADX filter ensures we only trade strong trends.
-# Volume spike confirms institutional participation. Works in bull/bear by requiring trend presence.
+# Hypothesis: 6h Elder Ray Index (Bull Power/Bear Power) with 1d ADX trend filter and volume confirmation
+# Long when Bull Power > 0 + Bear Power < 0 (bullish momentum) + 1d ADX > 20 + volume > 1.5x 20-period avg
+# Short when Bear Power < 0 + Bull Power < 0 (bearish momentum) + 1d ADX > 20 + volume > 1.5x 20-period avg
+# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (12-30/year).
+# Elder Ray measures bull/bear power via EMA(13). Works in trending markets (ADX filter) and avoids chop.
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,7 +23,7 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d HTF data once before loop for ADX
+    # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -90,25 +89,14 @@ def generate_signals(prices):
     
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # === 1h Indicator: Camarilla Pivots (R1, S1) ===
-    # Based on previous day's OHLC
-    # We need to get daily OHLC for each 1h bar
-    # Since we're on 1h timeframe, we can use rolling window of 24 bars (approx 1 day)
-    # But better: use actual daily data from prices - we'll approximate with 24-period
-    lookback = 24  # approximately 1 day of 1h bars
-    if len(high) < lookback:
-        return np.zeros(n)
+    # === 6h Indicator: Elder Ray Index (Bull Power/Bear Power) ===
+    # Bull Power = High - EMA(13)
+    # Bear Power = Low - EMA(13)
+    ema_period = 13
+    ema = pd.Series(close).ewm(span=ema_period, adjust=False, min_periods=ema_period).mean().values
     
-    # Calculate rolling max/min/close for pseudo-daily OHLC
-    # Using 24-period window for high, low, close
-    roll_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    roll_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    roll_close = pd.Series(close).rolling(window=lookback, min_periods=lookback).last().values  # close of period
-    
-    # Camarilla levels: R1 = close + (high - low) * 1.1/12, S1 = close - (high - low) * 1.1/12
-    camarilla_range = roll_high - roll_low
-    r1 = roll_close + camarilla_range * 1.1 / 12
-    s1 = roll_close - camarilla_range * 1.1 / 12
+    bull_power = high - ema
+    bear_power = low - ema
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -116,7 +104,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(lookback, 2*period) + 20  # lookback(24) + ADX(28) + volume(20)
+    warmup = max(ema_period, 2*period) + 20  # EMA(13) + ADX(28) + volume(20)
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -124,36 +112,40 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
+        # Volume filter: current volume > 1.5x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # Skip if any required data is NaN
-        if (np.isnan(r1[i]) or np.isnan(s1[i]) or
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
             np.isnan(adx_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 1h Camarilla R1
-        # 2. Trend (1d ADX > 20)
-        # 3. Volume confirmation
-        if (close[i] > r1[i]) and \
+        # 1. Bull Power > 0 (bullish momentum)
+        # 2. Bear Power < 0 (confirm no bearish pressure)
+        # 3. Trend (1d ADX > 20)
+        # 4. Volume confirmation
+        if (bull_power[i] > 0) and \
+           (bear_power[i] < 0) and \
            (adx_aligned[i] > 20) and vol_confirm:
-            signals[i] = 0.20
+            signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 1h Camarilla S1
-        # 2. Trend (1d ADX > 20)
-        # 3. Volume confirmation
-        elif (close[i] < s1[i]) and \
+        # 1. Bear Power < 0 (bearish momentum)
+        # 2. Bull Power < 0 (confirm no bullish pressure)
+        # 3. Trend (1d ADX > 20)
+        # 4. Volume confirmation
+        elif (bear_power[i] < 0) and \
+             (bull_power[i] < 0) and \
              (adx_aligned[i] > 20) and vol_confirm:
-            signals[i] = -0.20
+            signals[i] = -0.25
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "1h_Camarilla_R1S1_1dADX20_VolumeSpike_v1"
-timeframe = "1h"
+name = "6h_ElderRay_1dADX20_Volume_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
