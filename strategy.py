@@ -44,13 +44,18 @@ def generate_signals(prices):
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
+    # Calculate 6h Donchian channel (20-period)
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_20 + lowest_20) / 2.0
+    
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
         if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(camarilla_pivot_6h[i]) or 
             np.isnan(camarilla_r3_6h[i]) or np.isnan(camarilla_s3_6h[i]) or 
-            np.isnan(volume_ratio[i])):
+            np.isnan(volume_ratio[i]) or np.isnan(donchian_mid[i])):
             signals[i] = 0.0
             continue
         
@@ -59,22 +64,22 @@ def generate_signals(prices):
         vol_regime = atr_14_1d_aligned[i] > 0.006 * close[i]
         
         # Long conditions:
-        # 1. Price above Camarilla pivot (bullish bias)
+        # 1. Price above Donchian midpoint (bullish bias)
         # 2. Price breaks above Camarilla R3 with volume (bullish continuation)
         # 3. Volume confirmation: volume > 1.5x average
         # 4. Daily volatility regime filter (avoid chop)
-        if (close[i] > camarilla_pivot_6h[i] and
+        if (close[i] > donchian_mid[i] and
             close[i] > camarilla_r3_6h[i] and
             volume_ratio[i] > 1.5 and
             vol_regime):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Price below Camarilla pivot (bearish bias)
+        # 1. Price below Donchian midpoint (bearish bias)
         # 2. Price breaks below Camarilla S3 with volume (bearish continuation)
         # 3. Volume confirmation: volume > 1.5x average
         # 4. Daily volatility regime filter
-        elif (close[i] < camarilla_pivot_6h[i] and
+        elif (close[i] < donchian_mid[i] and
               close[i] < camarilla_s3_6h[i] and
               volume_ratio[i] > 1.5 and
               vol_regime):
@@ -84,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Vol_Regime_Camarilla_Pivot_R3S3_Breakout_v2"
+name = "6h_Donchian_Camarilla_Vol_Breakout_v1"
 timeframe = "6h"
 leverage = 1.0
