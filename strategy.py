@@ -13,73 +13,118 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d HTF data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 4h HTF data once before loop (primary timeframe alignment)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate 1d ATR(14) for volatility regime filter
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
-    tr3 = np.abs(df_1d['low'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Calculate 4h EMA(21) for trend filter
+    ema_21_4h = pd.Series(df_4h['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
     
-    # Calculate daily EMA(34) for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 4h RSI(14) for momentum filter
+    delta = pd.Series(df_4h['close'].values).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_14_4h = (100 - (100 / (1 + rs))).values
+    rsi_14_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_14_4h)
     
-    # Calculate 12h Donchian(20) channels (primary timeframe)
-    donchian_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 4h ATR(14) for volatility regime filter
+    tr1 = df_4h['high'] - df_4h['low']
+    tr2 = np.abs(df_4h['high'] - np.concatenate([[df_4h['close'].iloc[0]], df_4h['close'].iloc[:-1]]))
+    tr3 = np.abs(df_4h['low'] - np.concatenate([[df_4h['close'].iloc[0]], df_4h['close'].iloc[:-1]]))
+    tr_4h = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14_4h = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_14_4h)
     
-    # Calculate 12h volume ratio (current vs 20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ratio = volume / (vol_ma_20 + 1e-10)
+    # Calculate 12h HTF data for regime filter (choppiness index)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    
+    # Calculate 12h Choppiness Index(14) for regime detection
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # True Range for 12h
+    tr1_12h = high_12h - low_12h
+    tr2_12h = np.abs(high_12h - np.concatenate([[close_12h[0]], close_12h[:-1]]))
+    tr3_12h = np.abs(low_12h - np.concatenate([[close_12h[0]], close_12h[:-1]]))
+    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
+    
+    # Sum of TR over 14 periods
+    sum_tr_14 = pd.Series(tr_12h).rolling(window=14, min_periods=14).sum().values
+    
+    # Highest high and lowest low over 14 periods
+    hh_14 = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    
+    # Choppiness Index formula: 100 * log10(sum_tr_14 / (hh_14 - ll_14)) / log10(14)
+    # Avoid division by zero
+    range_14 = hh_14 - ll_14
+    chop_14_12h = np.where(
+        (range_14 > 0) & (sum_tr_14 > 0),
+        100 * np.log10(sum_tr_14 / range_14) / np.log10(14),
+        50  # neutral value when range is zero
+    )
+    chop_14_12h_aligned = align_htf_to_ltf(prices, df_12h, chop_14_12h)
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(donchian_high_20[i]) or np.isnan(donchian_low_20[i]) or 
-            np.isnan(volume_ratio[i])):
+        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(rsi_14_4h_aligned[i]) or 
+            np.isnan(atr_14_4h_aligned[i]) or np.isnan(chop_14_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility regime filter: only trade when daily ATR is elevated (> 0.5% of price)
-        vol_regime = atr_14_1d_aligned[i] > 0.005 * close[i]
+        # Volatility regime: only trade when 4h ATR is elevated (> 0.3% of price)
+        vol_regime = atr_14_4h_aligned[i] > 0.003 * close[i]
         
-        # Trend filter: price relative to daily EMA34
-        trend_filter = close[i] > ema_34_1d_aligned[i]
+        # Trend filter: price relative to 4h EMA21
+        bullish_trend = close[i] > ema_21_4h_aligned[i]
+        bearish_trend = close[i] < ema_21_4h_aligned[i]
+        
+        # Momentum filter: RSI not extreme
+        rsi_not_overbought = rsi_14_4h_aligned[i] < 70
+        rsi_not_oversold = rsi_14_4h_aligned[i] > 30
+        
+        # Chop regime filter: 
+        # CHOP > 61.8 = ranging market (favor mean reversion)
+        # CHOP < 38.2 = trending market (favor trend following)
+        # We'll use CHOP < 50 as trending bias for breakouts
+        trending_regime = chop_14_12h_aligned[i] < 50
         
         # Long conditions:
-        # 1. Price above daily EMA34 (bullish bias)
-        # 2. Price breaks above 12h Donchian(20) high with volume (bullish breakout)
-        # 3. Volume confirmation: volume > 1.5x average
-        # 4. Daily volatility regime filter
-        if (trend_filter and
-            close[i] > donchian_high_20[i] and
-            volume_ratio[i] > 1.5 and
-            vol_regime):
+        # 1. Bullish 4h trend (price > EMA21)
+        # 2. RSI not overbought (< 70)
+        # 3. Volatility regime active
+        # 4. Trending regime from 12h chop
+        if (bullish_trend and
+            rsi_not_overbought and
+            vol_regime and
+            trending_regime):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Price below daily EMA34 (bearish bias)
-        # 2. Price breaks below 12h Donchian(20) low with volume (bearish breakdown)
-        # 3. Volume confirmation: volume > 1.5x average
-        # 4. Daily volatility regime filter
-        elif (not trend_filter and
-              close[i] < donchian_low_20[i] and
-              volume_ratio[i] > 1.5 and
-              vol_regime):
+        # 1. Bearish 4h trend (price < EMA21)
+        # 2. RSI not oversold (> 30)
+        # 3. Volatility regime active
+        # 4. Trending regime from 12h chop
+        elif (bearish_trend and
+              rsi_not_oversold and
+              vol_regime and
+              trending_regime):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "12h_Vol_Regime_Donchian20_1dEMA34_Breakout_v2"
-timeframe = "12h"
+name = "4h_EMA21_RSI14_VolRegime_ChopFilter_v1"
+timeframe = "4h"
 leverage = 1.0
