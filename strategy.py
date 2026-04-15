@@ -13,65 +13,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h high/low for pivot points
-    daily = get_htf_data(prices, '12h')
-    high_12h = daily['high'].values
-    low_12h = daily['low'].values
-    close_12h = daily['close'].values
+    # 1d EMA(50) for trend filter
+    daily = get_htf_data(prices, '1d')
+    close_d = daily['close'].values
+    ema_50d = pd.Series(close_d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50d_aligned = align_htf_to_ltf(prices, daily, ema_50d)
     
-    # Calculate pivot points for 12h
-    # Pivot = (H + L + C) / 3
-    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
-    # R1 = 2*P - L
-    r1_12h = 2 * pivot_12h - low_12h
-    # S1 = 2*P - H
-    s1_12h = 2 * pivot_12h - high_12h
-    # R2 = P + (H - L)
-    r2_12h = pivot_12h + (high_12h - low_12h)
-    # S2 = P - (H - L)
-    s2_12h = pivot_12h - (high_12h - low_12h)
-    # R3 = H + 2*(P - L)
-    r3_12h = high_12h + 2 * (pivot_12h - low_12h)
-    # S3 = L - 2*(H - P)
-    s3_12h = low_12h - 2 * (high_12h - pivot_12h)
+    # 1d ATR(14) for volatility filter
+    high_d = daily['high'].values
+    low_d = daily['low'].values
+    tr1 = np.maximum(high_d[1:] - low_d[1:], np.abs(high_d[1:] - close_d[:-1]))
+    tr2 = np.maximum(np.abs(low_d[1:] - close_d[:-1]), tr1)
+    tr = np.concatenate([[np.nan], tr2])
+    atr_14d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14d_aligned = align_htf_to_ltf(prices, daily, atr_14d)
     
-    # Align pivot levels to 6h timeframe
-    pivot_12h_aligned = align_htf_to_ltf(prices, daily, pivot_12h)
-    r1_12h_aligned = align_htf_to_ltf(prices, daily, r1_12h)
-    s1_12h_aligned = align_htf_to_ltf(prices, daily, s1_12h)
-    r2_12h_aligned = align_htf_to_ltf(prices, daily, r2_12h)
-    s2_12h_aligned = align_htf_to_ltf(prices, daily, s2_12h)
-    r3_12h_aligned = align_htf_to_ltf(prices, daily, r3_12h)
-    s3_12h_aligned = align_htf_to_ltf(prices, daily, s3_12h)
-    
-    # Volume filter: 1.5x median of last 20 bars
+    # Volume threshold: 1.8x median of last 20 bars
     vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median()
-    vol_threshold = 1.5 * vol_median
+    vol_threshold = 1.8 * vol_median
+    
+    # ATR regime filter: avoid low volatility (chop) and extreme volatility
+    atr_ma = pd.Series(atr_14d_aligned).rolling(window=30, min_periods=30).mean()
+    atr_std = pd.Series(atr_14d_aligned).rolling(window=30, min_periods=30).std()
+    vol_regime = (atr_14d_aligned > atr_ma - 0.5 * atr_std) & (atr_14d_aligned < atr_ma + 2.0 * atr_std)
     
     signals = np.zeros(n)
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_12h_aligned[i]) or np.isnan(r1_12h_aligned[i]) or 
-            np.isnan(s1_12h_aligned[i]) or np.isnan(r2_12h_aligned[i]) or 
-            np.isnan(s2_12h_aligned[i]) or np.isnan(r3_12h_aligned[i]) or 
-            np.isnan(s3_12h_aligned[i]) or np.isnan(vol_threshold[i])):
+        if (np.isnan(ema_50d_aligned[i]) or np.isnan(atr_14d_aligned[i]) or
+            np.isnan(vol_threshold[i]) or np.isnan(vol_regime[i])):
             continue
         
-        # Long conditions: price above S1 with volume
-        if (close[i] > s1_12h_aligned[i] and 
+        # Volatility regime filter: avoid low volatility chop and extreme volatility
+        if not vol_regime[i]:
+            signals[i] = 0.0
+            continue
+        
+        # Long: Price above daily EMA50 + volume spike + volatility regime
+        if (close[i] > ema_50d_aligned[i] and 
             volume[i] > vol_threshold[i]):
-            signals[i] = 0.25
+            signals[i] = 0.30
         
-        # Short conditions: price below R1 with volume
-        elif (close[i] < r1_12h_aligned[i] and 
+        # Short: Price below daily EMA50 + volume spike + volatility regime
+        elif (close[i] < ema_50d_aligned[i] and 
               volume[i] > vol_threshold[i]):
-            signals[i] = -0.25
+            signals[i] = -0.30
         
-        # Exit: price crosses pivot in opposite direction
+        # Exit: price crosses back below/above daily EMA50
         elif (i > 0 and 
-              ((signals[i-1] == 0.25 and close[i] < pivot_12h_aligned[i]) or
-               (signals[i-1] == -0.25 and close[i] > pivot_12h_aligned[i]))):
+              ((signals[i-1] == 0.30 and close[i] < ema_50d_aligned[i]) or
+               (signals[i-1] == -0.30 and close[i] > ema_50d_aligned[i]))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -80,6 +72,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_Pivot_R1S1_VolumeFilter"
-timeframe = "6h"
+name = "4h_DailyEMA50_Vol1.8x_VolRegime_v1"
+timeframe = "4h"
 leverage = 1.0
