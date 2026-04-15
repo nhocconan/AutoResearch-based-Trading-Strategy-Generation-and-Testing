@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,55 +26,57 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate 6h volume ratio (current vs 20-period average)
+    # Calculate daily Camarilla pivot levels (using prior day's OHLC)
+    prior_high = df_1d['high'].shift(1).values
+    prior_low = df_1d['low'].shift(1).values
+    prior_close = df_1d['close'].shift(1).values
+    
+    camarilla_pivot = (prior_high + prior_low + prior_close) / 3.0
+    camarilla_r3 = camarilla_pivot + 1.1 * (prior_high - prior_low)
+    camarilla_s3 = camarilla_pivot - 1.1 * (prior_high - prior_low)
+    
+    # Align Camarilla levels to 1d
+    camarilla_pivot_1d = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    camarilla_r3_1d = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_1d = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Calculate 1d volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
-    # Calculate 1d RSI(14) for momentum filter
-    delta = pd.Series(df_1d['close']).diff().values
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14_1d = 100 - (100 / (1 + rs))
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
-    
     signals = np.zeros(n)
     
-    for i in range(100, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(volume_ratio[i]) or 
-            np.isnan(rsi_14_1d_aligned[i])):
+        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(camarilla_pivot_1d[i]) or 
+            np.isnan(camarilla_r3_1d[i]) or np.isnan(camarilla_s3_1d[i]) or 
+            np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility regime filter: only trade when daily ATR is elevated (> 0.6% of price)
-        vol_regime = atr_14_1d_aligned[i] > 0.006 * close[i]
+        # Volatility regime filter: only trade when daily ATR is elevated (> 0.5% of price)
+        # This avoids low-volatility chop and focuses on momentum/trend days
+        vol_regime = atr_14_1d_aligned[i] > 0.005 * close[i]
         
-        # Momentum filter: avoid extreme overbought/oversold conditions
-        mom_filter = (rsi_14_1d_aligned[i] > 30) & (rsi_14_1d_aligned[i] < 70)
-        
-        # Volume confirmation: volume > 1.5x average
-        vol_confirm = volume_ratio[i] > 1.5
-        
-        # Long conditions: price above VWAP + volume + momentum + volatility regime
-        vwap_6h = (pd.Series(close).rolling(window=6, min_periods=6).apply(lambda x: np.average(x, weights=pd.Series(volume[max(0, len(x)-6):len(x)]), raw=True)).values)
-        if np.isnan(vwap_6h[i]):
-            vwap_6h_val = close[i]
-        else:
-            vwap_6h_val = vwap_6h[i]
-            
-        if (close[i] > vwap_6h_val and
-            vol_confirm and
-            mom_filter and
+        # Long conditions:
+        # 1. Price above Camarilla pivot (bullish bias)
+        # 2. Price breaks above Camarilla R3 with volume (bullish continuation)
+        # 3. Volume confirmation: volume > 1.8x average
+        # 4. Daily volatility regime filter (avoid chop)
+        if (close[i] > camarilla_pivot_1d[i] and
+            close[i] > camarilla_r3_1d[i] and
+            volume_ratio[i] > 1.8 and
             vol_regime):
             signals[i] = 0.25
             
-        # Short conditions: price below VWAP + volume + momentum + volatility regime
-        elif (close[i] < vwap_6h_val and
-              vol_confirm and
-              mom_filter and
+        # Short conditions:
+        # 1. Price below Camarilla pivot (bearish bias)
+        # 2. Price breaks below Camarilla S3 with volume (bearish continuation)
+        # 3. Volume confirmation: volume > 1.8x average
+        # 4. Daily volatility regime filter
+        elif (close[i] < camarilla_pivot_1d[i] and
+              close[i] < camarilla_s3_1d[i] and
+              volume_ratio[i] > 1.8 and
               vol_regime):
             signals[i] = -0.25
         else:
@@ -82,6 +84,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Vol_Regime_VWAP_Momentum_Filter_v1"
-timeframe = "6h"
+name = "1d_Vol_Regime_Camarilla_Pivot_R3S3_Breakout_v3"
+timeframe = "1d"
 leverage = 1.0
