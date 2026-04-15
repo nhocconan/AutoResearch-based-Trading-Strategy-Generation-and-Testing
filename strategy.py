@@ -18,6 +18,7 @@ def generate_signals(prices):
     daily_high = daily['high'].values
     daily_low = daily['low'].values
     daily_close = daily['close'].values
+    daily_volume = daily['volume'].values
     
     # Calculate daily ATR for volatility filter
     daily_close_prev = np.concatenate([[daily_close[0]], daily_close[:-1]])
@@ -25,58 +26,44 @@ def generate_signals(prices):
                     np.maximum(np.abs(daily_high - daily_close_prev),
                                np.abs(daily_low - daily_close_prev)))
     atr_daily = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ratio_daily = atr_daily / daily_close
     
-    # Align daily ATR ratio to 12h timeframe
-    atr_ratio_12h = align_htf_to_ltf(prices, daily, atr_ratio_daily)
-    
-    # Calculate daily RSI for momentum filter
-    delta = np.diff(daily_close, prepend=daily_close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_daily = 100 - (100 / (1 + rs))
-    
-    # Align daily RSI to 12h timeframe
-    rsi_12h = align_htf_to_ltf(prices, daily, rsi_daily)
-    
-    # Calculate daily Bollinger Bands for mean reversion signals
+    # Calculate daily Bollinger Bands
     sma_20 = pd.Series(daily_close).rolling(window=20, min_periods=20).mean().values
     std_20 = pd.Series(daily_close).rolling(window=20, min_periods=20).std().values
     upper_band = sma_20 + (2 * std_20)
     lower_band = sma_20 - (2 * std_20)
     
-    # Align Bollinger Bands to 12h timeframe
-    upper_band_12h = align_htf_to_ltf(prices, daily, upper_band)
-    lower_band_12h = align_htf_to_ltf(prices, daily, lower_band)
+    # Calculate 20-day volume average
+    vol_ma_20 = pd.Series(daily_volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Align indicators to 4h timeframe
+    upper_band_4h = align_htf_to_ltf(prices, daily, upper_band)
+    lower_band_4h = align_htf_to_ltf(prices, daily, lower_band)
+    vol_ma_4h = align_htf_to_ltf(prices, daily, vol_ma_20)
     
     signals = np.zeros(n)
     
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_ratio_12h[i]) or np.isnan(rsi_12h[i]) or 
-            np.isnan(upper_band_12h[i]) or np.isnan(lower_band_12h[i])):
+        if (np.isnan(upper_band_4h[i]) or np.isnan(lower_band_4h[i]) or 
+            np.isnan(vol_ma_4h[i])):
             signals[i] = 0.0
             continue
         
-        # Mean reversion strategy with volatility and momentum filters
-        # Long when price touches lower BB in low volatility + oversold RSI
-        if (close[i] <= lower_band_12h[i] and 
-            atr_ratio_12h[i] < 0.01 and  # Low volatility filter
-            rsi_12h[i] < 30):  # Oversold filter
+        # Volume spike condition: current daily volume > 1.5x 20-day average
+        volume_spike = daily_volume[i // 24] > (vol_ma_20[i // 24] * 1.5) if i // 24 < len(daily_volume) else False
+        
+        # Long when price touches lower BB with volume spike
+        if (close[i] <= lower_band_4h[i] and volume_spike):
             signals[i] = 0.25
-        # Short when price touches upper BB in low volatility + overbought RSI
-        elif (close[i] >= upper_band_12h[i] and 
-              atr_ratio_12h[i] < 0.01 and  # Low volatility filter
-              rsi_12h[i] > 70):  # Overbought filter
+        # Short when price touches upper BB with volume spike
+        elif (close[i] >= upper_band_4h[i] and volume_spike):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "12h_DailyBB_RSI_Volatility_MeanReversion"
-timeframe = "12h"
+name = "4h_DailyBB_Volume_Spike_MeanReversion"
+timeframe = "4h"
 leverage = 1.0
