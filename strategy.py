@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Bollinger Band breakout with 12-hour EMA trend filter and volume confirmation
-# Uses 4h Bollinger Bands for volatility-based entry signals, 12h EMA for trend direction,
-# and volume spike to confirm breakout strength. Works in both bull and bear by
-# only taking breakouts in the direction of the 12h trend. Designed for moderate
-# trade frequency (target: 50-150 trades over 4 years) to minimize fee drag.
+# Hypothesis: 1d Williams Alligator + 1w Trend Filter + Volume Confirmation
+# Uses Williams Alligator (SMAs with forward shift) to identify trends on daily timeframe,
+# confirmed by 1-week EMA trend direction and volume spike.
+# Only takes long when price > Alligator Jaw and weekly trend up, short when price < Alligator Jaw and weekly trend down.
+# Aims for 30-100 total trades over 4 years with disciplined entries in both bull and bear markets.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,38 +19,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data (primary timeframe) for Bollinger Bands and price action
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Load 1d data for Williams Alligator calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Load 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Load 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Bollinger Bands (20, 2.0) on 4h
-    sma_20 = pd.Series(close_4h).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_4h).rolling(window=20, min_periods=20).std().values
-    upper_band = sma_20 + 2.0 * std_20
-    lower_band = sma_20 - 2.0 * std_20
+    # Williams Alligator on 1d (13,8,5 SMAs with future shift)
+    jaw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Calculate EMA50 on 12h for trend filter
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1-week EMA for trend filter
+    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Volume average (20-period on 4h)
-    vol_avg_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume average (20-period on 1d)
+    vol_avg_1d = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align all indicators to 4h timeframe
-    upper_band_aligned = align_htf_to_ltf(prices, df_4h, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_4h, lower_band)
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    vol_avg_aligned = align_htf_to_ltf(prices, df_4h, vol_avg_4h)
+    # Align all indicators to 1d timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
     position = 0
@@ -58,36 +58,41 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_avg_aligned[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(lips_aligned[i]) or
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_avg_aligned[i])):
             continue
         
-        # Long entry: price breaks above upper Bollinger Band + volume spike + price above 12h EMA50
-        if (close[i] > upper_band_aligned[i] and
-            volume[i] > 1.5 * vol_avg_aligned[i] and
-            close[i] > ema50_12h_aligned[i] and
-            position <= 0):
+        # Alligator condition: lips > jaws = bullish, lips < jaws = bearish
+        bullish_alligator = lips_aligned[i] > jaw_aligned[i]
+        bearish_alligator = lips_aligned[i] < jaw_aligned[i]
+        
+        # Weekly trend: price above/below weekly EMA
+        weekly_uptrend = close[i] > ema_1w_aligned[i]
+        weekly_downtrend = close[i] < ema_1w_aligned[i]
+        
+        # Volume confirmation
+        volume_spike = volume[i] > 1.5 * vol_avg_aligned[i]
+        
+        # Long entry: bullish alligator + weekly uptrend + volume spike
+        if bullish_alligator and weekly_uptrend and volume_spike and position <= 0:
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below lower Bollinger Band + volume spike + price below 12h EMA50
-        elif (close[i] < lower_band_aligned[i] and
-              volume[i] > 1.5 * vol_avg_aligned[i] and
-              close[i] < ema50_12h_aligned[i] and
-              position >= 0):
+        # Short entry: bearish alligator + weekly downtrend + volume spike
+        elif bearish_alligator and weekly_downtrend and volume_spike and position >= 0:
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse signal or price returns to middle Bollinger Band (SMA20)
-        elif position == 1 and close[i] < sma_20[i]:
+        # Exit: alligator reverses or volume dries up
+        elif position == 1 and (not bullish_alligator or not volume_spike):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > sma_20[i]:
+        elif position == -1 and (not bearish_alligator or not volume_spike):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Bollinger_12hEMA_Volume_Filter"
-timeframe = "4h"
+name = "1d_WilliamsAlligator_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
