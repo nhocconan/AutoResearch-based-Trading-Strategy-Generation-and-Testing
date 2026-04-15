@@ -3,10 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h 1-day Range Breakout with Volume Confirmation and ADX Trend Filter
-# Uses the previous day's high/low as support/resistance levels. Breakouts above previous day's high
-# or below previous day's low are traded only when confirmed by volume and ADX > 25 (trending market).
-# Works in bull markets (breakouts up) and bear markets (breakouts down). Target: 50-150 total trades.
+# Hypothesis: 6h Ichimoku Cloud with Weekly Trend Filter
+# Uses daily Tenkan/Kijun cross for entry, with weekly Cloud (Senkou Span A/B) as trend filter.
+# Long when price > Cloud and Tenkan > Kijun; Short when price < Cloud and Tenkan < Kijun.
+# Works in bull markets (trend-following above cloud) and bear markets (trend-following below cloud).
+# Target: 50-150 total trades over 4 years (12-37/year).
 
 def generate_signals(prices):
     n = len(prices)
@@ -16,64 +17,65 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load 1d data for previous day's high/low
+    # Load daily data for Ichimoku components
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 52:
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Load 12h data for ADX trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load weekly data for trend filter (Cloud)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 52:
         return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Previous day's high and low (shifted by 1 to avoid look-ahead)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_high_1d[0] = np.nan  # First value has no previous day
-    prev_low_1d[0] = np.nan
+    # Ichimoku calculations (daily)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    # Align previous day's high/low to 4h timeframe
-    prev_high_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_high_1d)
-    prev_low_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_low_1d)
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
     
-    # Calculate ADX (14-period) on 12h
-    # True Range
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
     
-    # Directional Movement
-    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
-                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)), 
-                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_b = (period52_high + period52_low) / 2
     
-    # Smoothed values
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    # Weekly Cloud (for trend filter)
+    # Weekly Senkou Span A: (weekly Tenkan + weekly Kijun) / 2
+    ws9_high = pd.Series(high_1w).rolling(window=9, min_periods=9).max().values
+    ws9_low = pd.Series(low_1w).rolling(window=9, min_periods=9).min().values
+    w_tenkan = (ws9_high + ws9_low) / 2
     
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+    ws26_high = pd.Series(high_1w).rolling(window=26, min_periods=26).max().values
+    ws26_low = pd.Series(low_1w).rolling(window=26, min_periods=26).min().values
+    w_kijun = (ws26_high + ws26_low) / 2
     
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    w_senkou_a = (w_tenkan + w_kijun) / 2
     
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    # Weekly Senkou Span B: (52-week high + 52-week low) / 2
+    ws52_high = pd.Series(high_1w).rolling(window=52, min_periods=52).max().values
+    ws52_low = pd.Series(low_1w).rolling(window=52, min_periods=52).min().values
+    w_senkou_b = (ws52_high + ws52_low) / 2
+    
+    # Align all indicators to 6h timeframe
+    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b)
+    w_senkou_a_6h = align_htf_to_ltf(prices, df_1w, w_senkou_a)
+    w_senkou_b_6h = align_htf_to_ltf(prices, df_1w, w_senkou_b)
     
     signals = np.zeros(n)
     position = 0
@@ -81,36 +83,35 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(prev_high_1d_aligned[i]) or np.isnan(prev_low_1d_aligned[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or
+            np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i]) or
+            np.isnan(w_senkou_a_6h[i]) or np.isnan(w_senkou_b_6h[i])):
             continue
         
-        # Long entry: price breaks above previous day's high + volume confirmation + ADX > 25
-        if (close[i] > prev_high_1d_aligned[i] and
-            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-            adx_aligned[i] > 25 and
-            position <= 0):
+        # Cloud boundaries (weekly)
+        cloud_top = np.maximum(w_senkou_a_6h[i], w_senkou_b_6h[i])
+        cloud_bottom = np.minimum(w_senkou_a_6h[i], w_senkou_b_6h[i])
+        
+        # Long entry: price above cloud + Tenkan > Kijun
+        if (close[i] > cloud_top and tenkan_6h[i] > kijun_6h[i] and position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below previous day's low + volume confirmation + ADX > 25
-        elif (close[i] < prev_low_1d_aligned[i] and
-              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-              adx_aligned[i] > 25 and
-              position >= 0):
+        # Short entry: price below cloud + Tenkan < Kijun
+        elif (close[i] < cloud_bottom and tenkan_6h[i] < kijun_6h[i] and position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse breakout or ADX < 20 (ranging market)
-        elif position == 1 and (close[i] < prev_low_1d_aligned[i] or adx_aligned[i] < 20):
+        # Exit: opposite Tenkan/Kijun cross
+        elif position == 1 and tenkan_6h[i] < kijun_6h[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > prev_high_1d_aligned[i] or adx_aligned[i] < 20):
+        elif position == -1 and tenkan_6h[i] > kijun_6h[i]:
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_1d_Range_Breakout_Volume_ADX"
-timeframe = "4h"
+name = "6h_Ichimoku_Cloud_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
