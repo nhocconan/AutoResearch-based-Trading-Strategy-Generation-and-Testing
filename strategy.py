@@ -13,94 +13,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h HTF data once before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly HTF data once before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 4h EMA(50) for trend filter
-    ema_50 = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    weekly_close = df_1w['close'].values
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_volume = df_1w['volume'].values
     
-    # Calculate 4h RSI(14) for momentum filter
-    delta = np.diff(df_4h['close'].values, prepend=df_4h['close'].values[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14 = 100 - (100 / (1 + rs))
+    # Calculate 50-period weekly EMA for trend filter
+    ema_50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 4h ATR(14) for volatility filter
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    prev_close = np.concatenate([[close_4h[0]], close_4h[:-1]])
-    tr = np.maximum(high_4h - low_4h,
-                    np.maximum(np.abs(high_4h - prev_close),
-                               np.abs(low_4h - prev_close)))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
-    volatility_ratio = atr_14 / (atr_ma_50 + 1e-10)
+    # Calculate 20-period weekly ATR for volatility regime
+    weekly_close_prev = np.concatenate([[weekly_close[0]], weekly_close[:-1]])
+    tr = np.maximum(weekly_high - weekly_low,
+                    np.maximum(np.abs(weekly_high - weekly_close_prev),
+                               np.abs(weekly_low - weekly_close_prev)))
+    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    atr_ma_50 = pd.Series(atr_20).rolling(window=50, min_periods=50).mean().values
+    volatility_ratio = atr_20 / (atr_ma_50 + 1e-10)
     
-    # Align HTF indicators to 1h timeframe with proper delay
-    ema_50_1h = align_htf_to_ltf(prices, df_4h, ema_50)
-    rsi_14_1h = align_htf_to_ltf(prices, df_4h, rsi_14)
-    volatility_ratio_1h = align_htf_to_ltf(prices, df_4h, volatility_ratio)
+    # Calculate weekly volume ratio (current vs 20-period average)
+    vol_ma_20 = pd.Series(weekly_volume).rolling(window=20, min_periods=20).mean().values
+    weekly_volume_ratio = weekly_volume / (vol_ma_20 + 1e-10)
     
-    # Calculate 1h Donchian channels (20-period)
+    # Align HTF indicators to 6h timeframe with proper delay
+    ema_50_6h = align_htf_to_ltf(prices, df_1w, ema_50)
+    volatility_ratio_6h = align_htf_to_ltf(prices, df_1w, volatility_ratio)
+    weekly_volume_ratio_6h = align_htf_to_ltf(prices, df_1w, weekly_volume_ratio)
+    
+    # Calculate 6h Donchian channels (20-period)
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1h volume ratio (current vs 20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ratio = volume / (vol_ma_20 + 1e-10)
-    
-    # Precompute session filter (08-20 UTC)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Calculate 6h volume ratio (current vs 20-period average)
+    vol_ma_20_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ratio_6h = volume / (vol_ma_20_6h + 1e-10)
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1h[i]) or np.isnan(rsi_14_1h[i]) or 
-            np.isnan(volatility_ratio_1h[i]) or np.isnan(highest_20[i]) or 
-            np.isnan(lowest_20[i]) or np.isnan(volume_ratio[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Skip if outside trading session
-        if not in_session[i]:
+        if (np.isnan(ema_50_6h[i]) or np.isnan(volatility_ratio_6h[i]) or 
+            np.isnan(weekly_volume_ratio_6h[i]) or np.isnan(highest_20[i]) or 
+            np.isnan(lowest_20[i]) or np.isnan(volume_ratio_6h[i])):
             signals[i] = 0.0
             continue
         
         # Entry conditions:
-        # 1. 4h trend filter: price above/below 4h EMA50
-        # 2. 4h momentum filter: RSI not extreme
-        # 3. 4h volatility regime: only trade in normal/high volatility (avoid low vol squeezes)
-        # 4. 1h Donchian breakout with volume confirmation
-        # 5. Discrete position sizing: 0.20
+        # 1. Weekly trend filter: price above/below weekly EMA50
+        # 2. Volatility regime: only trade in normal/high volatility (avoid low vol squeezes)
+        # 3. Weekly volume confirmation: above average volume on weekly timeframe
+        # 4. 6h Donchian breakout with volume confirmation
+        # 5. Discrete position sizing: 0.25
         
         # Long conditions
-        if (close[i] > ema_50_1h[i] and  # Uptrend filter
-            rsi_14_1h[i] < 70 and       # Not overbought
-            volatility_ratio_1h[i] > 0.8 and  # Avoid low volatility squeezes
-            close[i] > highest_20[i] and     # Donchian breakout
-            volume_ratio[i] > 1.5):        # Volume confirmation
-            signals[i] = 0.20
+        if (close[i] > ema_50_6h[i] and  # Uptrend filter
+            volatility_ratio_6h[i] > 0.8 and  # Avoid low volatility squeezes
+            weekly_volume_ratio_6h[i] > 1.2 and  # Weekly volume confirmation
+            close[i] > highest_20[i] and     # 6h Donchian breakout
+            volume_ratio_6h[i] > 1.5):       # 6h volume confirmation
+            signals[i] = 0.25
             
         # Short conditions
-        elif (close[i] < ema_50_1h[i] and   # Downtrend filter
-              rsi_14_1h[i] > 30 and       # Not oversold
-              volatility_ratio_1h[i] > 0.8 and  # Avoid low volatility squeezes
-              close[i] < lowest_20[i] and      # Donchian breakdown
-              volume_ratio[i] > 1.5):        # Volume confirmation
-            signals[i] = -0.20
+        elif (close[i] < ema_50_6h[i] and   # Downtrend filter
+              volatility_ratio_6h[i] > 0.8 and  # Avoid low volatility squeezes
+              weekly_volume_ratio_6h[i] > 1.2 and  # Weekly volume confirmation
+              close[i] < lowest_20[i] and      # 6h Donchian breakdown
+              volume_ratio_6h[i] > 1.5):       # 6h volume confirmation
+            signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1h_4hEMA_RSI_Volume_Donchian_Breakout_Session"
-timeframe = "1h"
+name = "6h_WeeklyEMA_Volume_Donchian_Breakout"
+timeframe = "6h"
 leverage = 1.0
