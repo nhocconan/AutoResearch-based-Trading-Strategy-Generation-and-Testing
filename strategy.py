@@ -15,16 +15,10 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily Donchian(20) channels
-    donch_high_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
-    donch_low_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
-    donch_high_20_aligned = align_htf_to_ltf(prices, df_1d, donch_high_20)
-    donch_low_20_aligned = align_htf_to_ltf(prices, df_1d, donch_low_20)
-    
-    # Calculate daily ATR(14) for volatility filter and position sizing
+    # Calculate daily ATR(14) for volatility filter
     tr1 = df_1d['high'] - df_1d['low']
     tr2 = np.abs(df_1d['high'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
     tr3 = np.abs(df_1d['low'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
@@ -32,37 +26,47 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate daily EMA(50) for trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate daily EMA(34) for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate daily RSI(14) for momentum filter
+    delta = pd.Series(df_1d['close'].values).diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_14_1d = 100 - (100 / (1 + rs))
+    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(donch_high_20_aligned[i]) or np.isnan(donch_low_20_aligned[i]) or 
-            np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(rsi_14_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when daily ATR is elevated (> 0.3% of price)
-        vol_filter = atr_14_1d_aligned[i] > 0.003 * close[i]
+        # Regime filter: only trade when daily ATR is elevated (> 0.4% of price)
+        vol_filter = atr_14_1d_aligned[i] > 0.004 * close[i]
         
         # Long conditions:
-        # 1. Price breaks above daily Donchian high (breakout)
-        # 2. Price above daily EMA50 (bullish bias)
+        # 1. Price above daily EMA34 (bullish bias)
+        # 2. Daily RSI > 50 (bullish momentum)
         # 3. Volatility filter
-        if (close[i] > donch_high_20_aligned[i] and 
-            close[i] > ema_50_1d_aligned[i] and 
+        if (close[i] > ema_34_1d_aligned[i] and 
+            rsi_14_1d_aligned[i] > 50 and 
             vol_filter):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Price breaks below daily Donchian low (breakdown)
-        # 2. Price below daily EMA50 (bearish bias)
+        # 1. Price below daily EMA34 (bearish bias)
+        # 2. Daily RSI < 50 (bearish momentum)
         # 3. Volatility filter
-        elif (close[i] < donch_low_20_aligned[i] and 
-              close[i] < ema_50_1d_aligned[i] and 
+        elif (close[i] < ema_34_1d_aligned[i] and 
+              rsi_14_1d_aligned[i] < 50 and 
               vol_filter):
             signals[i] = -0.25
         else:
@@ -70,6 +74,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_EMA50_VolFilter_v1"
-timeframe = "4h"
+name = "1d_EMA34_RSI_VolFilter_v1"
+timeframe = "1d"
 leverage = 1.0
