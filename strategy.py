@@ -3,99 +3,95 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Weekly Bollinger Band Squeeze with Daily Breakout and Volume Confirmation
-# Bollinger Band Width < 20th percentile indicates low volatility squeeze
-# Breakout above upper BB with volume > 1.5x 20-day average signals new trend
-# Works in bull markets (breakouts continue) and bear markets (false breakdowns fade)
-# Weekly timeframe for squeeze detection reduces false signals
-# Daily timeframe for execution balances responsiveness and trade frequency
-# Target: 15-25 trades/year to minimize fee drag
+# Hypothesis: 6h Donchian(20) breakout with 1d daily pivot direction filter
+# - Long when price breaks above Donchian high (20-bar high) AND daily pivot is bullish (close > pivot)
+# - Short when price breaks below Donchian low (20-bar low) AND daily pivot is bearish (close < pivot)
+# - Exit when price crosses back through the Donchian midpoint
+# - Uses volume filter: require volume > 1.5x 20-period average to avoid false breakouts
+# - Designed for low trade frequency (target 15-25/year) with clear trend-following logic
+# - Works in bull markets (breakouts continue) and bear markets (breakdowns continue)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data once for Bollinger Bands
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 30:
+    # Load 1d data once
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    weekly_close = df_weekly['close'].values
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
+    # Calculate daily pivot points (standard: P = (H+L+C)/3)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
     
-    # Weekly Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
-    sma = pd.Series(weekly_close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std = pd.Series(weekly_close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_bb = sma + (bb_std * std)
-    lower_bb = sma - (bb_std * std)
-    bb_width = upper_bb - lower_bb
+    # Pivot bias: bullish if close > pivot, bearish if close < pivot
+    pivot_bias = np.where(close_1d > pivot_1d, 1, np.where(close_1d < pivot_1d, -1, 0))
     
-    # Weekly Bollinger Band Width percentile (20-day lookback)
-    bb_width_percentile = pd.Series(bb_width).rolling(window=20, min_periods=10).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
+    # Donchian channels (20-period)
+    lookback = 20
+    # Calculate rolling max/min manually for efficiency
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
     
-    # Squeeze condition: BB Width < 20th percentile
-    squeeze = bb_width_percentile < 20
+    for i in range(lookback-1, n):
+        donchian_high[i] = np.max(high[i-lookback+1:i+1])
+        donchian_low[i] = np.min(low[i-lookback+1:i+1])
     
-    # Align squeeze signal to daily
-    squeeze_aligned = align_htf_to_ltf(prices, df_weekly, squeeze.astype(float))
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma = np.full(n, np.nan)
+    for i in range(20-1, n):
+        vol_ma[i] = np.mean(volume[i-20+1:i+1])
+    volume_filter = volume > (1.5 * vol_ma)
     
-    # Daily Bollinger Bands for breakout
-    daily_sma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    daily_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    daily_upper = daily_sma + (2 * daily_std)
-    daily_lower = daily_sma - (2 * daily_std)
-    
-    # Volume confirmation: current volume > 1.5x 20-day average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma)
+    # Align 1d pivot bias to 6h timeframe
+    pivot_bias_aligned = align_htf_to_ltf(prices, df_1d, pivot_bias)
     
     signals = np.zeros(n)
-    position = 0
-    position_size = 0.25  # 25% position
+    position = 0  # 0: flat, 1: long, -1: short
+    position_size = 0.25  # 25% position size
     
-    for i in range(40, n):
+    for i in range(30, n):  # Start after warmup period
         # Skip if any required data is NaN
-        if (np.isnan(squeeze_aligned[i]) or np.isnan(daily_upper[i]) or 
-            np.isnan(daily_lower[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(pivot_bias_aligned[i]) or np.isnan(volume_filter[i])):
             continue
         
-        # Long entry: squeeze + breakout above upper BB + volume
-        if (squeeze_aligned[i] > 0.5 and  # squeezed state
-            close[i] > daily_upper[i] and 
-            volume_confirm[i] and 
+        # Long entry: price breaks above Donchian high AND bullish pivot bias AND volume filter
+        if (close[i] > donchian_high[i] and 
+            pivot_bias_aligned[i] > 0 and 
+            volume_filter[i] and 
             position <= 0):
             position = 1
             signals[i] = position_size
         
-        # Short entry: squeeze + breakdown below lower BB + volume
-        elif (squeeze_aligned[i] > 0.5 and  # squeezed state
-              close[i] < daily_lower[i] and 
-              volume_confirm[i] and 
+        # Short entry: price breaks below Donchian low AND bearish pivot bias AND volume filter
+        elif (close[i] < donchian_low[i] and 
+              pivot_bias_aligned[i] < 0 and 
+              volume_filter[i] and 
               position >= 0):
             position = -1
             signals[i] = -position_size
         
-        # Exit: price returns to middle of Bollinger Bands
-        elif position == 1 and close[i] < daily_sma[i]:
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and close[i] > daily_sma[i]:
-            position = 0
-            signals[i] = 0.0
+        # Exit: price crosses back through Donchian midpoint
+        elif position != 0:
+            midpoint = (donchian_high[i] + donchian_low[i]) / 2.0
+            if position == 1 and close[i] < midpoint:
+                position = 0
+                signals[i] = 0.0
+            elif position == -1 and close[i] > midpoint:
+                position = 0
+                signals[i] = 0.0
     
     return signals
 
-name = "1d_WeeklyBB_Squeeze_Breakout_Volume"
-timeframe = "1d"
+name = "6h_Donchian_Pivot_Bias_Volume"
+timeframe = "6h"
 leverage = 1.0
