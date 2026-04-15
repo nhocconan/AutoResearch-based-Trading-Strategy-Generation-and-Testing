@@ -35,7 +35,7 @@ def generate_signals(prices):
     # Calculate 50-period daily EMA for trend filter
     ema_50 = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate daily RSI(14) for momentum filter
+    # Calculate 14-period daily RSI for momentum filter
     delta = np.diff(daily_close, prepend=daily_close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -94,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyEMA_RSI_Volume_Donchian_Breakout_v5"
+name = "4h_DailyEMA_RSI_Volume_Donchian_Breakout_v6"
 timeframe = "4h"
 leverage = 1.0
