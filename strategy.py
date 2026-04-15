@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,64 +13,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for ATR and volume context
+    # Load 1d data ONCE before loop
     daily = get_htf_data(prices, '1d')
     high_d = daily['high'].values
     low_d = daily['low'].values
     close_d = daily['close'].values
     volume_d = daily['volume'].values
     
-    # True Range calculation for ATR
+    # 14-day ATR for volatility filter
     tr1 = high_d[1:] - low_d[1:]
     tr2 = np.abs(high_d[1:] - close_d[:-1])
     tr3 = np.abs(low_d[1:] - close_d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # ATR with proper min_periods
     atr_14d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14d_aligned = align_htf_to_ltf(prices, daily, atr_14d)
     
-    # 12-period EMA of daily volume for volume context
-    vol_ema_12d = pd.Series(volume_d).ewm(span=12, adjust=False, min_periods=12).mean().values
-    vol_ema_12d_aligned = align_htf_to_ltf(prices, daily, vol_ema_12d)
+    # 20-period EMA of daily close for trend filter
+    ema_20d = pd.Series(close_d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20d_aligned = align_htf_to_ltf(prices, daily, ema_20d)
     
-    # Volatility filter: ATR > 0.5% of price (avoid low volatility)
-    vol_filter = atr_14d_aligned > (0.005 * close)
+    # 10-period EMA of daily volume for volume context
+    vol_ema_10d = pd.Series(volume_d).ewm(span=10, adjust=False, min_periods=10).mean().values
+    vol_ema_10d_aligned = align_htf_to_ltf(prices, daily, vol_ema_10d)
     
-    # Volume filter: current volume > 2x daily average volume
-    vol_threshold = 2.0 * vol_ema_12d_aligned
-    vol_spike = volume > vol_threshold
+    # Volume spike: current volume > 1.5x 10-day EMA of daily volume
+    vol_spike = volume > (1.5 * vol_ema_10d_aligned)
     
     signals = np.zeros(n)
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14d_aligned[i]) or np.isnan(vol_ema_12d_aligned[i]) or 
-            np.isnan(vol_threshold[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(atr_14d_aligned[i]) or np.isnan(ema_20d_aligned[i]) or 
+            np.isnan(vol_ema_10d_aligned[i])):
             continue
         
-        # Only trade when volatility is sufficient (avoid chop)
-        if not vol_filter[i]:
+        # Volatility filter: ATR > 0.3% of price (avoid low volatility chop)
+        if atr_14d_aligned[i] <= (0.003 * close[i]):
             signals[i] = 0.0
             continue
-            
-        # Long: Price above 12-period EMA of daily close + volume spike
-        daily_close_ema_12d = pd.Series(close_d).ewm(span=12, adjust=False, min_periods=12).mean().values
-        daily_close_ema_12d_aligned = align_htf_to_ltf(prices, daily, daily_close_ema_12d)
         
-        if (close[i] > daily_close_ema_12d_aligned[i] and 
-            vol_spike[i]):
+        # Long: Price above 20-day EMA + volume spike
+        if (close[i] > ema_20d_aligned[i] and vol_spike[i]):
             signals[i] = 0.25
         
-        # Short: Price below 12-period EMA of daily close + volume spike
-        elif (close[i] < daily_close_ema_12d_aligned[i] and 
-              vol_spike[i]):
+        # Short: Price below 20-day EMA + volume spike
+        elif (close[i] < ema_20d_aligned[i] and vol_spike[i]):
             signals[i] = -0.25
-        
-        # Exit: reverse signal on opposite direction
-        elif (close[i] < daily_close_ema_12d_aligned[i] and signals[i-1] > 0) or \
-             (close[i] > daily_close_ema_12d_aligned[i] and signals[i-1] < 0):
-            signals[i] = 0.0
         
         # Otherwise, hold previous position
         else:
@@ -78,6 +66,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Volatility_Volume_Trend_Filter"
+name = "12h_EMA20_Volume_Spike_Filter"
 timeframe = "12h"
 leverage = 1.0
