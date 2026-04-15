@@ -32,12 +32,12 @@ def generate_signals(prices):
     weekly_r1 = 2 * weekly_pivot - weekly_low
     weekly_s1 = 2 * weekly_pivot - weekly_high
     
-    # Align weekly pivot levels to 6h timeframe
+    # Align weekly pivot levels to 1d timeframe
     weekly_pivot_aligned = align_htf_to_ltf(prices, daily, weekly_pivot)
     weekly_r1_aligned = align_htf_to_ltf(prices, daily, weekly_r1)
     weekly_s1_aligned = align_htf_to_ltf(prices, daily, weekly_s1)
     
-    # Volume filter: current 6h volume > 1.3x 20-period average volume
+    # Volume filter: current 1d volume > 1.3x 20-period average volume
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.3 * vol_ma)
@@ -70,6 +70,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R1_S1_Breakout_Volume_RangeFilter"
-timeframe = "6h"
+name = "1d_WeeklyPivot_R1_S1_Breakout_Volume_RangeFilter"
+timeframe = "1d"
 leverage = 1.0
