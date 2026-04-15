@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R (14) + 1d EMA34 trend filter + volume confirmation
-# Long when Williams %R < -80 (oversold) + price > 1d EMA34 + volume > 1.5x 20-period avg
-# Short when Williams %R > -20 (overbought) + price < 1d EMA34 + volume > 1.5x 20-period avg
-# Uses discrete position sizing (0.25) to minimize fee drag and control drawdown.
-# Williams %R identifies exhaustion points in both bull and bear markets.
-# 1d EMA34 provides strong trend filter reducing counter-trend trades.
-# Volume threshold (1.5x) targets ~12-25 trades/year to minimize fee drag on 6h timeframe.
+# Hypothesis: 12h Camarilla pivot R1/S1 breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above Camarilla R1 (1d) + 1d EMA34 uptrend + volume > 1.5x 20-period avg
+# Short when price breaks below Camarilla S1 (1d) + 1d EMA34 downtrend + volume > 1.5x 20-period avg
+# Uses discrete position sizing (0.25) to minimize fee drag. Camarilla pivots from 1d provide
+# intraday support/resistance levels that work in ranging markets, while 1d EMA34 filters trend.
+# Volume threshold (1.5x) targets ~20-40 trades/year on 12h timeframe to avoid fee drag.
+# Works in bull markets (breakouts with trend) and bear markets (mean reversion at extremes).
 
 def generate_signals(prices):
     n = len(prices)
@@ -35,13 +35,15 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === 6h Williams %R (14-period) ===
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    # Avoid division by zero
-    hh_ll = highest_high - lowest_low
-    williams_r = np.where(hh_ll != 0, ((highest_high - close) / hh_ll) * -100, -50.0)
+    # === 1d Camarilla Pivot Levels (R1, S1) ===
+    # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_arr = df_1d['close'].values
+    camarilla_r1 = close_1d_arr + (1.1 * (high_1d - low_1d) / 12)
+    camarilla_s1 = close_1d_arr - (1.1 * (high_1d - low_1d) / 12)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,7 +51,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(34, 14, 20) + 5  # EMA34 + Williams %R(14) + volume(20) + buffer
+    warmup = max(34, 20) + 5  # EMA34 + volume(20) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -58,8 +60,8 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i]) or
-            np.isnan(vol_sma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or
+            np.isnan(camarilla_s1_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -67,18 +69,18 @@ def generate_signals(prices):
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # === LONG CONDITIONS ===
-        # 1. Williams %R < -80 (oversold)
-        # 2. Price > 1d EMA34 (uptrend filter)
+        # 1. Price breaks above Camarilla R1 (close > R1)
+        # 2. 1d EMA34 uptrend (close > EMA34)
         # 3. Volume confirmation
-        if (williams_r[i] < -80) and \
+        if (close[i] > camarilla_r1_aligned[i]) and \
            (close[i] > ema_34_1d_aligned[i]) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Williams %R > -20 (overbought)
-        # 2. Price < 1d EMA34 (downtrend filter)
+        # 1. Price breaks below Camarilla S1 (close < S1)
+        # 2. 1d EMA34 downtrend (close < EMA34)
         # 3. Volume confirmation
-        elif (williams_r[i] > -20) and \
+        elif (close[i] < camarilla_s1_aligned[i]) and \
              (close[i] < ema_34_1d_aligned[i]) and vol_confirm:
             signals[i] = -0.25
         
@@ -87,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR14_1dEMA34_Volume_Filter_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_1dEMA34_Volume_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
