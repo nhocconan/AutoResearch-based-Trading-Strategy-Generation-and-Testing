@@ -26,11 +26,17 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate 6h Donchian channels (20-period)
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate daily Donchian channel (20-period) using prior day's data
+    # Upper band: highest high of last 20 days (excluding current day)
+    # Lower band: lowest low of last 20 days (excluding current day)
+    prior_high = df_1d['high'].shift(1).rolling(window=20, min_periods=20).max().values
+    prior_low = df_1d['low'].shift(1).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 6h volume ratio (current vs 20-period average)
+    # Align Donchian levels to 12h timeframe
+    donchian_upper_12h = align_htf_to_ltf(prices, df_1d, prior_high)
+    donchian_lower_12h = align_htf_to_ltf(prices, df_1d, prior_low)
+    
+    # Calculate 12h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
@@ -38,30 +44,30 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(donchian_upper_12h[i]) or 
+            np.isnan(donchian_lower_12h[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility regime filter: only trade when daily ATR is elevated (> 0.6% of price)
+        # Volatility regime filter: only trade when daily ATR is elevated (> 0.5% of price)
         # This avoids low-volatility chop and focuses on momentum/trend days
-        vol_regime = atr_14_1d_aligned[i] > 0.006 * close[i]
+        vol_regime = atr_14_1d_aligned[i] > 0.005 * close[i]
         
         # Long conditions:
-        # 1. Price breaks above 6h Donchian upper with volume
-        # 2. Volume confirmation: volume > 1.5x average
-        # 3. Daily volatility regime filter
-        if (close[i] > donchian_upper[i] and
-            volume_ratio[i] > 1.5 and
+        # 1. Price breaks above prior 20-day Donchian upper band with volume
+        # 2. Volume confirmation: volume > 1.8x average
+        # 3. Daily volatility regime filter (avoid chop)
+        if (close[i] > donchian_upper_12h[i] and
+            volume_ratio[i] > 1.8 and
             vol_regime):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Price breaks below 6h Donchian lower with volume
-        # 2. Volume confirmation: volume > 1.5x average
+        # 1. Price breaks below prior 20-day Donchian lower band with volume
+        # 2. Volume confirmation: volume > 1.8x average
         # 3. Daily volatility regime filter
-        elif (close[i] < donchian_lower[i] and
-              volume_ratio[i] > 1.5 and
+        elif (close[i] < donchian_lower_12h[i] and
+              volume_ratio[i] > 1.8 and
               vol_regime):
             signals[i] = -0.25
         else:
@@ -69,6 +75,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_Volume_Breakout_VolRegime_v1"
-timeframe = "6h"
+name = "12h_Donchian20_Volume_VolatilityRegime"
+timeframe = "12h"
 leverage = 1.0
