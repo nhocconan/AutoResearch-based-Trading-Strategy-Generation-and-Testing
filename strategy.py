@@ -13,88 +13,96 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h HTF data once before loop (signal direction)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    # 4h EMA21 for trend
-    ema_21_4h = pd.Series(df_4h['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
-    
-    # Get 1d HTF data for regime filter
+    # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d ADX14 for trend strength
-    plus_dm = np.diff(df_1d['high'], prepend=df_1d['high'][0])
-    minus_dm = np.diff(df_1d['low'], prepend=df_1d['low'][0]) * -1
-    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0.0)
-    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0.0)
+    # Calculate 1d EMA200 for trend filter
+    close_1d = df_1d['close'].values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    tr1 = np.abs(df_1d['high'] - df_1d['low'])
-    tr2 = np.abs(df_1d['high'] - np.concatenate([[df_1d['close'][0]], df_1d['close'][:-1]]))
-    tr3 = np.abs(df_1d['low'] - np.concatenate([[df_1d['close'][0]], df_1d['close'][:-1]]))
+    # Calculate 1d RSI(14) for momentum filter
+    delta = pd.Series(close_1d).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_14_1d = (100 - (100 / (1 + rs))).values
+    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
+    
+    # Get weekly HTF data for structure
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # Calculate weekly Donchian(20) for breakout signals
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    upper_20_1w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    lower_20_1w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    
+    # Align weekly Donchian to 6h
+    upper_20_6h = align_htf_to_ltf(prices, df_1w, upper_20_1w)
+    lower_20_6h = align_htf_to_ltf(prices, df_1w, lower_20_1w)
+    
+    # Calculate 6h ATR(14) for volatility filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    plus_di_14 = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr_14_1d + 1e-10)
-    minus_di_14 = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr_14_1d + 1e-10)
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
-    adx_14 = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
-    
-    # 1h ATR14 for volatility filter
-    tr1h = np.abs(high - low)
-    tr2h = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3h = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    trh = np.maximum(tr1h, np.maximum(tr2h, tr3h))
-    atr_14_1h = pd.Series(trh).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # 1h volume ratio
+    # Calculate 6h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
     signals = np.zeros(n)
     
-    # Session filter: 08-20 UTC
+    # Session filter: 00-24 UTC (always true for 6h, kept for structure)
     hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    in_session = (hours >= 0) & (hours <= 23)
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(adx_14_aligned[i]) or 
-            np.isnan(atr_14_1h[i]) or np.isnan(volume_ratio[i]) or not in_session[i]):
+        if (np.isnan(upper_20_6h[i]) or np.isnan(lower_20_6h[i]) or 
+            np.isnan(ema200_1d_aligned[i]) or np.isnan(rsi_14_1d_aligned[i]) or 
+            np.isnan(atr_14[i]) or np.isnan(volume_ratio[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
         # Long conditions:
-        # 1. 4h EMA21 uptrend (price > EMA21)
-        # 2. 1d ADX > 25 (strong trend)
-        # 3. Volume confirmation: volume > 1.5x average
-        # 4. Volatility filter: ATR > 0.3% of price
-        if (close[i] > ema_21_4h_aligned[i] and
-            adx_14_aligned[i] > 25 and
+        # 1. 6h price breaks above weekly Donchian upper (20) - bullish breakout
+        # 2. Price above 1d EMA200 (bullish trend filter)
+        # 3. 1d RSI > 50 (bullish momentum)
+        # 4. Volume confirmation: volume > 1.5x average
+        # 5. Volatility filter: ATR > 0.3% of price (avoid low volatility chop)
+        if (close[i] > upper_20_6h[i] and
+            close[i] > ema200_1d_aligned[i] and
+            rsi_14_1d_aligned[i] > 50 and
             volume_ratio[i] > 1.5 and
-            atr_14_1h[i] > 0.003 * close[i]):
-            signals[i] = 0.20
+            atr_14[i] > 0.003 * close[i]):
+            signals[i] = 0.25
             
         # Short conditions:
-        # 1. 4h EMA21 downtrend (price < EMA21)
-        # 2. 1d ADX > 25 (strong trend)
-        # 3. Volume confirmation: volume > 1.5x average
-        # 4. Volatility filter: ATR > 0.3% of price
-        elif (close[i] < ema_21_4h_aligned[i] and
-              adx_14_aligned[i] > 25 and
+        # 1. 6h price breaks below weekly Donchian lower (20) - bearish breakdown
+        # 2. Price below 1d EMA200 (bearish trend filter)
+        # 3. 1d RSI < 50 (bearish momentum)
+        # 4. Volume confirmation: volume > 1.5x average
+        # 5. Volatility filter: ATR > 0.3% of price
+        elif (close[i] < lower_20_6h[i] and
+              close[i] < ema200_1d_aligned[i] and
+              rsi_14_1d_aligned[i] < 50 and
               volume_ratio[i] > 1.5 and
-              atr_14_1h[i] > 0.003 * close[i]):
-            signals[i] = -0.20
+              atr_14[i] > 0.003 * close[i]):
+            signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1h_4h_EMA21_1d_ADX25_Volume_Filter_v1"
-timeframe = "1h"
+name = "6h_1w_Donchian20_1d_EMA200_RSI_Volume_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
