@@ -70,6 +70,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyEMA20_Vol1.5x_ATR14dFilter_v2"
-timeframe = "4h"
+name = "12h_DailyEMA20_Vol1.5x_ATR14dFilter"
+timeframe = "12h"
 leverage = 1.0
