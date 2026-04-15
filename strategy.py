@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,63 +13,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h EMA(20) for trend filter (HTF)
-    daily_12h = get_htf_data(prices, '12h')
-    close_12h = daily_12h['close'].values
-    ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_12h_aligned = align_htf_to_ltf(prices, daily_12h, ema_20_12h)
+    # Weekly high/low for trend context
+    weekly = get_htf_data(prices, '1w')
+    high_w = weekly['high'].values
+    low_w = weekly['low'].values
     
-    # 12h ATR(14) for volatility filter (HTF)
-    high_12h = daily_12h['high'].values
-    low_12h = daily_12h['low'].values
-    tr1 = np.maximum(high_12h[1:] - low_12h[1:], np.abs(high_12h[1:] - close_12h[:-1]))
-    tr2 = np.maximum(np.abs(low_12h[1:] - close_12h[:-1]), tr1)
-    tr_12h = np.concatenate([[np.nan], tr2])
-    atr_14_12h = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_12h_aligned = align_htf_to_ltf(prices, daily_12h, atr_14_12h)
+    # Weekly high/low - only update on weekly bar close
+    weekly_high = np.maximum.accumulate(high_w)
+    weekly_low = np.minimum.accumulate(low_w)
+    weekly_high_aligned = align_htf_to_ltf(prices, weekly, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, weekly, weekly_low)
     
-    # Volume threshold: 2.0x median of last 20 bars (more selective)
-    vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median()
-    vol_threshold = 2.0 * vol_median
+    # Daily ATR(14) for volatility normalization
+    daily = get_htf_data(prices, '1d')
+    high_d = daily['high'].values
+    low_d = daily['low'].values
+    close_d = daily['close'].values
     
-    # Volatility regime filter: avoid extremes (0.3x to 2.5x of median ATR)
-    atr_median = pd.Series(atr_14_12h_aligned).rolling(window=30, min_periods=30).median()
+    tr1 = high_d[1:] - low_d[1:]
+    tr2 = np.abs(high_d[1:] - close_d[:-1])
+    tr3 = np.abs(low_d[1:] - close_d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_14d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14d_aligned = align_htf_to_ltf(prices, daily, atr_14d)
+    
+    # Daily ATR median for regime filter
+    atr_median = pd.Series(atr_14d_aligned).rolling(window=50, min_periods=50).median()
     
     signals = np.zeros(n)
     
-    for i in range(30, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_20_12h_aligned[i]) or np.isnan(atr_14_12h_aligned[i]) or
-            np.isnan(vol_threshold[i]) or np.isnan(atr_median[i])):
+        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or
+            np.isnan(atr_14d_aligned[i]) or np.isnan(atr_median[i])):
             continue
         
-        # Volatility filter: avoid extremes (0.3x to 2.5x of median ATR)
-        vol_filter = (atr_14_12h_aligned[i] > 0.3 * atr_median[i]) and (atr_14_12h_aligned[i] < 2.5 * atr_median[i])
+        # Volatility regime: avoid extreme volatility (>3x median ATR)
+        vol_regime = atr_14d_aligned[i] < 3.0 * atr_median[i]
         
-        # Long: Price above 12h EMA20 + volume spike + volatility filter
-        if (close[i] > ema_20_12h_aligned[i] and 
-            volume[i] > vol_threshold[i] and 
-            vol_filter):
+        # Long: Price breaks above weekly high with volume confirmation
+        long_breakout = (close[i] > weekly_high_aligned[i]) and (volume[i] > 1.5 * np.median(volume[max(0,i-20):i+1]))
+        
+        # Short: Price breaks below weekly low with volume confirmation
+        short_breakout = (close[i] < weekly_low_aligned[i]) and (volume[i] > 1.5 * np.median(volume[max(0,i-20):i+1]))
+        
+        if long_breakout and vol_regime:
             signals[i] = 0.25
-        
-        # Short: Price below 12h EMA20 + volume spike + volatility filter
-        elif (close[i] < ema_20_12h_aligned[i] and 
-              volume[i] > vol_threshold[i] and 
-              vol_filter):
+        elif short_breakout and vol_regime:
             signals[i] = -0.25
-        
-        # Exit: price crosses back below/above 12h EMA20
-        elif (i > 0 and 
-              ((signals[i-1] == 0.25 and close[i] < ema_20_12h_aligned[i]) or
-               (signals[i-1] == -0.25 and close[i] > ema_20_12h_aligned[i]))):
-            signals[i] = 0.0
-        
-        # Otherwise, hold previous position
         else:
-            signals[i] = signals[i-1]
+            signals[i] = signals[i-1] if i > 0 else 0.0
     
     return signals
 
-name = "4h_12hEMA20_Vol2.0x_ATR14dFilter_v1"
-timeframe = "4h"
+name = "6h_WeeklyBreakout_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
