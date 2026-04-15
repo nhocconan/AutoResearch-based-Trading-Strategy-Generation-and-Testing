@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d HTF data once before loop (daily ATR and Camarilla pivots)
+    # Get daily HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -37,62 +37,41 @@ def generate_signals(prices):
     camarilla_r4 = camarilla_pivot + 1.5 * (prior_high - prior_low)
     camarilla_s4 = camarilla_pivot - 1.5 * (prior_high - prior_low)
     
-    # Align Camarilla levels to 4h
-    camarilla_pivot_4h = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    camarilla_r3_4h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_4h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_r4_4h = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_4h = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    
-    # Calculate 4h ATR(14) for volatility entry filter
-    tr1_4h = high - low
-    tr2_4h = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3_4h = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
-    atr_14_4h = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Calculate 4h volume ratio (current vs 20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ratio = volume / (vol_ma_20 + 1e-10)
+    # Align Camarilla levels to 1d
+    camarilla_pivot_1d = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    camarilla_r3_1d = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_1d = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_r4_1d = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_1d = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(camarilla_pivot_4h[i]) or 
-            np.isnan(camarilla_r3_4h[i]) or np.isnan(camarilla_s3_4h[i]) or 
-            np.isnan(camarilla_r4_4h[i]) or np.isnan(camarilla_s4_4h[i]) or 
-            np.isnan(atr_14_4h[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(camarilla_pivot_1d[i]) or 
+            np.isnan(camarilla_r3_1d[i]) or np.isnan(camarilla_s3_1d[i]) or 
+            np.isnan(camarilla_r4_1d[i]) or np.isnan(camarilla_s4_1d[i])):
             signals[i] = 0.0
             continue
         
         # Volatility regime filter: only trade when daily ATR is elevated (> 0.8% of price)
-        # This avoids low-volatility chop and focuses on momentum/trend days
         vol_regime = atr_14_1d_aligned[i] > 0.008 * close[i]
         
         # Long conditions:
         # 1. Price above Camarilla pivot (bullish bias)
-        # 2. Price breaks above Camarilla R3 with volume (bullish continuation)
-        # 3. Volume confirmation: volume > 1.5x average (stricter to reduce trades)
-        # 4. 4h ATR > 0.5% of price (ensure sufficient volatility for move)
-        # 5. Daily volatility regime filter (avoid chop)
-        if (close[i] > camarilla_pivot_4h[i] and
-            close[i] > camarilla_r3_4h[i] and
-            volume_ratio[i] > 1.5 and
-            atr_14_4h[i] > 0.005 * close[i] and
+        # 2. Price breaks above Camarilla R3 with volume confirmation
+        if (close[i] > camarilla_pivot_1d[i] and
+            close[i] > camarilla_r3_1d[i] and
+            volume[i] > volume[i-1] and  # volume increasing
             vol_regime):
             signals[i] = 0.25
             
         # Short conditions:
         # 1. Price below Camarilla pivot (bearish bias)
-        # 2. Price breaks below Camarilla S3 with volume (bearish continuation)
-        # 3. Volume confirmation: volume > 1.5x average
-        # 4. 4h ATR > 0.5% of price
-        # 5. Daily volatility regime filter
-        elif (close[i] < camarilla_pivot_4h[i] and
-              close[i] < camarilla_s3_4h[i] and
-              volume_ratio[i] > 1.5 and
-              atr_14_4h[i] > 0.005 * close[i] and
+        # 2. Price breaks below Camarilla S3 with volume confirmation
+        elif (close[i] < camarilla_pivot_1d[i] and
+              close[i] < camarilla_s3_1d[i] and
+              volume[i] > volume[i-1] and  # volume increasing
               vol_regime):
             signals[i] = -0.25
         else:
@@ -100,6 +79,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Vol_Regime_Camarilla_Pivot_R3S3_Breakout_v2"
-timeframe = "4h"
+name = "1d_Vol_Regime_Camarilla_Pivot_R3S3_Breakout_v2"
+timeframe = "1d"
 leverage = 1.0
