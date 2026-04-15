@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot levels (1d is HTF for 12h)
+    # Get daily data for pivot levels (1d is HTF for 4h)
     daily = get_htf_data(prices, '1d')
     daily_high = daily['high'].values
     daily_low = daily['low'].values
@@ -26,20 +26,30 @@ def generate_signals(prices):
     r2 = pivot + (daily_high - daily_low)
     s2 = pivot - (daily_high - daily_low)
     
-    # Align pivot levels to 12h timeframe
+    # Align pivot levels to 4h timeframe
     pivot_aligned = align_htf_to_ltf(prices, daily, pivot)
     r1_aligned = align_htf_to_ltf(prices, daily, r1)
     s1_aligned = align_htf_to_ltf(prices, daily, s1)
     r2_aligned = align_htf_to_ltf(prices, daily, r2)
     s2_aligned = align_htf_to_ltf(prices, daily, s2)
     
-    # Volume filter: current 12h volume > 1.5x 15-period average volume
-    vol_ma = pd.Series(volume).rolling(window=15, min_periods=15).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    # Volume filter: current 4h volume > 1.3x 20-period average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.3 * vol_ma)
     
-    # Range filter: avoid trading when price is within 0.4% of pivot
+    # Range filter: avoid trading when price is within 0.3% of pivot
     price_to_pivot = np.abs(close - pivot_aligned) / pivot_aligned
-    range_filter = price_to_pivot > 0.004
+    range_filter = price_to_pivot > 0.003
+    
+    # Bollinger Band width filter to avoid choppy markets (20-period)
+    bb_ma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_ma + (2 * bb_std)
+    bb_lower = bb_ma - (2 * bb_std)
+    bb_width = (bb_upper - bb_lower) / bb_ma
+    # Only trade when BB width is above 20th percentile (avoid low volatility chop)
+    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=20).rank(pct=True).values
+    volatility_filter = bb_width_percentile > 0.2
     
     signals = np.zeros(n)
     
@@ -47,12 +57,13 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(s2_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(bb_width_percentile[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade when volume filter and range filter both pass
-        if volume_filter[i] and range_filter[i]:
+        # Only trade when volume filter, range filter, and volatility filter all pass
+        if volume_filter[i] and range_filter[i] and volatility_filter[i]:
             # Long conditions: price breaks above R2 with volume (strong breakout)
             if close[i] > r2_aligned[i]:
                 signals[i] = 0.25
@@ -72,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_R1_S1_R2_S2_Breakout_Volume_RangeFilter"
-timeframe = "12h"
+name = "4h_Pivot_R1_S1_R2_S2_Breakout_Volume_RangeFilter_VolatilityFilter"
+timeframe = "4h"
 leverage = 1.0
