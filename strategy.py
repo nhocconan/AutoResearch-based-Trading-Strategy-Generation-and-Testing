@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band Breakout with 1d ATR Regime Filter and Volume Spike
-# Long when price breaks above 6h BB upper (20,2.0) + 1d ATR(14) > 1.5x 50-period MA ATR + volume > 2.0x 20-period avg volume
-# Short when price breaks below 6h BB lower (20,2.0) + same regime + volume filter
-# Uses Bollinger Bands for volatility-based breakouts. ATR regime ensures we only trade when volatility is expanding (avoiding low-vol chop).
-# Volume spike confirms institutional interest. Designed for low trade frequency (15-30/year) to minimize fee drag.
-# Works in bull markets (breakouts continue) and bear markets (volatility expansions on downside) by requiring expanding volatility regime.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d volume spike and choppiness regime filter
+# Long when price breaks above 1d Camarilla R3 level + volume > 2x 24-period avg + choppiness > 61.8 (range)
+# Short when price breaks below 1d Camarilla S3 level + volume > 2x 24-period avg + choppiness > 61.8 (range)
+# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (12-30/year).
+# Camarilla levels provide intraday support/resistance. Volume spike confirms breakout strength.
+# Choppiness filter ensures we only trade in ranging markets where mean reversion at extremes works.
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,57 +26,67 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d Indicator: ATR(14) for volatility regime ===
+    # === 1d Indicator: Camarilla Pivot Levels (R3, S3) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
+    # Calculate pivot point
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels
+    r3 = pivot + (range_1d * 1.1 / 4)
+    s3 = pivot - (range_1d * 1.1 / 4)
+    
+    # Align to lower timeframe (12h)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # === 12h Indicator: Choppiness Index (14-period) ===
+    chop_window = 14
+    atr_12h = np.zeros(n)
+    tr = np.zeros(n)
+    
     # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])
+    high_shift = np.roll(high, 1)
+    low_shift = np.roll(low, 1)
+    close_shift = np.roll(close, 1)
+    
+    high_shift[0] = high[0]
+    low_shift[0] = low[0]
+    close_shift[0] = close[0]
+    
+    tr1 = high - low
+    tr2 = np.abs(high - close_shift)
+    tr3 = np.abs(low - close_shift)
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # ATR calculation (Wilder's smoothing)
-    atr_period = 14
-    alpha = 1.0 / atr_period
-    atr = np.zeros_like(tr)
-    atr[atr_period-1] = np.mean(tr[:atr_period])
-    for i in range(atr_period, len(tr)):
-        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    # ATR (Wilder's smoothing)
+    atr_12h[chop_window-1] = np.mean(tr[:chop_window])
+    for i in range(chop_window, n):
+        atr_12h[i] = (atr_12h[i-1] * (chop_window-1) + tr[i]) / chop_window
     
-    # ATR moving average (50-period) for regime comparison
-    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    # Highest high and lowest low over chop_window
+    hh = pd.Series(high).rolling(window=chop_window, min_periods=chop_window).max().values
+    ll = pd.Series(low).rolling(window=chop_window, min_periods=chop_window).min().values
     
-    # Volatility regime: ATR > 1.5x its 50-period MA (expanding volatility)
-    vol_regime = atr > (atr_ma * 1.5)
-    vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime)
+    # Choppiness Index
+    chop = np.zeros(n)
+    sum_atr = pd.Series(atr_12h).rolling(window=chop_window, min_periods=chop_window).sum().values
+    chop = 100 * np.log10(sum_atr / np.log10(chop_window) / (hh - ll))
+    chop = np.where((hh - ll) != 0, chop, 50.0)  # avoid division by zero
     
-    # === 6h Indicator: Bollinger Bands (20,2.0) ===
-    bb_window = 20
-    bb_std = 2.0
-    
-    # Basis (SMA)
-    basis = pd.Series(close).rolling(window=bb_window, min_periods=bb_window).mean().values
-    # Standard deviation
-    bb_std_dev = pd.Series(close).rolling(window=bb_window, min_periods=bb_window).std().values
-    # Upper and lower bands
-    upper_band = basis + (bb_std_dev * bb_std)
-    lower_band = basis - (bb_std_dev * bb_std)
-    
-    # Volume SMA for confirmation (20-period)
-    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume SMA for confirmation (using 24-period = 2 days of 12h bars)
+    vol_sma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(bb_window, 50) + 20  # BB(20) + ATR MA(50) + volume(20)
+    warmup = max(chop_window, 24) + 5  # Choppiness(14) + volume(24) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -84,29 +94,29 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2.0x 20-period volume SMA (strong spike)
-        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
+        # Volume filter: current volume > 2x 24-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_24[i] * 2.0)
         
         # Skip if any required data is NaN
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
-            np.isnan(vol_regime_aligned[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(chop[i]) or np.isnan(vol_sma_24[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 6h Bollinger Band upper (20,2.0)
-        # 2. Volatility regime: 1d ATR > 1.5x 50-period MA ATR (expanding volatility)
-        # 3. Volume confirmation (>2.0x average volume)
-        if (close[i] > upper_band[i]) and \
-           vol_regime_aligned[i] and vol_confirm:
+        # 1. Price breaks above 1d Camarilla R3 level
+        # 2. Volume confirmation
+        # 3. Choppiness > 61.8 (ranging market)
+        if (close[i] > r3_aligned[i]) and \
+           vol_confirm and (chop[i] > 61.8):
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 6h Bollinger Band lower (20,2.0)
-        # 2. Volatility regime: 1d ATR > 1.5x 50-period MA ATR (expanding volatility)
-        # 3. Volume confirmation (>2.0x average volume)
-        elif (close[i] < lower_band[i]) and \
-             vol_regime_aligned[i] and vol_confirm:
+        # 1. Price breaks below 1d Camarilla S3 level
+        # 2. Volume confirmation
+        # 3. Choppiness > 61.8 (ranging market)
+        elif (close[i] < s3_aligned[i]) and \
+             vol_confirm and (chop[i] > 61.8):
             signals[i] = -0.25
         
         else:
@@ -114,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_BB20_2.0_1dATR_Regime_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_1dVolSpike_Chop_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
