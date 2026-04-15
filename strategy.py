@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d Williams %R (14) for overbought/oversold extremes
-# combined with 1d EMA(50) trend filter and 6h volume confirmation.
-# In bear markets (price < EMA50), short when Williams %R > -20 (overbought bounce).
-# In bull markets (price > EMA50), long when Williams %R < -80 (oversold bounce).
-# Volume filter ensures momentum validity. Designed for low trade frequency 
-# (12-30/year) to minimize fee drag while adapting to trend via EMA50.
+# Hypothesis: 12h strategy using 1d Camarilla pivot levels (R1/S1 for mean reversion, R2/S2 for breakout)
+# combined with 1w EMA200 trend filter and volume confirmation. In ranging markets (price between R1-S1),
+# fade extremes; in trending markets (price outside R2-S2), breakout continuation. Volume filter ensures
+# momentum validity. Designed for low trade frequency (12-30/year) to minimize fee drag while adapting
+# to regime via pivot structure. Works in both bull and bear via regime-adaptive logic.
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,25 +23,38 @@ def generate_signals(prices):
     # Pre-compute session hours to avoid datetime operations in loop
     hours = pd.DatetimeIndex(open_time).hour
     
-    # Get 1d HTF data once before loop
+    # Get 1d and 1w HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 30 or len(df_1w) < 30:
         return np.zeros(n)
     
-    # === 1d Indicators: Williams %R (14) and EMA(50) ===
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high_1d = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
-    lowest_low_1d = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
-    williams_r_1d = (highest_high_1d - df_1d['close'].values) / (highest_high_1d - lowest_low_1d) * -100
-    # Handle division by zero (when high == low)
-    williams_r_1d = np.where((highest_high_1d - lowest_low_1d) == 0, -50, williams_r_1d)
+    # === 1d Indicators: Camarilla Pivot Levels (using typical price) ===
+    # Typical price = (high + low + close) / 3
+    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
     
-    # 1d EMA(50) for trend bias
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate pivot and support/resistance levels
+    pivot_1d = typical_price_1d
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    range_1d = high_1d - low_1d
     
-    # Align to 6h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r_1d)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Camarilla levels
+    r1_1d = pivot_1d + (range_1d * 1.1 / 12)
+    s1_1d = pivot_1d - (range_1d * 1.1 / 12)
+    r2_1d = pivot_1d + (range_1d * 1.1 / 6)
+    s2_1d = pivot_1d - (range_1d * 1.1 / 6)
+    
+    # Align to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    
+    # === 1w Indicators: Trend Filter ===
+    # 1w EMA(200) for long-term trend bias
+    ema_200_1w = pd.Series(df_1w['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
     signals = np.zeros(n)
     
@@ -56,36 +68,49 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current volume > 1.5x 20-period volume SMA
+        # Volume filter: current volume > 2.0x 20-period volume SMA
         vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
+        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
         
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
+            np.isnan(ema_200_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         # === REGIME DETECTION ===
-        # Bull market: price above EMA50
-        # Bear market: price below EMA50
-        is_bull = close[i] > ema_50_1d_aligned[i]
-        is_bear = close[i] < ema_50_1d_aligned[i]
+        # Ranging market: price between R1 and S1
+        # Trending market: price outside R2 and S2
+        # Transition zone: between R1-S1 and R2-S2 (no trade)
+        
+        in_range = (s1_aligned[i] <= close[i] <= r1_aligned[i])
+        in_uptrend = close[i] > r2_aligned[i]
+        in_downtrend = close[i] < s2_aligned[i]
         
         # === LONG CONDITIONS ===
-        # Only in bull market: long when oversold (Williams %R < -80)
-        if is_bull and williams_r_aligned[i] < -80 and vol_confirm:
-            signals[i] = 0.25
+        # 1. In ranging market AND price at S1 support (mean reversion long)
+        # 2. OR in uptrend AND breakout above R2 (continuation long)
+        # 3. Volume confirmation
+        if vol_confirm:
+            if (in_range and close[i] <= s1_aligned[i] * 1.001) or \
+               (in_uptrend and close[i] > r2_aligned[i]):
+                signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # Only in bear market: short when overbought (Williams %R > -20)
-        elif is_bear and williams_r_aligned[i] > -20 and vol_confirm:
-            signals[i] = -0.25
+        # 1. In ranging market AND price at R1 resistance (mean reversion short)
+        # 2. OR in downtrend AND breakdown below S2 (continuation short)
+        # 3. Volume confirmation
+        elif vol_confirm:
+            if (in_range and close[i] >= r1_aligned[i] * 0.999) or \
+               (in_downtrend and close[i] < s2_aligned[i]):
+                signals[i] = -0.25
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "6h_WilliamsR_EMA50_VolFilter_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_R2S2_EMA200_VolFilter_v1"
+timeframe = "12h"
 leverage = 1.0
