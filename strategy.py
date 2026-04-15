@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA(34) trend filter and volume confirmation
-# Long when price breaks above 1d Donchian upper band + 1w EMA34 uptrend + volume > 1.5x 20-period avg
-# Short when price breaks below 1d Donchian lower band + 1w EMA34 downtrend + volume > 1.5x 20-period avg
-# Uses discrete position sizing (0.25) to balance return and drawdown control.
-# 1w EMA34 provides strong trend filter reducing whipsaws in both bull and bear markets.
-# Volume threshold (1.5x) targets ~15-25 trades/year to minimize fee drag on 1d timeframe.
+# Hypothesis: 6h Bollinger Band squeeze breakout with 12h EMA trend filter and volume confirmation
+# Long when price breaks above upper BB after squeeze (BBW < 20th percentile) + 12h EMA50 uptrend + volume > 1.5x avg
+# Short when price breaks below lower BB after squeeze + 12h EMA50 downtrend + volume confirmation
+# Uses Bollinger Band width percentile to identify low volatility squeezes that precede breakouts
+# Works in both bull/bear markets by capturing expansion phases after contraction
+# Target: 12-30 trades/year via strict squeeze + breakout + volume confluence
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,22 +24,29 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1w HTF data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 40:
+    # Get 12h HTF data once before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 60:
         return np.zeros(n)
     
-    # === 1w Indicator: EMA(34) ===
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # === 12h Indicator: EMA50 for trend filter ===
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # === 1d Donchian Channel (20-period) ===
-    period = 20
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    upper_band = highest_high
-    lower_band = lowest_low
+    # === 6h Bollinger Bands (20, 2.0) ===
+    bb_period = 20
+    bb_std = 2.0
+    sma_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_band = sma_20 + (bb_std * std_20)
+    lower_band = sma_20 - (bb_std * std_20)
+    bb_width = (upper_band - lower_band) / sma_20  # Normalized BB width
+    
+    # BB width percentile lookback (50 periods ~ ~6-7 days on 6h)
+    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=30).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
+    ).values
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -47,7 +54,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(period, 20, 34) + 5  # Donchian(20) + volume(20) + EMA(34) buffer
+    warmup = max(bb_period, 50) + 20  # BB(20) + BB width percentile(50) + volume(20)
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -60,24 +67,31 @@ def generate_signals(prices):
         
         # Skip if any required data is NaN
         if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_sma_20[i])):
+            np.isnan(sma_20[i]) or np.isnan(std_20[i]) or
+            np.isnan(bb_width_percentile[i]) or np.isnan(ema_50_12h_aligned[i]) or
+            np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
+        # === SQUEEZE CONDITION: BB width below 20th percentile (low volatility) ===
+        is_squeeze = bb_width_percentile[i] < 0.20
+        
         # === LONG CONDITIONS ===
-        # 1. Price breaks above upper band (close > upper_band)
-        # 2. 1w EMA34 uptrend (price > EMA)
-        # 3. Volume confirmation
-        if (close[i] > upper_band[i]) and \
-           (close[i] > ema_34_1w_aligned[i]) and vol_confirm:
+        # 1. Price breaks above upper BB (close > upper_band)
+        # 2. Was in squeeze (low volatility breakout)
+        # 3. 12h EMA50 uptrend (price > EMA50)
+        # 4. Volume confirmation
+        if (close[i] > upper_band[i]) and is_squeeze and \
+           (close[i] > ema_50_12h_aligned[i]) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below lower band (close < lower_band)
-        # 2. 1w EMA34 downtrend (price < EMA)
-        # 3. Volume confirmation
-        elif (close[i] < lower_band[i]) and \
-             (close[i] < ema_34_1w_aligned[i]) and vol_confirm:
+        # 1. Price breaks below lower BB (close < lower_band)
+        # 2. Was in squeeze (low volatility breakout)
+        # 3. 12h EMA50 downtrend (price < EMA50)
+        # 4. Volume confirmation
+        elif (close[i] < lower_band[i]) and is_squeeze and \
+             (close[i] < ema_50_12h_aligned[i]) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -85,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wEMA34_Volume_Filter_v1"
-timeframe = "1d"
+name = "6h_BB_Squeeze_Breakout_12hEMA50_Volume_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
