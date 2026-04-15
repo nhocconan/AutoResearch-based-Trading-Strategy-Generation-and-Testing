@@ -26,21 +26,21 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate 1d RSI(14) for momentum filter
-    delta = pd.Series(df_1d['close']).diff().values
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14_1d = 100 - (100 / (1 + rs))
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
+    # Calculate daily Camarilla pivot levels (using prior day's OHLC)
+    prior_high = df_1d['high'].shift(1).values
+    prior_low = df_1d['low'].shift(1).values
+    prior_close = df_1d['close'].shift(1).values
     
-    # Calculate 6h Donchian(20) breakout levels
-    donchian_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    camarilla_pivot = (prior_high + prior_low + prior_close) / 3.0
+    camarilla_r3 = camarilla_pivot + 1.1 * (prior_high - prior_low)
+    camarilla_s3 = camarilla_pivot - 1.1 * (prior_high - prior_low)
     
-    # Calculate 6h volume ratio (current vs 20-period average)
+    # Align Camarilla levels to 12h
+    camarilla_pivot_12h = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    camarilla_r3_12h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_12h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Calculate 12h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
@@ -48,42 +48,42 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(rsi_14_1d_aligned[i]) or 
-            np.isnan(donchian_high_20[i]) or np.isnan(donchian_low_20[i]) or 
+        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(camarilla_pivot_12h[i]) or 
+            np.isnan(camarilla_r3_12h[i]) or np.isnan(camarilla_s3_12h[i]) or 
             np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
         # Volatility regime filter: only trade when daily ATR is elevated (> 0.6% of price)
+        # This avoids low-volatility chop and focuses on momentum/trend days
         vol_regime = atr_14_1d_aligned[i] > 0.006 * close[i]
         
-        # Momentum filter: RSI between 30 and 70 to avoid extremes
-        momentum_filter = (rsi_14_1d_aligned[i] > 30) & (rsi_14_1d_aligned[i] < 70)
-        
         # Long conditions:
-        # 1. Price breaks above 6h Donchian(20) high with volume
-        # 2. Daily volatility regime filter (avoid chop)
-        # 3. Daily momentum filter (avoid overbought/oversold)
-        if (close[i] > donchian_high_20[i] and
+        # 1. Price above Camarilla pivot (bullish bias)
+        # 2. Price breaks above Camarilla R3 with volume (bullish continuation)
+        # 3. Volume confirmation: volume > 1.5x average
+        # 4. Daily volatility regime filter (avoid chop)
+        if (close[i] > camarilla_pivot_12h[i] and
+            close[i] > camarilla_r3_12h[i] and
             volume_ratio[i] > 1.5 and
-            vol_regime and
-            momentum_filter):
+            vol_regime):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Price breaks below 6h Donchian(20) low with volume
-        # 2. Daily volatility regime filter
-        # 3. Daily momentum filter
-        elif (close[i] < donchian_low_20[i] and
+        # 1. Price below Camarilla pivot (bearish bias)
+        # 2. Price breaks below Camarilla S3 with volume (bearish continuation)
+        # 3. Volume confirmation: volume > 1.5x average
+        # 4. Daily volatility regime filter
+        elif (close[i] < camarilla_pivot_12h[i] and
+              close[i] < camarilla_s3_12h[i] and
               volume_ratio[i] > 1.5 and
-              vol_regime and
-              momentum_filter):
+              vol_regime):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "6h_Donchian20_Volume_VolRegime_MomentumFilter_v1"
-timeframe = "6h"
+name = "12h_Vol_Regime_Camarilla_Pivot_R3S3_Breakout_v1"
+timeframe = "12h"
 leverage = 1.0
