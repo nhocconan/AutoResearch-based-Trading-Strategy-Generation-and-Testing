@@ -13,75 +13,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily HTF data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h HTF data once before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    daily_close = df_1d['close'].values
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_volume = df_1d['volume'].values
+    h12_close = df_12h['close'].values
+    h12_high = df_12h['high'].values
+    h12_low = df_12h['low'].values
+    h12_volume = df_12h['volume'].values
     
-    # Calculate daily pivot points (standard floor trader's pivots)
-    pivot = (daily_high + daily_low + daily_close) / 3.0
-    r1 = 2 * pivot - daily_low
-    s1 = 2 * pivot - daily_high
+    # Calculate 12h Donchian channels (20-period) for trend filter
+    highest_20_12h = pd.Series(h12_high).rolling(window=20, min_periods=20).max().values
+    lowest_20_12h = pd.Series(h12_low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate daily ATR(14) for volatility filter
-    tr1 = pd.Series(daily_high - daily_low)
-    tr2 = pd.Series(np.abs(daily_high - np.concatenate([[daily_close[0]], daily_close[:-1]])))
-    tr3 = pd.Series(np.abs(daily_low - np.concatenate([[daily_close[0]], daily_close[:-1]])))
+    # Calculate 12h ATR(14) for volatility regime filter
+    tr1 = pd.Series(h12_high - h12_low)
+    tr2 = pd.Series(np.abs(h12_high - np.concatenate([[h12_close[0]], h12_close[:-1]])))
+    tr3 = pd.Series(np.abs(h12_low - np.concatenate([[h12_close[0]], h12_close[:-1]])))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14 = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14_12h = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align HTF indicators to 4h timeframe with proper delay
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    atr_14_4h = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Align HTF indicators to 6h timeframe with proper delay
+    highest_20_12h_6h = align_htf_to_ltf(prices, df_12h, highest_20_12h)
+    lowest_20_12h_6h = align_htf_to_ltf(prices, df_12h, lowest_20_12h)
+    atr_14_12h_6h = align_htf_to_ltf(prices, df_12h, atr_14_12h)
     
-    # Calculate 4h Donchian channels (20-period) for breakout signals
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 6h Donchian channels (10-period) for entry timing
+    highest_10_6h = pd.Series(high).rolling(window=10, min_periods=10).max().values
+    lowest_10_6h = pd.Series(low).rolling(window=10, min_periods=10).min().values
     
-    # Calculate 4h volume ratio (current vs 20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ratio = volume / (vol_ma_20 + 1e-10)
+    # Calculate 6h volume ratio (current vs 20-period average)
+    vol_ma_20_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ratio = volume / (vol_ma_20_6h + 1e-10)
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
-            np.isnan(atr_14_4h[i]) or np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
+        if (np.isnan(highest_20_12h_6h[i]) or np.isnan(lowest_20_12h_6h[i]) or 
+            np.isnan(atr_14_12h_6h[i]) or np.isnan(highest_10_6h[i]) or np.isnan(lowest_10_6h[i]) or 
             np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions:
-        # 1. 4h price breaks above R1 with volume confirmation → long
-        # 2. 4h price breaks below S1 with volume confirmation → short
-        # 3. Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
-        # 4. Volume confirmation: volume > 1.3x average
-        # 5. Discrete position sizing: 0.25
+        # Regime filter: 12h ATR > 1.5% of price (avoid low volatility chop)
+        volatility_regime = atr_14_12h_6h[i] > 0.015 * close[i]
         
-        # Long conditions: 4h breakout above R1
-        if (close[i] > r1_4h[i] and            # 4h price above R1 pivot
-            volume_ratio[i] > 1.3 and          # Volume confirmation
-            atr_14_4h[i] > 0.005 * close[i]):  # Volatility filter
+        # Entry conditions with discrete sizing 0.25
+        # Long: 6h breakout above 10-period high + 12h uptrend + volume + volatility regime
+        if (close[i] > highest_10_6h[i] and            # 6h breakout above recent high
+            close[i] > highest_20_12h_6h[i] and       # 12h uptrend: price above 12h 20-period high
+            volume_ratio[i] > 1.4 and                 # Volume confirmation
+            volatility_regime):                       # Sufficient volatility
             signals[i] = 0.25
             
-        # Short conditions: 4h breakdown below S1
-        elif (close[i] < s1_4h[i] and          # 4h price below S1 pivot
-              volume_ratio[i] > 1.3 and        # Volume confirmation
-              atr_14_4h[i] > 0.005 * close[i]): # Volatility filter
+        # Short: 6h breakdown below 10-period low + 12h downtrend + volume + volatility regime
+        elif (close[i] < lowest_10_6h[i] and          # 6h breakdown below recent low
+              close[i] < lowest_20_12h_6h[i] and      # 12h downtrend: price below 12h 20-period low
+              volume_ratio[i] > 1.4 and               # Volume confirmation
+              volatility_regime):                     # Sufficient volatility
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Pivot_R1_S1_Breakout_Volume_ATR_Filter"
-timeframe = "4h"
+name = "6h_12h_Donchian_Breakout_Trend_Filter_Volume"
+timeframe = "6h"
 leverage = 1.0
