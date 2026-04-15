@@ -94,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyEMA_RSI_Volume_Donchian_Breakout"
+name = "4h_DailyEMA_RSI_Volume_Donchian_Breakout_v2"
 timeframe = "4h"
 leverage = 1.0
