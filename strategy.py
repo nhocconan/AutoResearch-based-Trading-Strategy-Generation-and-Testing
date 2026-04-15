@@ -1,17 +1,18 @@
+# 1d_1w_Range_Breakout_Volume_ADX
+# Hypothesis: Daily breakouts above/below previous week's high/low, confirmed by volume and weekly ADX > 25.
+# Works in bull markets (breakouts up) and bear markets (breakouts down). Target: 50-150 total trades.
+# Uses 1d primary timeframe and 1h for HTF (as per new experiment).
+# Weekly ADX ensures we only trade in trending markets, avoiding whipsaws in ranging conditions.
+# Volume confirmation ensures breakouts are genuine.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h 1-week Donchian Breakout with Volume Confirmation and ATR Filter
-# Uses weekly high/low from previous week as support/resistance. Breakouts are traded
-# only with volume > 1.5x median volume and ATR > 0.5 * ATR(50) to filter low volatility.
-# Works in bull markets (breakouts up) and bear markets (breakouts down).
-# Target: 50-150 total trades over 4 years.
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,12 +20,13 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data for previous week's high/low
+    # Load weekly data for previous week's high/low and ADX
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    if len(df_1w) < 20:
         return np.zeros(n)
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # Previous week's high and low (shifted by 1 to avoid look-ahead)
     prev_high_1w = np.roll(high_1w, 1)
@@ -32,57 +34,78 @@ def generate_signals(prices):
     prev_high_1w[0] = np.nan
     prev_low_1w[0] = np.nan
     
-    # Align previous week's high/low to 4h timeframe
+    # Align previous week's high/low to daily timeframe
     prev_high_1w_aligned = align_htf_to_ltf(prices, df_1w, prev_high_1w)
     prev_low_1w_aligned = align_htf_to_ltf(prices, df_1w, prev_low_1w)
     
-    # Calculate ATR (14-period) on 4h
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # Calculate ADX (14-period) on weekly data
+    # True Range
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
+    
+    # Directional Movement
+    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), 
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), 
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
+    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align ADX to daily timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25
+    base_size = 0.25  # Position size
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
         if (np.isnan(prev_high_1w_aligned[i]) or np.isnan(prev_low_1w_aligned[i]) or
-            np.isnan(atr[i]) or np.isnan(atr_ma[i])):
+            np.isnan(adx_aligned[i])):
             continue
         
-        # Volatility filter: avoid low volatility periods
-        if atr[i] < 0.5 * atr_ma[i]:
-            continue
-        
-        # Long entry: price breaks above previous week's high + volume confirmation
+        # Long entry: price breaks above previous week's high + volume confirmation + ADX > 25
         if (close[i] > prev_high_1w_aligned[i] and
             volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
+            adx_aligned[i] > 25 and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below previous week's low + volume confirmation
+        # Short entry: price breaks below previous week's low + volume confirmation + ADX > 25
         elif (close[i] < prev_low_1w_aligned[i] and
               volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
+              adx_aligned[i] > 25 and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse breakout
-        elif position == 1 and close[i] < prev_low_1w_aligned[i]:
+        # Exit: reverse breakout or ADX < 20 (ranging market)
+        elif position == 1 and (close[i] < prev_low_1w_aligned[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > prev_high_1w_aligned[i]:
+        elif position == -1 and (close[i] > prev_high_1w_aligned[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_1w_Donchian_Breakout_Volume_ATR"
-timeframe = "4h"
+name = "1d_1w_Range_Breakout_Volume_ADX"
+timeframe = "1d"
 leverage = 1.0
