@@ -30,7 +30,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1d Donchian(20) channels
+    # Calculate daily Donchian(20) channels
     donchian_high_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
     donchian_low_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
     donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
