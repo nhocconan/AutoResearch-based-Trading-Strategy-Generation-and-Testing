@@ -13,12 +13,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d HTF data once before loop
+    # Get 1d HTF data once before loop (daily ATR and Camarilla pivots)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d ATR(14) for volatility regime filter
+    # Calculate daily ATR(14) for volatility regime filter
     tr1 = df_1d['high'] - df_1d['low']
     tr2 = np.abs(df_1d['high'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
     tr3 = np.abs(df_1d['low'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
@@ -26,62 +26,73 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate 12h ATR(14) for volatility entry filter
-    tr1_12h = high - low
-    tr2_12h = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3_12h = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
-    atr_14_12h = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate daily Camarilla pivot levels (using prior day's OHLC)
+    prior_high = df_1d['high'].shift(1).values
+    prior_low = df_1d['low'].shift(1).values
+    prior_close = df_1d['close'].shift(1).values
     
-    # Calculate 12h volume ratio (current vs 20-period average)
+    camarilla_pivot = (prior_high + prior_low + prior_close) / 3.0
+    camarilla_r3 = camarilla_pivot + 1.1 * (prior_high - prior_low)
+    camarilla_s3 = camarilla_pivot - 1.1 * (prior_high - prior_low)
+    camarilla_r4 = camarilla_pivot + 1.5 * (prior_high - prior_low)
+    camarilla_s4 = camarilla_pivot - 1.5 * (prior_high - prior_low)
+    
+    # Align Camarilla levels to 4h
+    camarilla_pivot_4h = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    camarilla_r3_4h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_4h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_r4_4h = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_4h = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    
+    # Calculate 4h ATR(14) for volatility entry filter
+    tr1_4h = high - low
+    tr2_4h = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    tr3_4h = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
+    atr_14_4h = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate 4h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
-    
-    # Calculate 12h RSI(14) for momentum filter
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(atr_14_12h[i]) or 
-            np.isnan(volume_ratio[i]) or np.isnan(rsi[i])):
+        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(camarilla_pivot_4h[i]) or 
+            np.isnan(camarilla_r3_4h[i]) or np.isnan(camarilla_s3_4h[i]) or 
+            np.isnan(camarilla_r4_4h[i]) or np.isnan(camarilla_s4_4h[i]) or 
+            np.isnan(atr_14_4h[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
         # Volatility regime filter: only trade when daily ATR is elevated (> 0.8% of price)
+        # This avoids low-volatility chop and focuses on momentum/trend days
         vol_regime = atr_14_1d_aligned[i] > 0.008 * close[i]
         
         # Long conditions:
-        # 1. Price above 12h EMA34 (bullish bias)
-        # 2. RSI > 50 (bullish momentum)
-        # 3. Volume confirmation: volume > 1.5x average
-        # 4. 12h ATR > 0.5% of price (ensure sufficient volatility for move)
+        # 1. Price above Camarilla pivot (bullish bias)
+        # 2. Price breaks above Camarilla R3 with volume (bullish continuation)
+        # 3. Volume confirmation: volume > 1.5x average (stricter to reduce trades)
+        # 4. 4h ATR > 0.5% of price (ensure sufficient volatility for move)
         # 5. Daily volatility regime filter (avoid chop)
-        ema34_12h = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
-        if (close[i] > ema34_12h[i] and
-            rsi[i] > 50 and
+        if (close[i] > camarilla_pivot_4h[i] and
+            close[i] > camarilla_r3_4h[i] and
             volume_ratio[i] > 1.5 and
-            atr_14_12h[i] > 0.005 * close[i] and
+            atr_14_4h[i] > 0.005 * close[i] and
             vol_regime):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Price below 12h EMA34 (bearish bias)
-        # 2. RSI < 50 (bearish momentum)
+        # 1. Price below Camarilla pivot (bearish bias)
+        # 2. Price breaks below Camarilla S3 with volume (bearish continuation)
         # 3. Volume confirmation: volume > 1.5x average
-        # 4. 12h ATR > 0.5% of price
+        # 4. 4h ATR > 0.5% of price
         # 5. Daily volatility regime filter
-        elif (close[i] < ema34_12h[i] and
-              rsi[i] < 50 and
+        elif (close[i] < camarilla_pivot_4h[i] and
+              close[i] < camarilla_s3_4h[i] and
               volume_ratio[i] > 1.5 and
-              atr_14_12h[i] > 0.005 * close[i] and
+              atr_14_4h[i] > 0.005 * close[i] and
               vol_regime):
             signals[i] = -0.25
         else:
@@ -89,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA34_RSI_Volume_Regime_Filter_v1"
-timeframe = "12h"
+name = "4h_Vol_Regime_Camarilla_Pivot_R3S3_Breakout_v2"
+timeframe = "4h"
 leverage = 1.0
