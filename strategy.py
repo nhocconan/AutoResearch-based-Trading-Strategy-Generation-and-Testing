@@ -3,98 +3,67 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 1h EMA crossover with 4h trend filter and session timing
+# Uses 4h EMA50 for trend direction, 1h EMA8/EMA21 for entry timing
+# Session filter (08-20 UTC) reduces noise in ranging markets
+# Discrete position sizing (0.20) controls drawdown and fee drag
+# Target: 15-35 trades/year/symbol to avoid fee drag
+
+name = "1h_EMA8_21_4hEMA50_Session_v1"
+timeframe = "1h"
+leverage = 1.0
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 12h HTF data once before loop (as per experiment spec)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 4h HTF data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 12h ATR(14) for volatility regime filter
-    tr1 = df_12h['high'] - df_12h['low']
-    tr2 = np.abs(df_12h['high'] - np.concatenate([[df_12h['close'].iloc[0]], df_12h['close'].iloc[:-1]]))
-    tr3 = np.abs(df_12h['low'] - np.concatenate([[df_12h['close'].iloc[0]], df_12h['close'].iloc[:-1]]))
-    tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_12h = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_14_12h)
+    # Calculate 4h EMA50 for trend filter
+    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate 12h EMA(34) for trend filter
-    ema_34_12h = pd.Series(df_12h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Calculate 1h EMAs for entry timing
+    ema_8 = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
+    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Calculate 12h RSI(14) for momentum filter
-    delta = pd.Series(df_12h['close'].values).diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14_12h = 100 - (100 / (1 + rs))
-    rsi_14_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_14_12h)
-    
-    # Calculate 4h Donchian(20) breakout levels
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    
-    # Calculate 4h volume ratio (current vs 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / (vol_ma + 1e-10)
+    # Pre-compute session hours (08-20 UTC) for efficiency
+    hours = prices.index.hour  # prices.index is DatetimeIndex
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     
-    for i in range(100, n):
-        # Skip if any required data is NaN
-        if (np.isnan(atr_14_12h_aligned[i]) or np.isnan(ema_34_12h_aligned[i]) or 
-            np.isnan(rsi_14_12h_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ratio[i])):
+    for i in range(50, n):
+        # Skip if 4h EMA not ready
+        if np.isnan(ema_50_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade when 12h ATR is elevated (> 0.5% of price)
-        vol_filter = atr_14_12h_aligned[i] > 0.005 * close[i]
+        # Session filter: trade only 08-20 UTC
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
         
-        # Volume confirmation: require above average volume
-        vol_confirm = vol_ratio[i] > 1.2
-        
-        # Long conditions:
-        # 1. Price breaks above 4h Donchian upper band (breakout)
-        # 2. Price above 12h EMA34 (bullish bias)
-        # 3. 12h RSI > 50 (bullish momentum)
-        # 4. Volatility filter
-        # 5. Volume confirmation
-        if (close[i] > highest_high[i] and 
-            close[i] > ema_34_12h_aligned[i] and 
-            rsi_14_12h_aligned[i] > 50 and 
-            vol_filter and 
-            vol_confirm):
-            signals[i] = 0.25
+        # Long: 4h uptrend + 1h bullish crossover
+        if (close[i] > ema_50_4h_aligned[i] and  # 4h uptrend
+            ema_8[i] > ema_21[i] and             # 1h bullish momentum
+            ema_8[i-1] <= ema_21[i-1]):          # bullish crossover
+            signals[i] = 0.20
             
-        # Short conditions:
-        # 1. Price breaks below 4h Donchian lower band (breakdown)
-        # 2. Price below 12h EMA34 (bearish bias)
-        # 3. 12h RSI < 50 (bearish momentum)
-        # 4. Volatility filter
-        # 5. Volume confirmation
-        elif (close[i] < lowest_low[i] and 
-              close[i] < ema_34_12h_aligned[i] and 
-              rsi_14_12h_aligned[i] < 50 and 
-              vol_filter and 
-              vol_confirm):
-            signals[i] = -0.25
+        # Short: 4h downtrend + 1h bearish crossover
+        elif (close[i] < ema_50_4h_aligned[i] and  # 4h downtrend
+              ema_8[i] < ema_21[i] and             # 1h bearish momentum
+              ema_8[i-1] >= ema_21[i-1]):          # bearish crossover
+            signals[i] = -0.20
         else:
             signals[i] = 0.0
     
     return signals
-
-name = "4h_Donchian20_EMA34_RSI_VolFilter_12h"
-timeframe = "4h"
-leverage = 1.0
