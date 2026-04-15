@@ -3,11 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Williams %R extremes combined with 12h EMA20 trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions on daily timeframe for mean reversion entries.
-# EMA20 on 12h provides trend filter to avoid counter-trend trades in strong moves.
-# Volume confirmation ensures momentum validity. Designed for low trade frequency (15-25/year) to minimize fee drag.
-# Works in both bull and bear markets: mean reversion in ranges, trend-filtered entries in trends.
+# Hypothesis: 4h strategy using 1d Donchian channel breakout with volume confirmation and ATR-based stoploss
+# In ranging markets (price within Donchian bands), fade extremes at bands; in trending markets (price outside bands),
+# breakout continuation. Volume filter ensures momentum validity. Designed for low trade frequency 
+# (20-50/year) to minimize fee drag while adapting to regime via Donchian structure.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,28 +17,43 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
     # Pre-compute session hours to avoid datetime operations in loop
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    hours = pd.DatetimeIndex(open_time).hour
     
-    # Get 1d and 12h HTF data once before loop
+    # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_1d) < 20 or len(df_12h) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 1d Indicators: Williams %R (14-period) ===
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high_1d = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
-    lowest_low_1d = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
-    williams_r_1d = (highest_high_1d - df_1d['close'].values) / (highest_high_1d - lowest_low_1d + 1e-10) * -100
+    # === 1d Indicators: Donchian Channel (20-period) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Align to 12h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r_1d)
+    # Calculate Donchian upper and lower bands
+    upper_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: EMA(20) for trend filter ===
-    ema_20_12h = pd.Series(df_12h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
+    # Align to 4h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
+    
+    # === 4h Indicators: ATR for volatility and stoploss ===
+    # True Range components
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0  # first bar has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # ATR(14) - using Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    atr = np.zeros_like(tr)
+    atr[13] = np.mean(tr[1:14])  # seed with simple average
+    for i in range(14, n):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
     signals = np.zeros(n)
     
@@ -53,30 +67,48 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current volume > 1.5x 20-period volume SMA
+        # Volume filter: current volume > 2.0x 20-period volume SMA
         vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
+        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
         
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_20_12h_aligned[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
+        # === REGIME DETECTION ===
+        # Ranging market: price within Donchian bands
+        # Trending market: price outside Donchian bands
+        # Transition zone: at bands (no trade)
+        
+        in_range = (lower_aligned[i] < close[i] < upper_aligned[i])
+        above_upper = close[i] >= upper_aligned[i]
+        below_lower = close[i] <= lower_aligned[i]
+        
         # === LONG CONDITIONS ===
-        # Williams %R oversold (< -80) AND price above EMA20 (bullish bias)
-        if williams_r_aligned[i] < -80 and close[i] > ema_20_12h_aligned[i] and vol_confirm:
-            signals[i] = 0.25
+        # 1. In ranging market AND price at lower band (mean reversion long)
+        # 2. OR breakout above upper band (continuation long)
+        # 3. Volume confirmation
+        if vol_confirm:
+            if (in_range and close[i] <= lower_aligned[i] * 1.001) or \
+               (above_upper):
+                signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # Williams %R overbought (> -20) AND price below EMA20 (bearish bias)
-        elif williams_r_aligned[i] > -20 and close[i] < ema_20_12h_aligned[i] and vol_confirm:
-            signals[i] = -0.25
+        # 1. In ranging market AND price at upper band (mean reversion short)
+        # 2. OR breakdown below lower band (continuation short)
+        # 3. Volume confirmation
+        elif vol_confirm:
+            if (in_range and close[i] >= upper_aligned[i] * 0.999) or \
+               (below_lower):
+                signals[i] = -0.25
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "12h_WilliamsR_EMA20_VolumeFilter_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Volume_MeanRev_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
