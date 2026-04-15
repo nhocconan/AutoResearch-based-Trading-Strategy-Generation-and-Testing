@@ -13,69 +13,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session hours (08-20 UTC)
-    hours = prices.index.hour
-    
-    # Get 4h and 1d HTF data once before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 20 or len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 4h EMA(21) for trend filter
-    ema_21_4h = pd.Series(df_4h['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
+    # Calculate daily EMA(20) for short-term trend
+    ema_20_1d = pd.Series(df_1d['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # Calculate 1h Donchian(20) for entry timing
-    donchian_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate daily EMA(50) for medium-term trend
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 1h ATR(14) for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate daily ATR(14) for volatility filter
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
+    tr3 = np.abs(df_1d['low'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    
+    # Calculate daily RSI(14) for momentum/overbought-oversold
+    delta = pd.Series(df_1d['close'].values).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_14_1d = 100 - (100 / (1 + rs))
+    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d.values)
     
     signals = np.zeros(n)
     
     for i in range(100, n):
-        # Session filter: 08-20 UTC
-        if not (8 <= hours[i] <= 20):
-            signals[i] = 0.0
-            continue
-            
         # Skip if any required data is NaN
-        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(donchian_high_20[i]) or 
-            np.isnan(donchian_low_20[i]) or np.isnan(atr_14[i])):
+        if (np.isnan(ema_20_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(atr_14_1d_aligned[i]) or np.isnan(rsi_14_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when 1h ATR is elevated (> 0.5% of price)
-        vol_filter = atr_14[i] > 0.005 * close[i]
+        # Volatility filter: only trade when daily ATR is in normal range (avoid extreme volatility)
+        vol_filter = (atr_14_1d_aligned[i] > 0.008 * close[i]) & (atr_14_1d_aligned[i] < 0.03 * close[i])
+        
+        # Trend alignment: EMA20 above EMA50 for bullish bias, below for bearish bias
+        bullish_trend = ema_20_1d_aligned[i] > ema_50_1d_aligned[i]
+        bearish_trend = ema_20_1d_aligned[i] < ema_50_1d_aligned[i]
+        
+        # Momentum filter: RSI not extreme to avoid buying tops/selling bottoms
+        momentum_filter = (rsi_14_1d_aligned[i] > 30) & (rsi_14_1d_aligned[i] < 70)
         
         # Long conditions:
-        # 1. 4h EMA21 uptrend (price above EMA21)
-        # 2. Price breaks above 1h Donchian(20) high
-        # 3. Volatility filter
-        if (close[i] > ema_21_4h_aligned[i] and
-            close[i] > donchian_high_20[i] and
-            vol_filter):
-            signals[i] = 0.20
+        # 1. Bullish trend alignment
+        # 2. Price above EMA20 (confirming short-term strength)
+        # 3. Normal volatility
+        # 4. Healthy momentum
+        if (bullish_trend and
+            close[i] > ema_20_1d_aligned[i] and
+            vol_filter and
+            momentum_filter):
+            signals[i] = 0.25
             
         # Short conditions:
-        # 1. 4h EMA21 downtrend (price below EMA21)
-        # 2. Price breaks below 1h Donchian(20) low
-        # 3. Volatility filter
-        elif (close[i] < ema_21_4h_aligned[i] and
-              close[i] < donchian_low_20[i] and
-              vol_filter):
-            signals[i] = -0.20
+        # 1. Bearish trend alignment
+        # 2. Price below EMA20 (confirming short-term weakness)
+        # 3. Normal volatility
+        # 4. Healthy momentum
+        elif (bearish_trend and
+              close[i] < ema_20_1d_aligned[i] and
+              vol_filter and
+              momentum_filter):
+            signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1h_EMA21_4h_Donchian20_VolFilter_v1"
-timeframe = "1h"
+name = "6h_EMA20_EMA50_RSI_VolFilter_v1"
+timeframe = "6h"
 leverage = 1.0
