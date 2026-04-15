@@ -3,14 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and 12h ADX trend filter
-# Uses 4h price channel (Donchian 20) breakouts confirmed by volume spike and 12h ADX > 25
-# Works in bull (breakouts up) and bear (breakouts down) markets. Target: 20-50 trades/year.
-# Timeframe: 4h, HTF: 12h for trend filter
+# Hypothesis: 1h Williams %R with 4h trend filter and 1d volume spike
+# Williams %R identifies overbought/oversold conditions for mean reversion entries.
+# 4h EMA provides trend direction to filter trades (long in uptrend, short in downtrend).
+# 1d volume spike confirms institutional participation and reduces false signals.
+# Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
+# Target: 60-150 total trades over 4 years = 15-37/year for 1h.
+# Timeframe: 1h, HTF: 4h (trend), 1d (volume)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,90 +21,57 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data for ADX trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Williams %R (14-period) on 1h
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
     
-    # Calculate Donchian channels (20-period) on 4h
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 4h EMA (21-period) for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    ema_4h = pd.Series(df_4h['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Calculate ADX (14-period) on 12h
-    # True Range
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    
-    # Directional Movement
-    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
-                       np.maximum(high_12h - np.roll(close_12h, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(close_12h, 1)), 
-                        np.maximum(np.roll(close_12h, 1) - low_12h, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    # 1d volume average (20-period) for volume spike filter
+    df_1d = get_htf_data(prices, '1d')
+    vol_avg_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25  # Position size (25% of capital)
+    base_size = 0.20  # Position size: 20% of capital
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_4h_aligned[i]) or 
+            np.isnan(vol_avg_1d_aligned[i])):
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period median
-        vol_median = np.median(volume[max(0, i-19):i+1]) if i >= 19 else np.median(volume[:i+1])
-        volume_ok = volume[i] > 1.5 * vol_median
-        
-        # Long entry: price breaks above Donchian high + volume + ADX > 25
-        if (close[i] > donchian_high[i] and
-            volume_ok and
-            adx_aligned[i] > 25 and
+        # Long entry: Williams %R oversold (< -80) + price above 4h EMA (uptrend) + volume spike
+        if (williams_r[i] < -80 and 
+            close[i] > ema_4h_aligned[i] and
+            volume[i] > 1.5 * vol_avg_1d_aligned[i] and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below Donchian low + volume + ADX > 25
-        elif (close[i] < donchian_low[i] and
-              volume_ok and
-              adx_aligned[i] > 25 and
+        # Short entry: Williams %R overbought (> -20) + price below 4h EMA (downtrend) + volume spike
+        elif (williams_r[i] > -20 and 
+              close[i] < ema_4h_aligned[i] and
+              volume[i] > 1.5 * vol_avg_1d_aligned[i] and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse breakout or ADX < 20 (ranging market)
-        elif position == 1 and (close[i] < donchian_low[i] or adx_aligned[i] < 20):
+        # Exit: Williams %R returns to neutral range (-50) or opposite extreme
+        elif position == 1 and williams_r[i] > -50:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > donchian_high[i] or adx_aligned[i] < 20):
+        elif position == -1 and williams_r[i] < -50:
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian20_Volume_ADX_Trend"
-timeframe = "4h"
+name = "1h_WilliamsR_4hEMA_1dVolumeSpike"
+timeframe = "1h"
 leverage = 1.0
