@@ -13,33 +13,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly HTF data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily HTF data once before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    weekly_close = df_1w['close'].values
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_volume = df_1w['volume'].values
+    daily_close = df_1d['close'].values
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_volume = df_1d['volume'].values
     
-    # Calculate weekly Donchian channels (20-period) for trend structure
-    highest_20 = pd.Series(weekly_high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(weekly_low).rolling(window=20, min_periods=20).min().values
+    # Calculate daily pivot points (standard floor trader's pivots)
+    pivot = (daily_high + daily_low + daily_close) / 3.0
+    r1 = 2 * pivot - daily_low
+    s1 = 2 * pivot - daily_high
     
-    # Calculate weekly ATR(14) for volatility filter
-    tr1 = pd.Series(weekly_high - weekly_low)
-    tr2 = pd.Series(np.abs(weekly_high - np.concatenate([[weekly_close[0]], weekly_close[:-1]])))
-    tr3 = pd.Series(np.abs(weekly_low - np.concatenate([[weekly_close[0]], weekly_close[:-1]])))
+    # Calculate daily ATR(14) for volatility filter
+    tr1 = pd.Series(daily_high - daily_low)
+    tr2 = pd.Series(np.abs(daily_high - np.concatenate([[daily_close[0]], daily_close[:-1]])))
+    tr3 = pd.Series(np.abs(daily_low - np.concatenate([[daily_close[0]], daily_close[:-1]])))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr_14 = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align HTF indicators to daily timeframe with proper delay
-    highest_20_d = align_htf_to_ltf(prices, df_1w, highest_20)
-    lowest_20_d = align_htf_to_ltf(prices, df_1w, lowest_20)
-    atr_14_d = align_htf_to_ltf(prices, df_1w, atr_14)
+    # Align HTF indicators to 12h timeframe with proper delay
+    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    atr_14_12h = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Calculate daily volume ratio (current vs 20-period average)
+    # Calculate 12h Donchian channels (20-period) for breakout confirmation
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 12h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
@@ -47,34 +53,35 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_20_d[i]) or np.isnan(lowest_20_d[i]) or 
-            np.isnan(atr_14_d[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
+            np.isnan(atr_14_12h[i]) or np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
+            np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
         # Entry conditions:
-        # 1. Daily price breaks above weekly Donchian high with volume confirmation → long
-        # 2. Daily price breaks below weekly Donchian low with volume confirmation → short
-        # 3. Volatility filter: ATR > 0.3% of price (avoid low volatility chop)
-        # 4. Volume confirmation: volume > 1.5x average
+        # 1. 12h price breaks above R1 with volume confirmation → long
+        # 2. 12h price breaks below S1 with volume confirmation → short
+        # 3. Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
+        # 4. Volume confirmation: volume > 1.5x average (stricter for fewer trades)
         # 5. Discrete position sizing: 0.25
         
-        # Long conditions: daily breakout above weekly high
-        if (close[i] > highest_20_d[i] and            # daily price above weekly Donchian high
-            volume_ratio[i] > 1.5 and                 # Volume confirmation
-            atr_14_d[i] > 0.003 * close[i]):          # Volatility filter
+        # Long conditions: 12h breakout above R1
+        if (close[i] > r1_12h[i] and            # 12h price above R1 pivot
+            volume_ratio[i] > 1.5 and          # Volume confirmation (stricter)
+            atr_14_12h[i] > 0.005 * close[i]):  # Volatility filter
             signals[i] = 0.25
             
-        # Short conditions: daily breakdown below weekly low
-        elif (close[i] < lowest_20_d[i] and           # daily price below weekly Donchian low
-              volume_ratio[i] > 1.5 and               # Volume confirmation
-              atr_14_d[i] > 0.003 * close[i]):        # Volatility filter
+        # Short conditions: 12h breakdown below S1
+        elif (close[i] < s1_12h[i] and          # 12h price below S1 pivot
+              volume_ratio[i] > 1.5 and        # Volume confirmation (stricter)
+              atr_14_12h[i] > 0.005 * close[i]): # Volatility filter
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1d_WeeklyDonchian20_Breakout_Volume_ATR_Filter"
-timeframe = "1d"
+name = "12h_Pivot_R1_S1_Breakout_Volume_ATR_Filter"
+timeframe = "12h"
 leverage = 1.0
