@@ -13,55 +13,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h HTF data once before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # Calculate 12h Donchian channels (20-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    upper_20_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    lower_20_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    
-    # Align 12h Donchian to 6h
-    upper_20_6h = align_htf_to_ltf(prices, df_12h, upper_20_12h)
-    lower_20_6h = align_htf_to_ltf(prices, df_12h, lower_20_12h)
-    
-    # Get 1d HTF data for weekly pivot direction
+    # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d weekly pivot points (using prior week's OHLC)
-    # For simplicity, we use prior day's OHLC as proxy for weekly pivot
-    # In practice, this would use weekly data, but we approximate with daily
+    # Calculate 1d Donchian channels (20-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Weekly pivot calculation (approximated with daily)
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pp - low_1d
-    s1 = 2 * pp - high_1d
-    r2 = pp + (high_1d - low_1d)
-    s2 = pp - (high_1d - low_1d)
-    r3 = high_1d + 2 * (pp - low_1d)
-    s3 = low_1d - 2 * (high_1d - pp)
+    # Align 1d Donchian to 4h
+    upper_20_4h = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_20_4h = align_htf_to_ltf(prices, df_1d, lower_20)
     
-    # Align 1d pivot levels to 6h
-    pp_6h = align_htf_to_ltf(prices, df_1d, pp)
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Calculate 6h ATR(14) for volatility filter
+    # Calculate 4h ATR(14) for volatility filter
     tr1 = high - low
     tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
     tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 6h volume ratio (current vs 20-period average)
+    # Calculate 4h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
@@ -73,30 +47,25 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_20_6h[i]) or np.isnan(lower_20_6h[i]) or 
-            np.isnan(pp_6h[i]) or np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
+        if (np.isnan(upper_20_4h[i]) or np.isnan(lower_20_4h[i]) or 
             np.isnan(atr_14[i]) or np.isnan(volume_ratio[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
         # Long conditions:
-        # 1. 6h price breaks above 12h Donchian upper (20)
-        # 2. Price above weekly R3 pivot (bullish bias)
-        # 3. Volume confirmation: volume > 1.5x average
-        # 4. Volatility filter: ATR > 0.3% of price
-        if (close[i] > upper_20_6h[i] and
-            close[i] > r3_6h[i] and
+        # 1. 4h price breaks above 1d Donchian upper (20)
+        # 2. Volume confirmation: volume > 1.5x average
+        # 3. Volatility filter: ATR > 0.3% of price (avoid low volatility chop)
+        if (close[i] > upper_20_4h[i] and
             volume_ratio[i] > 1.5 and
             atr_14[i] > 0.003 * close[i]):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. 6h price breaks below 12h Donchian lower (20)
-        # 2. Price below weekly S3 pivot (bearish bias)
-        # 3. Volume confirmation: volume > 1.5x average
-        # 4. Volatility filter: ATR > 0.3% of price
-        elif (close[i] < lower_20_6h[i] and
-              close[i] < s3_6h[i] and
+        # 1. 4h price breaks below 1d Donchian lower (20)
+        # 2. Volume confirmation: volume > 1.5x average
+        # 3. Volatility filter: ATR > 0.3% of price
+        elif (close[i] < lower_20_4h[i] and
               volume_ratio[i] > 1.5 and
               atr_14[i] > 0.003 * close[i]):
             signals[i] = -0.25
@@ -105,6 +74,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_Donchian20_1d_PivotR3S3_Volume_Filter_v1"
-timeframe = "6h"
+name = "4h_1d_Donchian20_Volume_Filter_v3"
+timeframe = "4h"
 leverage = 1.0
