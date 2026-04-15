@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI(14) + 4h/1d Trend Filter + Session Filter
-# Uses RSI for mean reversion entries during high-probability sessions (08-20 UTC).
-# Long when RSI < 30 and price > 4h EMA200 (bull trend filter); short when RSI > 70 and price < 4h EMA200 (bear trend filter).
-# Uses 1d ADX > 25 to filter ranging markets and avoid false signals.
-# Designed for low trade frequency (<30/year) with high win rate in both bull/bear markets via trend alignment.
+# Hypothesis: 12h Donchian(20) breakout + 1d volume confirmation + ADX trend filter
+# Long when price breaks above Donchian upper band with volume > 2x median and ADX > 25
+# Short when price breaks below Donchian lower band with volume > 2x median and ADX > 25
+# Uses discrete position sizing (0.25) to limit trade frequency and avoid fee drag
+# Designed to capture trends in both bull and bear markets with volume confirmation
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,80 +19,89 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Session filter: 08-20 UTC (precomputed for efficiency)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # 4h EMA200 for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # 1d ADX(14) for trend strength filter
+    # 1d Donchian channels (20-period)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = pd.Series(high_1d).diff()
-    tr2 = pd.Series(high_1d).sub(pd.Series(close_1d).shift())
-    tr3 = pd.Series(low_1d).sub(pd.Series(close_1d).shift())
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr.rolling(window=14, min_periods=14).mean()
+    # Calculate Donchian bands
+    dc_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    dc_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Directional Movement
-    up = pd.Series(high_1d).diff()
-    down = pd.Series(low_1d).diff()
-    up = np.where((up > down) & (up > 0), up, 0)
-    down = np.where((down > up) & (down > 0), down, 0)
+    # Align Donchian bands to 12h timeframe
+    dc_upper_aligned = align_htf_to_ltf(prices, df_1d, dc_upper)
+    dc_lower_aligned = align_htf_to_ltf(prices, df_1d, dc_lower)
     
-    # Smoothed DM
-    up_smooth = pd.Series(up).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    down_smooth = pd.Series(down).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    # 1d ADX for trend strength (14-period)
+    # Calculate +DM, -DM, TR
+    plus_dm = np.zeros_like(high_1d)
+    minus_dm = np.zeros_like(high_1d)
+    tr = np.zeros_like(high_1d)
     
-    # DI and DX
-    di_plus = 100 * up_smooth / atr_1d
-    di_minus = 100 * down_smooth / atr_1d
-    dx = (abs(di_plus - di_minus) / (di_plus + di_minus)) * 100
-    adx_1d = dx.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d.values)
+    for i in range(1, len(high_1d)):
+        high_diff = high_1d[i] - high_1d[i-1]
+        low_diff = low_1d[i-1] - low_1d[i]
+        plus_dm[i] = max(high_diff, 0) if high_diff > low_diff else 0
+        minus_dm[i] = max(low_diff, 0) if low_diff > high_diff else 0
+        tr[i] = max(high_1d[i] - low_1d[i], 
+                   abs(high_1d[i] - high_1d[i-1]), 
+                   abs(low_1d[i] - low_1d[i-1]))
     
-    # RSI(14) on 1h close
-    delta = pd.Series(close).diff()
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Smooth using Wilder's smoothing (alpha = 1/period)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(data[1:period])
+        # Subsequent values: smoothed = prev * (1 - 1/period) + current * (1/period)
+        for i in range(period, len(data)):
+            result[i] = result[i-1] * (1 - 1/period) + data[i] * (1/period)
+        return result
+    
+    # Calculate smoothed +DM, -DM, TR
+    smoothed_plus_dm = wilders_smoothing(plus_dm, 14)
+    smoothed_minus_dm = wilders_smoothing(minus_dm, 14)
+    smoothed_tr = wilders_smoothing(tr, 14)
+    
+    # Calculate +DI, -DI, DX
+    plus_di = np.where(smoothed_tr != 0, smoothed_plus_dm / smoothed_tr * 100, 0)
+    minus_di = np.where(smoothed_tr != 0, smoothed_minus_dm / smoothed_tr * 100, 0)
+    dx = np.where((plus_di + minus_di) != 0, 
+                  abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
+    
+    # ADX is smoothed DX
+    adx = wilders_smoothing(dx, 14)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume confirmation: current > 2x median of last 20 bars
+    vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
+    vol_threshold = 2.0 * vol_median
     
     signals = np.zeros(n)
     
-    for i in range(14, n):
+    for i in range(20, n):  # Start after Donchian warmup
         # Skip if any required data is NaN
-        if (np.isnan(rsi[i]) or np.isnan(ema_4h_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i]) or not in_session[i]):
+        if (np.isnan(dc_upper_aligned[i]) or np.isnan(dc_lower_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_threshold[i])):
             continue
         
-        # Long: RSI oversold, price above 4h EMA200, strong trend (ADX > 25)
-        if (rsi[i] < 30 and 
-            close[i] > ema_4h_aligned[i] and 
-            adx_1d_aligned[i] > 25):
-            signals[i] = 0.20
+        # Long: price breaks above Donchian upper, volume spike, ADX > 25
+        if (close[i] > dc_upper_aligned[i] and 
+            volume[i] > vol_threshold[i] and 
+            adx_aligned[i] > 25):
+            signals[i] = 0.25
         
-        # Short: RSI overbought, price below 4h EMA200, strong trend (ADX > 25)
-        elif (rsi[i] > 70 and 
-              close[i] < ema_4h_aligned[i] and 
-              adx_1d_aligned[i] > 25):
-            signals[i] = -0.20
+        # Short: price breaks below Donchian lower, volume spike, ADX > 25
+        elif (close[i] < dc_lower_aligned[i] and 
+              volume[i] > vol_threshold[i] and 
+              adx_aligned[i] > 25):
+            signals[i] = -0.25
         
-        # Exit: RSI returns to neutral zone (40-60)
+        # Exit: price crosses back inside Donchian channels
         elif (i > 0 and 
-              ((signals[i-1] == 0.20 and rsi[i] >= 40) or
-               (signals[i-1] == -0.20 and rsi[i] <= 60))):
+              ((signals[i-1] == 0.25 and close[i] < dc_upper_aligned[i]) or
+               (signals[i-1] == -0.25 and close[i] > dc_lower_aligned[i]))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -101,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_RSI_4hEMA200_1dADX_Session"
-timeframe = "1h"
+name = "12h_Donchian_Breakout_Volume_ADX"
+timeframe = "12h"
 leverage = 1.0
