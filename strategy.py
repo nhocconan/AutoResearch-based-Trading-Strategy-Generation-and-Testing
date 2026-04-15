@@ -70,6 +70,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyPivot_R1_S1_Breakout_Volume_RangeFilter"
-timeframe = "1d"
+name = "6h_WeeklyPivot_R1_S1_Breakout_Volume_RangeFilter"
+timeframe = "6h"
 leverage = 1.0
