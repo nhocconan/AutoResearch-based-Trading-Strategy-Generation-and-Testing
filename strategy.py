@@ -18,7 +18,7 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily ATR(14) for volatility regime
+    # Calculate daily ATR(14) for volatility filter
     tr1 = df_1d['high'] - df_1d['low']
     tr2 = np.abs(df_1d['high'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
     tr3 = np.abs(df_1d['low'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
@@ -26,9 +26,9 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate daily EMA(20) for trend filter
-    ema_20_1d = pd.Series(df_1d['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    # Calculate daily EMA(50) for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate daily RSI(14) for momentum filter
     delta = pd.Series(df_1d['close'].values).diff()
@@ -44,36 +44,38 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_20_1d_aligned[i]) or 
+        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(rsi_14_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade when daily ATR is elevated (> 0.4% of price)
-        vol_filter = atr_14_1d_aligned[i] > 0.004 * close[i]
+        # Volatility filter: only trade when daily ATR > 0.3% of price
+        vol_filter = atr_14_1d_aligned[i] > 0.003 * close[i]
         
         # Long conditions:
-        # 1. Price above daily EMA20 (bullish bias)
-        # 2. Daily RSI between 40 and 60 (neutral momentum, avoids extremes)
-        # 3. Volatility filter
-        if (close[i] > ema_20_1d_aligned[i] and
-            40 <= rsi_14_1d_aligned[i] <= 60 and
-            vol_filter):
+        # 1. Price above daily EMA50 (bullish bias)
+        # 2. Daily RSI between 30 and 70 (avoid extremes)
+        # 3. Volume above 20-period MA (confirm participation)
+        if (close[i] > ema_50_1d_aligned[i] and
+            30 <= rsi_14_1d_aligned[i] <= 70 and
+            vol_filter and
+            volume[i] > np.mean(volume[max(0, i-20):i])):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Price below daily EMA20 (bearish bias)
-        # 2. Daily RSI between 40 and 60 (neutral momentum, avoids extremes)
-        # 3. Volatility filter
-        elif (close[i] < ema_20_1d_aligned[i] and
-              40 <= rsi_14_1d_aligned[i] <= 60 and
-              vol_filter):
+        # 1. Price below daily EMA50 (bearish bias)
+        # 2. Daily RSI between 30 and 70 (avoid extremes)
+        # 3. Volume above 20-period MA (confirm participation)
+        elif (close[i] < ema_50_1d_aligned[i] and
+              30 <= rsi_14_1d_aligned[i] <= 70 and
+              vol_filter and
+              volume[i] > np.mean(volume[max(0, i-20):i])):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "6h_EMA20_RSI14_VolFilter_v1"
-timeframe = "6h"
+name = "12h_EMA50_RSI14_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
