@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h ADX trend filter and volume confirmation
-# Long when price breaks above 4h Donchian upper (20-period) + 12h ADX > 25 + volume > 1.5x 20-period avg
-# Short when price breaks below 4h Donchian lower (20-period) + 12h ADX > 25 + volume > 1.5x 20-period avg
-# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (20-40/year).
-# Donchian channels provide objective breakout levels. ADX filter ensures we only trade strong trends, avoiding chop.
-# Works in bull markets (trend continuation) and bear markets (strong downtrends) by requiring ADX > 25.
+# Hypothesis: 1d KAMA trend direction + RSI(2) mean reversion + volume spike filter
+# Long when: KAMA rising (bullish trend) + RSI(2) < 10 (extreme oversold) + volume > 2.0x 20-day avg
+# Short when: KAMA falling (bearish trend) + RSI(2) > 90 (extreme overbought) + volume > 2.0x 20-day avg
+# Uses discrete position sizing (0.30) to minimize fee churn. Designed for low trade frequency (10-25/year).
+# KAMA adapts to market noise, reducing whipsaws in choppy markets. RSI(2) captures short-term mean reversion.
+# Volume spike confirms institutional participation. Works in bull markets (buy oversold dips) and bear markets (sell overbought rallies).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,125 +20,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Precompute session hours (08-20 UTC) for filter
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # === 1d Indicator: KAMA (trend direction) ===
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)[:len(change)]
+    er = np.where(volatility != 0, change / volatility, 0)
     
-    # Get 12h HTF data once before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # === 12h Indicator: ADX (trend strength filter) ===
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Initialize KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Calculate ADX components: +DM, -DM, TR
-    high_12h_shift = np.roll(high_12h, 1)
-    low_12h_shift = np.roll(low_12h, 1)
-    high_12h_shift[0] = high_12h[0]
-    low_12h_shift[0] = low_12h[0]
+    # === 1d Indicator: RSI(2) ===
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    plus_dm = np.where((high_12h - high_12h_shift) > (low_12h_shift - low_12h), 
-                       np.maximum(high_12h - high_12h_shift, 0), 0)
-    minus_dm = np.where((low_12h_shift - low_12h) > (high_12h - high_12h_shift), 
-                        np.maximum(low_12h_shift - low_12h, 0), 0)
+    # First average
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
+    avg_gain[1] = np.mean(gain[:1]) if len(gain) >= 1 else 0
+    avg_loss[1] = np.mean(loss[:1]) if len(loss) >= 1 else 0
     
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr1[0] = high_12h[0] - low_12h[0]
-    tr2[0] = np.abs(high_12h[0] - close_12h[0])
-    tr3[0] = np.abs(low_12h[0] - close_12h[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Wilder's smoothing
+    for i in range(2, n):
+        avg_gain[i] = (avg_gain[i-1] * 1 + gain[i-1]) / 2
+        avg_loss[i] = (avg_loss[i-1] * 1 + loss[i-1]) / 2
     
-    # Wilder's smoothing (alpha = 1/period)
-    period = 14
-    alpha = 1.0 / period
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    atr = np.zeros_like(tr)
-    atr[period-1] = np.mean(tr[:period])
-    for i in range(period, len(tr)):
-        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-    
-    plus_di = np.zeros_like(plus_dm)
-    minus_di = np.zeros_like(minus_dm)
-    
-    # Smooth +DM and -DM
-    plus_dm_smooth = np.zeros_like(plus_dm)
-    minus_dm_smooth = np.zeros_like(minus_dm)
-    
-    plus_dm_smooth[period-1] = np.mean(plus_dm[:period])
-    minus_dm_smooth[period-1] = np.mean(minus_dm[:period])
-    
-    for i in range(period, len(plus_dm)):
-        plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
-        minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
-    
-    # Avoid division by zero
-    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
-    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
-    
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    
-    # Wilder's smoothing for ADX
-    adx = np.zeros_like(dx)
-    adx[2*period-1] = np.mean(dx[period-1:2*period])
-    for i in range(2*period, len(dx)):
-        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-    
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
-    
-    # === 4h Indicator: Donchian Channel (20-period) ===
-    donchian_window = 20
-    donchian_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    donchian_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
-    
-    # Volume SMA for confirmation (using 20-period)
+    # === 1d Indicator: Volume SMA(20) ===
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(donchian_window, 2*period) + 20  # Donchian(20) + ADX(28) + volume(20)
+    warmup = max(30, 2, 20) + 5  # KAMA(30) + RSI(2) + volume(20)
     
     for i in range(warmup, n):
-        # Skip if outside trading session (08-20 UTC)
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-        
-        # Volume filter: current volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
+        # Volume filter: current volume > 2.0x 20-day volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
         
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 4h Donchian upper (20-period)
-        # 2. Trend (12h ADX > 25)
+        # 1. KAMA rising (bullish trend)
+        # 2. RSI(2) < 10 (extreme oversold)
         # 3. Volume confirmation
-        if (close[i] > donchian_high[i]) and \
-           (adx_aligned[i] > 25) and vol_confirm:
-            signals[i] = 0.25
+        if (kama[i] > kama[i-1]) and \
+           (rsi[i] < 10) and vol_confirm:
+            signals[i] = 0.30
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 4h Donchian lower (20-period)
-        # 2. Trend (12h ADX > 25)
+        # 1. KAMA falling (bearish trend)
+        # 2. RSI(2) > 90 (extreme overbought)
         # 3. Volume confirmation
-        elif (close[i] < donchian_low[i]) and \
-             (adx_aligned[i] > 25) and vol_confirm:
-            signals[i] = -0.25
+        elif (kama[i] < kama[i-1]) and \
+             (rsi[i] > 90) and vol_confirm:
+            signals[i] = -0.30
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "4h_Donchian20_12hADX25_Volume_Filter_v1"
-timeframe = "4h"
+name = "1d_KAMA_RSI2_Volume_Spike_v1"
+timeframe = "1d"
 leverage = 1.0
