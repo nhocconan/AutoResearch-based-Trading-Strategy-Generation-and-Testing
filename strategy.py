@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Bollinger Band Breakout with Volume Spike and RSI Momentum Filter
-# Uses Bollinger Bands (20,2) on 4h to identify volatility breakouts. Enters long when price breaks above upper band
-# with volume > 2x 20-period average and RSI > 55 (momentum confirmation). Enters short when price breaks below lower band
-# with volume > 2x average and RSI < 45. Exits when price returns to middle band (20-period SMA).
-# Works in both bull and bear markets by capturing momentum bursts after volatility contractions.
-# Target: 80-150 total trades over 4 years (20-38/year) to stay within fee drag limits.
+# Hypothesis: 4h Williams Alligator with Elder Ray Power and Volume Confirmation
+# Uses Williams Alligator (Jaw/Teeth/Lips) to define trend direction and filter trades.
+# Elder Ray Power (bull/bear power) measures trend strength behind price action.
+# Volume confirmation ensures breakouts have participation.
+# Works in bull markets (buy when teeth above jaw, power positive) and bear markets (sell when teeth below jaw, power negative).
+# Target: 50-150 total trades over 4 years.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,62 +20,78 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20,2) on 4h
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean()
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std()
-    upper_band = sma_20 + 2 * std_20
-    lower_band = sma_20 - 2 * std_20
-    middle_band = sma_20  # 20-period SMA
+    # Load 1d data for Williams Alligator and Elder Ray
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume average (20-period)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    # Williams Alligator (13,8,5 SMAs with future shifts)
+    # Jaw: 13-period SMMA shifted 8 bars
+    jaw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean()
+    jaw = jaw.shift(8)  # Future shift
     
-    # RSI (14-period)
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean()
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Teeth: 8-period SMMA shifted 5 bars
+    teeth = pd.Series(close_1d).rolling(window=8, min_periods=8).mean()
+    teeth = teeth.shift(5)  # Future shift
+    
+    # Lips: 5-period SMMA shifted 3 bars
+    lips = pd.Series(close_1d).rolling(window=5, min_periods=5).mean()
+    lips = lips.shift(3)  # Future shift
+    
+    # Elder Ray Power
+    # Bull Power = High - EMA(13)
+    # Bear Power = Low - EMA(13)
+    ema13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean()
+    bull_power = high_1d - ema13
+    bear_power = low_1d - ema13
+    
+    # Align to 4h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw.values)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth.values)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips.values)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power.values)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power.values)
     
     signals = np.zeros(n)
     position = 0
     base_size = 0.25  # Position size
     
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
-            np.isnan(middle_band[i]) or np.isnan(vol_ma_20[i]) or
-            np.isnan(rsi[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or
+            np.isnan(lips_aligned[i]) or np.isnan(bull_power_aligned[i]) or
+            np.isnan(bear_power_aligned[i])):
             continue
         
-        # Long entry: price breaks above upper band + volume spike + RSI > 55
-        if (close[i] > upper_band[i] and
-            volume[i] > 2.0 * vol_ma_20[i] and
-            rsi[i] > 55 and
+        # Long entry: Teeth above Jaw (uptrend) + Bull Power positive + volume confirmation
+        if (teeth_aligned[i] > jaw_aligned[i] and
+            bull_power_aligned[i] > 0 and
+            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below lower band + volume spike + RSI < 45
-        elif (close[i] < lower_band[i] and
-              volume[i] > 2.0 * vol_ma_20[i] and
-              rsi[i] < 45 and
+        # Short entry: Teeth below Jaw (downtrend) + Bear Power negative + volume confirmation
+        elif (teeth_aligned[i] < jaw_aligned[i] and
+              bear_power_aligned[i] < 0 and
+              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: price returns to middle band (mean reversion)
-        elif position == 1 and close[i] < middle_band[i]:
+        # Exit: Opposite Alligator alignment or power divergence
+        elif position == 1 and (teeth_aligned[i] < jaw_aligned[i] or bull_power_aligned[i] < 0):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > middle_band[i]:
+        elif position == -1 and (teeth_aligned[i] > jaw_aligned[i] or bear_power_aligned[i] > 0):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Bollinger_Breakout_Volume_RSI"
+name = "4h_Williams_Alligator_ElderRay_Volume"
 timeframe = "4h"
 leverage = 1.0
