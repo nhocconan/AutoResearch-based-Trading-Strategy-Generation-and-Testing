@@ -1,83 +1,63 @@
 #!/usr/bin/env python3
-"""
-Hypothesis: 6h Williams Alligator + 1d Volume Spike
-- Williams Alligator (Jaws, Teeth, Lips) on 6h to detect trend direction and alignment
-- 1d volume spike (current volume > 2x 20-period median) to confirm institutional participation
-- Long: Alligator aligned bullish (Lips > Teeth > Jaws) + volume spike
-- Short: Alligator aligned bearish (Lips < Teeth < Jaws) + volume spike
-- Exit: Opposite Alligator alignment or loss of volume confirmation
-- Works in bull (trend following) and bear (catching sharp moves on volume)
-- Target: 15-25 trades/year to minimize fee drag
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # 6h data for Williams Alligator
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Williams Alligator components (13,8,5 SMAs with future shifts)
-    # Jaws: 13-period SMA shifted 8 bars
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean()
-    jaw = jaw.shift(8)  # Shift 8 bars forward
-    
-    # Teeth: 8-period SMA shifted 5 bars
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean()
-    teeth = teeth.shift(5)  # Shift 5 bars forward
-    
-    # Lips: 5-period SMA shifted 3 bars
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean()
-    lips = lips.shift(3)  # Shift 3 bars forward
-    
-    # 1d volume data for spike detection
+    # Get 1d data once
     df_1d = get_htf_data(prices, '1d')
-    vol_1d = df_1d['volume'].values
-    # 20-period median volume on 1d
-    vol_median_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).median()
-    vol_spike_1d = vol_1d > (2.0 * vol_median_1d)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
+    # Calculate 1d EMA200
+    close_1d = df_1d['close'].values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
+    # Align to 12h
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    
+    # 12h Bollinger Bands (20, 2)
+    sma = pd.Series(close).rolling(window=20, min_periods=20).mean()
+    std = pd.Series(close).rolling(window=20, min_periods=20).std()
+    upper = sma + 2 * std
+    lower = sma - 2 * std
+    
+    # Volume confirmation: current > 1.5x median of last 20 bars
+    vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
+    vol_threshold = 1.5 * vol_median
     
     signals = np.zeros(n)
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(vol_spike_1d_aligned[i])):
+        if np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(vol_threshold[i]) or np.isnan(ema_200_1d_aligned[i]):
             continue
         
-        # Bullish alignment: Lips > Teeth > Jaws
-        bullish = (lips[i] > teeth[i]) and (teeth[i] > jaw[i])
-        # Bearish alignment: Lips < Teeth < Jaws
-        bearish = (lips[i] < teeth[i]) and (teeth[i] < jaw[i])
-        # Volume spike confirmation
-        vol_spike = vol_spike_1d_aligned[i] > 0.5
-        
-        # Long: Bullish alignment + volume spike
-        if bullish and vol_spike:
+        # Long: close breaks above upper band + volume confirmation + price above 1d EMA200
+        if close[i] > upper[i] and volume[i] > vol_threshold[i] and close[i] > ema_200_1d_aligned[i]:
             signals[i] = 0.25
-        # Short: Bearish alignment + volume spike
-        elif bearish and vol_spike:
+        
+        # Short: close breaks below lower band + volume confirmation + price below 1d EMA200
+        elif close[i] < lower[i] and volume[i] > vol_threshold[i] and close[i] < ema_200_1d_aligned[i]:
             signals[i] = -0.25
-        # Exit: Opposite alignment or loss of volume confirmation
+        
+        # Exit: close crosses back inside bands (mean reversion)
         elif (i > 0 and 
-              ((signals[i-1] == 0.25 and (bearish or not vol_spike)) or
-               (signals[i-1] == -0.25 and (bullish or not vol_spike)))):
+              ((signals[i-1] == 0.25 and close[i] < upper[i]) or
+               (signals[i-1] == -0.25 and close[i] > lower[i]))):
             signals[i] = 0.0
+        
         # Otherwise, hold previous position
         else:
             signals[i] = signals[i-1]
     
     return signals
 
-name = "6h_WilliamsAlligator_1dVolumeSpike"
-timeframe = "6h"
+name = "12h_Bollinger_Breakout_Volume_1dEMA200"
+timeframe = "12h"
 leverage = 1.0
