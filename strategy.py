@@ -13,44 +13,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h price channel (Donchian 20-period)
-    high_12h = pd.Series(high).rolling(window=20, min_periods=20).max()
-    low_12h = pd.Series(low).rolling(window=20, min_periods=20).min()
-    
-    # Weekly trend filter: 20-period EMA
-    df_1w = get_htf_data(prices, '1w')
-    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean()
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Daily volume spike: current > 2.0x median of last 50 periods
+    # Daily ATR for volatility filter
     df_1d = get_htf_data(prices, '1d')
-    vol_median_1d = pd.Series(df_1d['volume'].values).rolling(window=50, min_periods=50).median()
-    vol_median_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_median_1d)
+    tr_1d = np.maximum(df_1d['high'].values - df_1d['low'].values,
+                       np.maximum(np.abs(df_1d['high'].values - np.concatenate([[df_1d['close'][0]], df_1d['close'][:-1]])),
+                                  np.abs(df_1d['low'].values - np.concatenate([[df_1d['close'][0]], df_1d['close'][:-1]]))))
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # 4h Bollinger Bands (20, 2)
+    sma_4h = pd.Series(close).rolling(window=20, min_periods=20).mean()
+    std_4h = pd.Series(close).rolling(window=20, min_periods=20).std()
+    upper_4h = sma_4h + 2 * std_4h
+    lower_4h = sma_4h - 2 * std_4h
+    
+    # Volume confirmation: current > 1.8x median of last 20 bars
+    vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
+    vol_threshold = 1.8 * vol_median
+    
+    # ATR-based volatility filter: require ATR > 0.5 * median ATR
+    atr_median = pd.Series(atr_1d_aligned).rolling(window=50, min_periods=1).median()
+    vol_filter = atr_1d_aligned > 0.5 * atr_median
     
     signals = np.zeros(n)
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_12h[i]) or np.isnan(low_12h[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_median_1d_aligned[i])):
+        if (np.isnan(upper_4h[i]) or np.isnan(lower_4h[i]) or 
+            np.isnan(vol_threshold[i]) or np.isnan(vol_filter[i])):
             continue
         
-        # Long: price breaks above 12h high + above weekly EMA + volume spike
-        if (close[i] > high_12h[i] and 
-            close[i] > ema_20_1w_aligned[i] and 
-            volume[i] > 2.0 * vol_median_1d_aligned[i]):
+        # Long: close breaks above upper band + volume + volatility filter
+        if close[i] > upper_4h[i] and volume[i] > vol_threshold[i] and vol_filter[i]:
             signals[i] = 0.25
         
-        # Short: price breaks below 12h low + below weekly EMA + volume spike
-        elif (close[i] < low_12h[i] and 
-              close[i] < ema_20_1w_aligned[i] and 
-              volume[i] > 2.0 * vol_median_1d_aligned[i]):
+        # Short: close breaks below lower band + volume + volatility filter
+        elif close[i] < lower_4h[i] and volume[i] > vol_threshold[i] and vol_filter[i]:
             signals[i] = -0.25
         
-        # Exit: price returns to midline of 12h channel
+        # Exit: close crosses back inside bands (mean reversion)
         elif (i > 0 and 
-              ((signals[i-1] == 0.25 and close[i] < (high_12h[i] + low_12h[i]) / 2) or
-               (signals[i-1] == -0.25 and close[i] > (high_12h[i] + low_12h[i]) / 2))):
+              ((signals[i-1] == 0.25 and close[i] < upper_4h[i]) or
+               (signals[i-1] == -0.25 and close[i] > lower_4h[i]))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -59,6 +63,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_WeeklyTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Bollinger_Breakout_Volume_VolFilter"
+timeframe = "4h"
 leverage = 1.0
