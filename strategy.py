@@ -3,11 +3,6 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
-# Uses discrete position sizing (0.25) to minimize fee drag. Designed to work in both bull and bear markets
-# by only trading with the weekly trend and requiring volume confirmation to avoid false breakouts.
-# Target: 20-50 trades per year to stay within fee drag limits.
-
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
@@ -18,59 +13,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly HTF data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h HTF data once before loop (primary HTF for trend)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    weekly_close = df_1w['close'].values
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
+    # Get 1d HTF data for pivot levels (secondary HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Calculate 50-period weekly EMA for trend filter
-    ema_50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 12h Donchian channels (20-period) for breakout signals
+    highest_20_12h = pd.Series(df_12h['high']).rolling(window=20, min_periods=20).max().values
+    lowest_20_12h = pd.Series(df_12h['low']).rolling(window=20, min_periods=20).min().values
     
-    # Align HTF indicators to 1d timeframe with proper delay
-    ema_50_1d = align_htf_to_ltf(prices, df_1w, ema_50)
+    # Calculate 12h volume ratio (current vs 20-period average)
+    vol_ma_20_12h = pd.Series(df_12h['volume']).rolling(window=20, min_periods=20).mean().values
+    volume_ratio_12h = df_12h['volume'].values / (vol_ma_20_12h + 1e-10)
     
-    # Calculate 1d Donchian channels (20-period)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d Camarilla pivot levels
+    # Based on previous day's OHLC
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    open_1d = df_1d['open'].values
     
-    # Calculate 1d volume ratio (current vs 20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ratio = volume / (vol_ma_20 + 1e-10)
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels
+    r3 = pivot + (range_1d * 1.1 / 4.0)
+    s3 = pivot - (range_1d * 1.1 / 4.0)
+    r4 = pivot + (range_1d * 1.1 / 2.0)
+    s4 = pivot - (range_1d * 1.1 / 2.0)
+    
+    # Align HTF indicators to 6h timeframe
+    highest_20_12h_aligned = align_htf_to_ltf(prices, df_12h, highest_20_12h)
+    lowest_20_12h_aligned = align_htf_to_ltf(prices, df_12h, lowest_20_12h)
+    volume_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_ratio_12h)
+    
+    # For pivot levels, we need to align from 1d to 6h
+    # Pivots are based on previous day, so they're known at the start of the day
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d[i]) or np.isnan(highest_20[i]) or 
-            np.isnan(lowest_20[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(highest_20_12h_aligned[i]) or np.isnan(lowest_20_12h_aligned[i]) or
+            np.isnan(volume_ratio_12h_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions:
-        # 1. Weekly trend filter: price above/below weekly EMA50
-        # 2. 1d Donchian breakout with volume confirmation
-        # 3. Discrete position sizing: 0.25
+        # Long conditions:
+        # 1. Price breaks above 12h Donchian upper band (20-period high)
+        # 2. Volume confirmation (above average)
+        # 3. Price is between S3 and R3 (not too extended)
+        # 4. Breakout is confirmed by closing above R3 (continuation signal)
         
-        # Long conditions
-        if (close[i] > ema_50_1d[i] and     # Uptrend filter
-            close[i] > highest_20[i] and     # Donchian breakout
-            volume_ratio[i] > 1.5):          # Volume confirmation
+        if (close[i] > highest_20_12h_aligned[i] and     # 12h Donchian breakout
+            volume_ratio_12h_aligned[i] > 1.3 and       # Volume confirmation
+            close[i] > s3_aligned[i] and                # Above S3 support
+            close[i] < r4_aligned[i] and                # Below R4 resistance (avoid overextended)
+            close[i] > r3_aligned[i]):                  # Confirmed by closing above R3
             signals[i] = 0.25
             
-        # Short conditions
-        elif (close[i] < ema_50_1d[i] and   # Downtrend filter
-              close[i] < lowest_20[i] and    # Donchian breakdown
-              volume_ratio[i] > 1.5):        # Volume confirmation
+        # Short conditions:
+        # 1. Price breaks below 12h Donchian lower band (20-period low)
+        # 2. Volume confirmation (above average)
+        # 3. Price is between S3 and R3 (not too extended)
+        # 4. Breakdown is confirmed by closing below S3 (continuation signal)
+        elif (close[i] < lowest_20_12h_aligned[i] and   # 12h Donchian breakdown
+              volume_ratio_12h_aligned[i] > 1.3 and     # Volume confirmation
+              close[i] < r3_aligned[i] and              # Below R3 resistance
+              close[i] > s4_aligned[i] and              # Above S4 support (avoid overextended)
+              close[i] < s3_aligned[i]):                # Confirmed by closing below S3
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1d_WeeklyEMA_Volume_Donchian_Breakout"
-timeframe = "1d"
+name = "6h_12hDonchian_1dCamarilla_Pivot_Volume"
+timeframe = "6h"
 leverage = 1.0
