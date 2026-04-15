@@ -36,40 +36,52 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
+    # Calculate daily volume average for volume confirmation
+    vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    
     signals = np.zeros(n)
     
     for i in range(50, n):
         # Skip if any required data is NaN
         if (np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i])):
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or
+            np.isnan(vol_ma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when daily ATR is elevated (> 0.3% of price)
-        vol_filter = atr_14_1d_aligned[i] > 0.003 * close[i]
+        # Volatility filter: only trade when daily ATR is elevated (> 0.4% of price)
+        vol_filter = atr_14_1d_aligned[i] > 0.004 * close[i]
+        
+        # Volume confirmation: current volume > 1.5x 20-day average
+        vol_confirm = volume[i] > 1.5 * vol_ma_20_aligned[i]
         
         # Long conditions:
         # 1. Price above daily EMA50 (bullish bias)
         # 2. Price breaks above daily Donchian(20) high
         # 3. Volatility filter
+        # 4. Volume confirmation
         if (close[i] > ema_50_1d_aligned[i] and
             close[i] > donchian_high_20_aligned[i] and
-            vol_filter):
+            vol_filter and
+            vol_confirm):
             signals[i] = 0.25
             
         # Short conditions:
         # 1. Price below daily EMA50 (bearish bias)
         # 2. Price breaks below daily Donchian(20) low
         # 3. Volatility filter
+        # 4. Volume confirmation
         elif (close[i] < ema_50_1d_aligned[i] and
               close[i] < donchian_low_20_aligned[i] and
-              vol_filter):
+              vol_filter and
+              vol_confirm):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "12h_EMA50_Donchian20_VolFilter_v1"
+name = "12h_EMA50_Donchian20_VolFilter_VolumeConfirm_v1"
 timeframe = "12h"
 leverage = 1.0
