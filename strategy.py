@@ -13,75 +13,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session filter (08-20 UTC) once before loop
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h HTF data once before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get weekly HTF data once before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 4h RSI(14) for trend filter
-    delta = pd.Series(df_4h['close'].values).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14_4h = 100 - (100 / (1 + rs))
-    rsi_14_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_14_4h)
+    # Calculate weekly EMA(21) for trend filter
+    ema_21_1w = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
-    # Calculate 4h EMA(20) for trend filter
-    ema_20_4h = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # Calculate weekly ATR(14) for volatility filter
+    tr1 = df_1w['high'] - df_1w['low']
+    tr2 = np.abs(df_1w['high'] - np.concatenate([[df_1w['close'].iloc[0]], df_1w['close'].iloc[:-1]]))
+    tr3 = np.abs(df_1w['low'] - np.concatenate([[df_1w['close'].iloc[0]], df_1w['close'].iloc[:-1]]))
+    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14_1w = pd.Series(tr_1w).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_14_1w)
     
-    # Calculate 1h ATR(14) for volatility filter and position sizing
-    tr1 = high - low
-    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Get daily HTF data once before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # Calculate daily Donchian(20) channels
+    donchian_high_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
+    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
+    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
     
     signals = np.zeros(n)
     
     for i in range(100, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-            
         # Skip if any required data is NaN
-        if (np.isnan(rsi_14_4h_aligned[i]) or np.isnan(ema_20_4h_aligned[i]) or 
-            np.isnan(atr_14[i])):
+        if (np.isnan(ema_21_1w_aligned[i]) or np.isnan(atr_14_1w_aligned[i]) or 
+            np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when 1h ATR is elevated (> 0.4% of price)
-        vol_filter = atr_14[i] > 0.004 * close[i]
+        # Volatility filter: only trade when weekly ATR is elevated (> 0.5% of price)
+        vol_filter = atr_14_1w_aligned[i] > 0.005 * close[i]
         
         # Long conditions:
-        # 1. 4h RSI > 50 (bullish momentum)
-        # 2. Price above 4h EMA20 (bullish bias)
+        # 1. Price above weekly EMA21 (bullish bias)
+        # 2. Price breaks above daily Donchian(20) high
         # 3. Volatility filter
-        if (rsi_14_4h_aligned[i] > 50 and
-            close[i] > ema_20_4h_aligned[i] and
+        if (close[i] > ema_21_1w_aligned[i] and
+            close[i] > donchian_high_20_aligned[i] and
             vol_filter):
-            signals[i] = 0.20
+            signals[i] = 0.25
             
         # Short conditions:
-        # 1. 4h RSI < 50 (bearish momentum)
-        # 2. Price below 4h EMA20 (bearish bias)
+        # 1. Price below weekly EMA21 (bearish bias)
+        # 2. Price breaks below daily Donchian(20) low
         # 3. Volatility filter
-        elif (rsi_14_4h_aligned[i] < 50 and
-              close[i] < ema_20_4h_aligned[i] and
+        elif (close[i] < ema_21_1w_aligned[i] and
+              close[i] < donchian_low_20_aligned[i] and
               vol_filter):
-            signals[i] = -0.20
+            signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1h_RSI40_EMA20_VolFilter_v1"
-timeframe = "1h"
+name = "6h_WeeklyEMA21_DailyDonchian20_VolFilter_v1"
+timeframe = "6h"
 leverage = 1.0
