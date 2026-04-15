@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with weekly trend filter and volume confirmation
-# Uses daily breakout with weekly EMA trend for directional bias and volume > 2x median for confirmation.
-# Designed to capture medium-term trends in both bull and bear markets with moderate trade frequency.
-# Target: 30-100 trades over 4 years (7-25/year) to minimize fee drag while capturing strong moves.
+# Hypothesis: 4h price action above/below 12h KAMA with 12h volume confirmation
+# KAMA adapts to market noise - effective in both trending and ranging markets
+# 12h volume > 1.5x median confirms institutional participation
+# Conservative sizing (0.25) to manage drawdowns in volatile markets
+# Designed for trend following with noise reduction
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,44 +19,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian(20) channels on daily timeframe
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max()
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min()
+    # 12h KAMA (adaptive moving average)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Weekly EMA(50) for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Efficiency Ratio calculation
+    change = np.abs(np.diff(close_12h, prepend=close_12h[0]))
+    volatility = np.abs(np.diff(close_12h))
+    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
     
-    # Volume confirmation: current > 2x median of last 50 bars
-    vol_median = pd.Series(volume).rolling(window=50, min_periods=1).median()
-    vol_threshold = 2.0 * vol_median
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    
+    # KAMA calculation
+    kama = np.full_like(close_12h, np.nan)
+    kama[0] = close_12h[0]
+    for i in range(1, len(close_12h)):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    kama_aligned = align_htf_to_ltf(prices, df_12h, kama)
+    
+    # 12h volume confirmation
+    vol_12h = df_12h['volume'].values
+    vol_median = pd.Series(vol_12h).rolling(window=20, min_periods=20).median()
+    vol_threshold = 1.5 * vol_median
+    vol_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_12h)
+    vol_threshold_aligned = align_htf_to_ltf(prices, df_12h, vol_threshold.values)
     
     signals = np.zeros(n)
     
-    for i in range(50, n):  # Start after warmup for weekly EMA(50)
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_threshold[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(vol_12h_aligned[i]) or 
+            np.isnan(vol_threshold_aligned[i])):
             continue
         
-        # Long: Donchian breakout up + above weekly EMA + volume spike
-        if (close[i] > high_20[i] and 
-            close[i] > ema_50_1w_aligned[i] and 
-            volume[i] > vol_threshold[i]):
+        # Long: price above KAMA with volume confirmation
+        if (close[i] > kama_aligned[i] and 
+            vol_12h_aligned[i] > vol_threshold_aligned[i]):
             signals[i] = 0.25
         
-        # Short: Donchian breakout down + below weekly EMA + volume spike
-        elif (close[i] < low_20[i] and 
-              close[i] < ema_50_1w_aligned[i] and 
-              volume[i] > vol_threshold[i]):
+        # Short: price below KAMA with volume confirmation
+        elif (close[i] < kama_aligned[i] and 
+              vol_12h_aligned[i] > vol_threshold_aligned[i]):
             signals[i] = -0.25
         
-        # Exit: price re-enters Donchian channel
+        # Exit: price crosses KAMA in opposite direction
         elif (i > 0 and 
-              ((signals[i-1] == 0.25 and close[i] < high_20[i]) or
-               (signals[i-1] == -0.25 and close[i] > low_20[i]))):
+              ((signals[i-1] == 0.25 and close[i] < kama_aligned[i]) or
+               (signals[i-1] == -0.25 and close[i] > kama_aligned[i]))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -64,6 +79,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_DonchianBreakout20_WeeklyEMA50_Volume2x"
-timeframe = "1d"
+name = "4h_KAMA_VolumeConfirmation_12h"
+timeframe = "4h"
 leverage = 1.0
