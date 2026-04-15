@@ -12,50 +12,53 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = pd.DatetimeIndex(prices['open_time'])
+    hours = open_time.hour
     
-    # Daily ATR for volatility filter
+    # Daily trend filter: EMA 50 on daily close
     df_1d = get_htf_data(prices, '1d')
-    tr_1d = np.maximum(df_1d['high'].values - df_1d['low'].values,
-                       np.maximum(np.abs(df_1d['high'].values - np.concatenate([[df_1d['close'][0]], df_1d['close'][:-1]])),
-                                  np.abs(df_1d['low'].values - np.concatenate([[df_1d['close'][0]], df_1d['close'][:-1]]))))
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 12-hour Bollinger Bands (20, 2)
+    # 1-hour RSI for entry timing
     close_series = pd.Series(close)
-    sma_12h = close_series.rolling(window=20, min_periods=20).mean()
-    std_12h = close_series.rolling(window=20, min_periods=20).std()
-    upper_12h = sma_12h + 2 * std_12h
-    lower_12h = sma_12h - 2 * std_12h
+    delta = close_series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # Volume confirmation: current > 1.5x median of last 20 bars
+    # Volume filter: current > 1.5x 20-period median
     vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
     vol_threshold = 1.5 * vol_median
     
-    # ATR-based volatility filter: require ATR > 0.3 * median ATR
-    atr_median = pd.Series(atr_1d_aligned).rolling(window=50, min_periods=1).median()
-    vol_filter = atr_1d_aligned > 0.3 * atr_median
-    
     signals = np.zeros(n)
     
-    for i in range(20, n):
-        # Skip if any required data is NaN
-        if (np.isnan(upper_12h[i]) or np.isnan(lower_12h[i]) or 
-            np.isnan(vol_threshold[i]) or np.isnan(vol_filter[i])):
+    for i in range(50, n):
+        # Session filter: 08-20 UTC
+        if not (8 <= hours[i] <= 20):
             continue
         
-        # Long: close breaks above upper band + volume + volatility filter
-        if close[i] > upper_12h[i] and volume[i] > vol_threshold[i] and vol_filter[i]:
-            signals[i] = 0.25
+        # Skip if any required data is NaN
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(vol_threshold[i])):
+            continue
         
-        # Short: close breaks below lower band + volume + volatility filter
-        elif close[i] < lower_12h[i] and volume[i] > vol_threshold[i] and vol_filter[i]:
-            signals[i] = -0.25
+        # Long: daily uptrend + RSI oversold + volume
+        if close[i] > ema_50_1d_aligned[i] and rsi[i] < 30 and volume[i] > vol_threshold[i]:
+            signals[i] = 0.20
         
-        # Exit: close crosses back inside bands (mean reversion)
+        # Short: daily downtrend + RSI overbought + volume
+        elif close[i] < ema_50_1d_aligned[i] and rsi[i] > 70 and volume[i] > vol_threshold[i]:
+            signals[i] = -0.20
+        
+        # Exit: RSI returns to neutral zone
         elif (i > 0 and 
-              ((signals[i-1] == 0.25 and close[i] < upper_12h[i]) or
-               (signals[i-1] == -0.25 and close[i] > lower_12h[i]))):
+              ((signals[i-1] == 0.20 and rsi[i] >= 50) or
+               (signals[i-1] == -0.20 and rsi[i] <= 50))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -64,6 +67,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Bollinger_Breakout_Volume_VolFilter"
-timeframe = "12h"
+name = "1h_DailyTrend_RSI_MeanReversion"
+timeframe = "1h"
 leverage = 1.0
