@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with volume confirmation and 12h EMA50 trend filter
-# Long when price breaks above 20-bar Donchian high + volume > 2.0x 20-period avg + 12h EMA50 > EMA50 prev bar (uptrend)
-# Short when price breaks below 20-bar Donchian low + volume > 2.0x 20-period avg + 12h EMA50 < EMA50 prev bar (downtrend)
-# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (12-30/year).
-# Donchian channels provide clear breakout levels. Volume confirms breakout strength. 12h EMA50 ensures we trade with higher timeframe trend.
-# Works in bull markets (trend continuation) and bear markets (strong downtrends) by requiring alignment with 12h EMA50 slope.
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d ADX trend filter
+# Long when price breaks above 20-period Donchian high + volume > 1.5x 20-period avg + 1d ADX > 25 (strong trend)
+# Short when price breaks below 20-period Donchian low + volume > 1.5x 20-period avg + 1d ADX > 25 (strong trend)
+# Uses discrete position sizing (0.30) to balance return and drawdown. Designed for low trade frequency (20-40/year).
+# Donchian channels provide objective breakout levels. ADX > 25 ensures we only trade strong trends, avoiding chop and whipsaws.
+# Works in bull markets (trend continuation) and bear markets (strong downtrends) by requiring strong ADX.
+# Volume confirmation ensures breakouts have participation, reducing false signals.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,30 +25,78 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 12h HTF data once before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d HTF data once before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 12h Indicator: EMA50 (trend direction) ===
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # === 1d Indicator: ADX (trend strength filter) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA50 slope (current > previous = uptrend)
-    ema50_slope = np.zeros_like(ema50_12h_aligned)
-    ema50_slope[1:] = ema50_12h_aligned[1:] > ema50_12h_aligned[:-1]
+    # Calculate ADX components: +DM, -DM, TR
+    high_1d_shift = np.roll(high_1d, 1)
+    low_1d_shift = np.roll(low_1d, 1)
+    high_1d_shift[0] = high_1d[0]
+    low_1d_shift[0] = low_1d[0]
     
-    # === 6h Indicators: Donchian(20) channels ===
-    # Donchian high = max(high, lookback=20)
-    # Donchian low = min(low, lookback=20)
-    lookback = 20
-    donchian_high = np.full_like(high, np.nan)
-    donchian_low = np.full_like(low, np.nan)
+    plus_dm = np.where((high_1d - high_1d_shift) > (low_1d_shift - low_1d), 
+                       np.maximum(high_1d - high_1d_shift, 0), 0)
+    minus_dm = np.where((low_1d_shift - low_1d) > (high_1d - high_1d_shift), 
+                        np.maximum(low_1d_shift - low_1d, 0), 0)
     
-    for i in range(lookback-1, n):
-        donchian_high[i] = np.max(high[i-lookback+1:i+1])
-        donchian_low[i] = np.min(low[i-lookback+1:i+1])
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]
+    tr2[0] = np.abs(high_1d[0] - close_1d[0])
+    tr3[0] = np.abs(low_1d[0] - close_1d[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Wilder's smoothing (alpha = 1/period)
+    period = 14
+    alpha = 1.0 / period
+    
+    atr = np.zeros_like(tr)
+    atr[period-1] = np.mean(tr[:period])
+    for i in range(period, len(tr)):
+        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+    
+    plus_di = np.zeros_like(plus_dm)
+    minus_di = np.zeros_like(minus_dm)
+    
+    # Smooth +DM and -DM
+    plus_dm_smooth = np.zeros_like(plus_dm)
+    minus_dm_smooth = np.zeros_like(minus_dm)
+    
+    plus_dm_smooth[period-1] = np.mean(plus_dm[:period])
+    minus_dm_smooth[period-1] = np.mean(minus_dm[:period])
+    
+    for i in range(period, len(plus_dm)):
+        plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
+        minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
+    
+    # Avoid division by zero
+    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
+    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
+    
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    
+    # Wilder's smoothing for ADX
+    adx = np.zeros_like(dx)
+    adx[2*period-1] = np.mean(dx[period-1:2*period])
+    for i in range(2*period, len(dx)):
+        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+    
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # === 4h Indicators: Donchian Channel (20-period) ===
+    # Calculate Donchian high and low using rolling window
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,7 +104,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(100, lookback-1, 50)  # ensure Donchian and EMA50 are ready
+    warmup = 50
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -63,36 +112,36 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
+        # Volume filter: current volume > 1.5x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
+        
         # Skip if any required data is NaN
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(ema50_slope[i]) or np.isnan(vol_sma_20[i])):
+            np.isnan(adx_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2.0x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
-        
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 20-bar Donchian high
-        # 2. Uptrend (12h EMA50 sloping up)
+        # 1. Price breaks above 20-period Donchian high
+        # 2. Strong trend (ADX > 25)
         # 3. Volume confirmation
         if (close[i] > donchian_high[i]) and \
-           ema50_slope[i] and vol_confirm:
-            signals[i] = 0.25
+           (adx_aligned[i] > 25) and vol_confirm:
+            signals[i] = 0.30
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 20-bar Donchian low
-        # 2. Downtrend (12h EMA50 sloping down)
+        # 1. Price breaks below 20-period Donchian low
+        # 2. Strong trend (ADX > 25)
         # 3. Volume confirmation
         elif (close[i] < donchian_low[i]) and \
-             (not ema50_slope[i]) and vol_confirm:
-            signals[i] = -0.25
+             (adx_aligned[i] > 25) and vol_confirm:
+            signals[i] = -0.30
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "6h_Donchian20_Volume_12hEMA50Trend_v1"
-timeframe = "6h"
+name = "4h_Donchian20_Volume_ADX25_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
