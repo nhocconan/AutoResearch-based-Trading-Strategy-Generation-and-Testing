@@ -3,9 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 12h timeframe with 1d/1w HTF context using volume-weighted RSI (VW-RSI)
+# to identify momentum extremes, filtered by volatility regime (ATR-based) and
+# volume confirmation. VW-RSI combines price momentum with institutional activity.
+# Works in bull/bear by adapting to volatility regimes and using volume as
+# confirmation of institutional participation, reducing false signals.
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -16,7 +22,7 @@ def generate_signals(prices):
     # Get daily data for HTF context
     daily = get_htf_data(prices, '1d')
     
-    # Calculate ATR on daily for volatility filter
+    # Calculate ATR for volatility regime filtering
     tr1 = daily['high'].values[1:] - daily['low'].values[1:]
     tr2 = np.abs(daily['high'].values[1:] - daily['close'].values[:-1])
     tr3 = np.abs(daily['low'].values[1:] - daily['close'].values[:-1])
@@ -24,53 +30,61 @@ def generate_signals(prices):
     atr_14d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14d_aligned = align_htf_to_ltf(prices, daily, atr_14d)
     
-    # Volatility filter: ATR > 0.2% of price to avoid low volatility chop
-    vol_filter = atr_14d_aligned > (0.002 * close)
+    # Volatility regime: high volatility (trending) when ATR > 20-period MA of ATR
+    atr_ma_20 = pd.Series(atr_14d).rolling(window=20, min_periods=20).mean().values
+    atr_ma_20_aligned = align_htf_to_ltf(prices, daily, atr_ma_20)
+    high_vol_regime = atr_14d_aligned > atr_ma_20_aligned
     
-    # Calculate daily EMA20 for trend direction
-    daily_ema_20 = pd.Series(daily['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    daily_ema_20_aligned = align_htf_to_ltf(prices, daily, daily_ema_20)
+    # Calculate volume-weighted RSI (VW-RSI) on daily data
+    # VW-RSI = 100 - (100 / (1 + RS)), where RS = avg gains / avg losses weighted by volume
+    price_change = np.diff(daily['close'].values, prepend=daily['close'].values[0])
+    gains = np.where(price_change > 0, price_change, 0)
+    losses = np.where(price_change < 0, -price_change, 0)
     
-    # Calculate daily EMA50 for additional trend confirmation
-    daily_ema_50 = pd.Series(daily['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    daily_ema_50_aligned = align_htf_to_ltf(prices, daily, daily_ema_50)
+    # Volume-weighted gains and losses
+    vol_weights = daily['volume'].values
+    vol_gains = gains * vol_weights
+    vol_losses = losses * vol_weights
     
-    # Calculate 4-period EMA of daily volume for volume spike detection
-    vol_ema_4d = pd.Series(daily['volume'].values).ewm(span=4, adjust=False, min_periods=4).mean().values
-    vol_ema_4d_aligned = align_htf_to_ltf(prices, daily, vol_ema_4d)
+    # Smoothed volume-weighted RS
+    avg_vol_gain = pd.Series(vol_gains).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_vol_loss = pd.Series(vol_losses).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = np.divide(avg_vol_gain, avg_vol_loss, out=np.full_like(avg_vol_gain, 50.0), where=avg_vol_loss!=0)
+    vw_rsi = 100 - (100 / (1 + rs))
+    vw_rsi_aligned = align_htf_to_ltf(prices, daily, vw_rsi)
     
-    # Volume filter: current volume > 1.8x 4-day average volume (more selective)
-    vol_threshold = 1.8 * vol_ema_4d_aligned
-    vol_spike = volume > vol_threshold
+    # Volume confirmation: current volume > 1.3x 20-day average volume
+    vol_ma_20 = pd.Series(daily['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, daily, vol_ma_20)
+    vol_confirmation = volume > (1.3 * vol_ma_20_aligned)
     
     signals = np.zeros(n)
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14d_aligned[i]) or np.isnan(vol_ema_4d_aligned[i]) or 
-            np.isnan(daily_ema_20_aligned[i]) or np.isnan(daily_ema_50_aligned[i])):
+        if (np.isnan(vw_rsi_aligned[i]) or np.isnan(atr_14d_aligned[i]) or 
+            np.isnan(atr_ma_20_aligned[i]) or np.isnan(vol_ma_20_aligned[i])):
             continue
         
-        # Only trade when volatility is sufficient (avoid chop)
-        if not vol_filter[i]:
+        # Only trade in high volatility regimes (trending markets)
+        if not high_vol_regime[i]:
             signals[i] = 0.0
             continue
             
-        # Long: Price above both EMA20 and EMA50 + volume spike
-        if (close[i] > daily_ema_20_aligned[i] and 
-            close[i] > daily_ema_50_aligned[i] and 
-            vol_spike[i]):
+        # Long: VW-RSI oversold (<30) in uptrend + volume confirmation
+        if (vw_rsi_aligned[i] < 30 and 
+            close[i] > close[i-1] and  # minor uptrend confirmation
+            vol_confirmation[i]):
             signals[i] = 0.25
         
-        # Short: Price below both EMA20 and EMA50 + volume spike
-        elif (close[i] < daily_ema_20_aligned[i] and 
-              close[i] < daily_ema_50_aligned[i] and 
-              vol_spike[i]):
+        # Short: VW-RSI overbought (>70) in downtrend + volume confirmation
+        elif (vw_rsi_aligned[i] > 70 and 
+              close[i] < close[i-1] and  # minor downtrend confirmation
+              vol_confirmation[i]):
             signals[i] = -0.25
         
-        # Exit: reverse signal on opposite direction
-        elif (close[i] < daily_ema_20_aligned[i] and signals[i-1] > 0) or \
-             (close[i] > daily_ema_20_aligned[i] and signals[i-1] < 0):
+        # Exit: VW-RSI returns to neutral zone (40-60)
+        elif 40 <= vw_rsi_aligned[i] <= 60:
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -79,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA20_50_Volume_Spike_Filter_v2"
-timeframe = "4h"
+name = "12h_VWRSI_Volatility_Regime_Volume"
+timeframe = "12h"
 leverage = 1.0
