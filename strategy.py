@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h KAMA trend following with 1d RSI filter and volume confirmation
-# Long when KAMA(ER=10) is rising + RSI(14) from 1d < 40 (oversold bounce) + volume > 1.5x 20-period avg
-# Short when KAMA(ER=10) is falling + RSI(14) from 1d > 60 (overbought pullback) + volume > 1.5x 20-period avg
-# KAMA adapts to market noise, reducing whipsaw in choppy markets. RSI filter avoids buying strength/selling weakness.
-# Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend) via adaptive trend.
-# Designed for low trade frequency (20-40/year) to minimize fee drag.
+# Hypothesis: 6h Bollinger Band squeeze breakout with 1d trend filter and volume confirmation
+# Long when price breaks above upper BB(20,2) after low BB width (<10th percentile) + 1d close > EMA50 + volume > 1.5x avg
+# Short when price breaks below lower BB(20,2) after low BB width + 1d close < EMA50 + volume > 1.5x avg
+# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (12-25/year).
+# Bollinger squeeze identifies low volatility compression before expansion. Trend filter ensures breakout alignment.
+# Works in bull markets (breakouts with uptrend) and bear markets (breakouts with downtrend) by requiring 1d EMA50 filter.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,60 +26,25 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 1d Indicator: RSI(14) ===
-    rsi_period = 14
-    delta = np.diff(df_1d['close'].values)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # === 1d Indicators: EMA50 (trend filter) ===
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[rsi_period] = np.mean(gain[:rsi_period])
-    avg_loss[rsi_period] = np.mean(loss[:rsi_period])
+    # === 6h Indicators: Bollinger Bands (20,2) ===
+    bb_window = 20
+    bb_std = 2
+    ma = pd.Series(close).rolling(window=bb_window, min_periods=bb_window).mean().values
+    bb_std_dev = pd.Series(close).rolling(window=bb_window, min_periods=bb_window).std().values
+    upper_bb = ma + (bb_std * bb_std_dev)
+    lower_bb = ma - (bb_std * bb_std_dev)
+    bb_width = ((upper_bb - lower_bb) / ma) * 100  # percentage
     
-    for i in range(rsi_period + 1, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
-        avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.concatenate([[np.nan], rsi])  # align length with df_1d
-    
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    
-    # === 4h Indicator: KAMA (ER=10, fast=2, slow=30) ===
-    er_period = 10
-    fast_sc = 2
-    slow_sc = 30
-    
-    change = np.abs(np.diff(close, n=er_period))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0) if hasattr(np.sum, 'axis') else np.sum(np.abs(np.diff(close)))
-    # Correct volatility calculation: sum of absolute changes over er_period window
-    volatility = np.zeros_like(close)
-    for i in range(er_period, len(close)):
-        volatility[i] = np.sum(np.abs(np.diff(close[i-er_period:i])))
-    
-    # Avoid division by zero
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (fast_sc/slow_sc - 1) + 1) ** 2
-    
-    kama = np.zeros_like(close)
-    kama[er_period] = close[er_period]  # seed
-    for i in range(er_period + 1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # KAMA direction: 1 if rising, -1 if falling, 0 if flat (using 3-period slope)
-    kama_dir = np.zeros_like(kama)
-    for i in range(3, len(kama)):
-        if kama[i] > kama[i-3]:
-            kama_dir[i] = 1
-        elif kama[i] < kama[i-3]:
-            kama_dir[i] = -1
-        else:
-            kama_dir[i] = 0
+    # BB width percentile (20-period lookback for squeeze detection)
+    bb_width_percentile = pd.Series(bb_width).rolling(window=20, min_periods=1).rank(pct=True).values * 100
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -87,7 +52,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(er_period + 3, 20) + 5  # KAMA seed + direction + volume + RSI
+    warmup = max(bb_window, 50) + 20  # BB(20) + EMA50(1d) + volume(20) + percentile lookback
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -99,25 +64,29 @@ def generate_signals(prices):
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # Skip if any required data is NaN
-        if (np.isnan(kama_dir[i]) or np.isnan(rsi_aligned[i]) or
-            np.isnan(vol_sma_20[i])):
+        if (np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_sma_20[i]) or
+            np.isnan(bb_width_percentile[i])):
             signals[i] = 0.0
             continue
         
+        # Squeeze condition: BB width below 10th percentile (low volatility)
+        is_squeeze = bb_width_percentile[i] < 10
+        
         # === LONG CONDITIONS ===
-        # 1. KAMA is rising (trend up)
-        # 2. 1d RSI < 40 (oversold bounce opportunity)
+        # 1. Price breaks above upper BB after squeeze
+        # 2. 1d close > EMA50 (uptrend)
         # 3. Volume confirmation
-        if (kama_dir[i] == 1) and \
-           (rsi_aligned[i] < 40) and vol_confirm:
+        if (close[i] > upper_bb[i]) and is_squeeze and \
+           (close[i] > ema50_1d_aligned[i]) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. KAMA is falling (trend down)
-        # 2. 1d RSI > 60 (overbought pullback opportunity)
+        # 1. Price breaks below lower BB after squeeze
+        # 2. 1d close < EMA50 (downtrend)
         # 3. Volume confirmation
-        elif (kama_dir[i] == -1) and \
-             (rsi_aligned[i] > 60) and vol_confirm:
+        elif (close[i] < lower_bb[i]) and is_squeeze and \
+             (close[i] < ema50_1d_aligned[i]) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -125,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA10_1dRSI40_60_Volume_Filter_v1"
-timeframe = "4h"
+name = "6h_BB_Squeeze_Breakout_1dEMA50_Volume_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
