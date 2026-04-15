@@ -3,12 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot-based mean reversion with 1d volume filter and 1w trend filter
-# Designed for low trade frequency (target 15-25/year) with high win probability
-# Uses Camarilla levels (L3/L4 for short, H3/H4 for long) from daily pivots
-# Only takes mean-reversion trades when 1w EMA50 trend aligns with expected reversal
-# Volume spike required to confirm institutional interest at pivot levels
-# Works in ranging markets (mean reversion) and trending markets (pullbacks to value)
+# Hypothesis: 1d Donchian breakout with 1w volume confirmation and trend filter
+# Designed for low trade frequency (target 10-25/year) with clear trend following logic
+# Works in both bull (breakout continuation) and bear (breakdown continuation) markets
+# Uses volume spike and EMA trend filter to avoid false breakouts
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,16 +18,9 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data (primary timeframe) for entry timing
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    
-    # Load 1d data for Camarilla pivot calculation
+    # Load 1d data (primary timeframe) for Donchian calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -37,33 +28,36 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Load 1w data for trend filter (EMA50)
+    # 1d Donchian channels (20-period)
+    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Load 1w data for volume confirmation and trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 60:
+    if len(df_1w) < 30:
         return np.zeros(n)
+    volume_1w = df_1w['volume'].values
     close_1w = df_1w['close'].values
     
-    # Calculate Camarilla pivot levels from previous day
-    # Standard Camarilla: H4 = C + 1.1*(H-L)/2, H3 = C + 1.1*(H-L)/4
-    # L3 = C - 1.1*(H-L)/4, L4 = C - 1.1*(H-L)/2
-    camarilla_H4 = close_1d + 1.1 * (high_1d - low_1d) / 2
-    camarilla_H3 = close_1d + 1.1 * (high_1d - low_1d) / 4
-    camarilla_L3 = close_1d - 1.1 * (high_1d - low_1d) / 4
-    camarilla_L4 = close_1d - 1.1 * (high_1d - low_1d) / 2
-    
-    # Volume average (20-period on 1d) for spike detection
-    vol_avg = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Volume average (20-period on 1w)
+    vol_avg = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
     
     # EMA50 on 1w for trend filter
     ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align all indicators to 4h timeframe
-    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
-    camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3)
-    camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3)
-    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
-    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg)
+    # ATR for volatility and stoploss (14-period on 1d)
+    tr1 = np.maximum(high_1d[1:], low_1d[:-1]) - np.minimum(high_1d[1:], low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align all indicators to 1d timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1w, vol_avg)
     ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
     signals = np.zeros(n)
     position = 0
@@ -71,41 +65,44 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_H3_aligned[i]) or 
-            np.isnan(camarilla_L3_aligned[i]) or np.isnan(camarilla_L4_aligned[i]) or 
-            np.isnan(vol_avg_aligned[i]) or np.isnan(ema50_1w_aligned[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(vol_avg_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(atr_aligned[i])):
             continue
         
-        # Long entry: price touches/slightly pierces L3/L4 + uptrend + volume spike
-        if (low[i] <= camarilla_L3_aligned[i] * 1.002 and  # Allow 0.2% penetration
-            close[i] > camarilla_L3_aligned[i] and          # Close back above L3
-            close[i] > ema50_1w_aligned[i] and              # Above weekly trend
-            volume[i] > 2.0 * vol_avg_aligned[i] and        # Strong volume confirmation
+        # Volatility-adjusted position size (inverse vol)
+        vol_factor = np.clip(0.5 * atr_aligned[i] / (close[i] + 1e-10), 0.5, 2.0)
+        position_size = base_size / vol_factor
+        position_size = np.clip(position_size, 0.15, 0.35)
+        
+        # Long entry: price breaks above Donchian high + uptrend + volume spike
+        if (close[i] > donch_high_aligned[i] and 
+            close[i] > ema50_1w_aligned[i] and 
+            volume[i] > 1.8 * vol_avg_aligned[i] and 
             position <= 0):
             position = 1
-            signals[i] = base_size
+            signals[i] = position_size
         
-        # Short entry: price touches/slightly pierces H3/H4 + downtrend + volume spike
-        elif (high[i] >= camarilla_H3_aligned[i] * 0.998 and  # Allow 0.2% penetration
-              close[i] < camarilla_H3_aligned[i] and          # Close back below H3
-              close[i] < ema50_1w_aligned[i] and              # Below weekly trend
-              volume[i] > 2.0 * vol_avg_aligned[i] and        # Strong volume confirmation
+        # Short entry: price breaks below Donchian low + downtrend + volume spike
+        elif (close[i] < donch_low_aligned[i] and 
+              close[i] < ema50_1w_aligned[i] and 
+              volume[i] > 1.8 * vol_avg_aligned[i] and 
               position >= 0):
             position = -1
-            signals[i] = -base_size
+            signals[i] = -position_size
         
-        # Exit: price returns to mean (pivot) or trend breaks
-        elif position == 1 and (close[i] >= (camarilla_H3_aligned[i] + camarilla_L3_aligned[i]) / 2 or
-                                close[i] < ema50_1w_aligned[i]):
+        # Exit: reverse signal or volatility-based stop
+        elif position == 1 and (close[i] < ema50_1w_aligned[i] or 
+                                close[i] < donch_low_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] <= (camarilla_H3_aligned[i] + camarilla_L3_aligned[i]) / 2 or
-                                 close[i] > ema50_1w_aligned[i]):
+        elif position == -1 and (close[i] > ema50_1w_aligned[i] or 
+                                 close[i] > donch_high_aligned[i]):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Camarilla_Pivot_MeanReversion_1dVol_1wTrend"
-timeframe = "4h"
+name = "1d_Donchian_1wVolume_1wEMA_Breakout"
+timeframe = "1d"
 leverage = 1.0
