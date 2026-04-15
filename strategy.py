@@ -15,10 +15,10 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d Donchian channels (20-period)
+    # Calculate 1d Donchian channels (20-period) for trend
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     upper_20_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
@@ -30,14 +30,10 @@ def generate_signals(prices):
     
     # Calculate 1d ATR(14) for volatility filter
     tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.concatenate([[close[0]], close[:-1]]))  # placeholder, will fix below
-    tr3 = np.abs(low_1d - np.concatenate([[close[0]], close[:-1]]))   # placeholder, will fix below
-    # Correct TR calculation using 1d close
-    close_1d = df_1d['close'].values
-    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    tr2 = np.abs(high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]]))
+    tr3 = np.abs(low_1d - np.concatenate([[low_1d[0]], low_1d[:-1]]))
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14_4h = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
     # Calculate 4h volume ratio (current vs 20-period average)
@@ -46,15 +42,14 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Session filter: avoid low liquidity periods (22-06 UTC)
+    # Precompute session filter (00-24 UTC for 4h)
     hours = prices.index.hour
-    in_session = (hours >= 6) & (hours <= 22)  # 6 AM to 10 PM UTC
+    in_session = (hours >= 0) & (hours <= 23)  # Always true for 4h, kept for structure
     
     for i in range(100, n):
         # Skip if any required data is NaN
         if (np.isnan(upper_20_4h[i]) or np.isnan(lower_20_4h[i]) or 
-            np.isnan(atr_14_4h[i]) or np.isnan(volume_ratio[i]) or 
-            not in_session[i]):
+            np.isnan(atr_14_4h[i]) or np.isnan(volume_ratio[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
@@ -80,6 +75,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Donchian20_Volume_ATR_Filter_v2"
+name = "4h_1d_Donchian20_Volume_ATR_Filter_v3"
 timeframe = "4h"
 leverage = 1.0
