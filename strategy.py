@@ -1,13 +1,12 @@
+# A robust 4-hour momentum strategy combining Donchian breakouts, volume confirmation, and ADX trend filtering. 
+# Designed to work in both bull and bear markets by focusing on breakout strength and institutional participation.
+# The strategy avoids false breakouts by requiring volume confirmation and trend alignment.
+# Target: 20-40 trades per year with clear entry/exit rules to minimize fee drag.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 4h Donchian breakout + 1d volume confirmation + volatility filter
-# Uses Donchian(20) breakout for trend following, confirmed by above-average volume
-# and filtered by low volatility regime (ATR ratio < 1.2) to avoid whipsaws
-# Designed for low trade frequency (target 20-40/year) with strong trend capture
-# Works in bull markets via breakouts and bear markets via breakdowns
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,33 +18,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data once
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
+    # Calculate 4h Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Volume confirmation: 20-period average volume
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # 1d ATR(14) for volatility measurement
-    tr1 = np.maximum(high_1d[1:], low_1d[:-1]) - np.minimum(high_1d[1:], low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    # ADX(14) for trend strength on 4h data
+    tr1 = np.maximum(high[1:], low[:-1]) - np.minimum(high[1:], low[:-1])
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # 4-period average volume for confirmation
-    avg_vol_4 = pd.Series(volume_1d).rolling(window=4, min_periods=4).mean().values
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                       np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                        np.maximum(low[:-1] - low[1:], 0), 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
     
-    # Donchian(20) channels on 4h
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Align 1d indicators to 4h timeframe
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    avg_vol_4_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_4)
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr + 1e-10)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0
@@ -53,40 +50,34 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
-            np.isnan(atr_1d_aligned[i]) or np.isnan(avg_vol_4_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(avg_volume[i]) or np.isnan(adx[i])):
             continue
         
-        # Volume confirmation: current 4h volume > 4-period average 1d volume
-        vol_confirmed = volume[i] > avg_vol_4_aligned[i]
-        
-        # Volatility filter: avoid high volatility regimes (ATR ratio < 1.2)
-        # Using close-based approximation for ATR ratio
-        if i >= 14:
-            tr_close = np.abs(close[i] - close[i-1])
-            atr_approx = pd.Series(tr_close).ewm(span=14, adjust=False, min_periods=14).mean().values[i]
-            vol_filter = atr_approx < (1.2 * atr_1d_aligned[i])
-        else:
-            vol_filter = True
-        
-        # Long entry: price breaks above Donchian upper band with volume confirmation
-        if close[i] > highest_20[i] and vol_confirmed and vol_filter and position <= 0:
+        # Long conditions: price breaks above Donchian high with volume confirmation and ADX > 20
+        if (close[i] > highest_high[i] and 
+            volume[i] > avg_volume[i] * 1.5 and 
+            adx[i] > 20 and 
+            position <= 0):
             position = 1
             signals[i] = position_size
-        # Short entry: price breaks below Donchian lower band with volume confirmation
-        elif close[i] < lowest_20[i] and vol_confirmed and vol_filter and position >= 0:
+        # Short conditions: price breaks below Donchian low with volume confirmation and ADX > 20
+        elif (close[i] < lowest_low[i] and 
+              volume[i] > avg_volume[i] * 1.5 and 
+              adx[i] > 20 and 
+              position >= 0):
             position = -1
             signals[i] = -position_size
-        # Exit: price returns to middle of channel
-        elif position == 1 and close[i] < (highest_20[i] + lowest_20[i]) / 2:
+        # Exit conditions: reverse signal or loss of momentum (ADX < 20)
+        elif position == 1 and (close[i] < lowest_low[i] or adx[i] < 20):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > (highest_20[i] + lowest_20[i]) / 2:
+        elif position == -1 and (close[i] > highest_high[i] or adx[i] < 20):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian20_Volume_VolFilter"
+name = "4h_Donchian_Volume_ADX_Momentum"
 timeframe = "4h"
 leverage = 1.0
