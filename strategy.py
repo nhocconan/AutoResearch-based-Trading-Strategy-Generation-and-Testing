@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w Donchian channel (breakout structure)
+    # Weekly Donchian breakout structure (20-period)
     weekly = get_htf_data(prices, '1w')
     high_w = weekly['high'].values
     low_w = weekly['low'].values
