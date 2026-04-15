@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index with 1d ADX regime filter and volume confirmation
-# Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low
-# Long when Bull Power > 0 AND Bear Power rising (less negative) AND price > 1d VWAP AND volume > 1.5x avg
-# Short when Bear Power < 0 AND Bull Power falling (less positive) AND price < 1d VWAP AND volume > 1.5x avg
-# Uses 1d ADX > 25 to filter for trending markets only, reducing whipsaws in ranging conditions
-# Designed for moderate trade frequency (50-120/year) with strong directional bias in trends
+# Hypothesis: 12h Camarilla R3/S3 breakout with volume confirmation and 1d HMA trend filter
+# Long when price breaks above Camarilla R3 (1d) + volume > 2.0x 24-period volume SMA + price > 1d HMA21
+# Short when price breaks below Camarilla S3 (1d) + volume > 2.0x 24-period volume SMA + price < 1d HMA21
+# Uses tighter Camarilla levels (R3/S3) for stronger breakouts, 1d HMA for trend alignment, and strict volume filter
+# Designed for low trade frequency (12-25/year) to minimize fee drag while capturing significant intraday moves
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,36 +21,51 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d Indicators: VWAP and ADX for regime filter ===
+    # === 1d Indicators: Camarilla Pivot Levels (R3, S3) and HMA21 ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # VWAP calculation
-    vwap_1d = (np.cumsum(close_1d * volume_1d) / np.cumsum(volume_1d))
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    # Camarilla calculations
+    range_1d = high_1d - low_1d
+    camarilla_pivot = (high_1d + low_1d + close_1d) / 3
+    camarilla_r3 = camarilla_pivot + (range_1d * 1.1 / 4)  # R3 level
+    camarilla_s3 = camarilla_pivot - (range_1d * 1.1 / 4)  # S3 level
     
-    # ADX calculation (14-period)
-    plus_dm = np.diff(high_1d, prepend=high_1d[0])
-    minus_dm = np.diff(low_1d, prepend=low_1d[0]) * -1
-    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
-    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    tr1 = np.abs(np.diff(high_1d, prepend=high_1d[0]))
-    tr2 = np.abs(np.diff(low_1d, prepend=low_1d[0]))
-    tr3 = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    # HMA21 calculation: Weighted Moving Average of WMA
+    def wma(arr, period):
+        weights = np.arange(1, period + 1)
+        return np.convolve(arr, weights/weights.sum(), mode='valid')
     
-    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_di_1d = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
-    minus_di_1d = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = pd.Series(dx_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    def hma(arr, period):
+        half_period = period // 2
+        sqrt_period = int(np.sqrt(period))
+        wma_half = wma(arr, half_period)
+        wma_full = wma(arr, period)
+        # Need to align lengths: 2*WMA(half) - WMA(full)
+        # Then WMA of that with sqrt_period
+        if len(wma_half) < 1 or len(wma_full) < 1:
+            return np.full_like(arr, np.nan)
+        # Pad to original length
+        wma_half_padded = np.full_like(arr, np.nan)
+        wma_full_padded = np.full_like(arr, np.nan)
+        wma_half_padded[half_period-1:] = wma_half
+        wma_full_padded[period-1:] = wma_full
+        diff = 2 * wma_half_padded - wma_full_padded
+        hma_vals = wma(diff, sqrt_period)
+        # Pad result
+        hma_result = np.full_like(arr, np.nan)
+        hma_result[period-1:] = hma_vals
+        return hma_result
+    
+    hma_21_1d = hma(close_1d, 21)
+    hma_21_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_21_1d)
     
     signals = np.zeros(n)
     
@@ -59,45 +73,28 @@ def generate_signals(prices):
     warmup = 100
     
     for i in range(warmup, n):
-        # Volume filter: current volume > 1.5x 20-period volume SMA
-        vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
+        # Volume filter: current volume > 2.0x 24-period volume SMA
+        vol_sma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+        vol_confirm = volume[i] > (vol_sma_24[i] * 2.0)
         
         # Skip if any required data is NaN
-        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) or
-            np.isnan(vol_sma_20[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(hma_21_1d_aligned[i]) or np.isnan(vol_sma_24[i])):
             signals[i] = 0.0
             continue
         
-        # === ELDER RAY CALCULATION (using 13-period EMA) ===
-        # Calculate EMA13 for Bull/Bear Power
-        ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-        bull_power = high - ema13
-        bear_power = ema13 - low
-        
-        # Calculate rising/falling power (1-period change)
-        bull_power_rising = bull_power[i] > bull_power[i-1]
-        bear_power_falling = bear_power[i] < bear_power[i-1]
-        
-        # Regime filter: only trade when ADX > 25 (trending market)
-        trending_regime = adx_1d_aligned[i] > 25
-        
         # === LONG CONDITIONS ===
-        # 1. Bull Power > 0 (buying strength)
-        # 2. Bull Power rising (momentum increasing)
-        # 3. Price above 1d VWAP (intraday bullish bias)
-        # 4. Volume confirmation
-        # 5. Trending regime (ADX > 25)
-        if (bull_power[i] > 0) and bull_power_rising and (close[i] > vwap_1d_aligned[i]) and vol_confirm and trending_regime:
+        # 1. Price breaks above 1d Camarilla R3
+        # 2. Volume confirmation
+        # 3. Price above 1d HMA21 (uptrend filter)
+        if (close[i] > camarilla_r3_aligned[i]) and vol_confirm and (close[i] > hma_21_1d_aligned[i]):
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Bear Power > 0 (selling strength) 
-        # 2. Bear Power falling (momentum increasing to downside)
-        # 3. Price below 1d VWAP (intraday bearish bias)
-        # 4. Volume confirmation
-        # 5. Trending regime (ADX > 25)
-        elif (bear_power[i] > 0) and bear_power_falling and (close[i] < vwap_1d_aligned[i]) and vol_confirm and trending_regime:
+        # 1. Price breaks below 1d Camarilla S3
+        # 2. Volume confirmation
+        # 3. Price below 1d HMA21 (downtrend filter)
+        elif (close[i] < camarilla_s3_aligned[i]) and vol_confirm and (close[i] < hma_21_1d_aligned[i]):
             signals[i] = -0.25
         
         else:
@@ -105,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_1dADX_VWAP_VolumeFilter_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Volume_HMA21_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
