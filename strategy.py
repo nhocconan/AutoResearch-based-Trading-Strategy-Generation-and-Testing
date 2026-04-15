@@ -24,77 +24,58 @@ def generate_signals(prices):
     upper_20_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     lower_20_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align 1d Donchian to 4h
-    upper_20_4h = align_htf_to_ltf(prices, df_1d, upper_20_1d)
-    lower_20_4h = align_htf_to_ltf(prices, df_1d, lower_20_1d)
+    # Align 1d Donchian to 1d (no shift needed as we use completed bar)
+    upper_20 = upper_20_1d
+    lower_20 = lower_20_1d
     
-    # Get 1w HTF data for weekly pivot levels
+    # Get 1w HTF data for weekly trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate weekly pivot points from prior week (using 1w data)
-    # Weekly high/low/close from prior week
-    weekly_high = pd.Series(df_1w['high']).shift(1).values  # prior week's high
-    weekly_low = pd.Series(df_1w['low']).shift(1).values   # prior week's low
-    weekly_close = pd.Series(df_1w['close']).shift(1).values # prior week's close
+    # Calculate 1w EMA(21) for weekly trend
+    ema_21_1w = pd.Series(df_1w['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1d = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
-    # Weekly pivot: (H+L+C)/3
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    # Weekly R1: 2*P - L
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    # Weekly S1: 2*P - H
-    weekly_s1 = 2 * weekly_pivot - weekly_high
-    
-    # Align weekly pivot levels to 4h
-    weekly_pivot_4h = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    weekly_r1_4h = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    weekly_s1_4h = align_htf_to_ltf(prices, df_1w, weekly_s1)
-    
-    # Calculate 4h ATR(14) for volatility filter
+    # Calculate 1d ATR(14) for volatility filter
     tr1 = high - low
     tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
     tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 4h volume ratio (current vs 20-period average)
+    # Calculate 1d volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
     signals = np.zeros(n)
     
-    # Precompute session filter (8-20 UTC for 4h - active trading hours)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_20_4h[i]) or np.isnan(lower_20_4h[i]) or 
-            np.isnan(weekly_pivot_4h[i]) or np.isnan(weekly_r1_4h[i]) or 
-            np.isnan(weekly_s1_4h[i]) or np.isnan(atr_14[i]) or 
-            np.isnan(volume_ratio[i]) or not in_session[i]):
+        if (np.isnan(upper_20[i]) or np.isnan(lower_20[i]) or 
+            np.isnan(ema_21_1d[i]) or np.isnan(atr_14[i]) or 
+            np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
         # Long conditions:
-        # 1. 4h price breaks above 1d Donchian upper (20) - bullish breakout
-        # 2. Price above weekly pivot (bullish bias from prior week)
+        # 1. 1d price breaks above 1d Donchian upper (20) - bullish breakout
+        # 2. Weekly trend filter: price above 1w EMA(21) (bullish weekly bias)
         # 3. Volume confirmation: volume > 1.5x average
         # 4. Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
-        if (close[i] > upper_20_4h[i] and
-            close[i] > weekly_pivot_4h[i] and
+        if (close[i] > upper_20[i] and
+            close[i] > ema_21_1d[i] and
             volume_ratio[i] > 1.5 and
             atr_14[i] > 0.005 * close[i]):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. 4h price breaks below 1d Donchian lower (20) - bearish breakdown
-        # 2. Price below weekly pivot (bearish bias from prior week)
+        # 1. 1d price breaks below 1d Donchian lower (20) - bearish breakdown
+        # 2. Weekly trend filter: price below 1w EMA(21) (bearish weekly bias)
         # 3. Volume confirmation: volume > 1.5x average
         # 4. Volatility filter: ATR > 0.5% of price
-        elif (close[i] < lower_20_4h[i] and
-              close[i] < weekly_pivot_4h[i] and
+        elif (close[i] < lower_20[i] and
+              close[i] < ema_21_1d[i] and
               volume_ratio[i] > 1.5 and
               atr_14[i] > 0.005 * close[i]):
             signals[i] = -0.25
@@ -103,6 +84,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Donchian20_1w_WeeklyPivot_Volume_Filter_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1w_EMA21_Volume_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
