@@ -3,14 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and ADX trend filter
-# Uses daily Donchian breakout for trend direction, confirmed by volume spike and ADX>25.
-# Designed to work in both bull and bear markets by requiring strong trend + volume.
-# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag.
+# Hypothesis: 4h Williams %R with 1-day Trend Filter
+# Williams %R(14) identifies overbought/oversold conditions: < -80 = oversold, > -20 = overbought.
+# Combined with 1-day EMA50 trend filter: only take long signals when price above daily EMA50,
+# and short signals when price below daily EMA50. This avoids counter-trend trades in strong trends.
+# Uses volume confirmation (>1.5x 20-bar median volume) to ensure institutional participation.
+# Designed to work in both bull and bear markets by following the higher timeframe trend.
+# Discrete sizing (0.25) limits trade frequency to ~25-35 trades/year per symbol.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,69 +21,45 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day Donchian channels for trend direction
+    # 1-day EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Calculate 20-period Donchian channels
-    high_max = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Align to 12h timeframe
-    donchian_high = align_htf_to_ltf(prices, df_1d, high_max)
-    donchian_low = align_htf_to_ltf(prices, df_1d, low_min)
-    
-    # 1-day ADX for trend strength
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    tr = np.maximum(high_1d[1:] - low_1d[1:], np.absolute(high_1d[1:] - close_1d[:-1]), np.absolute(low_1d[1:] - close_1d[:-1]))
+    # Williams %R calculation (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    tr = np.concatenate([[0], tr])
-    
-    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx_1d = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # 1-day volume confirmation
-    vol_1d = df_1d['volume'].values
-    vol_ma = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = 2.0 * vol_ma
-    vol_aligned = align_htf_to_ltf(prices, df_1d, vol_threshold)
+    # Volume confirmation: current > 1.5x median of last 20 bars
+    vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
+    vol_threshold = 1.5 * vol_median
     
     signals = np.zeros(n)
     
-    for i in range(20, n):
+    for i in range(14, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(vol_threshold[i])):
             continue
         
-        # Long: price breaks above Donchian high, ADX > 25, volume spike
-        if (close[i] > donchian_high[i] and 
-            adx_aligned[i] > 25 and 
-            volume[i] > vol_aligned[i]):
+        # Long: Williams %R < -80 (oversold), price above 1d EMA50, volume spike
+        if (williams_r[i] < -80 and close[i] > ema_1d_aligned[i] and 
+            volume[i] > vol_threshold[i]):
             signals[i] = 0.25
         
-        # Short: price breaks below Donchian low, ADX > 25, volume spike
-        elif (close[i] < donchian_low[i] and 
-              adx_aligned[i] > 25 and 
-              volume[i] > vol_aligned[i]):
+        # Short: Williams %R > -20 (overbought), price below 1d EMA50, volume spike
+        elif (williams_r[i] > -20 and close[i] < ema_1d_aligned[i] and 
+              volume[i] > vol_threshold[i]):
             signals[i] = -0.25
         
-        # Exit: price returns to middle of channel or ADX weakens
+        # Exit: Williams %R returns to neutral range (-50) or trend fails
         elif (i > 0 and 
-              ((signals[i-1] == 0.25 and (close[i] < (donchian_high[i] + donchian_low[i]) / 2 or adx_aligned[i] <= 25)) or
-               (signals[i-1] == -0.25 and (close[i] > (donchian_high[i] + donchian_low[i]) / 2 or adx_aligned[i] <= 25)))):
+              ((signals[i-1] == 0.25 and (williams_r[i] >= -50 or close[i] <= ema_1d_aligned[i])) or
+               (signals[i-1] == -0.25 and (williams_r[i] <= -50 or close[i] >= ema_1d_aligned[i])))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -89,6 +68,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_Volume_ADX"
-timeframe = "12h"
+name = "4h_WilliamsR_1dEMA_Volume"
+timeframe = "4h"
 leverage = 1.0
