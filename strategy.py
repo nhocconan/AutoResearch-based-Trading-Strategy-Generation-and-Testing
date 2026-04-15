@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
-# Long when price breaks above 4h Donchian upper band (20-period high) + 1w close > 1w EMA50 (uptrend) + volume > 1.5x 20-period avg
-# Short when price breaks below 4h Donchian lower band (20-period low) + 1w close < 1w EMA50 (downtrend) + volume > 1.5x 20-period avg
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
+# Long when price breaks above 1d Donchian upper band (20-period high) + 1w close > 1w EMA50 (uptrend) + volume > 1.5x 20-period avg
+# Short when price breaks below 1d Donchian lower band (20-period low) + 1w close < 1w EMA50 (downtrend) + volume > 1.5x 20-period avg
 # Uses discrete position sizing (0.25) to reduce fee churn and improve drawdown resistance.
 # Weekly EMA50 provides a stronger, more stable trend filter than daily, reducing whipsaws in ranging markets.
-# Volume confirmation avoids false breakouts. Designed for low trade frequency (15-30/year) to minimize fee drag.
+# Volume confirmation avoids false breakouts. Designed for low trade frequency (10-25/year) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -34,7 +34,7 @@ def generate_signals(prices):
     ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # === 4h Donchian Channel (20-period) ===
+    # === 1d Donchian Channel (20-period) ===
     period = 20
     highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
@@ -88,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1wEMA50_Volume_Filter_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_Volume_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
