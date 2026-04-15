@@ -24,19 +24,19 @@ def generate_signals(prices):
     r1 = 2 * pivot - daily_low
     s1 = 2 * pivot - daily_high
     
-    # Align pivot levels to 6h timeframe
+    # Align pivot levels to 4h timeframe
     pivot_aligned = align_htf_to_ltf(prices, daily, pivot)
     r1_aligned = align_htf_to_ltf(prices, daily, r1)
     s1_aligned = align_htf_to_ltf(prices, daily, s1)
     
-    # Volume filter: current 6h volume > 1.5x 20-period average volume
+    # Volume filter: current 4h volume > 1.5x 20-period average volume
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
     
-    # Range filter: avoid trading when price is within 0.3% of pivot
+    # Range filter: avoid trading when price is within 0.5% of pivot
     price_to_pivot = np.abs(close - pivot_aligned) / pivot_aligned
-    range_filter = price_to_pivot > 0.003
+    range_filter = price_to_pivot > 0.005
     
     signals = np.zeros(n)
     
@@ -51,10 +51,10 @@ def generate_signals(prices):
         if volume_filter[i] and range_filter[i]:
             # Long conditions: price breaks above R1 with volume
             if close[i] > r1_aligned[i]:
-                signals[i] = 0.25
+                signals[i] = 0.30
             # Short conditions: price breaks below S1 with volume
             elif close[i] < s1_aligned[i]:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = signals[i-1]
         else:
@@ -62,6 +62,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Pivot_R1_S1_Breakout_Volume_RangeFilter"
-timeframe = "6h"
+name = "4h_Pivot_R1_S1_Breakout_Volume_RangeFilter"
+timeframe = "4h"
 leverage = 1.0
