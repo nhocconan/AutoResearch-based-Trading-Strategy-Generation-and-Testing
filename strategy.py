@@ -13,60 +13,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly HTF data once before loop (1w)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 12h HTF data once before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate weekly ATR(14) for volatility filter
-    tr1 = df_1w['high'] - df_1w['low']
-    tr2 = np.abs(df_1w['high'] - np.concatenate([[df_1w['close'].iloc[0]], df_1w['close'].iloc[:-1]]))
-    tr3 = np.abs(df_1w['low'] - np.concatenate([[df_1w['close'].iloc[0]], df_1w['close'].iloc[:-1]]))
-    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1w = pd.Series(tr_1w).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_14_1w)
+    # Calculate 12h ATR(14) for volatility regime filter
+    tr1 = df_12h['high'] - df_12h['low']
+    tr2 = np.abs(df_12h['high'] - np.concatenate([[df_12h['close'].iloc[0]], df_12h['close'].iloc[:-1]]))
+    tr3 = np.abs(df_12h['low'] - np.concatenate([[df_12h['close'].iloc[0]], df_12h['close'].iloc[:-1]]))
+    tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14_12h = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_14_12h)
     
-    # Calculate weekly EMA(34) for trend filter
-    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 12h EMA(50) for trend filter
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate weekly RSI(14) for momentum filter
-    delta = pd.Series(df_1w['close'].values).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14_1w = 100 - (100 / (1 + rs))
-    rsi_14_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_14_1w)
+    # Calculate 6h Donchian(20) channels
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_1w_aligned[i]) or np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(rsi_14_1w_aligned[i])):
+        if (np.isnan(atr_14_12h_aligned[i]) or np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(highest_20[i]) or np.isnan(lowest_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when weekly ATR is elevated (> 0.3% of price)
-        vol_filter = atr_14_1w_aligned[i] > 0.003 * close[i]
+        # Volatility regime filter: only trade when 12h ATR is elevated (> 0.8% of price)
+        vol_filter = atr_14_12h_aligned[i] > 0.008 * close[i]
         
         # Long conditions:
-        # 1. Price above weekly EMA34 (bullish bias)
-        # 2. Weekly RSI between 35 and 65 (neutral momentum, avoids extremes)
-        # 3. Volatility filter
-        if (close[i] > ema_34_1w_aligned[i] and
-            35 <= rsi_14_1w_aligned[i] <= 65 and
+        # 1. Price breaks above 6h Donchian upper channel (breakout)
+        # 2. Price above 12h EMA50 (bullish bias from higher timeframe)
+        # 3. Volatility filter ensures we trade during active regimes
+        if (close[i] > highest_20[i] and
+            close[i] > ema_50_12h_aligned[i] and
             vol_filter):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Price below weekly EMA34 (bearish bias)
-        # 2. Weekly RSI between 35 and 65 (neutral momentum, avoids extremes)
-        # 3. Volatility filter
-        elif (close[i] < ema_34_1w_aligned[i] and
-              35 <= rsi_14_1w_aligned[i] <= 65 and
+        # 1. Price breaks below 6h Donchian lower channel (breakdown)
+        # 2. Price below 12h EMA50 (bearish bias from higher timeframe)
+        # 3. Volatility filter ensures we trade during active regimes
+        elif (close[i] < lowest_20[i] and
+              close[i] < ema_50_12h_aligned[i] and
               vol_filter):
             signals[i] = -0.25
         else:
@@ -74,6 +68,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA34_RSI14_VolFilter_1w_v1"
-timeframe = "1d"
+name = "6h_Donchian20_EMA50_12h_VolFilter_v1"
+timeframe = "6h"
 leverage = 1.0
