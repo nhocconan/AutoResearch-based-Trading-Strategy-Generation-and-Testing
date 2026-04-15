@@ -22,21 +22,27 @@ def generate_signals(prices):
     daily_high = df_1d['high'].values
     daily_low = df_1d['low'].values
     
-    # Calculate daily Donchian channel (20-period)
-    # Upper = max(high, 20), Lower = min(low, 20)
-    roll_max = pd.Series(daily_high).rolling(window=20, min_periods=20).max().values
-    roll_min = pd.Series(daily_low).rolling(window=20, min_periods=20).min().values
-    
-    # Align HTF Donchian levels to 4h timeframe
-    donchian_upper_4h = align_htf_to_ltf(prices, df_1d, roll_max)
-    donchian_lower_4h = align_htf_to_ltf(prices, df_1d, roll_min)
-    
-    # Calculate 4h ATR(14) for volatility filter and stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    # Calculate daily ATR(14) for volatility regime
+    tr1 = daily_high - daily_low
+    tr2 = np.abs(daily_high - np.concatenate([[daily_close[0]], daily_close[:-1]]))
+    tr3 = np.abs(daily_low - np.concatenate([[daily_close[0]], daily_close[:-1]]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate daily Donchian channels (20-period)
+    upper_20 = pd.Series(daily_high).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(daily_low).rolling(window=20, min_periods=20).min().values
+    
+    # Align HTF Donchian levels to 4h timeframe
+    upper_20_4h = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_20_4h = align_htf_to_ltf(prices, df_1d, lower_20)
+    
+    # Calculate 4h ATR(14) for stoploss
+    tr1_4h = high - low
+    tr2_4h = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    tr3_4h = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
+    atr_14_4h = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     # Calculate 4h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -46,34 +52,31 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper_4h[i]) or np.isnan(donchian_lower_4h[i]) or 
-            np.isnan(atr_14[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(upper_20_4h[i]) or np.isnan(lower_20_4h[i]) or 
+            np.isnan(atr_14_4h[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
         # Entry conditions:
-        # 1. 4h price breaks above daily Donchian upper with volume confirmation → long
-        # 2. 4h price breaks below daily Donchian lower with volume confirmation → short
-        # 3. Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
-        # 4. Volume confirmation: volume > 1.5x average
-        # 5. Discrete position sizing: 0.25
+        # 1. 4h price breaks above 1d Donchian upper with volume confirmation → long
+        # 2. 4h price breaks below 1d Donchian lower with volume confirmation → short
+        # 3. Volume confirmation: volume > 1.5x average
+        # 4. Discrete position sizing: 0.25
         
-        # Long conditions: 4h breakout above daily Donchian upper
-        if (close[i] > donchian_upper_4h[i] and            # 4h price above daily Donchian upper
-            volume_ratio[i] > 1.5 and                      # Volume confirmation
-            atr_14[i] > 0.005 * close[i]):                 # Volatility filter
+        # Long conditions: 4h breakout above 1d Donchian upper
+        if (close[i] > upper_20_4h[i] and            # 4h price above 1d Donchian upper
+            volume_ratio[i] > 1.5):                  # Volume confirmation
             signals[i] = 0.25
             
-        # Short conditions: 4h breakdown below daily Donchian lower
-        elif (close[i] < donchian_lower_4h[i] and          # 4h price below daily Donchian lower
-              volume_ratio[i] > 1.5 and                    # Volume confirmation
-              atr_14[i] > 0.005 * close[i]):               # Volatility filter
+        # Short conditions: 4h breakdown below 1d Donchian lower
+        elif (close[i] < lower_20_4h[i] and          # 4h price below 1d Donchian lower
+              volume_ratio[i] > 1.5):                # Volume confirmation
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "4h_DailyDonchian20_Breakout_Volume_ATR_Filter"
+name = "4h_1d_Donchian_Breakout_Volume_Confirmation"
 timeframe = "4h"
 leverage = 1.0
