@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w Donchian channel breakout with volume confirmation and ATR-based position sizing.
-# Uses 1w Donchian(20) for breakout signals, filtered by 1d EMA200 for trend bias and volume spike for momentum confirmation.
-# ATR-based position sizing (0.25 at low vol, 0.15 at high vol) adapts to market conditions.
-# Session filter (08-20 UTC) reduces noise trades. Designed for low trade frequency (10-25/year) to minimize fee drag.
-# Works in bull/bear: 1d EMA200 avoids counter-trend trades, Donchian breakouts capture sustained momentum with volume confirmation.
+# Hypothesis: 6h strategy using 12h Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout)
+# combined with 1d EMA50 trend filter and volume confirmation. 
+# In ranging markets (price between R3-S3), fade extremes; in trending markets (price outside R4-S4), 
+# breakout continuation. Volume filter ensures momentum validity. Designed for low trade frequency 
+# (12-30/year) to minimize fee drag while adapting to regime via pivot structure.
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,42 +23,43 @@ def generate_signals(prices):
     # Pre-compute session hours to avoid datetime operations in loop
     hours = pd.DatetimeIndex(open_time).hour
     
-    # Get 1d and 1w HTF data once before loop
+    # Get 12h and 1d HTF data once before loop
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 30 or len(df_1w) < 30:
+    if len(df_12h) < 30 or len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d Indicators: EMA200 for trend bias ===
-    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # === 12h Indicators: Camarilla Pivot Levels (using typical price) ===
+    # Typical price = (high + low + close) / 3
+    typical_price_12h = (df_12h['high'].values + df_12h['low'].values + df_12h['close'].values) / 3.0
     
-    # === 1w Indicators: Donchian Channel (20) ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    # Donchian upper = max(high, lookback=20)
-    donch_high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    # Donchian lower = min(low, lookback=20)
-    donch_low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Calculate pivot and support/resistance levels
+    pivot_12h = typical_price_12h
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    range_12h = high_12h - low_12h
     
-    donch_high_aligned = align_htf_to_ltf(prices, df_1w, donch_high_20)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1w, donch_low_20)
+    # Camarilla levels
+    r3_12h = pivot_12h + (range_12h * 1.1 / 4)
+    s3_12h = pivot_12h - (range_12h * 1.1 / 4)
+    r4_12h = pivot_12h + (range_12h * 1.1 / 2)
+    s4_12h = pivot_12h - (range_12h * 1.1 / 2)
     
-    # === ATR(14) for volatility-based position sizing ===
-    # True Range calculation
-    tr1 = np.abs(high[1:] - low[1:])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
+    s3_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
+    r4_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
+    s4_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
     
-    # ATR percentile for volatility regime (using 50-period lookback)
-    atr_percentile = pd.Series(atr_14).rolling(window=50, min_periods=30).rank(pct=True).values
+    # === 1d Indicators: Trend Filter ===
+    # 1d EMA(50) for trend bias
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 200
+    warmup = 100
     
     for i in range(warmup, n):
         # Session filter: 08-20 UTC only
@@ -72,48 +73,44 @@ def generate_signals(prices):
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.8)
         
         # Skip if any required data is NaN
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or
-            np.isnan(ema_200_1d_aligned[i]) or np.isnan(atr_percentile[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Base position size
-        base_size = 0.25
+        # === REGIME DETECTION ===
+        # Ranging market: price between R3 and S3
+        # Trending market: price outside R4 and S4
+        # Transition zone: between R3-S3 and R4-S4 (no trade)
         
-        # Adjust size based on volatility regime (lower size in high vol)
-        if atr_percentile[i] > 0.8:  # High volatility
-            size = base_size * 0.6  # Reduce to 0.15
-        elif atr_percentile[i] < 0.2:  # Low volatility
-            size = base_size * 1.2  # Increase to 0.30 (capped at 0.35)
-        else:
-            size = base_size
-        
-        # Cap size at 0.35
-        size = min(size, 0.35)
+        in_range = (s3_aligned[i] <= close[i] <= r3_aligned[i])
+        in_uptrend = close[i] > r4_aligned[i]
+        in_downtrend = close[i] < s4_aligned[i]
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 1w Donchian upper (20-period high)
-        # 2. 1d price above EMA200 (bullish trend bias)
+        # 1. In ranging market AND price at S3 support (mean reversion long)
+        # 2. OR in uptrend AND breakout above R4 (continuation long)
         # 3. Volume confirmation
-        if (close[i] > donch_high_aligned[i] and
-            close[i] > ema_200_1d_aligned[i] and
-            vol_confirm):
-            signals[i] = size
+        if vol_confirm:
+            if (in_range and close[i] <= s3_aligned[i] * 1.002) or \
+               (in_uptrend and close[i] > r4_aligned[i]):
+                signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 1w Donchian lower (20-period low)
-        # 2. 1d price below EMA200 (bearish trend bias)
+        # 1. In ranging market AND price at R3 resistance (mean reversion short)
+        # 2. OR in downtrend AND breakdown below S4 (continuation short)
         # 3. Volume confirmation
-        elif (close[i] < donch_low_aligned[i] and
-              close[i] < ema_200_1d_aligned[i] and
-              vol_confirm):
-            signals[i] = -size
+        elif vol_confirm:
+            if (in_range and close[i] >= r3_aligned[i] * 0.998) or \
+               (in_downtrend and close[i] < s4_aligned[i]):
+                signals[i] = -0.25
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "1d_1w_Donchian20_1d_EMA200_VolFilter_v1"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_R4S4_EMA50_VolFilter_v1"
+timeframe = "6h"
 leverage = 1.0
