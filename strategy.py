@@ -21,14 +21,29 @@ def generate_signals(prices):
     daily_close = df_1d['close'].values
     daily_high = df_1d['high'].values
     daily_low = df_1d['low'].values
+    daily_volume = df_1d['volume'].values
     
-    # Calculate daily Williams %R (14-period)
-    highest_high_14 = pd.Series(daily_high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(daily_low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - daily_close) / (highest_high_14 - lowest_low_14 + 1e-10)
+    # Calculate daily pivot points (standard floor trader's pivots)
+    pivot = (daily_high + daily_low + daily_close) / 3.0
+    r1 = 2 * pivot - daily_low
+    s1 = 2 * pivot - daily_high
+    r2 = pivot + (daily_high - daily_low)
+    s2 = pivot - (daily_high - daily_low)
+    
+    # Calculate daily ATR(14) for volatility filter
+    tr1 = pd.Series(daily_high - daily_low)
+    tr2 = pd.Series(np.abs(daily_high - np.concatenate([[daily_close[0]], daily_close[:-1]])))
+    tr3 = pd.Series(np.abs(daily_low - np.concatenate([[daily_close[0]], daily_close[:-1]])))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14 = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
     
     # Align HTF indicators to 6h timeframe with proper delay
-    williams_r_6h = align_htf_to_ltf(prices, df_1d, williams_r)
+    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
+    r2_6h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_6h = align_htf_to_ltf(prices, df_1d, s2)
+    atr_14_6h = align_htf_to_ltf(prices, df_1d, atr_14)
     
     # Calculate 6h Donchian channels (20-period) for breakout signals
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -42,36 +57,35 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_6h[i]) or np.isnan(highest_20[i]) or 
-            np.isnan(lowest_20[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or 
+            np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or np.isnan(atr_14_6h[i]) or 
+            np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
         # Entry conditions:
-        # 1. 6h price breaks above Donchian(20) high with volume confirmation → long
-        # 2. 6h price breaks below Donchian(20) low with volume confirmation → short
-        # 3. Williams %R filter: avoid extreme overbought/oversold for continuation
-        #    Long: Williams %R > -80 (not deeply oversold)
-        #    Short: Williams %R < -20 (not deeply overbought)
-        # 4. Volume confirmation: volume > 1.5x average
+        # 1. 6h price breaks above R2 with volume confirmation → long (strong breakout)
+        # 2. 6h price breaks below S2 with volume confirmation → short (strong breakdown)
+        # 3. Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
+        # 4. Volume confirmation: volume > 1.3x average
         # 5. Discrete position sizing: 0.25
         
-        # Long conditions: 6h breakout above Donchian high
-        if (close[i] > highest_20[i] and            # 6h price above Donchian high
-            williams_r_6h[i] > -80.0 and           # Not deeply oversold
-            volume_ratio[i] > 1.5):                # Volume confirmation
+        # Long conditions: 6h breakout above R2 (strong breakout)
+        if (close[i] > r2_6h[i] and            # 6h price above R2 pivot
+            volume_ratio[i] > 1.3 and          # Volume confirmation
+            atr_14_6h[i] > 0.005 * close[i]):  # Volatility filter
             signals[i] = 0.25
             
-        # Short conditions: 6h breakdown below Donchian low
-        elif (close[i] < lowest_20[i] and          # 6h price below Donchian low
-              williams_r_6h[i] < -20.0 and         # Not deeply overbought
-              volume_ratio[i] > 1.5):              # Volume confirmation
+        # Short conditions: 6h breakdown below S2 (strong breakdown)
+        elif (close[i] < s2_6h[i] and          # 6h price below S2 pivot
+              volume_ratio[i] > 1.3 and        # Volume confirmation
+              atr_14_6h[i] > 0.005 * close[i]): # Volatility filter
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "6h_WilliamsR_Donchian_Breakout_Volume_Filter"
+name = "6h_Pivot_R2_S2_Breakout_Volume_ATR_Filter"
 timeframe = "6h"
 leverage = 1.0
