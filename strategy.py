@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d ADX trend filter and volume confirmation
-# Long when price breaks above Camarilla R3 level + 1d ADX > 25 (trending) + volume > 1.5x 20-period avg
-# Short when price breaks below Camarilla S3 level + 1d ADX > 25 + volume confirmation
-# Uses discrete position sizing (0.25) to limit drawdown and reduce fee drag.
-# Camarilla levels provide mathematically derived support/resistance that work in ranging markets.
-# ADX filter ensures we only trade in trending conditions, reducing whipsaws in chop.
-# Volume threshold targets ~15-25 trades/year on 12h timeframe to avoid overtrading.
+# Hypothesis: 12h TRIX(9) zero-line crossover with 1d volume spike (>2.0x 20-period avg) and session filter (08-20 UTC)
+# TRIX is a triple-smoothed EMA momentum oscillator that filters noise and identifies trend changes.
+# Long when TRIX crosses above zero + volume confirmation. Short when TRIX crosses below zero + volume confirmation.
+# Uses discrete position sizing (0.25) to control drawdown and minimize fee drag.
+# Volume confirmation ensures breakouts have conviction, reducing false signals.
+# Session filter avoids low-liquidity periods. TRIX + volume combo has shown robustness in ETH/USDT experiments.
 
 def generate_signals(prices):
     n = len(prices)
@@ -30,59 +29,26 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 1d Indicator: ADX(14) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 1d Indicator: Volume SMA (20-period) ===
+    vol_1d = df_1d['volume'].values
+    vol_sma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_20_1d)
     
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values
-    tr14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # DI and DX
-    di_plus = 100 * dm_plus_14 / tr14
-    di_minus = 100 * dm_minus_14 / tr14
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    dx = np.where(np.isnan(dx), 0, dx)
-    
-    # ADX
-    adx_14 = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
-    
-    # === 12h Camarilla Pivot Levels (based on previous day) ===
-    # Typical Price = (H + L + C) / 3
-    typical_price = (high + low + close) / 3.0
-    # Range = H - L
-    range_hl = high - low
-    
-    # Resistance 3 = Close + (Range * 1.1 / 4)
-    camarilla_r3 = close + (range_hl * 1.1 / 4.0)
-    # Support 3 = Close - (Range * 1.1 / 4)
-    camarilla_s3 = close - (range_hl * 1.1 / 4.0)
-    
-    # Volume SMA for confirmation (using 20-period)
-    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # === Primary TF (12h) Indicator: TRIX(9) ===
+    # TRIX = EMA(EMA(EMA(close, period), period), period) - 1-period lag
+    # Using triple EMA with span=9
+    close_series = pd.Series(close)
+    ema1 = close_series.ewm(span=9, adjust=False, min_periods=9).mean()
+    ema2 = ema1.ewm(span=9, adjust=False, min_periods=9).mean()
+    ema3 = ema2.ewm(span=9, adjust=False, min_periods=9).mean()
+    trix = (ema3 / ema3.shift(1) - 1) * 100  # Percentage rate of change
+    trix_values = trix.values
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(50, 20) + 5  # ADX + Camarilla + volume(20) + buffer
+    # TRIX needs 3*9 + 1 = 28 periods for EMA + 1 for ROC, plus volume SMA 20
+    warmup = max(28, 20) + 5  # TRIX + volume + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -91,29 +57,22 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or
-            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(trix_values[i]) or np.isnan(trix_values[i-1]) or
+            np.isnan(vol_sma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
-        
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx_1d_aligned[i] > 25.0
+        # Volume filter: current 1d volume > 2.0x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20_1d_aligned[i] * 2.0)
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above Camarilla R3 level
-        # 2. Trending market (ADX > 25)
-        # 3. Volume confirmation
-        if (close[i] > camarilla_r3[i]) and trending and vol_confirm:
+        # TRIX crosses above zero (bullish momentum) + volume confirmation
+        if (trix_values[i-1] <= 0 and trix_values[i] > 0) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below Camarilla S3 level
-        # 2. Trending market (ADX > 25)
-        # 3. Volume confirmation
-        elif (close[i] < camarilla_s3[i]) and trending and vol_confirm:
+        # TRIX crosses below zero (bearish momentum) + volume confirmation
+        elif (trix_values[i-1] >= 0 and trix_values[i] < 0) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -121,6 +80,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_1dADX_Volume_Filter_v1"
+name = "12h_TRIX9_1dVolumeSpike_v1"
 timeframe = "12h"
 leverage = 1.0
