@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-hour momentum with 4h trend filter and 1d regime filter
-# Uses RSI(2) for short-term mean reversion entries in direction of 4h EMA50 trend,
-# only when 1d ADX < 25 (low volatility regime). Avoids trend-following whipsaws
-# in choppy markets while capturing mean reversion in low-volatility environments.
-# Target: 60-150 total trades over 4 years (15-37/year) with disciplined entries.
+# Hypothesis: 6h Donchian(20) breakout + weekly pivot direction + volume confirmation
+# Uses Donchian channel breakouts for trend capture, weekly pivot points to determine
+# the dominant trend direction, and volume to confirm breakout strength. Works in
+# both bull and bear by only taking breakouts aligned with the weekly pivot trend.
+# Target: 50-150 total trades over 4 years (12-37/year) with disciplined entries.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,99 +19,92 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load 6h data (primary timeframe) for price action
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 50:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
     
-    # Load 1d data for regime filter (ADX)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data for pivot points and trend direction
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate RSI(2) on 1h close
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate Donchian channels (20-period) on 6h
+    donch_high_6h = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    donch_low_6h = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate EMA50 on 4h for trend filter
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate weekly pivot points (standard floor trader pivots)
+    # Pivot = (H + L + C) / 3
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    # Support 1 = (2 * Pivot) - High
+    s1_1w = (2 * pivot_1w) - high_1w
+    # Resistance 1 = (2 * Pivot) - Low
+    r1_1w = (2 * pivot_1w) - low_1w
     
-    # Calculate ADX(14) on 1d for regime filter
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Weekly trend: bullish if close > pivot, bearish if close < pivot
+    weekly_trend_bull = close_1w > pivot_1w
+    weekly_trend_bear = close_1w < pivot_1w
     
-    # Directional Movement
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = np.diff(low_1d, prepend=low_1d[0]) * -1
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Volume average (20-period on 6h)
+    vol_avg_6h = pd.Series(df_6h['volume'].values).rolling(window=20, min_periods=20).mean().values
     
-    # Smoothed DM
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / (atr + 1e-10)
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / (atr + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Align indicators to 1h timeframe
-    rsi_aligned = rsi  # already on 1h
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align all indicators to 6h timeframe
+    donch_high_6h_aligned = align_htf_to_ltf(prices, df_6h, donch_high_6h)
+    donch_low_6h_aligned = align_htf_to_ltf(prices, df_6h, donch_low_6h)
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    weekly_trend_bull_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_bull.astype(float))
+    weekly_trend_bear_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_bear.astype(float))
+    vol_avg_aligned = align_htf_to_ltf(prices, df_6h, vol_avg_6h)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.20  # Position size
+    base_size = 0.25  # Position size
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi_aligned[i]) or np.isnan(ema50_4h_aligned[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(donch_high_6h_aligned[i]) or np.isnan(donch_low_6h_aligned[i]) or
+            np.isnan(pivot_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or
+            np.isnan(r1_1w_aligned[i]) or np.isnan(weekly_trend_bull_aligned[i]) or
+            np.isnan(weekly_trend_bear_aligned[i]) or np.isnan(vol_avg_aligned[i])):
             continue
         
-        # Long entry: RSI < 10 (oversold) + price above 4h EMA50 + ADX < 25 (low volatility)
-        if (rsi_aligned[i] < 10 and
-            close[i] > ema50_4h_aligned[i] and
-            adx_aligned[i] < 25 and
+        # Long entry: price breaks above Donchian high + weekly trend bullish + volume spike
+        if (close[i] > donch_high_6h_aligned[i] and
+            weekly_trend_bull_aligned[i] > 0.5 and  # Weekly trend is bullish
+            volume[i] > 1.5 * vol_avg_aligned[i] and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: RSI > 90 (overbought) + price below 4h EMA50 + ADX < 25 (low volatility)
-        elif (rsi_aligned[i] > 90 and
-              close[i] < ema50_4h_aligned[i] and
-              adx_aligned[i] < 25 and
+        # Short entry: price breaks below Donchian low + weekly trend bearish + volume spike
+        elif (close[i] < donch_low_6h_aligned[i] and
+              weekly_trend_bear_aligned[i] > 0.5 and  # Weekly trend is bearish
+              volume[i] > 1.5 * vol_avg_aligned[i] and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse signal or RSI returns to neutral (50) or ADX > 25 (high volatility)
-        elif position == 1 and (rsi_aligned[i] > 50 or adx_aligned[i] > 25):
+        # Exit: reverse signal or price crosses weekly pivot (trend change)
+        elif position == 1 and (close[i] < donch_low_6h_aligned[i] or 
+                                close[i] < pivot_1w_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (rsi_aligned[i] < 50 or adx_aligned[i] > 25):
+        elif position == -1 and (close[i] > donch_high_6h_aligned[i] or 
+                                 close[i] > pivot_1w_aligned[i]):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "1h_RSI2_4hTrend_1dADX_Filter"
-timeframe = "1h"
+name = "6h_Donchian_WeeklyPivot_Volume"
+timeframe = "6h"
 leverage = 1.0
