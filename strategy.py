@@ -13,98 +13,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w HTF data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h HTF data once before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate 1w EMA(34) for trend filter
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_6h = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 12h Donchian channels (20-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    upper_20_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    lower_20_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Get 1d HTF data for Camarilla pivot levels
+    # Align 12h Donchian to 12h
+    upper_20_12h_aligned = align_htf_to_ltf(prices, df_12h, upper_20_12h)
+    lower_20_12h_aligned = align_htf_to_ltf(prices, df_12h, lower_20_12h)
+    
+    # Get 1d HTF data for weekly pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from prior day
-    # Camarilla: based on prior day's high, low, close
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly pivot points from prior week (using 1d data)
+    weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().shift(5).values
+    weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().shift(5).values
+    weekly_close = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).last().shift(5).values
     
-    # Prior day values (shifted by 1 to avoid look-ahead)
-    prior_high = np.concatenate([[np.nan], high_1d[:-1]])
-    prior_low = np.concatenate([[np.nan], low_1d[:-1]])
-    prior_close = np.concatenate([[np.nan], close_1d[:-1]])
+    # Weekly pivot: (H+L+C)/3
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    # Weekly R1: 2*P - L
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    # Weekly S1: 2*P - H
+    weekly_s1 = 2 * weekly_pivot - weekly_high
     
-    # Camarilla calculations
-    camarilla_pivot = (prior_high + prior_low + prior_close) / 3.0
-    camarilla_range = prior_high - prior_low
-    camarilla_r3 = camarilla_pivot + (camarilla_range * 1.1 / 4.0)  # R3
-    camarilla_s3 = camarilla_pivot - (camarilla_range * 1.1 / 4.0)  # S3
-    camarilla_r4 = camarilla_pivot + (camarilla_range * 1.1 / 2.0)  # R4
-    camarilla_s4 = camarilla_pivot - (camarilla_range * 1.1 / 2.0)  # S4
+    # Align weekly pivot levels to 12h
+    weekly_pivot_12h = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    weekly_r1_12h = align_htf_to_ltf(prices, df_1d, weekly_r1)
+    weekly_s1_12h = align_htf_to_ltf(prices, df_1d, weekly_s1)
     
-    # Align Camarilla levels to 6h
-    camarilla_pivot_6h = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    camarilla_r3_6h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_6h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_r4_6h = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_6h = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    
-    # Calculate 6h ATR(20) for volatility filter
+    # Calculate 12h ATR(14) for volatility filter
     tr1 = high - low
     tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
     tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_20 = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 6h volume ratio (current vs 20-period average)
+    # Calculate 12h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
     signals = np.zeros(n)
     
-    # Session filter: trade during active UTC hours (00-24 covers all, but structure)
+    # Precompute session filter (00-24 UTC for 12h - less restrictive)
     hours = prices.index.hour
-    in_session = (hours >= 0) & (hours <= 23)  # Always true for 6h, kept for structure
+    in_session = (hours >= 0) & (hours <= 23)  # Always true for 12h, kept for structure
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_6h[i]) or np.isnan(camarilla_pivot_6h[i]) or 
-            np.isnan(camarilla_r3_6h[i]) or np.isnan(camarilla_s3_6h[i]) or 
-            np.isnan(camarilla_r4_6h[i]) or np.isnan(camarilla_s4_6h[i]) or 
-            np.isnan(atr_20[i]) or np.isnan(volume_ratio[i]) or not in_session[i]):
+        if (np.isnan(upper_20_12h_aligned[i]) or np.isnan(lower_20_12h_aligned[i]) or 
+            np.isnan(weekly_pivot_12h[i]) or np.isnan(weekly_r1_12h[i]) or 
+            np.isnan(weekly_s1_12h[i]) or np.isnan(atr_14[i]) or 
+            np.isnan(volume_ratio[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
         # Long conditions:
-        # 1. Price above weekly EMA(34) (bullish weekly trend)
-        # 2. Price breaks above Camarilla R3 with volume (breakout continuation)
+        # 1. 12h price breaks above 12h Donchian upper (20) - bullish breakout
+        # 2. Price above weekly pivot (bullish bias from prior week)
         # 3. Volume confirmation: volume > 1.5x average
-        # 4. Volatility filter: ATR > 0.3% of price (avoid extremely low volatility)
-        if (close[i] > ema_34_6h[i] and
-            close[i] > camarilla_r3_6h[i] and
+        # 4. Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
+        if (close[i] > upper_20_12h_aligned[i] and
+            close[i] > weekly_pivot_12h[i] and
             volume_ratio[i] > 1.5 and
-            atr_20[i] > 0.003 * close[i]):
+            atr_14[i] > 0.005 * close[i]):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Price below weekly EMA(34) (bearish weekly trend)
-        # 2. Price breaks below Camarilla S3 with volume (breakdown continuation)
+        # 1. 12h price breaks below 12h Donchian lower (20) - bearish breakdown
+        # 2. Price below weekly pivot (bearish bias from prior week)
         # 3. Volume confirmation: volume > 1.5x average
-        # 4. Volatility filter: ATR > 0.3% of price
-        elif (close[i] < ema_34_6h[i] and
-              close[i] < camarilla_s3_6h[i] and
+        # 4. Volatility filter: ATR > 0.5% of price
+        elif (close[i] < lower_20_12h_aligned[i] and
+              close[i] < weekly_pivot_12h[i] and
               volume_ratio[i] > 1.5 and
-              atr_20[i] > 0.003 * close[i]):
+              atr_14[i] > 0.005 * close[i]):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "6h_1w_EMA34_1d_Camarilla_R3S3_Breakout_Volume_Filter_v1"
-timeframe = "6h"
+name = "12h_12h_Donchian20_1d_WeeklyPivot_Volume_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
