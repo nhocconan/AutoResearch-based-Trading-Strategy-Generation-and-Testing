@@ -13,45 +13,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot levels and volume
+    # Get daily data for 1d pivot levels
     daily = get_htf_data(prices, '1d')
     daily_high = daily['high'].values
     daily_low = daily['low'].values
     daily_close = daily['close'].values
-    daily_volume = daily['volume'].values
     
-    # Calculate daily pivot levels (classic floor trader pivots)
+    # Calculate daily pivot levels
     pivot = (daily_high + daily_low + daily_close) / 3.0
     r1 = 2 * pivot - daily_low
     s1 = 2 * pivot - daily_high
     r2 = pivot + (daily_high - daily_low)
     s2 = pivot - (daily_high - daily_low)
     
-    # Align pivot levels to 4h timeframe
+    # Align pivot levels to 6h timeframe
     pivot_aligned = align_htf_to_ltf(prices, daily, pivot)
     r1_aligned = align_htf_to_ltf(prices, daily, r1)
     s1_aligned = align_htf_to_ltf(prices, daily, s1)
     r2_aligned = align_htf_to_ltf(prices, daily, r2)
     s2_aligned = align_htf_to_ltf(prices, daily, s2)
     
-    # Volume filter: current 4h volume > 1.5x 20-period average volume
+    # Volume filter: current 6h volume > 1.5x 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
     
-    # Range filter: avoid trading when price is within 0.5% of pivot (reduces whipsaw)
+    # Range filter: avoid trading when price is within 0.3% of pivot
     price_to_pivot = np.abs(close - pivot_aligned) / pivot_aligned
-    range_filter = price_to_pivot > 0.005
-    
-    # ATR-based volatility filter: avoid extremely low volatility periods
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ratio = atr / close
-    # Only trade when ATR ratio is above 30th percentile (avoid extremely low volatility)
-    atr_ratio_percentile = pd.Series(atr_ratio).rolling(window=50, min_periods=20).rank(pct=True).values
-    volatility_filter = atr_ratio_percentile > 0.3
+    range_filter = price_to_pivot > 0.003
     
     signals = np.zeros(n)
     
@@ -59,13 +47,12 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(atr_ratio_percentile[i])):
+            np.isnan(s2_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade when volume filter, range filter, and volatility filter all pass
-        if volume_filter[i] and range_filter[i] and volatility_filter[i]:
+        # Only trade when volume filter and range filter both pass
+        if volume_filter[i] and range_filter[i]:
             # Long conditions: price breaks above R2 with volume (strong breakout)
             if close[i] > r2_aligned[i]:
                 signals[i] = 0.25
@@ -85,6 +72,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Pivot_R1_S1_R2_S2_Breakout_Volume_RangeFilter_VolatilityFilter_v2"
-timeframe = "4h"
+name = "6h_Pivot_R1_S1_R2_S2_Breakout_Volume_RangeFilter"
+timeframe = "6h"
 leverage = 1.0
