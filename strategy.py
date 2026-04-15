@@ -26,9 +26,9 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate daily EMA(34) for trend filter (slower for more stability)
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate daily EMA(20) for trend filter
+    ema_20_1d = pd.Series(df_1d['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
     # Calculate daily RSI(14) for momentum filter
     delta = pd.Series(df_1d['close'].values).diff()
@@ -41,39 +41,61 @@ def generate_signals(prices):
     rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
     
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_20_1d_aligned[i]) or 
             np.isnan(rsi_14_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade when daily ATR is elevated (> 0.3% of price)
-        vol_filter = atr_14_1d_aligned[i] > 0.003 * close[i]
+        # Regime filter: only trade when daily ATR is elevated (> 0.4% of price)
+        vol_filter = atr_14_1d_aligned[i] > 0.004 * close[i]
         
         # Long conditions:
-        # 1. Price above daily EMA34 (bullish bias)
-        # 2. Daily RSI between 35 and 65 (wider neutral momentum range)
+        # 1. Price above daily EMA20 (bullish bias)
+        # 2. Daily RSI between 40 and 60 (neutral momentum, avoids extremes)
         # 3. Volatility filter
-        if (close[i] > ema_34_1d_aligned[i] and
-            35 <= rsi_14_1d_aligned[i] <= 65 and
-            vol_filter):
-            signals[i] = 0.30
-            
+        long_condition = (close[i] > ema_20_1d_aligned[i] and
+                          40 <= rsi_14_1d_aligned[i] <= 60 and
+                          vol_filter)
+        
         # Short conditions:
-        # 1. Price below daily EMA34 (bearish bias)
-        # 2. Daily RSI between 35 and 65 (wider neutral momentum range)
+        # 1. Price below daily EMA20 (bearish bias)
+        # 2. Daily RSI between 40 and 60 (neutral momentum, avoids extremes)
         # 3. Volatility filter
-        elif (close[i] < ema_34_1d_aligned[i] and
-              35 <= rsi_14_1d_aligned[i] <= 65 and
-              vol_filter):
-            signals[i] = -0.30
-        else:
-            signals[i] = 0.0
+        short_condition = (close[i] < ema_20_1d_aligned[i] and
+                           40 <= rsi_14_1d_aligned[i] <= 60 and
+                           vol_filter)
+        
+        # Entry logic with hysteresis to prevent whipsaw
+        if position == 0:  # flat
+            if long_condition:
+                signals[i] = 0.25
+                position = 1
+            elif short_condition:
+                signals[i] = -0.25
+                position = -1
+            else:
+                signals[i] = 0.0
+        elif position == 1:  # long
+            # Exit long if price crosses below EMA20 or RSI goes extreme
+            if close[i] < ema_20_1d_aligned[i] or rsi_14_1d_aligned[i] < 30 or rsi_14_1d_aligned[i] > 70:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:  # short
+            # Exit short if price crosses above EMA20 or RSI goes extreme
+            if close[i] > ema_20_1d_aligned[i] or rsi_14_1d_aligned[i] < 30 or rsi_14_1d_aligned[i] > 70:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "1d_EMA34_RSI14_VolFilter_v1"
+name = "1d_EMA20_RSI14_VolFilter_v2"
 timeframe = "1d"
 leverage = 1.0
