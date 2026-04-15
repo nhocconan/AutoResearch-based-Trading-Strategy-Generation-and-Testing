@@ -1,12 +1,14 @@
-#!/usr/bin/env python3
+# 4h_1d_Range_Breakout_Volume_ADX - Refined
+# Hypothesis: Breakouts from the previous day's high/low with volume confirmation and ADX trend filter.
+# In trending markets (ADX > 25), breakouts tend to continue. In ranging markets (ADX < 20), we exit.
+# This strategy aims to capture trends while avoiding false breakouts in low volatility.
+# Uses daily levels for support/resistance, which are significant in crypto markets.
+# Volume confirmation ensures breakouts are supported by participation.
+# Designed to work in both bull and bear markets by trading breakouts in the direction of the trend.
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 4h 1-day Range Breakout with Volume Confirmation and ADX Trend Filter
-# Uses the previous day's high/low as support/resistance levels. Breakouts above previous day's high
-# or below previous day's low are traded only when confirmed by volume and ADX > 25 (trending market).
-# Works in bull markets (breakouts up) and bear markets (breakouts down). Target: 50-150 total trades.
 
 def generate_signals(prices):
     n = len(prices)
