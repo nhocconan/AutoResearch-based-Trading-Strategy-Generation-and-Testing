@@ -12,82 +12,64 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time']
     
-    # Precompute hour filter (08-20 UTC) to reduce noise
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # 1d data for trend filter (once before loop)
+    # 1d data for ATR and volume context
     daily = get_htf_data(prices, '1d')
-    close_d = daily['close'].values
     high_d = daily['high'].values
     low_d = daily['low'].values
+    close_d = daily['close'].values
+    volume_d = daily['volume'].values
     
-    # EMA200 on daily for long-term trend
-    ema200_d = pd.Series(close_d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_d_aligned = align_htf_to_ltf(prices, daily, ema200_d)
+    # True Range calculation for ATR
+    tr1 = high_d[1:] - low_d[1:]
+    tr2 = np.abs(high_d[1:] - close_d[:-1])
+    tr3 = np.abs(low_d[1:] - close_d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # 4h data for entry timing
-    h4 = get_htf_data(prices, '4h')
-    close_4h = h4['close'].values
-    high_4h = h4['high'].values
-    low_4h = h4['low'].values
-    volume_4h = h4['volume'].values
+    # ATR with proper min_periods
+    atr_14d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14d_aligned = align_htf_to_ltf(prices, daily, atr_14d)
     
-    # 4h EMA20 for short-term trend
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_4h_aligned = align_htf_to_ltf(prices, h4, ema20_4h)
+    # 12-period EMA of daily volume for volume context
+    vol_ema_12d = pd.Series(volume_d).ewm(span=12, adjust=False, min_periods=12).mean().values
+    vol_ema_12d_aligned = align_htf_to_ltf(prices, daily, vol_ema_12d)
     
-    # 4h ATR for volatility filter
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr_4h = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14_4h = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_4h_aligned = align_htf_to_ltf(prices, h4, atr_14_4h)
+    # Volatility filter: ATR > 0.5% of price (avoid low volatility)
+    vol_filter = atr_14d_aligned > (0.005 * close)
     
-    # Volume filter: 1.5x median of last 20 periods on 4h
-    vol_median_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).median()
-    vol_threshold_4h = 1.5 * vol_median_4h
-    vol_4h_aligned = align_htf_to_ltf(prices, h4, vol_threshold_4h.values)
+    # Volume filter: current volume > 2x daily average volume
+    vol_threshold = 2.0 * vol_ema_12d_aligned
+    vol_spike = volume > vol_threshold
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema200_d_aligned[i]) or np.isnan(ema20_4h_aligned[i]) or 
-            np.isnan(atr_14_4h_aligned[i]) or np.isnan(vol_4h_aligned[i])):
+        if (np.isnan(atr_14d_aligned[i]) or np.isnan(vol_ema_12d_aligned[i]) or 
+            np.isnan(vol_threshold[i]) or np.isnan(vol_spike[i])):
             continue
         
-        # Session filter: only trade 08-20 UTC
-        if not in_session[i]:
+        # Only trade when volatility is sufficient (avoid chop)
+        if not vol_filter[i]:
             signals[i] = 0.0
             continue
+            
+        # Long: Price above 12-period EMA of daily close + volume spike
+        daily_close_ema_12d = pd.Series(close_d).ewm(span=12, adjust=False, min_periods=12).mean().values
+        daily_close_ema_12d_aligned = align_htf_to_ltf(prices, daily, daily_close_ema_12d)
         
-        # Volatility filter: avoid low volatility periods
-        if atr_14_4h_aligned[i] < (0.01 * close[i]):
-            signals[i] = 0.0
-            continue
+        if (close[i] > daily_close_ema_12d_aligned[i] and 
+            vol_spike[i]):
+            signals[i] = 0.25
         
-        # Volume filter: require above-average volume
-        if volume[i] < vol_4h_aligned[i]:
-            signals[i] = 0.0
-            continue
+        # Short: Price below 12-period EMA of daily close + volume spike
+        elif (close[i] < daily_close_ema_12d_aligned[i] and 
+              vol_spike[i]):
+            signals[i] = -0.25
         
-        # Long condition: price above daily EMA200 AND above 4h EMA20
-        if (close[i] > ema200_d_aligned[i] and 
-            close[i] > ema20_4h_aligned[i]):
-            signals[i] = 0.20
-        
-        # Short condition: price below daily EMA200 AND below 4h EMA20
-        elif (close[i] < ema200_d_aligned[i] and 
-              close[i] < ema20_4h_aligned[i]):
-            signals[i] = -0.20
-        
-        # Exit: reverse signal when trend condition fails
-        elif (signals[i-1] > 0 and close[i] < ema20_4h_aligned[i]) or \
-             (signals[i-1] < 0 and close[i] > ema20_4h_aligned[i]):
+        # Exit: reverse signal on opposite direction
+        elif (close[i] < daily_close_ema_12d_aligned[i] and signals[i-1] > 0) or \
+             (close[i] > daily_close_ema_12d_aligned[i] and signals[i-1] < 0):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -96,6 +78,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_EMA200_4hEMA20_Volume_Filter"
-timeframe = "1h"
+name = "12h_Volatility_Volume_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
