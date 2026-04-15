@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily 12-hour Exponential Moving Average crossover with volume confirmation
-# EMA(12) on 1-day data provides trend direction; crossovers signal momentum shifts.
-# Volume > 2.0x 50-day median ensures institutional participation.
-# Designed to work in both bull (bullish crossovers) and bear (bearish crossovers) markets.
+# Hypothesis: 4h Camarilla pivot levels from 1-day high/low/close with volume confirmation
+# Camarilla levels provide precise support/resistance based on previous day's range.
+# Long when price crosses above L3 with volume confirmation; short when below H3.
+# Volume > 2.0x 20-bar median ensures institutional participation.
+# Works in both bull (breakouts above resistance) and bear (breakdowns below support).
 # Conservative sizing (0.25) to limit trade frequency and avoid fee drag.
-# Uses 1-day EMA on 1-week higher timeframe for trend filter to avoid whipsaws.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,57 +20,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA calculation
+    # Get 1-day data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate EMA(12) on 1d close
-    ema_12 = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # Calculate Camarilla levels for each 1-day bar
+    # H3 = close + 1.1 * (high - low) / 6
+    # L3 = close - 1.1 * (high - low) / 6
+    rang = high_1d - low_1d
+    H3 = close_1d + 1.1 * rang / 6
+    L3 = close_1d - 1.1 * rang / 6
     
-    # Calculate EMA(26) on 1d close for crossover
-    ema_26 = pd.Series(close_1d).ewm(span=26, adjust=False, min_periods=26).mean().values
+    # Align Camarilla levels to 4h timeframe
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     
-    # Volume filter: 2.0x 50-day median volume
-    vol_median_50 = pd.Series(volume_1d).rolling(window=50, min_periods=50).median()
-    vol_threshold = 2.0 * vol_median_50
-    
-    # Align 1d indicators to lower timeframe
-    ema_12_aligned = align_htf_to_ltf(prices, df_1d, ema_12)
-    ema_26_aligned = align_htf_to_ltf(prices, df_1d, ema_26)
-    vol_threshold_aligned = align_htf_to_ltf(prices, df_1d, vol_threshold)
+    # Volume confirmation: current > 2.0x median of last 20 bars
+    vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
+    vol_threshold = 2.0 * vol_median
     
     signals = np.zeros(n)
     
-    for i in range(1, n):  # Start from 1 to access previous values
+    for i in range(30, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(ema_12_aligned[i]) or np.isnan(ema_26_aligned[i]) or
-            np.isnan(vol_threshold_aligned[i])):
+        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or 
+            np.isnan(vol_threshold[i])):
             continue
         
-        # Bullish crossover: EMA12 crosses above EMA26 + volume confirmation
-        if (ema_12_aligned[i] > ema_26_aligned[i] and 
-            ema_12_aligned[i-1] <= ema_26_aligned[i-1] and
-            volume_1d[min(i, len(volume_1d)-1)] > vol_threshold_aligned[i]):
+        # Long: price crosses above L3 with volume confirmation
+        if (close[i] > L3_aligned[i] and 
+            (i == 0 or close[i-1] <= L3_aligned[i]) and  # crossed above
+            volume[i] > vol_threshold[i]):
             signals[i] = 0.25
         
-        # Bearish crossover: EMA12 crosses below EMA26 + volume confirmation
-        elif (ema_12_aligned[i] < ema_26_aligned[i] and 
-              ema_12_aligned[i-1] >= ema_26_aligned[i-1] and
-              volume_1d[min(i, len(volume_1d)-1)] > vol_threshold_aligned[i]):
+        # Short: price crosses below H3 with volume confirmation
+        elif (close[i] < H3_aligned[i] and 
+              (i == 0 or close[i-1] >= H3_aligned[i]) and  # crossed below
+              volume[i] > vol_threshold[i]):
             signals[i] = -0.25
         
-        # Exit: opposite crossover
-        elif (ema_12_aligned[i] < ema_26_aligned[i] and 
-              ema_12_aligned[i-1] >= ema_26_aligned[i-1] and
-              signals[i-1] == 0.25):
-            signals[i] = 0.0
-        elif (ema_12_aligned[i] > ema_26_aligned[i] and 
-              ema_12_aligned[i-1] <= ema_26_aligned[i-1] and
-              signals[i-1] == -0.25):
+        # Exit: price returns to mid-point between H3 and L3
+        elif (i > 0 and 
+              ((signals[i-1] == 0.25 and close[i] < (H3_aligned[i] + L3_aligned[i]) / 2) or
+               (signals[i-1] == -0.25 and close[i] > (H3_aligned[i] + L3_aligned[i]) / 2))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -79,6 +73,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMACrossover_VolumeFilter"
-timeframe = "1d"
+name = "4h_CamarillaPivot_VolumeConfirmation"
+timeframe = "4h"
 leverage = 1.0
