@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA + RSI + Chop Regime Filter
-# Uses Kaufman Adaptive Moving Average (KAMA) to capture trend direction.
-# Enters long when price > KAMA and RSI > 50, short when price < KAMA and RSI < 50.
-# Filters trades using Choppiness Index (CHOP) to avoid ranging markets.
-# Works in both bull and bear markets by adapting to trend strength and avoiding chop.
-# Target: 30-100 total trades over 4 years (7-25/year).
+# Hypothesis: 12h Donchian breakout with volume confirmation and ATR stoploss
+# Uses 20-period Donchian channels on 12h timeframe. Breakouts above upper band or below lower band
+# are traded when confirmed by volume > 1.5x median volume of last 20 bars.
+# Includes ATR-based stoploss to limit downside. Works in both bull and bear markets by
+# capturing breakouts in either direction. Target: 50-150 total trades over 4 years.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,95 +19,76 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data for Chop regime filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1d data for ATR calculation (using daily data for more stable volatility)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate KAMA (10-period ER, 2/30 SC)
-    change = np.abs(close - np.roll(close, 10))
-    change[0:10] = 0  # Avoid look-ahead for first 10 bars
-    
-    volatility = np.abs(np.diff(close, prepend=close[0]))
-    volatility_sum = pd.Series(volatility).rolling(window=10, min_periods=10).sum().values
-    
-    er = np.where(volatility_sum > 0, change / volatility_sum, 0)
-    sc = (er * (2/30 - 2/10) + 2/10) ** 2
-    sc[0] = 0  # First value
-    
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # Calculate RSI (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate Choppiness Index (14-period) on weekly data
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    # Calculate ATR (14-period) on daily data
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # First value
     
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    chop = np.where((highest_high - lowest_low) > 0,
-                    100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14),
-                    50)
+    # Calculate Donchian channels (20-period) on 12h data
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Align KAMA, RSI, and Chop to daily timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1w, kama)  # Using 1w for alignment base
-    rsi_aligned = align_htf_to_ltf(prices, df_1w, rsi)
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
+    # Upper band: highest high of last 20 periods
+    upper_band = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    # Lower band: lowest low of last 20 periods
+    lower_band = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian bands to 12h timeframe
+    upper_band_aligned = align_htf_to_ltf(prices, df_12h, upper_band)
+    lower_band_aligned = align_htf_to_ltf(prices, df_12h, lower_band)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25  # Position size
+    base_size = 0.25  # Position size (25% of capital)
     
-    for i in range(100, n):
+    for i in range(20, n):  # Start from 20 to ensure we have enough data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or
+            np.isnan(atr_1d_aligned[i])):
             continue
         
-        # Long entry: price > KAMA and RSI > 50 and Chop < 61.8 (trending)
-        if (close[i] > kama_aligned[i] and
-            rsi_aligned[i] > 50 and
-            chop_aligned[i] < 61.8 and
+        # Long entry: price breaks above upper Donchian band + volume confirmation
+        if (close[i] > upper_band_aligned[i] and
+            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price < KAMA and RSI < 50 and Chop < 61.8 (trending)
-        elif (close[i] < kama_aligned[i] and
-              rsi_aligned[i] < 50 and
-              chop_aligned[i] < 61.8 and
+        # Short entry: price breaks below lower Donchian band + volume confirmation
+        elif (close[i] < lower_band_aligned[i] and
+              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: opposite signal or Chop > 61.8 (choppy market)
-        elif position == 1 and (close[i] < kama_aligned[i] or chop_aligned[i] > 61.8):
+        # Exit: ATR-based stoploss or reverse breakout
+        elif position == 1 and (close[i] < upper_band_aligned[i] - 2.0 * atr_1d_aligned[i] or
+                                close[i] < lower_band_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > kama_aligned[i] or chop_aligned[i] > 61.8):
+        elif position == -1 and (close[i] > lower_band_aligned[i] + 2.0 * atr_1d_aligned[i] or
+                                 close[i] > upper_band_aligned[i]):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "1d_KAMA_RSI_Chop_Regime"
-timeframe = "1d"
+name = "12h_Donchian_Breakout_Volume_ATR"
+timeframe = "12h"
 leverage = 1.0
