@@ -13,16 +13,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d HTF data once before loop
+    # Get 1d HTF data once before loop (Camarilla pivots and ATR)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate 1d ATR(14) for volatility filter
+    # Calculate daily ATR(14) for volatility regime filter
     tr1 = df_1d['high'] - df_1d['low']
     tr2 = np.abs(df_1d['high'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
     tr3 = np.abs(df_1d['low'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
@@ -30,11 +26,32 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate 6h Donchian(20) breakout levels
-    donchian_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate daily Camarilla pivot levels (using prior day's OHLC)
+    prior_high = df_1d['high'].shift(1).values
+    prior_low = df_1d['low'].shift(1).values
+    prior_close = df_1d['close'].shift(1).values
     
-    # Calculate 6h volume ratio (current vs 20-period average)
+    camarilla_pivot = (prior_high + prior_low + prior_close) / 3.0
+    camarilla_r3 = camarilla_pivot + 1.1 * (prior_high - prior_low)
+    camarilla_s3 = camarilla_pivot - 1.1 * (prior_high - prior_low)
+    camarilla_r4 = camarilla_pivot + 1.5 * (prior_high - prior_low)
+    camarilla_s4 = camarilla_pivot - 1.5 * (prior_high - prior_low)
+    
+    # Align Camarilla levels to 1d (primary timeframe)
+    camarilla_pivot_1d = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    camarilla_r3_1d = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_1d = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_r4_1d = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_1d = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    
+    # Calculate 1d ATR(14) for volatility entry filter
+    tr1_1d = high - low
+    tr2_1d = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    tr3_1d = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
+    atr_14_1d_local = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate 1d volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
@@ -42,39 +59,47 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(donchian_high_20[i]) or np.isnan(donchian_low_20[i]) or 
-            np.isnan(volume_ratio[i])):
+        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(camarilla_pivot_1d[i]) or 
+            np.isnan(camarilla_r3_1d[i]) or np.isnan(camarilla_s3_1d[i]) or 
+            np.isnan(camarilla_r4_1d[i]) or np.isnan(camarilla_s4_1d[i]) or 
+            np.isnan(atr_14_1d_local[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when daily ATR is elevated (> 0.6% of price)
-        vol_filter = atr_14_1d_aligned[i] > 0.006 * close[i]
+        # Volatility regime filter: only trade when daily ATR is elevated (> 0.8% of price)
+        # This avoids low-volatility chop and focuses on momentum/trend days
+        vol_regime = atr_14_1d_aligned[i] > 0.008 * close[i]
         
         # Long conditions:
-        # 1. Price above 1d EMA(50) (bullish trend)
-        # 2. Price breaks above 6h Donchian(20) high with volume
-        # 3. Volume confirmation: volume > 1.5x average
-        if (close[i] > ema_50_1d_aligned[i] and
-            close[i] > donchian_high_20[i] and
-            volume_ratio[i] > 1.5 and
-            vol_filter):
+        # 1. Price above Camarilla pivot (bullish bias)
+        # 2. Price breaks above Camarilla R3 with volume (bullish continuation)
+        # 3. Volume confirmation: volume > 1.3x average
+        # 4. 1d ATR > 0.4% of price (ensure sufficient volatility for move)
+        # 5. Daily volatility regime filter (avoid chop)
+        if (close[i] > camarilla_pivot_1d[i] and
+            close[i] > camarilla_r3_1d[i] and
+            volume_ratio[i] > 1.3 and
+            atr_14_1d_local[i] > 0.004 * close[i] and
+            vol_regime):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Price below 1d EMA(50) (bearish trend)
-        # 2. Price breaks below 6h Donchian(20) low with volume
-        # 3. Volume confirmation: volume > 1.5x average
-        elif (close[i] < ema_50_1d_aligned[i] and
-              close[i] < donchian_low_20[i] and
-              volume_ratio[i] > 1.5 and
-              vol_filter):
+        # 1. Price below Camarilla pivot (bearish bias)
+        # 2. Price breaks below Camarilla S3 with volume (bearish continuation)
+        # 3. Volume confirmation: volume > 1.3x average
+        # 4. 1d ATR > 0.4% of price
+        # 5. Daily volatility regime filter
+        elif (close[i] < camarilla_pivot_1d[i] and
+              close[i] < camarilla_s3_1d[i] and
+              volume_ratio[i] > 1.3 and
+              atr_14_1d_local[i] > 0.004 * close[i] and
+              vol_regime):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "6h_EMA50_Donchian20_Volume_Breakout_v1"
-timeframe = "6h"
+name = "1d_Vol_Regime_Camarilla_Pivot_R3S3_Breakout_v1"
+timeframe = "1d"
 leverage = 1.0
