@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Long when price breaks above Donchian upper + 1d EMA50 uptrend + volume > 1.5x 20-period avg
-# Short when price breaks below Donchian lower + 1d EMA50 downtrend + volume > 1.5x 20-period avg
-# Uses discrete position sizing (0.25) to control drawdown and minimize fee drag.
-# 1d EMA50 provides strong trend filter reducing whipsaws in both bull and bear markets.
-# Volume threshold (1.5x) targets ~30-60 trades/year on 4h timeframe to avoid overtrading.
-# Donchian channels provide objective breakout levels based on price structure.
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA50 trend + volume spike
+# Long when price breaks above Donchian upper + 1d EMA50 uptrend + volume > 1.7x 20-period avg
+# Short when price breaks below Donchian lower + 1d EMA50 downtrend + volume > 1.7x 20-period avg
+# Discrete position sizing (0.25) to limit drawdown and reduce fee churn.
+# 1d EMA50 provides strong trend filter effective in both bull and bear regimes.
+# Volume threshold (1.7x) targets ~30-50 trades/year on 4h timeframe to avoid overtrading.
 
 def generate_signals(prices):
     n = len(prices)
@@ -35,9 +34,9 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === 4h Donchian Channels (20-period) ===
-    # Upper = highest high of last 20 periods
-    # Lower = lowest low of last 20 periods
+    # === 4h Donchian Channel (20) ===
+    # Upper = max(high, lookback=20)
+    # Lower = min(low, lookback=20)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
@@ -63,8 +62,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
+        # Volume filter: current volume > 1.7x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.7)
         
         # === LONG CONDITIONS ===
         # 1. Price breaks above Donchian upper (close > upper)
