@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R1/S1 breakout with volume confirmation and daily chop regime filter
-# Uses proven pivot structure from HTF for institutional levels, volume to confirm breakout strength,
-# and chop regime to avoid whipsaws in ranging markets. Designed for low trade frequency
-# (target: 50-150 total over 4 years) to minimize fee drag while capturing breakout moves
-# in both bull and bear regimes via bidirectional breakout logic.
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA(34) trend filter and volume confirmation.
+# Works in bull markets via breakout continuation; in bear markets via short breakdowns below trend.
+# Uses discrete position sizing (0.25) to limit fee churn and drawdown.
+# Target: 20-50 trades/year per symbol (<200 total over 4 years) to avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,86 +18,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d HTF data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h HTF data once before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 34:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels (R1, S1)
-    # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    hl_range = df_1d['high'] - df_1d['low']
-    camarilla_r1 = df_1d['close'] + (1.1 * hl_range / 12)
-    camarilla_s1 = df_1d['close'] - (1.1 * hl_range / 12)
+    # Calculate 12h EMA(34) for trend filter
+    ema_34_12h = pd.Series(df_12h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1.values)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1.values)
-    
-    # Calculate daily choppiness index regime filter
-    # CHOP = 100 * log10(sum(ATR(14)) / log10(n) * (highest_high - lowest_low))
-    # Simplified: CHOP > 61.8 = ranging, CHOP < 38.2 = trending
-    # We'll use trending regime (CHOP < 50) for breakout trading
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
-    tr3 = np.abs(df_1d['low'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean()
-    
-    # Sum of ATR over 14 periods
-    sum_atr_14 = atr_14.rolling(window=14, min_periods=14).sum()
-    highest_high_14 = df_1d['high'].rolling(window=14, min_periods=14).max()
-    lowest_low_14 = df_1d['low'].rolling(window=14, min_periods=14).min()
-    
-    # Avoid division by zero
-    chop_denom = np.log10(14) * (highest_high_14 - lowest_low_14)
-    chop_denom = np.where(chop_denom == 0, 1e-10, chop_denom)
-    chop_value = 100 * np.log10(sum_atr_14 / chop_denom)
-    
-    # Regime filter: trade only when market is trending (CHOP < 50)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_value.values.fillna(50))
-    trending_regime = chop_aligned < 50
-    
-    # Calculate daily volume average for confirmation
-    vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Calculate 12h ATR(14) for volatility filter
+    tr1 = df_12h['high'] - df_12h['low']
+    tr2 = np.abs(df_12h['high'] - np.concatenate([[df_12h['close'].iloc[0]], df_12h['close'].iloc[:-1]]))
+    tr3 = np.abs(df_12h['low'] - np.concatenate([[df_12h['close'].iloc[0]], df_12h['close'].iloc[:-1]]))
+    tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14_12h = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_14_12h)
     
     signals = np.zeros(n)
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(vol_ma_20_aligned[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(atr_14_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x daily average volume
-        # Approximate: compare current volume to scaled daily average
-        vol_filter = volume[i] > 1.5 * (vol_ma_20_aligned[i] / 8)  # 8x 12h bars in 1d
+        # Volatility filter: only trade when 12h ATR is elevated (> 0.4% of price)
+        vol_filter = atr_14_12h_aligned[i] > 0.004 * close[i]
         
-        # Regime filter: only trade in trending markets
-        regime_filter = trending_regime[i]
+        # Calculate 4h Donchian(20) channels using available data up to i
+        start_idx = max(0, i - 19)
+        donchian_high = np.max(high[start_idx:i+1])
+        donchian_low = np.min(low[start_idx:i+1])
         
         # Long conditions:
-        # 1. Price breaks above Camarilla R1 level
-        # 2. Volume confirmation
-        # 3. Trending regime
-        if (close[i] > camarilla_r1_aligned[i] and
+        # 1. Price above 12h EMA34 (bullish bias)
+        # 2. Price breaks above 4h Donchian(20) high
+        # 3. Volume confirmation: current volume > 20-period average
+        # 4. Volatility filter
+        if (close[i] > ema_34_12h_aligned[i] and
+            close[i] > donchian_high and
             vol_filter and
-            regime_filter):
+            volume[i] > np.mean(np.maximum(volume[start_idx:i], 1e-9))):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Price breaks below Camarilla S1 level
-        # 2. Volume confirmation
-        # 3. Trending regime
-        elif (close[i] < camarilla_s1_aligned[i] and
+        # 1. Price below 12h EMA34 (bearish bias)
+        # 2. Price breaks below 4h Donchian(20) low
+        # 3. Volume confirmation
+        # 4. Volatility filter
+        elif (close[i] < ema_34_12h_aligned[i] and
+              close[i] < donchian_low and
               vol_filter and
-              regime_filter):
+              volume[i] > np.mean(np.maximum(volume[start_idx:i], 1e-9))):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "12h_Camarilla_R1S1_Volume_Regime_v1"
-timeframe = "12h"
+name = "4h_Donchian20_EMA34_12h_VolFilter_v1"
+timeframe = "4h"
 leverage = 1.0
