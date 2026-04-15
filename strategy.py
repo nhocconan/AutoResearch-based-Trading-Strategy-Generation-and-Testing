@@ -23,14 +23,6 @@ def generate_signals(prices):
     daily_low = df_1d['low'].values
     daily_volume = df_1d['volume'].values
     
-    # Calculate daily pivot points (standard floor trader's pivots)
-    # P = (H + L + C) / 3
-    # R1 = 2*P - L
-    # S1 = 2*P - H
-    pivot = (daily_high + daily_low + daily_close) / 3.0
-    r1 = 2 * pivot - daily_low
-    s1 = 2 * pivot - daily_high
-    
     # Calculate daily ATR(14) for volatility filter
     tr1 = pd.Series(daily_high - daily_low)
     tr2 = pd.Series(np.abs(daily_high - np.concatenate([[daily_close[0]], daily_close[:-1]])))
@@ -38,13 +30,14 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr_14 = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align HTF indicators to 1d timeframe with proper delay
-    pivot_1d = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_1d = align_htf_to_ltf(prices, df_1d, r1)
-    s1_1d = align_htf_to_ltf(prices, df_1d, s1)
-    atr_14_1d = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Align HTF ATR to 6h timeframe
+    atr_14_6h = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Calculate 1d volume ratio (current vs 20-period average)
+    # Calculate 6h Donchian channels (20-period) for breakout signals
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 6h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
@@ -52,34 +45,34 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_1d[i]) or np.isnan(r1_1d[i]) or np.isnan(s1_1d[i]) or 
-            np.isnan(atr_14_1d[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(atr_14_6h[i]) or 
+            np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
         # Entry conditions:
-        # 1. 1d price breaks above R1 with volume confirmation → long
-        # 2. 1d price breaks below S1 with volume confirmation → short
+        # 1. 6h price breaks above 20-period Donchian high with volume confirmation → long
+        # 2. 6h price breaks below 20-period Donchian low with volume confirmation → short
         # 3. Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
-        # 4. Volume confirmation: volume > 1.3x average
+        # 4. Volume confirmation: volume > 1.5x average
         # 5. Discrete position sizing: 0.25
         
-        # Long conditions: 1d breakout above R1
-        if (close[i] > r1_1d[i] and            # 1d price above R1 pivot
-            volume_ratio[i] > 1.3 and          # Volume confirmation
-            atr_14_1d[i] > 0.005 * close[i]):  # Volatility filter
+        # Long conditions: 6h breakout above Donchian high
+        if (close[i] > highest_20[i] and            # 6h price above Donchian high
+            volume_ratio[i] > 1.5 and               # Volume confirmation
+            atr_14_6h[i] > 0.005 * close[i]):       # Volatility filter
             signals[i] = 0.25
             
-        # Short conditions: 1d breakdown below S1
-        elif (close[i] < s1_1d[i] and          # 1d price below S1 pivot
-              volume_ratio[i] > 1.3 and        # Volume confirmation
-              atr_14_1d[i] > 0.005 * close[i]): # Volatility filter
+        # Short conditions: 6h breakdown below Donchian low
+        elif (close[i] < lowest_20[i] and           # 6h price below Donchian low
+              volume_ratio[i] > 1.5 and             # Volume confirmation
+              atr_14_6h[i] > 0.005 * close[i]):     # Volatility filter
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1d_Pivot_R1_S1_Breakout_Volume_ATR_Filter"
-timeframe = "1d"
+name = "6h_Donchian20_Breakout_Volume_ATR_Filter"
+timeframe = "6h"
 leverage = 1.0
