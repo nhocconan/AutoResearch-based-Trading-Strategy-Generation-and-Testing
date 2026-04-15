@@ -3,9 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 1d 15-period Donchian breakout with weekly trend filter and volume confirmation.
+# Donchian channels provide clear breakout levels; weekly trend ensures directional bias;
+# volume confirmation reduces false breakouts. Designed for low trade frequency (<25/year)
+# to avoid fee drag, works in bull/bear via trend filter.
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,47 +18,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot levels
-    daily = get_htf_data(prices, '1d')
-    daily_high = daily['high'].values
-    daily_low = daily['low'].values
-    daily_close = daily['close'].values
+    # Get weekly data for trend filter
+    weekly = get_htf_data(prices, '1w')
+    weekly_close = weekly['close'].values
     
-    # Calculate daily pivot levels
-    pivot = (daily_high + daily_low + daily_close) / 3.0
-    r1 = 2 * pivot - daily_low
-    s1 = 2 * pivot - daily_high
+    # Calculate weekly EMA(40) for trend
+    weekly_close_series = pd.Series(weekly_close)
+    weekly_ema = weekly_close_series.ewm(span=40, adjust=False, min_periods=40).mean().values
+    weekly_ema_aligned = align_htf_to_ltf(prices, weekly, weekly_ema)
     
-    # Align pivot levels to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, daily, pivot)
-    r1_aligned = align_htf_to_ltf(prices, daily, r1)
-    s1_aligned = align_htf_to_ltf(prices, daily, s1)
+    # Calculate daily Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: current 4h volume > 1.8x 20-period average volume
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.8 * vol_ma)
-    
-    # Range filter: avoid trading when price is within 0.5% of pivot
-    price_to_pivot = np.abs(close - pivot_aligned) / pivot_aligned
-    range_filter = price_to_pivot > 0.005
+    # Volume filter: current 1d volume > 1.5x 20-period average volume
+    volume_series = pd.Series(volume)
+    volume_ma = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * volume_ma)
     
     signals = np.zeros(n)
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(weekly_ema_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade when volume filter and range filter both pass
-        if volume_filter[i] and range_filter[i]:
-            # Long conditions: price breaks above R1 with volume
-            if close[i] > r1_aligned[i]:
+        # Only trade when volume filter passes
+        if volume_filter[i]:
+            # Long conditions: price breaks above Donchian high AND above weekly EMA (uptrend)
+            if close[i] > donchian_high[i] and close[i] > weekly_ema_aligned[i]:
                 signals[i] = 0.25
-            # Short conditions: price breaks below S1 with volume
-            elif close[i] < s1_aligned[i]:
+            # Short conditions: price breaks below Donchian low AND below weekly EMA (downtrend)
+            elif close[i] < donchian_low[i] and close[i] < weekly_ema_aligned[i]:
                 signals[i] = -0.25
             else:
                 signals[i] = signals[i-1]
@@ -62,6 +62,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Pivot_R1_S1_Breakout_Volume_RangeFilter"
-timeframe = "4h"
+name = "1d_Donchian20_WeeklyEMA40_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
