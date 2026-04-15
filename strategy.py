@@ -13,84 +13,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d HTF data once before loop (daily trend and Camarilla pivots)
+    # Get 1d HTF data once before loop for daily ATR regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate daily ATR(14) for volatility regime filter
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
+    tr3 = np.abs(df_1d['low'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Align daily ATR to 12h timeframe
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate daily Camarilla pivot levels (using prior day's OHLC)
-    prior_high = df_1d['high'].shift(1).values
-    prior_low = df_1d['low'].shift(1).values
-    prior_close = df_1d['close'].shift(1).values
+    # Calculate 12h ATR(14) for position sizing and stoploss reference
+    tr1_12h = high - low
+    tr2_12h = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    tr3_12h = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
+    atr_14_12h = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Camarilla pivot point
-    camarilla_pivot = (prior_high + prior_low + prior_close) / 3.0
-    # Camarilla R3 and S3 (key reversal levels)
-    camarilla_r3 = camarilla_pivot + 1.1 * (prior_high - prior_low)
-    camarilla_s3 = camarilla_pivot - 1.1 * (prior_high - prior_low)
-    # Camarilla R4 and S4 (breakout levels)
-    camarilla_r4 = camarilla_pivot + 1.5 * (prior_high - prior_low)
-    camarilla_s4 = camarilla_pivot - 1.5 * (prior_high - prior_low)
-    
-    # Align Camarilla levels to 4h
-    camarilla_pivot_4h = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    camarilla_r3_4h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_4h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_r4_4h = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_4h = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    
-    # Calculate 4h ATR(14) for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Calculate 4h volume ratio (current vs 20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ratio = volume / (vol_ma_20 + 1e-10)
+    # Calculate 12h Donchian(20) channels
+    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_pivot_4h[i]) or 
-            np.isnan(camarilla_r3_4h[i]) or np.isnan(camarilla_s3_4h[i]) or 
-            np.isnan(camarilla_r4_4h[i]) or np.isnan(camarilla_s4_4h[i]) or 
-            np.isnan(atr_14[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or 
+            np.isnan(atr_14_12h[i]) or np.isnan(atr_14_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions:
-        # 1. Daily trend filter: price above 1d EMA34 (bullish daily bias)
-        # 2. Price breaks above Camarilla R4 with volume (bullish breakout)
-        # 3. Volume confirmation: volume > 1.5x average
-        # 4. Volatility filter: ATR > 0.3% of price (avoid extremely low volatility)
-        if (close[i] > ema_34_1d_aligned[i] and
-            close[i] > camarilla_r4_4h[i] and
-            volume_ratio[i] > 1.5 and
-            atr_14[i] > 0.003 * close[i]):
-            signals[i] = 0.25
+        # Regime filter: Only trade when volatility is elevated (ATR > 0.8% of price)
+        # This avoids choppy low-volatility periods and focuses on meaningful moves
+        if atr_14_1d_aligned[i] <= 0.008 * close[i]:
+            signals[i] = 0.0
+            continue
             
-        # Short conditions:
-        # 1. Daily trend filter: price below 1d EMA34 (bearish daily bias)
-        # 2. Price breaks below Camarilla S4 with volume (bearish breakdown)
-        # 3. Volume confirmation: volume > 1.5x average
-        # 4. Volatility filter: ATR > 0.3% of price
-        elif (close[i] < ema_34_1d_aligned[i] and
-              close[i] < camarilla_s4_4h[i] and
-              volume_ratio[i] > 1.5 and
-              atr_14[i] > 0.003 * close[i]):
-            signals[i] = -0.25
+        # Long: Break above 20-period high with volume confirmation
+        # Short: Break below 20-period low with volume confirmation
+        if close[i] > highest_high_20[i]:
+            # Volume confirmation: current volume > 1.3x 20-period average
+            vol_ma_20 = pd.Series(volume[max(0, i-19):i+1]).mean()
+            if volume[i] > 1.3 * vol_ma_20:
+                signals[i] = 0.25  # 25% position
+        elif close[i] < lowest_low_20[i]:
+            # Volume confirmation: current volume > 1.3x 20-period average
+            vol_ma_20 = pd.Series(volume[max(0, i-19):i+1]).mean()
+            if volume[i] > 1.3 * vol_ma_20:
+                signals[i] = -0.25  # 25% position
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "4h_1d_EMA34_Camarilla_R4S4_Breakout_Volume_Filter_v1"
-timeframe = "4h"
+name = "12h_Donchian20_Volume_ATR_Regime_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
