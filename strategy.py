@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud with 1d/1w trend alignment
-# Uses Tenkan/Kijun cross + Senkou Span cloud filter from daily timeframe
-# Weekly trend filter (price vs weekly Kijun) to avoid counter-trend trades
-# Designed for low frequency (15-30/year) with clear trend following in both bull/bear
-# Ichimoku works well in crypto trends and avoids whipsaws in ranging markets
+# Hypothesis: 12h Williams Alligator with 1d volume confirmation and 1w trend filter
+# Designed for low trade frequency (target 15-30/year) with clear trend following logic
+# Williams Alligator identifies trends via SMAs (jaw/teeth/lips); we use lips > teeth > jaw for uptrend
+# Works in both bull (trend continuation) and bear (trend continuation) markets
+# Uses volume spike to confirm breakouts and avoid false signals
+# 12h timeframe reduces trade frequency vs lower TFs, minimizing fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,105 +20,91 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 6h data (primary timeframe) for Ichimoku calculation
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 52:
+    # Load 12h data (primary timeframe) for Williams Alligator calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Ichimoku components on 6h
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    tenkan_high = pd.Series(high_6h).rolling(window=9, min_periods=9).max()
-    tenkan_low = pd.Series(low_6h).rolling(window=9, min_periods=9).min()
-    tenkan_sen = (tenkan_high + tenkan_low) / 2
+    # Williams Alligator: three SMAs
+    # Jaw (13-period, 8-shifted)
+    jaw_12h = pd.Series(close_12h).rolling(window=13, min_periods=13).mean().shift(8).values
+    # Teeth (8-period, 5-shifted)
+    teeth_12h = pd.Series(close_12h).rolling(window=8, min_periods=8).mean().shift(5).values
+    # Lips (5-period, 3-shifted)
+    lips_12h = pd.Series(close_12h).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    kijun_high = pd.Series(high_6h).rolling(window=26, min_periods=26).max()
-    kijun_low = pd.Series(low_6h).rolling(window=26, min_periods=26).min()
-    kijun_sen = (kijun_high + kijun_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(26)
-    
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods
-    senkou_high_52 = pd.Series(high_6h).rolling(window=52, min_periods=52).max()
-    senkou_low_52 = pd.Series(low_6h).rolling(window=52, min_periods=52).min()
-    senkou_span_b = ((senkou_high_52 + senkou_low_52) / 2).shift(26)
-    
-    # Load 1d data for trend context
+    # Load 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Load 1w data for stronger trend filter
+    # Load 1w data for trend filter (close > SMA50)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    if len(df_1w) < 60:
         return np.zeros(n)
     close_1w = df_1w['close'].values
     
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Volume average (20-period on 1d)
+    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # 1w EMA25 for trend filter
-    ema25_1w = pd.Series(close_1w).ewm(span=25, adjust=False, min_periods=25).mean().values
+    # SMA50 on 1w for trend filter
+    sma50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
     
-    # Align all indicators to 6h timeframe
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_6h, tenkan_sen.values)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_6h, kijun_sen.values)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_6h, senkou_span_a.values)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_6h, senkou_span_b.values)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    ema25_1w_aligned = align_htf_to_ltf(prices, df_1w, ema25_1w)
+    # Align all indicators to 12h timeframe
+    jaw_12h_aligned = align_htf_to_ltf(prices, df_12h, jaw_12h)
+    teeth_12h_aligned = align_htf_to_ltf(prices, df_12h, teeth_12h)
+    lips_12h_aligned = align_htf_to_ltf(prices, df_12h, lips_12h)
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    sma50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25
+    base_size = 0.25  # Base position size
     
-    for i in range(52, n):  # Start after Ichimoku warmup
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
-            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(ema25_1w_aligned[i])):
+        if (np.isnan(jaw_12h_aligned[i]) or np.isnan(teeth_12h_aligned[i]) or 
+            np.isnan(lips_12h_aligned[i]) or np.isnan(vol_avg_1d_aligned[i]) or 
+            np.isnan(sma50_1w_aligned[i])):
             continue
         
-        # Determine cloud top and bottom
-        cloud_top = max(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        cloud_bottom = min(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        # Williams Alligator conditions
+        # Uptrend: lips > teeth > jaw
+        # Downtrend: lips < teeth < jaw
+        is_uptrend = (lips_12h_aligned[i] > teeth_12h_aligned[i] > jaw_12h_aligned[i])
+        is_downtrend = (lips_12h_aligned[i] < teeth_12h_aligned[i] < jaw_12h_aligned[i])
         
-        # Long entry: TK cross bullish + price above cloud + bullish higher timeframe
-        if (tenkan_sen_aligned[i] > kijun_sen_aligned[i] and  # Bullish TK cross
-            close[i] > cloud_top and  # Price above cloud
-            close[i] > ema50_1d_aligned[i] and  # Above daily EMA50
-            close[i] > ema25_1w_aligned[i] and  # Above weekly EMA25
+        # Long entry: uptrend + price above lips + volume spike
+        if (is_uptrend and 
+            close[i] > lips_12h_aligned[i] and 
+            volume[i] > 2.0 * vol_avg_1d_aligned[i] and 
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: TK cross bearish + price below cloud + bearish higher timeframe
-        elif (tenkan_sen_aligned[i] < kijun_sen_aligned[i] and  # Bearish TK cross
-              close[i] < cloud_bottom and  # Price below cloud
-              close[i] < ema50_1d_aligned[i] and  # Below daily EMA50
-              close[i] < ema25_1w_aligned[i] and  # Below weekly EMA25
+        # Short entry: downtrend + price below lips + volume spike
+        elif (is_downtrend and 
+              close[i] < lips_12h_aligned[i] and 
+              volume[i] > 2.0 * vol_avg_1d_aligned[i] and 
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: TK cross reverses or price enters cloud
-        elif position == 1 and (tenkan_sen_aligned[i] < kijun_sen_aligned[i] or 
-                                close[i] < cloud_top):
+        # Exit: trend reversal or price crosses jaw
+        elif position == 1 and (not is_uptrend or close[i] < jaw_12h_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (tenkan_sen_aligned[i] > kijun_sen_aligned[i] or 
-                                 close[i] > cloud_bottom):
+        elif position == -1 and (not is_downtrend or close[i] > jaw_12h_aligned[i]):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "6h_Ichimoku_TK_Cross_CloudFilter_1d1wTrend"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1dVolume_1wTrend"
+timeframe = "12h"
 leverage = 1.0
