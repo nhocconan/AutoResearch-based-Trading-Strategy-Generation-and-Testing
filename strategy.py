@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Bull/Bear Power with 1d EMA34 trend filter and volume spike
-# Long when Bull Power > 0 (close > EMA13) AND Bear Power < 0 (low < EMA34) AND 1d EMA34 uptrend (close > EMA34) AND volume > 2x 20-period avg
-# Short when Bear Power < 0 (low < EMA13) AND Bull Power < 0 (close < EMA34) AND 1d EMA34 downtrend (close < EMA34) AND volume > 2x 20-period avg
-# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (12-30/year).
-# Elder Ray measures bull/bear power relative to EMAs, providing dynamic support/resistance. 1d EMA34 filter ensures we trade with higher timeframe trend.
-# Volume spike confirms institutional participation. Works in bull markets (strong uptrends) and bear markets (strong downtrends) by requiring alignment with 1d trend.
+# Hypothesis: 12h Camarilla R4/S4 breakout with volume confirmation and 1d EMA34 trend filter
+# Long when price breaks above 1d Camarilla R4 + volume > 1.5x 20-period avg + close > 1d EMA34
+# Short when price breaks below 1d Camarilla S4 + volume > 1.5x 20-period avg + close < 1d EMA34
+# Uses tighter R4/S4 levels (vs R3/S3) for fewer, higher-quality signals.
+# EMA34 filter ensures we trade with the intermediate-term trend, avoiding counter-trend whipsaws.
+# Designed for low trade frequency (15-25/year) to minimize fee drag on 12h timeframe.
+# Works in bull markets (trend continuation) and bear markets (strong downtrends) by requiring alignment with 1d EMA34.
 
 def generate_signals(prices):
     n = len(prices)
@@ -29,18 +30,21 @@ def generate_signals(prices):
     if len(df_1d) < 40:
         return np.zeros(n)
     
-    # === 1d Indicator: EMA34 (trend filter) ===
+    # === 1d Indicator: Camarilla Pivot Levels (R4, S4) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels: R4 = close + (high - low) * 1.1/2, S4 = close - (high - low) * 1.1/2
+    camarilla_r4_1d = close_1d + (high_1d - low_1d) * 1.1 / 2
+    camarilla_s4_1d = close_1d - (high_1d - low_1d) * 1.1 / 2
+    
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4_1d)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4_1d)
+    
+    # === 1d Indicator: EMA34 (trend filter) ===
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # === 6h Indicators: EMA13 and EMA34 for Elder Ray ===
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema34_ltf = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Elder Ray components
-    bull_power = close - ema13  # Bull Power = close - EMA13
-    bear_power = low - ema34_ltf  # Bear Power = low - EMA34
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,35 +60,29 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2.0x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
+        # Volume filter: current volume > 1.5x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # Skip if any required data is NaN
-        if (np.isnan(ema34_aligned[i]) or np.isnan(bull_power[i]) or
-            np.isnan(bear_power[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
+            np.isnan(ema34_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Bull Power > 0 (close > EMA13) - bulls in control
-        # 2. Bear Power < 0 (low < EMA34) - bears weak
-        # 3. 1d EMA34 uptrend (close > 1d EMA34) - higher timeframe uptrend
-        # 4. Volume confirmation
-        if (bull_power[i] > 0) and \
-           (bear_power[i] < 0) and \
-           (close[i] > ema34_aligned[i]) and \
-           vol_confirm:
+        # 1. Price breaks above 1d Camarilla R4 level
+        # 2. Uptrend (close > 1d EMA34)
+        # 3. Volume confirmation
+        if (close[i] > camarilla_r4_aligned[i]) and \
+           (close[i] > ema34_aligned[i]) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Bear Power < 0 (low < EMA13) - bears in control
-        # 2. Bull Power < 0 (close < EMA34) - bulls weak
-        # 3. 1d EMA34 downtrend (close < 1d EMA34) - higher timeframe downtrend
-        # 4. Volume confirmation
-        elif (bear_power[i] < 0) and \
-             (bull_power[i] < 0) and \
-             (close[i] < ema34_aligned[i]) and \
-             vol_confirm:
+        # 1. Price breaks below 1d Camarilla S4 level
+        # 2. Downtrend (close < 1d EMA34)
+        # 3. Volume confirmation
+        elif (close[i] < camarilla_s4_aligned[i]) and \
+             (close[i] < ema34_aligned[i]) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -92,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_EMA13_EMA34_1dEMA34_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_CamarillaR4S4_Volume_EMA34_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
