@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 1w EMA34 trend filter + volume confirmation
-# Long when Bull Power > 0, Bear Power < 0, price > 1w EMA34, volume > 1.5x 20-period avg
-# Short when Bull Power < 0, Bear Power > 0, price < 1w EMA34, volume > 1.5x 20-period avg
+# Hypothesis: 12h Bollinger Band breakout with 1d ADX trend filter and volume confirmation
+# Long when price closes above upper BB(20,2) + 1d ADX > 25 (trending) + volume > 1.5x 20-period avg
+# Short when price closes below lower BB(20,2) + 1d ADX > 25 + volume confirmation
 # Uses discrete position sizing (0.25) to minimize fee drag and control drawdown.
-# 1w EMA34 provides strong trend filter reducing whipsaws in both bull and bear markets.
-# Volume threshold (1.5x) targets ~50-150 trades over 4 years (~12-37/year) to minimize fee drag on 6h timeframe.
-# Elder Ray measures bull/bear power relative to EMA13, providing institutional-grade trend strength.
+# 1d ADX > 25 ensures we only trade in trending markets, reducing whipsaws in ranging periods.
+# Bollinger Bands provide dynamic support/resistance that adapts to volatility.
+# Volume filter ensures breakouts have conviction.
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,23 +25,65 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1w HTF data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 1d HTF data once before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1w Indicator: EMA34 ===
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # === 1d Indicator: ADX(14) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === Elder Ray Indicators (Bull Power, Bear Power) ===
-    # Bull Power = High - EMA13
-    # Bear Power = Low - EMA13
-    # Using 13-period EMA as standard for Elder Ray
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values (Wilder's smoothing = EMA with alpha=1/period)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        alpha = 1.0 / period
+        for i in range(len(data)):
+            if np.isnan(result[i-1]) if i > 0 else True:
+                result[i] = data[i]
+            else:
+                result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+        return result
+    
+    period = 14
+    atr = wilders_smoothing(tr, period)
+    dm_plus_smooth = wilders_smoothing(dm_plus, period)
+    dm_minus_smooth = wilders_smoothing(dm_minus, period)
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = wilders_smoothing(dx, period)
+    
+    adx_1d = adx
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # === 12h Bollinger Bands (20,2) ===
+    bb_period = 20
+    bb_std = 2
+    sma_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_bb = sma_20 + (bb_std * std_20)
+    lower_bb = sma_20 - (bb_std * std_20)
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,7 +91,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(34, 13, 20) + 5  # EMA34(1w) + EMA13 + volume(20) + buffer
+    warmup = max(bb_period, 20) + period + 5  # BB(20) + ADX(14) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -58,30 +100,29 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or
+            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter: current volume > 1.5x 20-period volume SMA
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
+        # Trend filter: 1d ADX > 25 (trending market)
+        trending = adx_1d_aligned[i] > 25
+        
         # === LONG CONDITIONS ===
-        # 1. Bull Power > 0 (bulls in control)
-        # 2. Bear Power < 0 (bears weak)
-        # 3. Price > 1w EMA34 (primary trend up)
-        # 4. Volume confirmation
-        if (bull_power[i] > 0) and (bear_power[i] < 0) and \
-           (close[i] > ema_34_1w_aligned[i]) and vol_confirm:
+        # 1. Price closes above upper Bollinger Band
+        # 2. 1d ADX > 25 (trending)
+        # 3. Volume confirmation
+        if (close[i] > upper_bb[i]) and trending and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Bull Power < 0 (bulls weak)
-        # 2. Bear Power > 0 (bears in control)
-        # 3. Price < 1w EMA34 (primary trend down)
-        # 4. Volume confirmation
-        elif (bull_power[i] < 0) and (bear_power[i] > 0) and \
-             (close[i] < ema_34_1w_aligned[i]) and vol_confirm:
+        # 1. Price closes below lower Bollinger Band
+        # 2. 1d ADX > 25 (trending)
+        # 3. Volume confirmation
+        elif (close[i] < lower_bb[i]) and trending and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -89,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_BullBearPower_1wEMA34_Volume_Filter_v1"
-timeframe = "6h"
+name = "12h_BB_Breakout_1dADX_Volume_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
