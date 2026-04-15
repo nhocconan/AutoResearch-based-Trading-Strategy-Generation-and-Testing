@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud with 1d ADX trend filter and volume confirmation
-# Long when Tenkan > Kijun + price above cloud + 1d ADX > 25 (trending) + volume > 1.5x 20-period avg
-# Short when Tenkan < Kijun + price below cloud + 1d ADX > 25 + volume confirmation
+# Hypothesis: 12h Williams %R reversal with 1w EMA34 trend filter and volume spike
+# Long when Williams %R(14) crosses above -80 (oversold bounce) + 1w EMA34 uptrend + volume > 2.0x 24-period avg
+# Short when Williams %R(14) crosses below -20 (overbought rejection) + 1w EMA34 downtrend + volume > 2.0x 24-period avg
 # Uses discrete position sizing (0.25) to minimize fee drag and control drawdown.
-# Ichimoku provides dynamic support/resistance via cloud, ADX filters ranging markets,
-# volume confirmation ensures breakout strength. Works in bull/bear by following trends.
+# 1w EMA34 provides strong trend filter reducing whipsaws in both bull and bear markets.
+# Volume threshold (2.0x) targets ~15-25 trades/year to minimize fee drag on 12h timeframe.
+# Williams %R calculated from 12h OHLC using 14-period lookback.
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,92 +25,34 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d HTF data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w HTF data once before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # === 1d Indicator: ADX(14) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 1w Indicator: EMA34 ===
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])  # First value NaN
+    # === 12h Williams %R(14) ===
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # Where Highest High = max(high over lookback), Lowest Low = min(low over lookback)
+    lookback = 14
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    williams_r = np.full(n, np.nan)
+    for i in range(n):
+        if not (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or highest_high[i] == lowest_low[i]):
+            williams_r[i] = ((highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i])) * -100
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]),
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]),
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
-    
-    # Smoothed values (Wilder's smoothing = EMA with alpha=1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            # First value is simple average
-            result[period-1] = np.nanmean(data[:period])
-            # Subsequent values: Wilder's smoothing
-            for i in range(period, len(data)):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    period_adx = 14
-    atr = wilders_smoothing(tr, period_adx)
-    dm_plus_smooth = wilders_smoothing(dm_plus, period_adx)
-    dm_minus_smooth = wilders_smoothing(dm_minus, period_adx)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilders_smoothing(dx, period_adx)
-    
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # === 6h Ichimoku Cloud ===
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period_tenkan = 9
-    max_high_9 = pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    min_low_9 = pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan = (max_high_9 + min_low_9) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period_kijun = 26
-    max_high_26 = pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    min_low_26 = pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun = (max_high_26 + min_low_26) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2 shifted 26 periods ahead
-    period_senkou_b = 52
-    max_high_52 = pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    min_low_52 = pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_b = ((max_high_52 + min_low_52) / 2)
-    
-    # Current cloud boundaries (Senkou Span A/B from 26 periods ago)
-    senkou_a_shifted = np.roll(senkou_a, 26)
-    senkou_b_shifted = np.roll(senkou_b, 26)
-    senkou_a_shifted[:26] = np.nan
-    senkou_b_shifted[:26] = np.nan
-    
-    # Volume SMA for confirmation (using 20-period)
-    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume SMA for confirmation (using 24-period = 12 days of 12h bars)
+    vol_sma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(52, 26, 9, 14*2) + 5  # Ichimoku 52 + ADX smoothing + buffer
+    warmup = max(34, lookback, 24) + 5  # EMA34 + Williams %R + volume(24) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -118,37 +61,31 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or
-            np.isnan(senkou_a_shifted[i]) or np.isnan(senkou_b_shifted[i]) or
-            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_sma_24[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
+        # Volume filter: current volume > 2.0x 24-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_24[i] * 2.0)
         
-        # Cloud boundaries: top = max(senkou_a, senkou_b), bottom = min(senkou_a, senkou_b)
-        cloud_top = np.maximum(senkou_a_shifted[i], senkou_b_shifted[i])
-        cloud_bottom = np.minimum(senkou_a_shifted[i], senkou_b_shifted[i])
+        # Williams %R levels
+        williams_prev = williams_r[i-1] if i > 0 else williams_r[i]
         
         # === LONG CONDITIONS ===
-        # 1. Tenkan > Kijun (bullish momentum)
-        # 2. Price above cloud (bullish breakout)
-        # 3. ADX > 25 (trending market)
-        # 4. Volume confirmation
-        if (tenkan[i] > kijun[i]) and \
-           (close[i] > cloud_top) and \
-           (adx_1d_aligned[i] > 25) and vol_confirm:
+        # 1. Williams %R crosses above -80 (from below -80 to above -80)
+        # 2. 1w EMA34 uptrend (close > EMA34)
+        # 3. Volume confirmation
+        williams_cross_up = (williams_prev <= -80.0) and (williams_r[i] > -80.0)
+        if williams_cross_up and \
+           (close[i] > ema_34_1w_aligned[i]) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Tenkan < Kijun (bearish momentum)
-        # 2. Price below cloud (bearish breakout)
-        # 3. ADX > 25 (trending market)
-        # 4. Volume confirmation
-        elif (tenkan[i] < kijun[i]) and \
-             (close[i] < cloud_bottom) and \
-             (adx_1d_aligned[i] > 25) and vol_confirm:
+        # 1. Williams %R crosses below -20 (from above -20 to below -20)
+        # 2. 1w EMA34 downtrend (close < EMA34)
+        # 3. Volume confirmation
+        elif (williams_prev >= -20.0) and (williams_r[i] < -20.0) and \
+             (close[i] < ema_34_1w_aligned[i]) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -156,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Cloud_1dADX_Volume_Filter_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_1wEMA34_Volume_Spike_v1"
+timeframe = "12h"
 leverage = 1.0
