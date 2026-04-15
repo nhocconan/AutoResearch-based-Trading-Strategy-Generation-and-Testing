@@ -1,16 +1,20 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Bollinger Band Breakout with Volume Confirmation and ADX Trend Filter
-# Uses Bollinger Bands (20, 2) on 12h timeframe. Breakouts above upper band or below lower band
-# are traded only when confirmed by volume and ADX > 25 (trending market).
-# Works in bull markets (breakouts up) and bear markets (breakouts down). Target: 50-150 total trades.
+# Hypothesis: 4h Volume Spike + Price Rejection (Pin Bar) with 1d Trend Filter
+# Enter long when: (1) Bullish pin bar (long lower wick, small body) forms at support,
+# (2) Volume spike (>2x 20-period median), (3) Price above 1d EMA50 (uptrend).
+# Enter short when: (1) Bearish pin bar (long upper wick, small body) forms at resistance,
+# (2) Volume spike, (3) Price below 1d EMA50 (downtrend).
+# Exit on opposite pin bar or volume normalization.
+# Target: 30-80 total trades over 4 years (7-20/year) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,90 +22,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data for Bollinger Bands and ADX
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 1d data for trend filter (EMA50)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Bollinger Bands (20, 2) on 12h
-    sma_20 = pd.Series(close_12h).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_12h).rolling(window=20, min_periods=20).std().values
-    upper_band = sma_20 + 2 * std_20
-    lower_band = sma_20 - 2 * std_20
+    # Calculate 1d EMA50
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate ADX (14-period) on 12h
-    # True Range
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    # Align 1d EMA50 to 4h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Directional Movement
-    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
-                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)), 
-                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Pin bar detection
+    body = np.abs(close - open_)
+    lower_wick = np.minimum(open_, close) - low
+    upper_wick = high - np.maximum(open_, close)
     
-    # Smoothed values
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    # Bullish pin: long lower wick, small body, close near high
+    bullish_pin = (lower_wick > 2 * body) & (body < (high - low) * 0.3) & (close > open_)
+    # Bearish pin: long upper wick, small body, close near low
+    bearish_pin = (upper_wick > 2 * body) & (body < (high - low) * 0.3) & (close < open_)
     
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align Bollinger Bands and ADX to 12h timeframe
-    upper_band_aligned = align_htf_to_ltf(prices, df_12h, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_12h, lower_band)
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    # Volume spike (>2x 20-period median)
+    vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median().values
+    volume_spike = volume > 2 * vol_median
     
     signals = np.zeros(n)
     position = 0
     base_size = 0.25  # Position size
     
-    for i in range(100, n):
-        # Skip if any required data is NaN
-        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or
-            np.isnan(adx_aligned[i])):
+    for i in range(20, n):  # Start after warmup for volume median
+        # Skip if EMA data not ready
+        if np.isnan(ema_50_1d_aligned[i]):
             continue
         
-        # Long entry: price breaks above upper Bollinger Band + volume confirmation + ADX > 25
-        if (close[i] > upper_band_aligned[i] and
-            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-            adx_aligned[i] > 25 and
+        # Long entry: bullish pin + volume spike + price above 1d EMA50 (uptrend)
+        if (bullish_pin[i] and volume_spike[i] and close[i] > ema_50_1d_aligned[i] and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below lower Bollinger Band + volume confirmation + ADX > 25
-        elif (close[i] < lower_band_aligned[i] and
-              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-              adx_aligned[i] > 25 and
+        # Short entry: bearish pin + volume spike + price below 1d EMA50 (downtrend)
+        elif (bearish_pin[i] and volume_spike[i] and close[i] < ema_50_1d_aligned[i] and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse breakout or ADX < 20 (ranging market)
-        elif position == 1 and (close[i] < lower_band_aligned[i] or adx_aligned[i] < 20):
+        # Exit: opposite pin bar or volume normalization (volume < 1.5x median)
+        elif position == 1 and (bearish_pin[i] or volume[i] < 1.5 * vol_median[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > upper_band_aligned[i] or adx_aligned[i] < 20):
+        elif position == -1 and (bullish_pin[i] or volume[i] < 1.5 * vol_median[i]):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "12h_Bollinger_Breakout_Volume_ADX"
-timeframe = "12h"
+name = "4h_Volume_Spin_Pin_Bar_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
