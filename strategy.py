@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band squeeze breakout with 1d trend filter and volume confirmation
-# Long when price breaks above upper BB(20,2) + BB width at 20-period low (squeeze) + 1d EMA50 > EMA200 (uptrend) + volume > 1.5x avg
-# Short when price breaks below lower BB(20,2) + BB width at 20-period low (squeeze) + 1d EMA50 < EMA200 (downtrend) + volume > 1.5x avg
-# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (12-37/year).
-# Bollinger squeeze identifies low volatility periods primed for breakouts. Trend filter ensures we trade in direction of higher TF trend.
-# Works in bull markets (breakouts with uptrend) and bear markets (breakdowns with downtrend) by requiring EMA alignment.
+# Hypothesis: 4h Donchian(20) breakout with 1d ATR regime filter and volume confirmation
+# Long when price breaks above 4h Donchian upper (20-period) + 1d ATR(14) > 20-period SMA of ATR + volume > 1.5x 20-period avg
+# Short when price breaks below 4h Donchian lower (20-period) + 1d ATR(14) > 20-period SMA of ATR + volume > 1.5x 20-period avg
+# Uses ATR regime to filter choppy markets (low ATR) and only trade when volatility is expanding.
+# Designed for low trade frequency (20-40/year) with discrete position sizing (0.25) to minimize fee churn.
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,33 +25,44 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d Indicator: EMA50 and EMA200 (trend filter) ===
+    # === 1d Indicator: ATR (volatility regime filter) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # 1 = uptrend (EMA50 > EMA200), -1 = downtrend (EMA50 < EMA200), 0 = no trend
-    trend_1d = np.where(ema50_1d > ema200_1d, 1, np.where(ema50_1d < ema200_1d, -1, 0))
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    # Calculate True Range
+    high_1d_shift = np.roll(high_1d, 1)
+    low_1d_shift = np.roll(low_1d, 1)
+    close_1d_shift = np.roll(close_1d, 1)
+    high_1d_shift[0] = high_1d[0]
+    low_1d_shift[0] = low_1d[0]
+    close_1d_shift[0] = close_1d[0]
     
-    # === 6h Indicator: Bollinger Bands (20,2) and BB Width ===
-    bb_window = 20
-    bb_std = 2
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - close_1d_shift)
+    tr3 = np.abs(low_1d - close_1d_shift)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Calculate Bollinger Bands
-    sma = pd.Series(close).rolling(window=bb_window, min_periods=bb_window).mean().values
-    std = pd.Series(close).rolling(window=bb_window, min_periods=bb_window).std().values
-    upper_band = sma + (bb_std * std)
-    lower_band = sma - (bb_std * std)
+    # Wilder's ATR (14-period)
+    period = 14
+    atr_1d = np.zeros_like(tr)
+    atr_1d[period-1] = np.mean(tr[:period])
+    for i in range(period, len(tr)):
+        atr_1d[i] = (atr_1d[i-1] * (period-1) + tr[i]) / period
     
-    # Calculate Bollinger Band Width (normalized)
-    bb_width = (upper_band - lower_band) / sma
+    # 20-period SMA of ATR for regime comparison
+    atr_sma_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
+    atr_regime = atr_1d > atr_sma_20  # Volatility expanding when ATR > its SMA
     
-    # Calculate 20-period rolling minimum of BB Width (for squeeze detection)
-    bb_width_min = pd.Series(bb_width).rolling(window=bb_window, min_periods=bb_window).min().values
+    atr_regime_aligned = align_htf_to_ltf(prices, df_1d, atr_regime)
+    
+    # === 4h Indicator: Donchian Channel (20-period) ===
+    donchian_window = 20
+    donchian_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    donchian_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -60,7 +70,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(bb_window, 200) + 20  # BB(20) + EMA200(200) + volume(20)
+    warmup = max(donchian_window, 20) + 20  # Donchian(20) + ATR(14+20) + volume(20)
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -72,33 +82,25 @@ def generate_signals(prices):
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # Skip if any required data is NaN
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
-            np.isnan(bb_width_min[i]) or np.isnan(trend_1d_aligned[i]) or
-            np.isnan(vol_sma_20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(atr_regime_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Squeeze condition: BB Width at 20-period low
-        squeeze_condition = bb_width[i] <= bb_width_min[i]
-        
         # === LONG CONDITIONS ===
-        # 1. Price breaks above upper Bollinger Band
-        # 2. Bollinger Band squeeze (low volatility)
-        # 3. Uptrend on 1d (EMA50 > EMA200)
-        # 4. Volume confirmation
-        if (close[i] > upper_band[i]) and \
-           squeeze_condition and \
-           (trend_1d_aligned[i] == 1) and vol_confirm:
+        # 1. Price breaks above 4h Donchian upper (20-period)
+        # 2. Volatility regime: 1d ATR > 20-period SMA of ATR (expanding volatility)
+        # 3. Volume confirmation
+        if (close[i] > donchian_high[i]) and \
+           atr_regime_aligned[i] and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below lower Bollinger Band
-        # 2. Bollinger Band squeeze (low volatility)
-        # 3. Downtrend on 1d (EMA50 < EMA200)
-        # 4. Volume confirmation
-        elif (close[i] < lower_band[i]) and \
-             squeeze_condition and \
-             (trend_1d_aligned[i] == -1) and vol_confirm:
+        # 1. Price breaks below 4h Donchian lower (20-period)
+        # 2. Volatility regime: 1d ATR > 20-period SMA of ATR (expanding volatility)
+        # 3. Volume confirmation
+        elif (close[i] < donchian_low[i]) and \
+             atr_regime_aligned[i] and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -106,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_BB20_2_Squeeze_1dEMA50_200_Trend_Volume_Filter_v1"
-timeframe = "6h"
+name = "4h_Donchian20_1dATR_Regime_Volume_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
