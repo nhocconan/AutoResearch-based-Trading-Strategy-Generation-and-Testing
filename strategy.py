@@ -18,78 +18,72 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1d ATR(14) for volatility regime filter
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
+    tr3 = np.abs(df_1d['low'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate 1d Donchian(20) channels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    donchian_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
-    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
-    
-    # Calculate 6h ADX(14) for trend strength filter
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    # Directional Movement
-    up_move = high - np.concatenate([[high[0]], high[:-1]])
-    down_move = np.concatenate([[low[0]], low[:-1]]) - low
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    # Smoothed values
-    tr_ma = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_dm_ma = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    minus_dm_ma = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    # DI and DX
-    plus_di = 100 * plus_dm_ma / (tr_ma + 1e-10)
-    minus_di = 100 * minus_dm_ma / (tr_ma + 1e-10)
-    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10) * 100
+    # Calculate 1d ADX(14) for trend regime filter
+    plus_dm = np.where((df_1d['high'] - df_1d['high'].shift(1)) > (df_1d['low'].shift(1) - df_1d['low']), 
+                       np.maximum(df_1d['high'] - df_1d['high'].shift(1), 0), 0)
+    minus_dm = np.where((df_1d['low'].shift(1) - df_1d['low']) > (df_1d['high'] - df_1d['high'].shift(1)), 
+                        np.maximum(df_1d['low'].shift(1) - df_1d['low'], 0), 0)
+    tr_sum = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (tr_sum + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (tr_sum + 1e-10)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
     adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate 12h Donchian(20) breakout levels
+    donch_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 12h volume ratio (current vs 20-period average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ratio = volume / (vol_ma_20 + 1e-10)
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(donchian_high_20_aligned[i]) or 
-            np.isnan(donchian_low_20_aligned[i]) or np.isnan(adx[i])):
+        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(donch_high_20[i]) or np.isnan(donch_low_20[i]) or 
+            np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: only trade when price is above/below 1d EMA50
-        price_above_ema = close[i] > ema_50_1d_aligned[i]
-        price_below_ema = close[i] < ema_50_1d_aligned[i]
-        
-        # Trend strength filter: only trade when ADX > 25
-        strong_trend = adx[i] > 25
+        # Regime filter: trade only when daily ATR is elevated AND ADX > 25 (trending market)
+        vol_regime = atr_14_1d_aligned[i] > 0.006 * close[i]
+        trend_regime = adx_aligned[i] > 25
         
         # Long conditions:
-        # 1. Price above 1d EMA50 (bullish bias)
-        # 2. Price breaks above 1d Donchian(20) high
-        # 3. Strong trend (ADX > 25)
-        if (price_above_ema and 
-            close[i] > donchian_high_20_aligned[i] and
-            strong_trend):
+        # 1. Price breaks above 20-period Donchian high with volume
+        # 2. Volume confirmation: volume > 1.8x average
+        # 3. Volatility and trend regime filters
+        if (close[i] > donch_high_20[i] and
+            volume_ratio[i] > 1.8 and
+            vol_regime and
+            trend_regime):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Price below 1d EMA50 (bearish bias)
-        # 2. Price breaks below 1d Donchian(20) low
-        # 3. Strong trend (ADX > 25)
-        elif (price_below_ema and 
-              close[i] < donchian_low_20_aligned[i] and
-              strong_trend):
+        # 1. Price breaks below 20-period Donchian low with volume
+        # 2. Volume confirmation: volume > 1.8x average
+        # 3. Volatility and trend regime filters
+        elif (close[i] < donch_low_20[i] and
+              volume_ratio[i] > 1.8 and
+              vol_regime and
+              trend_regime):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "6h_EMA50_Donchian20_ADX_Filter_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dATR_ADX_Volume_Breakout_v1"
+timeframe = "12h"
 leverage = 1.0
