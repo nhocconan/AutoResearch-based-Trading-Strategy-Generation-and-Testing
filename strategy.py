@@ -3,10 +3,6 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R1/S1 breakout with 1d volume spike and chop regime filter
-# Uses proven pivot structure from daily timeframe, avoids overtrading via tight entry conditions
-# Works in bull/bear by fading extremes at R1/S1 levels with volume confirmation
-
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
@@ -19,68 +15,78 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily ATR(14) for Camarilla levels
+    # Calculate daily ATR(14) for volatility regime filter
     tr1 = df_1d['high'] - df_1d['low']
     tr2 = np.abs(df_1d['high'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
     tr3 = np.abs(df_1d['low'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
     tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate Camarilla levels from previous day
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate daily ATR(50) for long-term volatility regime
+    atr_50_1d = pd.Series(tr_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    atr_50_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_50_1d)
     
-    # Camarilla R1, S1 (using previous day's data)
-    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
-    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
+    # Volatility regime: only trade when short-term ATR is between 0.5x and 2.0x long-term ATR
+    # This avoids both extremely low volatility (chop) and extremely high volatility (panic)
+    vol_ratio = atr_14_1d_aligned / (atr_50_1d_aligned + 1e-10)
+    vol_regime = (vol_ratio >= 0.5) & (vol_ratio <= 2.0)
     
-    # Align to 12h timeframe (previous day's levels available at open)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Calculate 4h Donchian channels (20-period) for breakout signals
+    # Use rolling window on 4h data directly
+    donchian_high = pd.Series(close).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(close).rolling(window=20, min_periods=20).min().values
     
-    # Daily volume spike filter (volume > 1.5x 20-day average)
-    vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_spike = df_1d['volume'].values > (vol_ma_20 * 1.5)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
+    # Calculate 4h ADX(14) for trend strength filter
+    # +DM and -DM
+    up_move = np.diff(high, prepend=high[0])
+    down_move = np.diff(low, prepend=low[0]) * -1  # invert to positive
     
-    # Daily choppiness regime filter (CHOP > 50 = choppy market, good for mean reversion)
-    # Chop = 100 * log10(sum(ATR(14)) / log10(highest-highest-lowest-lowest) / log10(n))
-    atr_14 = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    highest_high = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
-    chop_denom = (highest_high - lowest_low) + 1e-10
-    chop = 100 * np.log10(np.nansum(pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values) / chop_denom) / np.log10(14)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # True Range
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]  # first period
+    
+    # Smoothed values
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # DI values
+    plus_di = 100 * plus_dm_smooth / (atr_14 + 1e-10)
+    minus_di = 100 * minus_dm_smooth / (atr_14 + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     
+    # Trade only when volatility regime is normal and trend is strong enough
     for i in range(100, n):
-        # Skip if any required data is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(vol_spike_aligned[i]) or np.isnan(chop_aligned[i])):
+        if not vol_regime[i] or np.isnan(adx[i]) or adx[i] < 25:
             signals[i] = 0.0
             continue
-        
-        # Volume and regime filters
-        vol_filter = bool(vol_spike_aligned[i])
-        chop_filter = chop_aligned[i] > 50  # Choppy market favors mean reversion
-        
-        # Long at S1 with volume spike in choppy market
-        if (vol_filter and chop_filter and low[i] <= camarilla_s1_aligned[i]):
+            
+        # Long breakout: price breaks above Donchian high with volume confirmation
+        if (close[i] > donchian_high[i-1] and  # break above previous high
+            volume[i] > 1.5 * np.median(volume[max(0, i-20):i])):  # volume spike
             signals[i] = 0.25
             
-        # Short at R1 with volume spike in choppy market
-        elif (vol_filter and chop_filter and high[i] >= camarilla_r1_aligned[i]):
+        # Short breakout: price breaks below Donchian low with volume confirmation
+        elif (close[i] < donchian_low[i-1] and  # break below previous low
+              volume[i] > 1.5 * np.median(volume[max(0, i-20):i])):  # volume spike
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "12h_Camarilla_R1S1_VolumeChop_v1"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_Volume_ADX_v1"
+timeframe = "4h"
 leverage = 1.0
