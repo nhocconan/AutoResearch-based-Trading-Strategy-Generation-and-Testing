@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h trend-following strategy using 1d trend filter (EMA50) with 1h ADX for trend strength
-# and volume confirmation. Only trades in strong trends (ADX > 25) with price above/below 1d EMA50.
-# Uses volume spike (1.5x 20-period average) for entry confirmation. Targets 15-30 trades/year
-# by combining 1d trend filter + 1h ADX + volume spike. Works in both bull and bear markets
-# by following the higher timeframe trend. Uses discrete position sizing (0.20) to minimize churn.
+# Hypothesis: 4h Donchian breakout with 1d EMA trend filter and volume confirmation
+# Works in both bull and bear by using 1d EMA200 to filter direction
+# Long when price breaks above Donchian(20) high and close > 1d EMA200
+# Short when price breaks below Donchian(20) low and close < 1d EMA200
+# Volume confirmation: volume > 1.5x 20-period average
+# Designed for low trade frequency (target 20-40/year) to avoid fee drag
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,71 +20,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data once for trend filter
+    # Load 1d data once for EMA200 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
+    # Calculate 1d EMA200
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # 1h ADX(14) for trend strength
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    plus_dm = np.insert(plus_dm, 0, 0)
-    minus_dm = np.insert(minus_dm, 0, 0)
+    # Calculate Donchian channels (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(low, 1)), np.abs(low - np.roll(high, 1))))
-    tr[0] = high[0] - low[0]
-    
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr + 1e-10)
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr + 1e-10)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # 1h volume moving average for confirmation
+    # Volume confirmation: 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
-    for i in range(100, n):
-        # Skip outside session
-        if not (8 <= hours[i] <= 20):
-            continue
-        
-        # Skip if not enough data
-        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(adx[i]) or np.isnan(volume_ma[i]):
+    for i in range(20, n):
+        # Skip if not enough data for indicators
+        if np.isnan(ema_200_aligned[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i]) or np.isnan(volume_ma[i]):
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         vol_confirm = volume[i] > 1.5 * volume_ma[i]
         
-        # Long conditions: price above 1d EMA50, ADX > 25, volume spike
-        if close[i] > ema_50_1d_aligned[i] and adx[i] > 25 and vol_confirm and position <= 0:
+        # Long conditions: breakout above Donchian high AND above 1d EMA200 AND volume confirmation
+        if close[i] > high_max[i] and close[i] > ema_200_aligned[i] and vol_confirm and position <= 0:
             position = 1
             signals[i] = position_size
-        # Short conditions: price below 1d EMA50, ADX > 25, volume spike
-        elif close[i] < ema_50_1d_aligned[i] and adx[i] > 25 and vol_confirm and position >= 0:
+        # Short conditions: breakout below Donchian low AND below 1d EMA200 AND volume confirmation
+        elif close[i] < low_min[i] and close[i] < ema_200_aligned[i] and vol_confirm and position >= 0:
             position = -1
             signals[i] = -position_size
-        # Exit: ADX falls below 20 (weakening trend) or price crosses back over EMA50
-        elif position == 1 and (adx[i] < 20 or close[i] < ema_50_1d_aligned[i]):
+        # Exit conditions: reverse signal or loss of trend filter
+        elif position == 1 and (close[i] < ema_200_aligned[i] or close[i] < low_min[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (adx[i] < 20 or close[i] > ema_50_1d_aligned[i]):
+        elif position == -1 and (close[i] > ema_200_aligned[i] or close[i] > high_max[i]):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "1h_1d_EMA50_ADX_Volume"
-timeframe = "1h"
+name = "4h_Donchian_1dEMA200_Volume"
+timeframe = "4h"
 leverage = 1.0
