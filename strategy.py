@@ -1,10 +1,3 @@
-# Solution: 1d_Kelly_WeeklyTrend
-# Hypothesis: On daily timeframe, use weekly trend (EMA50) for bias, and enter on pullbacks with Kelly sizing based on weekly volatility.
-# In bull markets, weekly trend up → buy pullbacks; in bear markets, weekly trend down → sell rallies.
-# Kelly sizing reduces exposure in high volatility (bear markets) and increases in low volatility (bull markets), managing drawdowns.
-# Uses only 2 conditions: weekly trend + price position relative to weekly EMA.
-# Expects ~10-20 trades/year, avoiding fee drag.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -12,88 +5,95 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load weekly data once
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 50:
+    # Load daily data once
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 30:
         return np.zeros(n)
     
-    # Weekly close array
-    close_weekly = df_weekly['close'].values
+    # Daily high, low, close
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    close_daily = df_daily['close'].values
     
-    # Weekly EMA(50) for trend
-    ema50_weekly = pd.Series(close_weekly).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Calculate daily Pivot Point and support/resistance levels
+    pivot = (high_daily + low_daily + close_daily) / 3
+    r1 = 2 * pivot - low_daily
+    s1 = 2 * pivot - high_daily
+    r2 = pivot + (high_daily - low_daily)
+    s2 = pivot - (high_daily - low_daily)
+    r3 = high_daily + 2 * (pivot - low_daily)
+    s3 = low_daily - 2 * (high_daily - pivot)
     
-    # Weekly volatility (ATR-like: std dev of returns) for Kelly scaling
-    returns_weekly = np.diff(np.log(close_weekly))
-    vol_weekly = pd.Series(returns_weekly).rolling(window=20, min_periods=20).std().values
-    # Prepend first value to match length
-    vol_weekly = np.concatenate([np.full(20, np.nan), vol_weekly])
+    # Align Pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_daily, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_daily, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_daily, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_daily, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_daily, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_daily, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_daily, s3)
+    
+    # Volume filter: 60-period average volume
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=60, min_periods=60).mean().values
     
     signals = np.zeros(n)
     position = 0
+    position_size = 0.25  # 25% position size
     
-    for i in range(200, n):
-        # Get aligned weekly indicators
-        ema50_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)[i]
-        vol_aligned = align_htf_to_ltf(prices, df_weekly, vol_weekly)[i]
-        
-        # Check for NaN values
-        if np.isnan(ema50_aligned) or np.isnan(vol_aligned):
+    for i in range(100, n):
+        # Skip if volume data not ready
+        if np.isnan(vol_ma[i]):
             continue
         
-        # Weekly trend filter
-        if close[i] > ema50_aligned:
-            # Bullish bias: buy on dip (price below weekly EMA but above prior low)
-            if close[i] < ema50_aligned and low[i] < low[i-1]:  # simple pullback signal
-                # Kelly fraction: assume edge = 0.02, vol = vol_aligned, kelly = edge/vol^2
-                edge = 0.02
-                if vol_aligned > 0:
-                    kelly = edge / (vol_aligned ** 2)
-                    # Cap Kelly at 0.3 and scale by trend strength
-                    trend_strength = min((close[i] - ema50_aligned) / ema50_aligned, 0.1)  # max 10% above
-                    size = 0.3 * (kelly / 0.5) * (1 + trend_strength)  # normalize kelly
-                    size = max(0.05, min(size, 0.3))  # clamp between 5% and 30%
-                    if position <= 0:
-                        position = 1
-                        signals[i] = size
-                else:
-                    if position <= 0:
-                        position = 1
-                        signals[i] = 0.15  # fallback size
-            # Exit: close above weekly EMA with strength
-            elif position == 1 and close[i] > ema50_aligned * 1.02:
+        # Volume confirmation: current volume > 1.5x average
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        
+        # Get current price and aligned pivot levels
+        curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        
+        # Skip if any pivot data is NaN
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i])):
+            continue
+        
+        # Long conditions: price breaks above S1 with volume, targeting pivot/R1
+        if curr_low <= s1_aligned[i] and curr_close > s1_aligned[i] and vol_confirm:
+            if position <= 0:  # Only enter if not already long
+                position = 1
+                signals[i] = position_size
+        
+        # Short conditions: price breaks below R1 with volume, targeting pivot/S1
+        elif curr_high >= r1_aligned[i] and curr_close < r1_aligned[i] and vol_confirm:
+            if position >= 0:  # Only enter if not already short
+                position = -1
+                signals[i] = -position_size
+        
+        # Exit conditions
+        if position == 1:
+            # Exit long if price reaches R1 or drops back below S1
+            if curr_close >= r1_aligned[i] or curr_close < s1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
-        else:
-            # Bearish bias: sell on rally (price above weekly EMA but below prior high)
-            if close[i] > ema50_aligned and high[i] > high[i-1]:  # simple rally signal
-                edge = 0.02
-                if vol_aligned > 0:
-                    kelly = edge / (vol_aligned ** 2)
-                    trend_strength = min((ema50_aligned - close[i]) / ema50_aligned, 0.1)
-                    size = 0.3 * (kelly / 0.5) * (1 + trend_strength)
-                    size = max(0.05, min(size, 0.3))
-                    if position >= 0:
-                        position = -1
-                        signals[i] = -size
-                else:
-                    if position >= 0:
-                        position = -1
-                        signals[i] = -0.15
-            # Exit: close below weekly EMA with strength
-            elif position == -1 and close[i] < ema50_aligned * 0.98:
+        elif position == -1:
+            # Exit short if price reaches S1 or rises back above R1
+            if curr_close <= s1_aligned[i] or curr_close > r1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "1d_Kelly_WeeklyTrend"
-timeframe = "1d"
+name = "6h_Pivot_Breakout_Volume"
+timeframe = "6h"
 leverage = 1.0
