@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Power with 12h EMA50 Trend Filter and Volume Confirmation
-# Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-# Long when Bull Power > 0 and increasing + price > 12h EMA50 + volume > 1.5x median
-# Short when Bear Power < 0 and decreasing + price < 12h EMA50 + volume > 1.5x median
-# Exit when power crosses zero or volume drops
-# Works in bull markets (strong bull power) and bear markets (strong bear power)
-# Target: 50-150 total trades over 4 years = 12-37/year. Well under 300 max.
+# Hypothesis: 12h 1-week Range Breakout with Volume Confirmation and ADX Trend Filter
+# Uses the previous week's high/low as support/resistance levels. Breakouts above previous week's high
+# or below previous week's low are traded only when confirmed by volume and ADX > 25 (trending market).
+# Works in bull markets (breakouts up) and bear markets (breakouts down). Target: 50-150 total trades.
+# Timeframe: 12h, HTF: 1w
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,73 +19,99 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data for EMA50 trend filter
+    # Load 1w data for previous week's high/low
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # Load 12h data for ADX trend filter
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 50:
         return np.zeros(n)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     
-    # Calculate EMA13 on 6h for Elder Ray
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Previous week's high and low (shifted by 1 to avoid look-ahead)
+    prev_high_1w = np.roll(high_1w, 1)
+    prev_low_1w = np.roll(low_1w, 1)
+    prev_high_1w[0] = np.nan  # First value has no previous week
+    prev_low_1w[0] = np.nan
     
-    # Calculate Elder Ray Power
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Align previous week's high/low to 12h timeframe
+    prev_high_1w_aligned = align_htf_to_ltf(prices, df_1w, prev_high_1w)
+    prev_low_1w_aligned = align_htf_to_ltf(prices, df_1w, prev_low_1w)
     
-    # Calculate EMA50 on 12h for trend filter
-    close_12h_s = pd.Series(close_12h)
-    ema50_12h = close_12h_s.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate ADX (14-period) on 12h
+    # True Range
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Align EMA50_12h to 6h timeframe
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Directional Movement
+    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
+                       np.maximum(high_12h - np.roll(close_12h, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(close_12h, 1)), 
+                        np.maximum(np.roll(close_12h, 1) - low_12h, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
+    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25  # Position size (25%)
+    base_size = 0.25  # Position size
     
-    for i in range(13, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema50_12h_aligned[i])):
+        if (np.isnan(prev_high_1w_aligned[i]) or np.isnan(prev_low_1w_aligned[i]) or
+            np.isnan(adx_aligned[i])):
             continue
         
-        # Calculate 20-period median volume for confirmation
-        if i >= 20:
-            vol_median = np.median(volume[i-20:i])
-        else:
-            vol_median = np.median(volume[:i+1]) if i > 0 else volume[i]
-        
-        vol_confirm = volume[i] > 1.5 * vol_median
-        
-        # Long entry: Bull Power positive AND increasing + price > 12h EMA50 + volume confirmation
-        if (bull_power[i] > 0 and 
-            bull_power[i] > bull_power[i-1] and  # Increasing bull power
-            close[i] > ema50_12h_aligned[i] and
-            vol_confirm and
+        # Long entry: price breaks above previous week's high + volume confirmation + ADX > 25
+        if (close[i] > prev_high_1w_aligned[i] and
+            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
+            adx_aligned[i] > 25 and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: Bear Power negative AND decreasing + price < 12h EMA50 + volume confirmation
-        elif (bear_power[i] < 0 and 
-              bear_power[i] < bear_power[i-1] and  # Decreasing bear power (more negative)
-              close[i] < ema50_12h_aligned[i] and
-              vol_confirm and
+        # Short entry: price breaks below previous week's low + volume confirmation + ADX > 25
+        elif (close[i] < prev_low_1w_aligned[i] and
+              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
+              adx_aligned[i] > 25 and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: Power crosses zero or volume drops significantly
-        elif position == 1 and (bull_power[i] <= 0 or volume[i] < 0.5 * vol_median):
+        # Exit: reverse breakout or ADX < 20 (ranging market)
+        elif position == 1 and (close[i] < prev_low_1w_aligned[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (bear_power[i] >= 0 or volume[i] < 0.5 * vol_median):
+        elif position == -1 and (close[i] > prev_high_1w_aligned[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "6h_ElderRay_12hEMA50_Volume"
-timeframe = "6h"
+name = "12h_1w_Range_Breakout_Volume_ADX"
+timeframe = "12h"
 leverage = 1.0
