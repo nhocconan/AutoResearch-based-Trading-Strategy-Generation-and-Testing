@@ -21,9 +21,8 @@ def generate_signals(prices):
     daily_close = df_1d['close'].values
     daily_high = df_1d['high'].values
     daily_low = df_1d['low'].values
-    daily_volume = df_1d['volume'].values
     
-    # Calculate 14-period daily ATR for volatility regime filter
+    # Calculate 14-period daily ATR for volatility regime
     daily_close_prev = np.concatenate([[daily_close[0]], daily_close[:-1]])
     tr = np.maximum(daily_high - daily_low,
                     np.maximum(np.abs(daily_high - daily_close_prev),
@@ -59,70 +58,41 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Add minimum holding period to reduce trade frequency
-    position = 0  # 0 = flat, 1 = long, -1 = short
-    bars_since_entry = 0
-    min_hold_bars = 12  # Minimum 12 bars (3 days for 6h) holding period
-    
     for i in range(100, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_50_6h[i]) or np.isnan(rsi_14_6h[i]) or 
             np.isnan(volatility_ratio_6h[i]) or np.isnan(highest_20[i]) or 
             np.isnan(lowest_20[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
-            position = 0
-            bars_since_entry = 0
             continue
         
-        bars_since_entry += 1
+        # Entry conditions:
+        # 1. Daily trend filter: price above/below daily EMA50
+        # 2. Daily momentum filter: RSI not extreme
+        # 3. Volatility regime: only trade in normal/high volatility (avoid low vol squeezes)
+        # 4. 6h Donchian breakout with volume confirmation
+        # 5. Discrete position sizing: 0.25
         
-        # Exit conditions: reverse signal or min hold period exceeded with opposing signal
-        if position == 1 and bars_since_entry >= min_hold_bars:
-            # Exit long if price breaks below Donchian low or RSI becomes oversold
-            if close[i] < lowest_20[i] or rsi_14_6h[i] < 30:
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
-            else:
-                signals[i] = 0.25  # Maintain long
-        elif position == -1 and bars_since_entry >= min_hold_bars:
-            # Exit short if price breaks above Donchian high or RSI becomes overbought
-            if close[i] > highest_20[i] or rsi_14_6h[i] > 70:
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
-            else:
-                signals[i] = -0.25  # Maintain short
+        # Long conditions
+        if (close[i] > ema_50_6h[i] and  # Uptrend filter
+            rsi_14_6h[i] < 70 and       # Not overbought
+            volatility_ratio_6h[i] > 0.8 and  # Avoid low volatility squeezes
+            close[i] > highest_20[i] and     # Donchian breakout
+            volume_ratio[i] > 1.5):        # Volume confirmation
+            signals[i] = 0.25
+            
+        # Short conditions
+        elif (close[i] < ema_50_6h[i] and   # Downtrend filter
+              rsi_14_6h[i] > 30 and       # Not oversold
+              volatility_ratio_6h[i] > 0.8 and  # Avoid low volatility squeezes
+              close[i] < lowest_20[i] and      # Donchian breakdown
+              volume_ratio[i] > 1.5):        # Volume confirmation
+            signals[i] = -0.25
         else:
-            # Entry logic
-            if position == 0:  # Only enter when flat
-                # Long conditions
-                if (close[i] > ema_50_6h[i] and  # Uptrend filter
-                    rsi_14_6h[i] < 70 and       # Not overbought
-                    volatility_ratio_6h[i] > 0.8 and  # Avoid low volatility squeezes
-                    close[i] > highest_20[i] and     # Donchian breakout
-                    volume_ratio[i] > 1.5):        # Volume confirmation
-                    signals[i] = 0.25
-                    position = 1
-                    bars_since_entry = 0
-                    
-                # Short conditions
-                elif (close[i] < ema_50_6h[i] and   # Downtrend filter
-                      rsi_14_6h[i] > 30 and       # Not oversold
-                      volatility_ratio_6h[i] > 0.8 and  # Avoid low volatility squeezes
-                      close[i] < lowest_20[i] and      # Donchian breakdown
-                      volume_ratio[i] > 1.5):        # Volume confirmation
-                    signals[i] = -0.25
-                    position = -1
-                    bars_since_entry = 0
-                else:
-                    signals[i] = 0.0
-            else:
-                # Maintain current position
-                signals[i] = 0.25 if position == 1 else -0.25
+            signals[i] = 0.0
     
     return signals
 
-name = "6h_DailyEMA_RSI_Volume_Donchian_Breakout_v2"
+name = "6h_DailyEMA_RSI_Volume_Donchian_Breakout"
 timeframe = "6h"
 leverage = 1.0
