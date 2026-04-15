@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,48 +13,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily Donchian channels (20-day high/low) for trend
+    # Daily ATR for volatility filter
     df_1d = get_htf_data(prices, '1d')
-    donch_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    tr_1d = np.maximum(df_1d['high'].values - df_1d['low'].values,
+                       np.maximum(np.abs(df_1d['high'].values - np.concatenate([[df_1d['close'][0]], df_1d['close'][:-1]])),
+                                  np.abs(df_1d['low'].values - np.concatenate([[df_1d['close'][0]], df_1d['close'][:-1]]))))
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # 4h RSI for momentum confirmation
-    rsi_period = 14
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    avg_loss = loss.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    # 4h Bollinger Bands (20, 2)
+    sma_4h = pd.Series(close).rolling(window=20, min_periods=20).mean()
+    std_4h = pd.Series(close).rolling(window=20, min_periods=20).std()
+    upper_4h = sma_4h + 2 * std_4h
+    lower_4h = sma_4h - 2 * std_4h
     
-    # Volume filter: current > 1.5x median of last 20 bars
+    # Volume confirmation: current > 1.8x median of last 20 bars
     vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
-    vol_threshold = 1.5 * vol_median
+    vol_threshold = 1.8 * vol_median
+    
+    # ATR-based volatility filter: require ATR > 0.5 * median ATR
+    atr_median = pd.Series(atr_1d_aligned).rolling(window=50, min_periods=1).median()
+    vol_filter = atr_1d_aligned > 0.5 * atr_median
     
     signals = np.zeros(n)
     
     for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
-            np.isnan(vol_threshold[i]) or np.isnan(rsi[i])):
+        if (np.isnan(upper_4h[i]) or np.isnan(lower_4h[i]) or 
+            np.isnan(vol_threshold[i]) or np.isnan(vol_filter[i])):
             continue
         
-        # Long: price > daily Donchian high + RSI > 50 + volume confirmation
-        if close[i] > donch_high_aligned[i] and rsi[i] > 50 and volume[i] > vol_threshold[i]:
+        # Long: close breaks above upper band + volume + volatility filter
+        if close[i] > upper_4h[i] and volume[i] > vol_threshold[i] and vol_filter[i]:
             signals[i] = 0.25
         
-        # Short: price < daily Donchian low + RSI < 50 + volume confirmation
-        elif close[i] < donch_low_aligned[i] and rsi[i] < 50 and volume[i] > vol_threshold[i]:
+        # Short: close breaks below lower band + volume + volatility filter
+        elif close[i] < lower_4h[i] and volume[i] > vol_threshold[i] and vol_filter[i]:
             signals[i] = -0.25
         
-        # Exit: price crosses back inside daily Donchian channels
+        # Exit: close crosses back inside bands (mean reversion)
         elif (i > 0 and 
-              ((signals[i-1] == 0.25 and close[i] < donch_high_aligned[i]) or
-               (signals[i-1] == -0.25 and close[i] > donch_low_aligned[i]))):
+              ((signals[i-1] == 0.25 and close[i] < upper_4h[i]) or
+               (signals[i-1] == -0.25 and close[i] > lower_4h[i]))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -63,6 +63,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyDonchian_RSI_Volume"
+name = "4h_Bollinger_Breakout_Volume_VolFilter"
 timeframe = "4h"
 leverage = 1.0
