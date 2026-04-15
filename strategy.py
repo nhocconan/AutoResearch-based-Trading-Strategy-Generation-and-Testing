@@ -1,24 +1,12 @@
-# 4H 1-DAY RANGE BREAKOUT WITH VOLUME CONFIRMATION AND ADX TREND FILTER
-
-# HYPOTHESIS:
-#   - Use the previous day's high/low as support/resistance levels.
-#   - Breakouts above previous day's high or below previous day's low are traded only when:
-#       * Confirmed by volume (current volume > 1.5x 20-period median volume)
-#       * Trend filter: ADX(14) > 25 on 12h timeframe (trending market)
-#   - Exit on reverse breakout or when ADX < 20 (ranging market).
-#   - Works in bull markets (breakouts up) and bear markets (breakouts down).
-#   - Target: 50-150 total trades over 4 years.
-
-# REASONING:
-#   - Previous day's high/low are natural support/resistance levels that often hold.
-#   - Breakouts with volume confirmation indicate genuine momentum.
-#   - ADX filter ensures we only trade in trending conditions, avoiding whipsaws in ranges.
-#   - This combines price action (breakouts), volume confirmation, and trend filtering.
-#   - Simple, robust, and historically effective in crypto markets.
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 1d Weekly Bollinger Breakout with Volume Confirmation and ADX Trend Filter
+# Uses the previous week's Bollinger Bands (20, 2) as support/resistance levels. 
+# Breakouts above upper band or below lower band are traded only when confirmed by volume and ADX > 25 (trending market).
+# Works in bull markets (breakouts up) and bear markets (breakouts down). Target: 30-100 total trades.
 
 def generate_signals(prices):
     n = len(prices)
@@ -30,44 +18,43 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for previous day's high/low
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load 1w data for Bollinger Bands
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Load 12h data for ADX trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate Bollinger Bands (20, 2) on weekly
+    sma_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
+    upper_band = sma_20 + 2 * std_20
+    lower_band = sma_20 - 2 * std_20
     
-    # Previous day's high and low (shifted by 1 to avoid look-ahead)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_high_1d[0] = np.nan  # First value has no previous day
-    prev_low_1d[0] = np.nan
+    # Previous week's bands (shifted by 1 to avoid look-ahead)
+    prev_upper = np.roll(upper_band, 1)
+    prev_lower = np.roll(lower_band, 1)
+    prev_upper[0] = np.nan  # First value has no previous week
+    prev_lower[0] = np.nan
     
-    # Align previous day's high/low to 4h timeframe
-    prev_high_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_high_1d)
-    prev_low_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_low_1d)
+    # Align previous week's bands to daily timeframe
+    prev_upper_aligned = align_htf_to_ltf(prices, df_1w, prev_upper)
+    prev_lower_aligned = align_htf_to_ltf(prices, df_1w, prev_lower)
     
-    # Calculate ADX (14-period) on 12h
+    # Load 1d data for ADX trend filter (using daily data itself)
     # True Range
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First value
     
     # Directional Movement
-    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
-                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)), 
-                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
     dm_plus[0] = 0
     dm_minus[0] = 0
     
@@ -84,45 +71,42 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
-    
     signals = np.zeros(n)
     position = 0
     base_size = 0.25  # Position size
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(prev_high_1d_aligned[i]) or np.isnan(prev_low_1d_aligned[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(prev_upper_aligned[i]) or np.isnan(prev_lower_aligned[i]) or
+            np.isnan(adx[i])):
             continue
         
-        # Long entry: price breaks above previous day's high + volume confirmation + ADX > 25
-        if (close[i] > prev_high_1d_aligned[i] and
+        # Long entry: price breaks above previous week's upper band + volume confirmation + ADX > 25
+        if (close[i] > prev_upper_aligned[i] and
             volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-            adx_aligned[i] > 25 and
+            adx[i] > 25 and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below previous day's low + volume confirmation + ADX > 25
-        elif (close[i] < prev_low_1d_aligned[i] and
+        # Short entry: price breaks below previous week's lower band + volume confirmation + ADX > 25
+        elif (close[i] < prev_lower_aligned[i] and
               volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-              adx_aligned[i] > 25 and
+              adx[i] > 25 and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
         # Exit: reverse breakout or ADX < 20 (ranging market)
-        elif position == 1 and (close[i] < prev_low_1d_aligned[i] or adx_aligned[i] < 20):
+        elif position == 1 and (close[i] < prev_lower_aligned[i] or adx[i] < 20):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > prev_high_1d_aligned[i] or adx_aligned[i] < 20):
+        elif position == -1 and (close[i] > prev_upper_aligned[i] or adx[i] < 20):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_1d_Range_Breakout_Volume_ADX"
-timeframe = "4h"
+name = "1d_Weekly_Bollinger_Breakout_Volume_ADX"
+timeframe = "1d"
 leverage = 1.0
