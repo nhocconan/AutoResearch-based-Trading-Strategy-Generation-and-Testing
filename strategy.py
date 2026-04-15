@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,63 +13,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    # Calculate 12h EMA(50) for trend
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Get daily data for weekly pivot levels
+    daily = get_htf_data(prices, '1d')
+    daily_high = daily['high'].values
+    daily_low = daily['low'].values
+    daily_close = daily['close'].values
     
-    # Get daily data for pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly pivot levels from daily data (5-day week)
+    weekly_high = pd.Series(daily_high).rolling(window=5, min_periods=5).max().values
+    weekly_low = pd.Series(daily_low).rolling(window=5, min_periods=5).min().values
+    weekly_close = pd.Series(daily_close).rolling(window=5, min_periods=5).last().values
     
-    # Calculate daily pivot points
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
     
-    # Align pivot levels to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align weekly pivot levels to daily timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, daily, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, daily, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, daily, weekly_s1)
     
-    # Volume filter: current 4h volume > 1.8x 20-period average volume
+    # Volume filter: current daily volume > 1.5x 20-period average volume
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.8 * vol_ma)
+    volume_filter = volume > (1.5 * vol_ma)
     
-    # Trend filter: price above/below 12h EMA50
-    trend_filter_long = close > ema_12h_aligned
-    trend_filter_short = close < ema_12h_aligned
+    # Range filter: avoid trading when price is within 0.3% of weekly pivot
+    price_to_pivot = np.abs(close - weekly_pivot_aligned) / weekly_pivot_aligned
+    range_filter = price_to_pivot > 0.003
     
     signals = np.zeros(n)
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(ema_12h_aligned[i])):
+        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or 
+            np.isnan(weekly_s1_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade when volume filter passes
-        if volume_filter[i]:
-            # Long conditions: price breaks above R1 with uptrend
-            if close[i] > r1_aligned[i] and trend_filter_long[i]:
+        # Only trade when all filters pass
+        if volume_filter[i] and range_filter[i]:
+            # Long conditions: price breaks above weekly R1 with volume
+            if close[i] > weekly_r1_aligned[i]:
                 signals[i] = 0.25
-            # Short conditions: price breaks below S1 with downtrend
-            elif close[i] < s1_aligned[i] and trend_filter_short[i]:
+            # Short conditions: price breaks below weekly S1 with volume
+            elif close[i] < weekly_s1_aligned[i]:
                 signals[i] = -0.25
             else:
-                signals[i] = 0.0  # Flat when conditions not met
+                signals[i] = signals[i-1]
         else:
-            signals[i] = 0.0  # Flat when volume filter fails
+            signals[i] = signals[i-1]
     
     return signals
 
-name = "4h_DailyPivot_R1_S1_Breakout_TrendFilter_Volume"
-timeframe = "4h"
+name = "1d_WeeklyPivot_R1_S1_Breakout_Volume_RangeFilter"
+timeframe = "1d"
 leverage = 1.0
