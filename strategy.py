@@ -3,9 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 6h timeframe with weekly pivot-based trend filter + volume spike
+# Uses weekly high/low to establish trend context and avoid counter-trend trades
+# Volume spike confirms institutional participation in breakouts
+# Designed for low trade frequency (12-37/year) to minimize fee drag
+# Works in bull/bear by aligning with higher timeframe momentum
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,79 +19,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for 1d HTF context
-    daily = get_htf_data(prices, '1d')
+    # Get weekly data for trend context (called ONCE before loop)
+    weekly = get_htf_data(prices, '1w')
     
-    # Calculate daily ATR for volatility filter
-    tr1 = daily['high'].values[1:] - daily['low'].values[1:]
-    tr2 = np.abs(daily['high'].values[1:] - daily['close'].values[:-1])
-    tr3 = np.abs(daily['low'].values[1:] - daily['close'].values[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14d_aligned = align_htf_to_ltf(prices, daily, atr_14d)
+    # Calculate weekly high and low for trend determination
+    weekly_high = weekly['high'].values
+    weekly_low = weekly['low'].values
     
-    # Volatility filter: ATR > 0.8% of price to avoid low volatility chop
-    vol_filter = atr_14d_aligned > (0.008 * close)
+    # Align weekly high/low to 6s timeframe (waits for weekly bar close)
+    weekly_high_aligned = align_htf_to_ltf(prices, weekly, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, weekly, weekly_low)
     
-    # Calculate daily EMA21 for trend direction
-    daily_ema_21 = pd.Series(daily['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
-    daily_ema_21_aligned = align_htf_to_ltf(prices, daily, daily_ema_21)
+    # Weekly average volume for spike detection
+    weekly_vol = weekly['volume'].values
+    vol_ma_4w = pd.Series(weekly_vol).rolling(window=4, min_periods=4).mean().values
+    vol_ma_4w_aligned = align_htf_to_ltf(prices, weekly, vol_ma_4w)
     
-    # Calculate daily EMA50 for additional trend confirmation
-    daily_ema_50 = pd.Series(daily['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    daily_ema_50_aligned = align_htf_to_ltf(prices, daily, daily_ema_50)
-    
-    # Calculate daily volume average for volume spike detection
-    vol_ma_10d = pd.Series(daily['volume'].values).rolling(window=10, min_periods=10).mean().values
-    vol_ma_10d_aligned = align_htf_to_ltf(prices, daily, vol_ma_10d)
-    
-    # Volume filter: current volume > 1.5x 10-day average volume
-    vol_threshold = 1.5 * vol_ma_10d_aligned
-    vol_spike = volume > vol_threshold
-    
-    # Calculate 12h Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Volume spike threshold
+    vol_threshold = 1.5 * vol_ma_4w_aligned
     
     signals = np.zeros(n)
     
-    for i in range(100, n):
-        # Skip if any required data is NaN
-        if (np.isnan(atr_14d_aligned[i]) or np.isnan(daily_ema_21_aligned[i]) or 
-            np.isnan(daily_ema_50_aligned[i]) or np.isnan(vol_ma_10d_aligned[i]) or
-            np.isnan(high_20[i]) or np.isnan(low_20[i])):
-            continue
-        
-        # Only trade when volatility is sufficient (avoid chop)
-        if not vol_filter[i]:
+    for i in range(50, n):
+        # Skip if weekly data not yet available
+        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
+            np.isnan(vol_ma_4w_aligned[i])):
             signals[i] = 0.0
             continue
-            
-        # Long: Price above both EMA21 and EMA50 + volume spike + break above Donchian high
-        if (close[i] > daily_ema_21_aligned[i] and 
-            close[i] > daily_ema_50_aligned[i] and 
-            vol_spike[i] and 
-            close[i] > high_20[i]):
-            signals[i] = 0.30
         
-        # Short: Price below both EMA21 and EMA50 + volume spike + break below Donchian low
-        elif (close[i] < daily_ema_21_aligned[i] and 
-              close[i] < daily_ema_50_aligned[i] and 
-              vol_spike[i] and 
-              close[i] < low_20[i]):
-            signals[i] = -0.30
+        # Long: Price breaks above weekly high with volume spike
+        if (close[i] > weekly_high_aligned[i] and 
+            volume[i] > vol_threshold[i]):
+            signals[i] = 0.25
         
-        # Exit: reverse signal on opposite direction
-        elif (close[i] < daily_ema_21_aligned[i] and signals[i-1] > 0) or \
-             (close[i] > daily_ema_21_aligned[i] and signals[i-1] < 0):
-            signals[i] = 0.0
+        # Short: Price breaks below weekly low with volume spike
+        elif (close[i] < weekly_low_aligned[i] and 
+              volume[i] > vol_threshold[i]):
+            signals[i] = -0.25
         
-        # Otherwise, hold previous position
+        # Exit: price returns to weekly midpoint (mean reversion within weekly range)
+        elif (weekly_high_aligned[i] > weekly_low_aligned[i]):  # avoid division by zero
+            weekly_mid = (weekly_high_aligned[i] + weekly_low_aligned[i]) / 2
+            if ((signals[i-1] > 0 and close[i] < weekly_mid) or
+                (signals[i-1] < 0 and close[i] > weekly_mid)):
+                signals[i] = 0.0
+            else:
+                signals[i] = signals[i-1]
         else:
             signals[i] = signals[i-1]
     
     return signals
 
-name = "12h_DailyEMA21_50_Volume_Spike_Donchian_Breakout"
-timeframe = "12h"
+name = "6h_WeeklyHighLow_Breakout_Volume"
+timeframe = "6h"
 leverage = 1.0
