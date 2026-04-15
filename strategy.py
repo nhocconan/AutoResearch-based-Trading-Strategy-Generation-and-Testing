@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R1/S1 breakout with 1d volume spike and choppiness regime filter
-# Long when price breaks above 1d Camarilla R1 + 12h volume > 2x 20-period avg + 12h chop < 61.8 (trending)
-# Short when price breaks below 1d Camarilla S1 + 12h volume > 2x 20-period avg + 12h chop < 61.8
-# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (15-30/year).
-# Camarilla levels provide intraday support/resistance. Volume spike confirms breakout strength.
-# Chop filter ensures we trade only in trending markets, avoiding whipsaws in ranging conditions.
-# Works in bull markets (buying strength) and bear markets (selling weakness) by requiring trending regime.
+# Hypothesis: 4h KAMA trend following with 1d RSI filter and volume confirmation
+# Long when KAMA(ER=10) is rising + RSI(14) from 1d < 40 (oversold bounce) + volume > 1.5x 20-period avg
+# Short when KAMA(ER=10) is falling + RSI(14) from 1d > 60 (overbought pullback) + volume > 1.5x 20-period avg
+# KAMA adapts to market noise, reducing whipsaw in choppy markets. RSI filter avoids buying strength/selling weakness.
+# Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend) via adaptive trend.
+# Designed for low trade frequency (20-40/year) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -30,70 +29,65 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d Indicator: Camarilla Pivot Levels (R1, S1) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 1d Indicator: RSI(14) ===
+    rsi_period = 14
+    delta = np.diff(df_1d['close'].values)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate pivot point
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[rsi_period] = np.mean(gain[:rsi_period])
+    avg_loss[rsi_period] = np.mean(loss[:rsi_period])
     
-    # Camarilla levels
-    r1 = pivot + (range_1d * 1.1 / 12)
-    s1 = pivot - (range_1d * 1.1 / 12)
+    for i in range(rsi_period + 1, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
+        avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
     
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.concatenate([[np.nan], rsi])  # align length with df_1d
     
-    # === 12h Indicator: Choppiness Index (regime filter) ===
-    chop_window = 14
-    atr_chop = np.zeros_like(close)
-    tr = np.zeros_like(close)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
-    # True Range
-    high_shift = np.roll(high, 1)
-    low_shift = np.roll(low, 1)
-    close_shift = np.roll(close, 1)
-    high_shift[0] = high[0]
-    low_shift[0] = low[0]
-    close_shift[0] = close[0]
+    # === 4h Indicator: KAMA (ER=10, fast=2, slow=30) ===
+    er_period = 10
+    fast_sc = 2
+    slow_sc = 30
     
-    tr1 = high - low
-    tr2 = np.abs(high - close_shift)
-    tr3 = np.abs(low - close_shift)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    change = np.abs(np.diff(close, n=er_period))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0) if hasattr(np.sum, 'axis') else np.sum(np.abs(np.diff(close)))
+    # Correct volatility calculation: sum of absolute changes over er_period window
+    volatility = np.zeros_like(close)
+    for i in range(er_period, len(close)):
+        volatility[i] = np.sum(np.abs(np.diff(close[i-er_period:i])))
     
-    # ATR calculation
-    atr_chop[chop_window-1] = np.mean(tr[:chop_window])
-    for i in range(chop_window, len(tr)):
-        atr_chop[i] = (atr_chop[i-1] * (chop_window-1) + tr[i]) / chop_window
+    # Avoid division by zero
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (fast_sc/slow_sc - 1) + 1) ** 2
     
-    # Choppiness Index
-    sum_tr = np.zeros_like(close)
-    sum_tr[chop_window-1] = np.sum(tr[:chop_window])
-    for i in range(chop_window, len(tr)):
-        sum_tr[i] = sum_tr[i-1] + tr[i]
+    kama = np.zeros_like(close)
+    kama[er_period] = close[er_period]  # seed
+    for i in range(er_period + 1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    highest_high = pd.Series(high).rolling(window=chop_window, min_periods=chop_window).max().values
-    lowest_low = pd.Series(low).rolling(window=chop_window, min_periods=chop_window).min().values
-    
-    chop = np.zeros_like(close)
-    for i in range(chop_window-1, len(close)):
-        if highest_high[i] != lowest_low[i]:
-            chop[i] = 100 * np.log10(sum_tr[i] / (highest_high[i] - lowest_low[i])) / np.log10(chop_window)
+    # KAMA direction: 1 if rising, -1 if falling, 0 if flat (using 3-period slope)
+    kama_dir = np.zeros_like(kama)
+    for i in range(3, len(kama)):
+        if kama[i] > kama[i-3]:
+            kama_dir[i] = 1
+        elif kama[i] < kama[i-3]:
+            kama_dir[i] = -1
         else:
-            chop[i] = 50.0  # neutral when no range
+            kama_dir[i] = 0
     
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)  # Using 1d HTF for chop calculation
-    
-    # === 12h Indicator: Volume Spike Confirmation ===
+    # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(chop_window, 20) + 5
+    warmup = max(er_period + 3, 20) + 5  # KAMA seed + direction + volume + RSI
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -101,30 +95,29 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
-        
-        # Regime filter: chop < 61.8 (trending market)
-        trending_regime = chop_aligned[i] < 61.8
+        # Volume filter: current volume > 1.5x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(vol_sma_20[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(kama_dir[i]) or np.isnan(rsi_aligned[i]) or
+            np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 1d Camarilla R1
-        # 2. Volume confirmation
-        # 3. Trending regime (chop < 61.8)
-        if (close[i] > r1_aligned[i]) and vol_confirm and trending_regime:
+        # 1. KAMA is rising (trend up)
+        # 2. 1d RSI < 40 (oversold bounce opportunity)
+        # 3. Volume confirmation
+        if (kama_dir[i] == 1) and \
+           (rsi_aligned[i] < 40) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 1d Camarilla S1
-        # 2. Volume confirmation
-        # 3. Trending regime (chop < 61.8)
-        elif (close[i] < s1_aligned[i]) and vol_confirm and trending_regime:
+        # 1. KAMA is falling (trend down)
+        # 2. 1d RSI > 60 (overbought pullback opportunity)
+        # 3. Volume confirmation
+        elif (kama_dir[i] == -1) and \
+             (rsi_aligned[i] > 60) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -132,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_1dVolumeSpike_ChopFilter_v1"
-timeframe = "12h"
+name = "4h_KAMA10_1dRSI40_60_Volume_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
