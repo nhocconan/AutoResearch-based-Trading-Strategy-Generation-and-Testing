@@ -1,15 +1,14 @@
-# 6h Volume-Weighted Gap Reversal
-# Hypothesis: On 6B timeframe, significant volume spikes (>2x median volume) combined with
-# price gaps (>0.5% from prior close) often reverse in mean-reverting fashion.
-# Long when: gap down >0.5% + volume spike >2x median + price near 6h low
-# Short when: gap up >0.5% + volume spike >2x median + price near 6h high
-# Works in both bull/bear markets as volatility spikes create reversals regardless of trend.
-# Target: 20-40 trades/year (80-160 total) with low turnover to minimize fee drag.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 4h Williams %R mean-reversion with 1d volume filter
+# Williams %R identifies overbought/oversold conditions (below -80 = oversold, above -20 = overbought)
+# Mean reversion works well in ranging markets; trend filter avoids whipsaws
+# Uses 1d average volume to confirm institutional participation
+# Designed for low trade frequency (target 20-30/year) with clear entry/exit rules
+# Works in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,49 +20,67 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike detection: current volume > 2x 50-period median
-    vol_median = pd.Series(volume).rolling(window=50, min_periods=20).median().values
-    vol_spike = volume > (2.0 * vol_median)
+    # Load 1d data once
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # Gap detection: abs((open - prev_close) / prev_close) > 0.005 (0.5%)
-    prev_close = np.roll(close, 1)
-    prev_close[0] = close[0]  # avoid NaN on first bar
-    gap_pct = (prices['open'].values - prev_close) / prev_close
-    gap_up = gap_pct > 0.005
-    gap_down = gap_pct < -0.005
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Price position within 6h range: near high/low for fade signals
-    hl_range = high - low
-    near_high = (high - close) < (0.1 * hl_range)  # within 10% of high
-    near_low = (close - low) < (0.1 * hl_range)    # within 10% of low
+    # Williams %R(14) on 1d
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    wr = -100 * (highest_high - close_1d) / (highest_high - lowest_low + 1e-10)
+    
+    # 1d average volume (20-period) for confirmation
+    avg_volume = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align indicators to 4h timeframe
+    wr_aligned = align_htf_to_ltf(prices, df_1d, wr)
+    avg_volume_aligned = align_htf_to_ltf(prices, df_1d, avg_volume)
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position
+    position_size = 0.25  # 25% position size
     
-    for i in range(50, n):
-        # Skip if volume median not ready
-        if np.isnan(vol_median[i]):
+    for i in range(30, n):
+        # Skip if any required data is NaN
+        if (np.isnan(wr_aligned[i]) or np.isnan(avg_volume_aligned[i]) or 
+            np.isnan(volume[i])):
             continue
-            
-        # Long setup: gap down + volume spike + near low
-        if gap_down[i] and vol_spike[i] and near_low[i] and position <= 0:
-            position = 1
-            signals[i] = position_size
-        # Short setup: gap up + volume spike + near high
-        elif gap_up[i] and vol_spike[i] and near_high[i] and position >= 0:
-            position = -1
-            signals[i] = -position_size
-        # Exit: reverse signal or loss of momentum
-        elif position == 1 and (gap_up[i] or not vol_spike[i]):
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and (gap_down[i] or not vol_spike[i]):
-            position = 0
-            signals[i] = 0.0
+        
+        # Volume confirmation: current 4h volume > 1.5x 1d average volume
+        vol_confirmed = volume[i] > 1.5 * avg_volume_aligned[i]
+        
+        # Mean reversion signals from Williams %R
+        oversold = wr_aligned[i] < -80
+        overbought = wr_aligned[i] > -20
+        
+        # Exit when WR returns to neutral zone (-50 to -50)
+        neutral_exit = (-50 <= wr_aligned[i] <= -50)
+        
+        if vol_confirmed:
+            # Long when oversold and exiting oversold
+            if oversold and wr_aligned[i] > wr_aligned[i-1] and position <= 0:
+                position = 1
+                signals[i] = position_size
+            # Short when overbought and exiting overbought
+            elif overbought and wr_aligned[i] < wr_aligned[i-1] and position >= 0:
+                position = -1
+                signals[i] = -position_size
+            # Exit when WR returns to neutral
+            elif position == 1 and wr_aligned[i] >= -50:
+                position = 0
+                signals[i] = 0.0
+            elif position == -1 and wr_aligned[i] <= -50:
+                position = 0
+                signals[i] = 0.0
     
     return signals
 
-name = "6h_VolumeGap_Reversal"
-timeframe = "6h"
+name = "4h_1d_WilliamsR_Volume_MeanReversion"
+timeframe = "4h"
 leverage = 1.0
