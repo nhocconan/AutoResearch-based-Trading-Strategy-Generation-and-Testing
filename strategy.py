@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ADX > 25 and volume > 2.0x 20-period average
-# Long when price breaks above 4h Donchian upper + 1d ADX > 25 + volume confirmation
-# Short when price breaks below 4h Donchian lower + 1d ADX > 25 + volume confirmation
-# Uses discrete position sizing (0.25) to minimize fee churn. Target: 20-40 trades/year.
-# Donchian provides objective breakout levels. 1d ADX ensures we only trade strong daily trends.
-# Volume filter (2.0x average) ensures breakouts have conviction. Works in bull/bear via ADX filter.
+# Hypothesis: 12h Camarilla R1/S1 breakout with 1d volume spike and ADX regime filter
+# Long when price breaks above 1d Camarilla R1 + 1d ADX > 20 + volume > 2x 24-period avg
+# Short when price breaks below 1d Camarilla S1 + 1d ADX > 20 + volume > 2x 24-period avg
+# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (12-25/year).
+# Camarilla levels provide precise intraday support/resistance. ADX filter ensures trending markets only.
+# Volume spike confirms institutional participation. Works in bull/bear by requiring ADX > 20.
 
 def generate_signals(prices):
     n = len(prices)
@@ -90,18 +90,33 @@ def generate_signals(prices):
     
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # === 4h Indicator: Donchian Channel (20-period) ===
-    donchian_window = 20
-    donchian_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    donchian_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    # === 1d Indicator: Camarilla Pivot Levels (R1, S1) ===
+    # Based on previous day's OHLC
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
     
-    # Volume SMA for confirmation (using 20-period)
-    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    
+    # Camarilla levels: R1 = Close + (Range * 1.1/12), S1 = Close - (Range * 1.1/12)
+    r1 = prev_close + (range_hl * 1.1 / 12)
+    s1 = prev_close - (range_hl * 1.1 / 12)
+    
+    # Align Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Volume SMA for confirmation (using 24-period for 12h timeframe)
+    vol_sma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(donchian_window, 2*period) + 20  # Donchian(20) + ADX(28) + volume(20)
+    warmup = max(2*period, 24) + 1  # ADX(28) + volume(24) + 1 for Camarilla shift
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -109,29 +124,29 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2.0x 20-period volume SMA (stricter)
-        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
+        # Volume filter: current volume > 2x 24-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_24[i] * 2.0)
         
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_sma_24[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 4h Donchian upper (20-period)
-        # 2. Trend (1d ADX > 25)
-        # 3. Volume confirmation (strict)
-        if (close[i] > donchian_high[i]) and \
-           (adx_aligned[i] > 25) and vol_confirm:
+        # 1. Price breaks above 1d Camarilla R1
+        # 2. Trend (1d ADX > 20)
+        # 3. Volume confirmation
+        if (close[i] > r1_aligned[i]) and \
+           (adx_aligned[i] > 20) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 4h Donchian lower (20-period)
-        # 2. Trend (1d ADX > 25)
-        # 3. Volume confirmation (strict)
-        elif (close[i] < donchian_low[i]) and \
-             (adx_aligned[i] > 25) and vol_confirm:
+        # 1. Price breaks below 1d Camarilla S1
+        # 2. Trend (1d ADX > 20)
+        # 3. Volume confirmation
+        elif (close[i] < s1_aligned[i]) and \
+             (adx_aligned[i] > 20) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -139,6 +154,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dADX25_Volume2x_Filter_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_1dADX20_Volume_Spike_v1"
+timeframe = "12h"
 leverage = 1.0
