@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian Breakout with Volume Spike and ADX Trend Filter
-# Uses the 12-period Donchian channel (highest high/lowest low over last 12 periods) on 12h timeframe.
-# Breakouts above the upper band or below the lower band are traded when confirmed by volume spike
-# (volume > 1.5x 20-period median volume) and ADX > 25 (trending market).
-# Works in both bull and bear markets: breakouts up in bull markets, breakouts down in bear markets.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
-# Timeframe: 12h
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ADX trend filter.
+# Uses the 4h chart for entry/exit, with 1d high/low as the Donchian channel basis.
+# Breakouts above previous day's high or below previous day's low are traded only when
+# confirmed by volume > 1.5x 20-period median volume and ADX(14) > 25 (trending market).
+# Works in bull markets (breakouts up) and bear markets (breakouts down).
+# Target: 50-150 total trades over 4 years (12-38/year).
+# Timeframe: 4h, HTF: 1d
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,35 +21,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data for Donchian channel and ADX
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Load 1d data for previous day's high/low (Donchian channel)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 12-period Donchian channel on 12h
-    highest_high = pd.Series(high_12h).rolling(window=12, min_periods=12).max().values
-    lowest_low = pd.Series(low_12h).rolling(window=12, min_periods=12).min().values
+    # Previous day's high and low (shifted by 1 to avoid look-ahead)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_high_1d[0] = np.nan  # First value has no previous day
+    prev_low_1d[0] = np.nan
     
-    # Align Donchian levels to 12h timeframe (same timeframe, so direct assignment)
-    upper_band = highest_high
-    lower_band = lowest_low
+    # Align previous day's high/low to 4h timeframe
+    prev_high_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_high_1d)
+    prev_low_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_low_1d)
     
-    # Calculate ADX (14-period) on 12h
+    # Load 4h data for ADX trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # Calculate ADX (14-period) on 4h
     # True Range
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First value
     
     # Directional Movement
-    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
-                       np.maximum(high_12h - np.roll(close_12h, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(close_12h, 1)), 
-                        np.maximum(np.roll(close_12h, 1) - low_12h, 0), 0)
+    dm_plus = np.where((high_4h - np.roll(high_4h, 1)) > (np.roll(low_4h, 1) - low_4h), 
+                       np.maximum(high_4h - np.roll(close_4h, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_4h, 1) - low_4h) > (high_4h - np.roll(close_4h, 1)), 
+                        np.maximum(np.roll(close_4h, 1) - low_4h, 0), 0)
     dm_plus[0] = 0
     dm_minus[0] = 0
     
@@ -66,45 +75,42 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Align ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
-    
     signals = np.zeros(n)
     position = 0
     base_size = 0.25  # Position size
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(prev_high_1d_aligned[i]) or np.isnan(prev_low_1d_aligned[i]) or
+            np.isnan(adx[i])):
             continue
         
-        # Long entry: price breaks above upper Donchian band + volume spike + ADX > 25
-        if (close[i] > upper_band[i] and
+        # Long entry: price breaks above previous day's high + volume confirmation + ADX > 25
+        if (close[i] > prev_high_1d_aligned[i] and
             volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-            adx_aligned[i] > 25 and
+            adx[i] > 25 and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below lower Donchian band + volume spike + ADX > 25
-        elif (close[i] < lower_band[i] and
+        # Short entry: price breaks below previous day's low + volume confirmation + ADX > 25
+        elif (close[i] < prev_low_1d_aligned[i] and
               volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-              adx_aligned[i] > 25 and
+              adx[i] > 25 and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
         # Exit: reverse breakout or ADX < 20 (ranging market)
-        elif position == 1 and (close[i] < lower_band[i] or adx_aligned[i] < 20):
+        elif position == 1 and (close[i] < prev_low_1d_aligned[i] or adx[i] < 20):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > upper_band[i] or adx_aligned[i] < 20):
+        elif position == -1 and (close[i] > prev_high_1d_aligned[i] or adx[i] < 20):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "12h_Donchian_Breakout_Volume_ADX"
-timeframe = "12h"
+name = "4h_Donchian20_Volume_ADX_Filter"
+timeframe = "4h"
 leverage = 1.0
