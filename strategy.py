@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily ATR for volatility filter
+    # 1d ATR for volatility filter
     df_1d = get_htf_data(prices, '1d')
     tr_1d = np.maximum(df_1d['high'].values - df_1d['low'].values,
                        np.maximum(np.abs(df_1d['high'].values - np.concatenate([[df_1d['close'][0]], df_1d['close'][:-1]])),
