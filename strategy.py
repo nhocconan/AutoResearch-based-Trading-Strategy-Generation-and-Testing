@@ -26,14 +26,14 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate 12h ATR(14) for volatility entry filter
-    tr1_12h = high - low
-    tr2_12h = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3_12h = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
-    atr_14_12h = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate 6h ATR(14) for volatility entry filter
+    tr1_6h = high - low
+    tr2_6h = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    tr3_6h = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr_6h = np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))
+    atr_14_6h = pd.Series(tr_6h).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 12h volume ratio (current vs 20-period average)
+    # Calculate 6h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
@@ -41,7 +41,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(atr_14_12h[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(atr_14_6h[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -51,25 +51,29 @@ def generate_signals(prices):
         # Long conditions:
         # 1. Daily volatility regime filter (avoid chop)
         # 2. Volume confirmation: volume > 1.5x average
-        # 3. 12h ATR > 0.5% of price (ensure sufficient volatility for move)
+        # 3. 6h ATR > 0.5% of price (ensure sufficient volatility for move)
+        # 4. Close > prior 6h high (breakout)
         if (vol_regime and
             volume_ratio[i] > 1.5 and
-            atr_14_12h[i] > 0.005 * close[i]):
+            atr_14_6h[i] > 0.005 * close[i] and
+            close[i] > np.max(high[max(0, i-6):i])):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Daily volatility regime filter (avoid chop)
+        # 1. Daily volatility regime filter
         # 2. Volume confirmation: volume > 1.5x average
-        # 3. 12h ATR > 0.5% of price
+        # 3. 6h ATR > 0.5% of price
+        # 4. Close < prior 6h low (breakdown)
         elif (vol_regime and
               volume_ratio[i] > 1.5 and
-              atr_14_12h[i] > 0.005 * close[i]):
+              atr_14_6h[i] > 0.005 * close[i] and
+              close[i] < np.min(low[max(0, i-6):i])):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "12h_Vol_Regime_ATR_Volume_Breakout_v1"
-timeframe = "12h"
+name = "6h_Vol_Regime_Breakout_v1"
+timeframe = "6h"
 leverage = 1.0
