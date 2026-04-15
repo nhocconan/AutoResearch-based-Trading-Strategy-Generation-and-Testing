@@ -1,11 +1,3 @@
-# 12h_1D_Range_Breakout_With_Volume_Confirmation
-# Hypothesis: Breakouts from daily trading ranges with volume confirmation capture directional moves in both bull and bear markets.
-# Uses daily high/low as key support/resistance levels. Volume spike confirms institutional participation.
-# Works in bull markets (breakouts to new highs) and bear markets (breakdowns to new lows).
-# Timeframe: 12h balances trade frequency and signal quality, avoiding excessive churn.
-# Volume filter prevents false breakouts in low-liquidity periods.
-# Expect 15-30 trades/year per symbol, balancing opportunity with cost efficiency.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -21,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for key levels and volume context
+    # Get daily data for key levels
     daily = get_htf_data(prices, '1d')
     
     # Calculate daily range (high-low) and its 20-period average for volatility filter
