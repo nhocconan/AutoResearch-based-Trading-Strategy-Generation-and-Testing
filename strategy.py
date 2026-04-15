@@ -1,3 +1,11 @@
+# 12h_1D_Range_Breakout_With_Volume_Confirmation
+# Hypothesis: Breakouts from daily trading ranges with volume confirmation capture directional moves in both bull and bear markets.
+# Uses daily high/low as key support/resistance levels. Volume spike confirms institutional participation.
+# Works in bull markets (breakouts to new highs) and bear markets (breakdowns to new lows).
+# Timeframe: 12h balances trade frequency and signal quality, avoiding excessive churn.
+# Volume filter prevents false breakouts in low-liquidity periods.
+# Expect 15-30 trades/year per symbol, balancing opportunity with cost efficiency.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,64 +21,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for 1w HTF context
-    weekly = get_htf_data(prices, '1w')
+    # Get daily data for key levels and volume context
+    daily = get_htf_data(prices, '1d')
     
-    # Calculate weekly ATR for volatility filter
-    tr1 = weekly['high'].values[1:] - weekly['low'].values[1:]
-    tr2 = np.abs(weekly['high'].values[1:] - weekly['close'].values[:-1])
-    tr3 = np.abs(weekly['low'].values[1:] - weekly['close'].values[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14w = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14w_aligned = align_htf_to_ltf(prices, weekly, atr_14w)
+    # Calculate daily range (high-low) and its 20-period average for volatility filter
+    daily_range = daily['high'].values - daily['low'].values
+    avg_daily_range = pd.Series(daily_range).rolling(window=20, min_periods=20).mean().values
+    avg_daily_range_aligned = align_htf_to_ltf(prices, daily, avg_daily_range)
     
-    # Volatility filter: ATR > 0.5% of price to avoid low volatility chop
-    vol_filter = atr_14w_aligned > (0.005 * close)
-    
-    # Calculate weekly EMA10 for trend direction
-    weekly_ema_10 = pd.Series(weekly['close'].values).ewm(span=10, adjust=False, min_periods=10).mean().values
-    weekly_ema_10_aligned = align_htf_to_ltf(prices, weekly, weekly_ema_10)
-    
-    # Calculate weekly EMA30 for additional trend confirmation
-    weekly_ema_30 = pd.Series(weekly['close'].values).ewm(span=30, adjust=False, min_periods=30).mean().values
-    weekly_ema_30_aligned = align_htf_to_ltf(prices, weekly, weekly_ema_30)
-    
-    # Calculate weekly volume average for volume spike detection
-    vol_ma_4w = pd.Series(weekly['volume'].values).rolling(window=4, min_periods=4).mean().values
-    vol_ma_4w_aligned = align_htf_to_ltf(prices, weekly, vol_ma_4w)
-    
-    # Volume filter: current volume > 1.3x 4-week average volume
-    vol_threshold = 1.3 * vol_ma_4w_aligned
-    vol_spike = volume > vol_threshold
+    # Volume spike detection: current volume > 1.5x 20-day average volume
+    vol_ma_20d = pd.Series(daily['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20d_aligned = align_htf_to_ltf(prices, daily, vol_ma_20d)
+    volume_threshold = 1.5 * vol_ma_20d_aligned
+    volume_spike = volume > volume_threshold
     
     signals = np.zeros(n)
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14w_aligned[i]) or np.isnan(weekly_ema_10_aligned[i]) or 
-            np.isnan(weekly_ema_30_aligned[i]) or np.isnan(vol_ma_4w_aligned[i])):
+        if np.isnan(avg_daily_range_aligned[i]) or np.isnan(vol_ma_20d_aligned[i]):
+            signals[i] = 0.0
             continue
         
-        # Only trade when volatility is sufficient (avoid chop)
-        if not vol_filter[i]:
+        # Get today's daily high and low (aligned to current 12h bar)
+        daily_high = align_htf_to_ltf(prices, daily, daily['high'].values)[i]
+        daily_low = align_htf_to_ltf(prices, daily, daily['low'].values)[i]
+        
+        # Only trade when volatility is sufficient (avoid low volatility chop)
+        if avg_daily_range_aligned[i] < 0.01 * close[i]:  # Less than 1% of price
             signals[i] = 0.0
             continue
             
-        # Long: Price above both EMA10 and EMA30 + volume spike
-        if (close[i] > weekly_ema_10_aligned[i] and 
-            close[i] > weekly_ema_30_aligned[i] and 
-            vol_spike[i]):
+        # Long: Price breaks above daily high with volume spike
+        if close[i] > daily_high and volume_spike[i]:
             signals[i] = 0.25
         
-        # Short: Price below both EMA10 and EMA30 + volume spike
-        elif (close[i] < weekly_ema_10_aligned[i] and 
-              close[i] < weekly_ema_30_aligned[i] and 
-              vol_spike[i]):
+        # Short: Price breaks below daily low with volume spike
+        elif close[i] < daily_low and volume_spike[i]:
             signals[i] = -0.25
         
-        # Exit: reverse signal on opposite direction
-        elif (close[i] < weekly_ema_10_aligned[i] and signals[i-1] > 0) or \
-             (close[i] > weekly_ema_10_aligned[i] and signals[i-1] < 0):
+        # Exit: reverse signal when price returns to opposite daily level
+        elif close[i] < daily_low and signals[i-1] > 0:
+            signals[i] = 0.0
+        elif close[i] > daily_high and signals[i-1] < 0:
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -79,6 +72,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyEMA10_30_Volume_Spike_Filter"
-timeframe = "1d"
+name = "12h_1D_Range_Breakout_With_Volume_Confirmation"
+timeframe = "12h"
 leverage = 1.0
