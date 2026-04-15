@@ -1,8 +1,3 @@
-# 4h_PostClose_Reversal_With_Volume
-# Reversal after close of Bollinger band breach with volume confirmation
-# Works in both bull and bear by fading extremes during volatility spikes
-# Target: 30-80 trades/year, avoids overtrading
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -18,46 +13,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2) on close
-    close_series = pd.Series(close)
-    sma = close_series.rolling(window=20, min_periods=20).mean()
-    std = close_series.rolling(window=20, min_periods=20).std()
-    upper = sma + 2 * std
-    lower = sma - 2 * std
+    # Calculate 14-period ATR for volatility filter
+    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
+    tr = np.concatenate([[np.nan], tr])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume filter: current volume > 1.8x median of last 20 bars
-    vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
-    vol_threshold = 1.8 * vol_median
+    # Daily median volume filter (from daily data)
+    df_1d = get_htf_data(prices, '1d')
+    daily_vol = df_1d['volume'].values
+    daily_vol_median = pd.Series(daily_vol).rolling(window=10, min_periods=10).median().values
+    daily_vol_median_aligned = align_htf_to_ltf(prices, df_1d, daily_vol_median)
     
-    # Bollinger Band width for volatility regime
-    bb_width = (upper - lower) / sma
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean()
-    vol_expansion = bb_width > bb_width_ma  # Volatility expanding
+    # 6-hour price change momentum (close - open over 6h)
+    price_change = close - prices['open'].values
+    price_change_ma = pd.Series(price_change).rolling(window=6, min_periods=6).mean().values
     
     signals = np.zeros(n)
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(vol_threshold[i]) or np.isnan(vol_expansion[i])):
+        if np.isnan(atr[i]) or np.isnan(daily_vol_median_aligned[i]) or np.isnan(price_change_ma[i]):
             continue
         
-        # Long: Price closed ABOVE upper band PREVIOUS bar + volume + vol expansion
-        if (i > 0 and close[i-1] > upper[i-1] and 
-            volume[i] > vol_threshold[i] and vol_expansion[i]):
+        # Volume condition: current 6h volume > 1.5x daily median volume / 4 (approx 6h slice)
+        vol_cond = volume[i] > 1.5 * (daily_vol_median_aligned[i] / 4)
+        
+        # Momentum condition: significant 6-bar price momentum
+        mom_cond = np.abs(price_change_ma[i]) > 0.5 * atr[i]
+        
+        # Long: positive momentum + volume confirmation
+        if price_change_ma[i] > 0 and vol_cond and mom_cond:
             signals[i] = 0.25
         
-        # Short: Price closed BELOW lower band PREVIOUS bar + volume + vol expansion
-        elif (i > 0 and close[i-1] < lower[i-1] and 
-              volume[i] > vol_threshold[i] and vol_expansion[i]):
+        # Short: negative momentum + volume confirmation
+        elif price_change_ma[i] < 0 and vol_cond and mom_cond:
             signals[i] = -0.25
         
-        # Exit: Price returns to middle (SMA) or opposite band touched
-        elif i > 0:
-            if signals[i-1] == 0.25 and close[i] <= sma[i]:
-                signals[i] = 0.0
-            elif signals[i-1] == -0.25 and close[i] >= sma[i]:
-                signals[i] = 0.0
+        # Exit: momentum fades or volume drops
+        elif (i > 0 and 
+              ((signals[i-1] == 0.25 and price_change_ma[i] <= 0) or
+               (signals[i-1] == -0.25 and price_change_ma[i] >= 0) or
+               volume[i] <= 0.8 * (daily_vol_median_aligned[i] / 4))):
+            signals[i] = 0.0
         
         # Otherwise, hold previous position
         else:
@@ -65,6 +62,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_PostClose_Reversal_With_Volume"
-timeframe = "4h"
+name = "6h_Momentum_Volume_Filter"
+timeframe = "6h"
 leverage = 1.0
