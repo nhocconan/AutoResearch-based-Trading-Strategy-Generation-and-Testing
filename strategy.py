@@ -13,89 +13,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h HTF data once before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 4h HTF data once before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Calculate 12h EMA(50) for trend filter
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_6h = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 4h EMA(21) for trend
+    ema_4h = pd.Series(df_4h['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Get 1d HTF data for Camarilla pivot levels
+    # Get 1d HTF data for weekly pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels (based on prior day)
-    # Prior day's high, low, close
-    prior_high = df_1d['high'].shift(1).values
-    prior_low = df_1d['low'].shift(1).values
-    prior_close = df_1d['close'].shift(1).values
+    # Calculate weekly pivot points from prior week (using 1d data)
+    weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().shift(5).values
+    weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().shift(5).values
+    weekly_close = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).last().shift(5).values
     
-    # Camarilla pivot: (H+L+C)/3
-    camarilla_pivot = (prior_high + prior_low + prior_close) / 3.0
-    # Camarilla R3: C + (H-L)*1.1/4
-    camarilla_r3 = prior_close + (prior_high - prior_low) * 1.1 / 4
-    # Camarilla S3: C - (H-L)*1.1/4
-    camarilla_s3 = prior_close - (prior_high - prior_low) * 1.1 / 4
+    # Weekly pivot: (H+L+C)/3
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    # Weekly R1: 2*P - L
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    # Weekly S1: 2*P - H
+    weekly_s1 = 2 * weekly_pivot - weekly_high
     
-    # Align Camarilla levels to 6h
-    camarilla_pivot_6h = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    camarilla_r3_6h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_6h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align weekly pivot levels to 1h
+    weekly_pivot_1h = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    weekly_r1_1h = align_htf_to_ltf(prices, df_1d, weekly_r1)
+    weekly_s1_1h = align_htf_to_ltf(prices, df_1d, weekly_s1)
     
-    # Calculate 6h ATR(14) for volatility filter
+    # Calculate 1h ATR(14) for volatility filter
     tr1 = high - low
     tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
     tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 6h volume ratio (current vs 20-period average)
+    # Calculate 1h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
     signals = np.zeros(n)
     
-    # Session filter: avoid low-volume periods (22-02 UTC)
+    # Precompute session filter (08-20 UTC)
     hours = prices.index.hour
-    in_session = (hours >= 2) & (hours <= 21)  # UTC 2-21, avoids Asian session lows
+    in_session = (hours >= 8) & (hours <= 20)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_6h[i]) or np.isnan(camarilla_pivot_6h[i]) or 
-            np.isnan(camarilla_r3_6h[i]) or np.isnan(camarilla_s3_6h[i]) or 
-            np.isnan(atr_14[i]) or np.isnan(volume_ratio[i]) or not in_session[i]):
+        if (np.isnan(ema_4h_aligned[i]) or 
+            np.isnan(weekly_pivot_1h[i]) or np.isnan(weekly_r1_1h[i]) or 
+            np.isnan(weekly_s1_1h[i]) or np.isnan(atr_14[i]) or 
+            np.isnan(volume_ratio[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
         # Long conditions:
-        # 1. 6h price above 12h EMA50 (bullish trend)
-        # 2. Price touches or breaks above Camarilla R3 (strong bullish breakout)
-        # 3. Volume confirmation: volume > 1.5x average
-        # 4. Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
-        if (close[i] > ema_50_6h[i] and
-            close[i] >= camarilla_r3_6h[i] and
+        # 1. 4h EMA(21) trending up (current > previous)
+        # 2. Price breaks above weekly R1 with volume confirmation
+        # 3. Volatility filter: ATR > 0.3% of price
+        if (ema_4h_aligned[i] > ema_4h_aligned[i-1] and
+            close[i] > weekly_r1_1h[i] and
             volume_ratio[i] > 1.5 and
-            atr_14[i] > 0.005 * close[i]):
-            signals[i] = 0.25
+            atr_14[i] > 0.003 * close[i]):
+            signals[i] = 0.20
             
         # Short conditions:
-        # 1. 6h price below 12h EMA50 (bearish trend)
-        # 2. Price touches or breaks below Camarilla S3 (strong bearish breakdown)
-        # 3. Volume confirmation: volume > 1.5x average
-        # 4. Volatility filter: ATR > 0.5% of price
-        elif (close[i] < ema_50_6h[i] and
-              close[i] <= camarilla_s3_6h[i] and
+        # 1. 4h EMA(21) trending down (current < previous)
+        # 2. Price breaks below weekly S1 with volume confirmation
+        # 3. Volatility filter: ATR > 0.3% of price
+        elif (ema_4h_aligned[i] < ema_4h_aligned[i-1] and
+              close[i] < weekly_s1_1h[i] and
               volume_ratio[i] > 1.5 and
-              atr_14[i] > 0.005 * close[i]):
-            signals[i] = -0.25
+              atr_14[i] > 0.003 * close[i]):
+            signals[i] = -0.20
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "6h_12h_EMA50_1d_CamarillaR3S3_Volume_Filter_v1"
-timeframe = "6h"
+name = "1h_4h_EMA21_1d_WeeklyPivot_Volume_Filter_v1"
+timeframe = "1h"
 leverage = 1.0
