@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Choppiness Index + 1d RSI + 1d Volume Spike
-# Uses Choppiness Index to detect ranging markets (CHOP > 61.8) for mean reversion,
-# RSI(14) for overbought/oversold signals, and volume spike for confirmation.
-# Works in both bull and bear markets by adapting to market regime - 
-# in ranging markets, mean reversion at RSI extremes with volume confirmation.
-# Target: 50-100 total trades over 4 years (12-25/year).
+# Hypothesis: 6s Williams %R + 1d volume + 12h trend filter
+# Williams %R identifies overbought/oversold conditions; volume confirms momentum; 12h EMA50 ensures trend alignment.
+# Works in both bull and bear markets by fading extremes in range and following momentum in trends.
+# Target: 50-150 total trades over 4 years (12-37/year) with disciplined entries.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,112 +18,82 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for calculations
+    # Load 6h data (primary timeframe) for price action
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 30:
+        return np.zeros(n)
+    
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    
+    # Load 1d data for Williams %R and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
-    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate Choppiness Index (14-period)
-    def calculate_chop(high_arr, low_arr, close_arr, period=14):
-        atr = np.zeros(len(close_arr))
-        tr = np.zeros(len(close_arr))
-        for i in range(1, len(close_arr)):
-            tr[i] = max(high_arr[i] - low_arr[i], 
-                       abs(high_arr[i] - close_arr[i-1]),
-                       abs(low_arr[i] - close_arr[i-1]))
-        # Smooth TR using Wilder's smoothing (equivalent to RMA)
-        atr[period-1] = np.sum(tr[1:period]) / period
-        for i in range(period, len(tr)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        
-        # Calculate highest high and lowest low over period
-        highest_high = np.zeros(len(close_arr))
-        lowest_low = np.zeros(len(close_arr))
-        for i in range(period-1, len(close_arr)):
-            highest_high[i] = np.max(high_arr[i-period+1:i+1])
-            lowest_low[i] = np.min(low_arr[i-period+1:i+1])
-        
-        # Avoid division by zero
-        range_hl = highest_high - lowest_low
-        range_hl[range_hl == 0] = 1e-10
-        
-        chop = 100 * np.log10(atr * period / range_hl) / np.log10(period)
-        return chop
+    # Load 12h data for trend filter (EMA50)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 60:
+        return np.zeros(n)
+    close_12h = df_12h['close'].values
     
-    chop = calculate_chop(high_1d, low_1d, close_1d, 14)
+    # Calculate Williams %R (14-period)
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
     
-    # Calculate RSI (14-period)
-    def calculate_rsi(close_arr, period=14):
-        delta = np.diff(close_arr)
-        delta = np.insert(delta, 0, 0)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.zeros(len(close_arr))
-        avg_loss = np.zeros(len(close_arr))
-        
-        avg_gain[period] = np.mean(gain[1:period+1])
-        avg_loss[period] = np.mean(loss[1:period+1])
-        
-        for i in range(period+1, len(close_arr)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    # Volume average (20-period on 1d)
+    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    rsi = calculate_rsi(close_1d, 14)
+    # EMA50 on 12h for trend filter
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume average (20-period)
-    vol_avg = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all indicators to 1d timeframe (prices are already 1d)
-    chop_aligned = chop
-    rsi_aligned = rsi
-    vol_avg_aligned = vol_avg
+    # Align all indicators to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25  # Position size
+    base_size = 0.25  # Base position size
     
-    for i in range(30, n):  # Start after warmup period
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(chop_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(vol_avg_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(vol_avg_aligned[i]) or 
+            np.isnan(ema50_12h_aligned[i])):
             continue
         
-        # Long entry: Choppy market (CHOP > 61.8) + RSI oversold (< 30) + volume spike
-        if (chop_aligned[i] > 61.8 and 
-            rsi_aligned[i] < 30 and 
-            volume_1d[i] > 1.5 * vol_avg_aligned[i] and 
+        # Long entry: Williams %R oversold (< -80) + volume spike + price above 12h EMA50
+        if (williams_r_aligned[i] < -80 and 
+            volume[i] > 1.5 * vol_avg_aligned[i] and 
+            close[i] > ema50_12h_aligned[i] and 
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: Choppy market (CHOP > 61.8) + RSI overbought (> 70) + volume spike
-        elif (chop_aligned[i] > 61.8 and 
-              rsi_aligned[i] > 70 and 
-              volume_1d[i] > 1.5 * vol_avg_aligned[i] and 
+        # Short entry: Williams %R overbought (> -20) + volume spike + price below 12h EMA50
+        elif (williams_r_aligned[i] > -20 and 
+              volume[i] > 1.5 * vol_avg_aligned[i] and 
+              close[i] < ema50_12h_aligned[i] and 
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: RSI returns to neutral zone (40-60) or chop market ends
-        elif position == 1 and (rsi_aligned[i] > 40 or chop_aligned[i] <= 61.8):
+        # Exit: reverse signal or Williams %R returns to neutral range (-50 to -50)
+        elif position == 1 and williams_r_aligned[i] > -50:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (rsi_aligned[i] < 60 or chop_aligned[i] <= 61.8):
+        elif position == -1 and williams_r_aligned[i] < -50:
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "1d_Chop_RSI_Volume_MeanReversion"
-timeframe = "1d"
+name = "6h_WilliamsR_1dVolume_12hEMA_Trend"
+timeframe = "6h"
 leverage = 1.0
