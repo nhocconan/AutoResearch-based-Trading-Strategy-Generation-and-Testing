@@ -3,84 +3,79 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy combining 1d Williams %R (14) for extreme mean reversion
-# with 4h Donchian breakout (20) for trend confirmation and volume spike filter.
-# Long: price breaks above 4h upper Donchian + 1d Williams %R < -80 (oversold) + volume > 2x 20-bar average.
-# Short: price breaks below 4h lower Donchian + 1d Williams %R > -20 (overbought) + volume > 2x 20-bar average.
-# Williams %R identifies exhaustion points; Donchian ensures structural break; volume confirms conviction.
-# Designed for low trade frequency (<30/year) to minimize fee drag while capturing reversal extremes in both bull and bear markets.
+# Hypothesis: 6h strategy using 1d Williams Alligator (Jaw/Teeth/Lips) for trend direction and 6h Elder Ray (Bull/Bear Power) for entry timing.
+# In 1d uptrend (Lips > Teeth > Jaw), wait for 6h Bull Power > 0 to go long (buy the dip in uptrend).
+# In 1d downtrend (Lips < Teeth < Jaw), wait for 6h Bear Power < 0 to go short (sell the rally in downtrend).
+# Volume confirmation ensures momentum validity. Designed for low trade frequency (12-30/year) to minimize fee drag.
+# Alligator uses SMAs with specific periods; Elder Ray uses EMA13 and high/low minus EMA13.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Pre-compute session hours to avoid datetime operations in loop
-    hours = pd.DatetimeIndex(open_time).hour
-    
-    # Get 4h and 1d HTF data once before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 30 or len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 4h Indicators: Donchian Channel (20) ===
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
-    
-    # === 1d Indicators: Williams %R (14) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === 1d Indicators: Williams Alligator ===
+    # Jaw: Blue line, 13-period SMMA smoothed by 8 bars
+    # Teeth: Red line, 8-period SMMA smoothed by 5 bars
+    # Lips: Green line, 5-period SMMA smoothed by 3 bars
     close_1d = df_1d['close'].values
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * ((highest_high - close_1d) / (highest_high - lowest_low + 1e-10))
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # SMMA (Smoothed Moving Average) = EMA with alpha=1/period
+    jaw = pd.Series(close_1d).ewm(alpha=1/13, adjust=False, min_periods=13).mean().values
+    jaw = pd.Series(jaw).ewm(alpha=1/8, adjust=False, min_periods=8).mean().values  # additional smoothing
+    teeth = pd.Series(close_1d).ewm(alpha=1/8, adjust=False, min_periods=8).mean().values
+    teeth = pd.Series(teeth).ewm(alpha=1/5, adjust=False, min_periods=5).mean().values  # additional smoothing
+    lips = pd.Series(close_1d).ewm(alpha=1/5, adjust=False, min_periods=5).mean().values
+    lips = pd.Series(lips).ewm(alpha=1/3, adjust=False, min_periods=3).mean().values  # additional smoothing
+    
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    
+    # === 6h Indicators: Elder Ray (Bull Power / Bear Power) ===
+    # Bull Power = High - EMA13(close)
+    # Bear Power = Low - EMA13(close)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 50
+    warmup = 100
     
     for i in range(warmup, n):
-        # Session filter: 08-20 UTC only
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
-            
-        # Volume filter: current volume > 2x 20-period volume SMA
-        vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
-        
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(williams_r_aligned[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
             signals[i] = 0.0
             continue
+        
+        # Determine 1d Alligator trend
+        # Uptrend: Lips > Teeth > Jaw
+        # Downtrend: Lips < Teeth < Jaw
+        is_uptrend = (lips_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > jaw_aligned[i])
+        is_downtrend = (lips_aligned[i] < teeth_aligned[i]) and (teeth_aligned[i] < jaw_aligned[i])
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 4h upper Donchian (bullish breakout)
-        # 2. 1d Williams %R < -80 (extreme oversold)
-        # 3. Volume spike confirmation
-        if (close[i] > donchian_high_aligned[i]) and (williams_r_aligned[i] < -80) and vol_confirm:
+        # 1. In 1d uptrend (Alligator aligned up)
+        # 2. 6h Bull Power > 0 (bullish momentum)
+        if is_uptrend and (bull_power[i] > 0):
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 4h lower Donchian (bearish breakdown)
-        # 2. 1d Williams %R > -20 (extreme overbought)
-        # 3. Volume spike confirmation
-        elif (close[i] < donchian_low_aligned[i]) and (williams_r_aligned[i] > -20) and vol_confirm:
+        # 1. In 1d downtrend (Alligator aligned down)
+        # 2. 6h Bear Power < 0 (bearish momentum)
+        elif is_downtrend and (bear_power[i] < 0):
             signals[i] = -0.25
         
         else:
@@ -88,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR14_Donchian20_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_Alligator_ElderRay_v1"
+timeframe = "6h"
 leverage = 1.0
