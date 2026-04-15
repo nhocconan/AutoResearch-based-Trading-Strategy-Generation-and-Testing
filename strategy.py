@@ -28,12 +28,12 @@ def generate_signals(prices):
     weekly_r1 = 2 * weekly_pivot - weekly_low
     weekly_s1 = 2 * weekly_pivot - weekly_high
     
-    # Align weekly pivot levels to 12h timeframe
+    # Align weekly pivot levels to daily timeframe
     weekly_pivot_aligned = align_htf_to_ltf(prices, daily, weekly_pivot)
     weekly_r1_aligned = align_htf_to_ltf(prices, daily, weekly_r1)
     weekly_s1_aligned = align_htf_to_ltf(prices, daily, weekly_s1)
     
-    # Volume filter: current 12h volume > 1.8x 20-period average volume
+    # Volume filter: current daily volume > 1.8x 20-period average volume
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.8 * vol_ma)
@@ -41,10 +41,6 @@ def generate_signals(prices):
     # Range filter: avoid trading when price is within 0.5% of weekly pivot
     price_to_pivot = np.abs(close - weekly_pivot_aligned) / weekly_pivot_aligned
     range_filter = price_to_pivot > 0.005
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     
@@ -55,8 +51,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Only trade when all filters pass
-        if volume_filter[i] and range_filter[i] and session_filter[i]:
+        # Only trade when both filters pass
+        if volume_filter[i] and range_filter[i]:
             # Long conditions: price breaks above weekly R1 with volume
             if close[i] > weekly_r1_aligned[i]:
                 signals[i] = 0.25
@@ -70,6 +66,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WeeklyPivot_R1_S1_Breakout_Volume_RangeFilter_Session"
-timeframe = "12h"
+name = "1d_WeeklyPivot_R1_S1_Breakout_Volume_RangeFilter"
+timeframe = "1d"
 leverage = 1.0
