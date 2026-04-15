@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,76 +13,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for HTF context
+    # Get daily data for context
     daily = get_htf_data(prices, '1d')
     daily_high = daily['high'].values
     daily_low = daily['low'].values
     daily_close = daily['close'].values
     daily_volume = daily['volume'].values
     
-    # Calculate daily ATR for volatility regime
+    # Calculate daily ATR for volatility
     daily_close_prev = np.concatenate([[daily_close[0]], daily_close[:-1]])
     tr = np.maximum(daily_high - daily_low,
                     np.maximum(np.abs(daily_high - daily_close_prev),
                                np.abs(daily_low - daily_close_prev)))
     atr_daily = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma_daily = pd.Series(atr_daily).rolling(window=30, min_periods=30).mean().values
-    vol_regime = atr_daily / (atr_ma_daily + 1e-10)  # >1 = high volatility
     
-    # Align volatility regime to 6h
-    vol_regime_6h = align_htf_to_ltf(prices, daily, vol_regime)
+    # Calculate daily SMA for trend
+    sma_50_daily = pd.Series(daily_close).rolling(window=50, min_periods=50).mean().values
     
-    # Calculate 12h data for trend direction
-    htf_12h = get_htf_data(prices, '12h')
-    htf_close_12h = htf_12h['close'].values
+    # Calculate daily volume SMA for confirmation
+    vol_sma_20_daily = pd.Series(daily_volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 12h EMA20 for trend
-    ema_12h = pd.Series(htf_close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, htf_12h, ema_12h)
+    # Align daily indicators to 4h timeframe
+    atr_4h = align_htf_to_ltf(prices, daily, atr_daily)
+    sma_50_4h = align_htf_to_ltf(prices, daily, sma_50_daily)
+    vol_sma_20_4h = align_htf_to_ltf(prices, daily, vol_sma_20_daily)
     
-    # Calculate 12h Donchian(20) for breakout levels
-    donch_high_12h = pd.Series(htf_close_12h).rolling(window=20, min_periods=20).max().values
-    donch_low_12h = pd.Series(htf_close_12h).rolling(window=20, min_periods=20).min().values
-    donch_high_12h_aligned = align_htf_to_ltf(prices, htf_12h, donch_high_12h)
-    donch_low_12h_aligned = align_htf_to_ltf(prices, htf_12h, donch_low_12h)
-    
-    # Calculate daily volume average for confirmation
-    vol_ma_daily = pd.Series(daily_volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = daily_volume / (vol_ma_daily + 1e-10)
-    vol_ratio_6h = align_htf_to_ltf(prices, daily, vol_ratio)
+    # Calculate 4h Donchian channels
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
     signals = np.zeros(n)
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(vol_regime_6h[i]) or np.isnan(ema_12h_aligned[i]) or 
-            np.isnan(donch_high_12h_aligned[i]) or np.isnan(donch_low_12h_aligned[i]) or
-            np.isnan(vol_ratio_6h[i])):
+        if (np.isnan(atr_4h[i]) or np.isnan(sma_50_4h[i]) or 
+            np.isnan(vol_sma_20_4h[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade in high volatility regimes (vol_ratio > 1.2)
-        if vol_regime_6h[i] <= 1.2:
-            signals[i] = 0.0
-            continue
+        # Volume confirmation: current volume above daily average
+        volume_confirmed = volume[i] > vol_sma_20_4h[i]
         
-        # Long: price breaks above 12h Donchian high + above EMA + volume confirmation
-        if (close[i] > donch_high_12h_aligned[i] and 
-            close[i] > ema_12h_aligned[i] and
-            vol_ratio_6h[i] > 1.5):
+        # Long: price breaks above Donchian high in uptrend (price > SMA50) with volume
+        if (close[i] > highest_high[i] and 
+            close[i] > sma_50_4h[i] and 
+            volume_confirmed):
             signals[i] = 0.25
-        
-        # Short: price breaks below 12h Donchian low + below EMA + volume confirmation
-        elif (close[i] < donch_low_12h_aligned[i] and 
-              close[i] < ema_12h_aligned[i] and
-              vol_ratio_6h[i] > 1.5):
+        # Short: price breaks below Donchian low in downtrend (price < SMA50) with volume
+        elif (close[i] < lowest_low[i] and 
+              close[i] < sma_50_4h[i] and 
+              volume_confirmed):
             signals[i] = -0.25
-        
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "6h_VolRegime_DonchianBreakout_EMAFilter"
-timeframe = "6h"
+name = "4h_DonchianBreakout_SMA50_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
