@@ -3,9 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 12h timeframe with Donchian(20) breakout + volume confirmation + ATR filter
+# Uses 1d HTF for trend alignment (price > 1d EMA50 for longs, < for shorts)
+# Designed for low trade frequency (<30/year) to minimize fee drag and work in both bull/bear markets
+# Entry: 12h price breaks Donchian(20) with volume > 1.5x average and ATR > 0.6% of price
+# Trend filter: 1d EMA50 direction (long only when price > EMA50, short only when price < EMA50)
+# Exit: signal=0 when conditions not met or opposite signal triggers
+# Position size: 0.25 (discrete to reduce churn)
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,61 +26,53 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    daily_close = df_1d['close'].values
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
+    # Calculate 1d EMA50 for trend filter
+    close_1d = pd.Series(df_1d['close'].values)
+    ema_50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate daily ATR(14) for volatility filter
-    tr1 = pd.Series(daily_high - daily_low)
-    tr2 = pd.Series(np.abs(daily_high - np.concatenate([[daily_close[0]], daily_close[:-1]])))
-    tr3 = pd.Series(np.abs(daily_low - np.concatenate([[daily_close[0]], daily_close[:-1]])))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14 = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align HTF ATR to 6h timeframe with proper delay
-    atr_14_6h = align_htf_to_ltf(prices, df_1d, atr_14)
-    
-    # Calculate 6h Donchian channels (20-period) for breakout signals
+    # Calculate 12h Donchian channels (20-period)
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 6h volume ratio (current vs 20-period average)
+    # Calculate 12h ATR(14) for volatility filter
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.concatenate([[close[0]], close[:-1]])))
+    tr3 = pd.Series(np.abs(low - np.concatenate([[close[0]], close[:-1]])))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14 = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate 12h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
     signals = np.zeros(n)
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_6h[i]) or 
-            np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
-            np.isnan(volume_ratio[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(highest_20[i]) or 
+            np.isnan(lowest_20[i]) or np.isnan(atr_14[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions:
-        # 1. 6h price breaks above 20-period high with volume confirmation → long
-        # 2. 6h price breaks below 20-period low with volume confirmation → short
-        # 3. Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
-        # 4. Volume confirmation: volume > 1.5x average
-        # 5. Discrete position sizing: 0.25
-        
-        # Long conditions: 6h breakout above Donchian high
-        if (close[i] > highest_20[i] and            # 6h price above Donchian high
-            volume_ratio[i] > 1.5 and               # Volume confirmation
-            atr_14_6h[i] > 0.005 * close[i]):       # Volatility filter
+        # Long conditions: price breaks above Donchian high with volume and trend filter
+        if (close[i] > highest_20[i] and            # Breakout above 20-period high
+            close[i] > ema_50_1d_aligned[i] and    # Above 1d EMA50 (uptrend filter)
+            volume_ratio[i] > 1.5 and              # Strong volume confirmation
+            atr_14[i] > 0.006 * close[i]):         # Adequate volatility
             signals[i] = 0.25
             
-        # Short conditions: 6h breakdown below Donchian low
-        elif (close[i] < lowest_20[i] and           # 6h price below Donchian low
-              volume_ratio[i] > 1.5 and             # Volume confirmation
-              atr_14_6h[i] > 0.005 * close[i]):     # Volatility filter
+        # Short conditions: price breaks below Donchian low with volume and trend filter
+        elif (close[i] < lowest_20[i] and          # Breakdown below 20-period low
+              close[i] < ema_50_1d_aligned[i] and  # Below 1d EMA50 (downtrend filter)
+              volume_ratio[i] > 1.5 and            # Strong volume confirmation
+              atr_14[i] > 0.006 * close[i]):       # Adequate volatility
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "6h_Donchian20_Breakout_Volume_ATR_Filter"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_Volume_EMA50_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
