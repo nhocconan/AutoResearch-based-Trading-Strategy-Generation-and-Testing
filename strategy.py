@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d volume spike and 1w ADX regime filter
-# Long when price breaks above 1d Camarilla R3 + volume > 2x 20-period avg + 1w ADX > 25 (trending)
-# Short when price breaks below 1d Camarilla S3 + volume > 2x 20-period avg + 1w ADX > 25 (trending)
-# Uses discrete position sizing (0.25) to reduce fee churn. Designed for low trade frequency (12-30/year).
-# Camarilla levels from 1d provide intraday support/resistance. Volume confirms breakout strength.
-# 1w ADX > 25 ensures we only trade in trending markets, avoiding whipsaws in ranges.
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA34 trend filter and volume confirmation
+# Long when price breaks above 4h Donchian upper band + 12h close > 12h EMA34 (uptrend) + volume > 1.5x 20-period avg
+# Short when price breaks below 4h Donchian lower band + 12h close < 12h EMA34 (downtrend) + volume > 1.5x 20-period avg
+# Uses discrete position sizing (0.25) to reduce fee churn and improve drawdown resistance.
+# 12h EMA34 provides intermediate trend filter (more responsive than weekly, smoother than daily) reducing whipsaws.
+# Volume confirmation avoids false breakouts. Target: 20-40 trades/year to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,77 +24,22 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d HTF data once before loop for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h HTF data once before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 40:
         return np.zeros(n)
     
-    # Get 1w HTF data once before loop for ADX regime filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
+    # === 12h Indicator: EMA34 (trend filter) ===
+    close_12h = df_12h['close'].values
+    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
-    # === 1d Indicator: Camarilla Pivot Levels (R3, S3) ===
-    # Based on previous day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate pivot and ranges
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    
-    # Camarilla levels
-    R3_1d = pivot_1d + (range_1d * 1.1 / 4.0)
-    S3_1d = pivot_1d - (range_1d * 1.1 / 4.0)
-    
-    # Align to 12h timeframe
-    R3_1d_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
-    S3_1d_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
-    
-    # === 1w Indicator: ADX (trend regime filter) ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
-    
-    # Directional Movement
-    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w),
-                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)),
-                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values (Wilder's smoothing)
-    def wilders_smoothing(values, period):
-        smoothed = np.zeros_like(values)
-        smoothed[period-1] = np.nansum(values[:period])
-        for i in range(period, len(values)):
-            smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + values[i]
-        return smoothed
-    
-    period_adx = 14
-    atr_1w = wilders_smoothing(tr, period_adx)
-    dm_plus_smooth = wilders_smoothing(dm_plus, period_adx)
-    dm_minus_smooth = wilders_smoothing(dm_minus, period_adx)
-    
-    # Directional Indicators
-    di_plus = np.where(atr_1w != 0, (dm_plus_smooth / atr_1w) * 100, 0)
-    di_minus = np.where(atr_1w != 0, (dm_minus_smooth / atr_1w) * 100, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
-    adx_1w = wilders_smoothing(dx, period_adx)
-    
-    # Align to 12h timeframe
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    # === 4h Donchian Channel (20-period) ===
+    period = 20
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    upper_band = highest_high
+    lower_band = lowest_low
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -102,7 +47,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(30, 20) + period_adx  # 1d lookback + volume + ADX
+    warmup = max(period, 20) + 34  # Donchian(20) + volume(20) + EMA34(12h)
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -110,32 +55,32 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
+        # Volume filter: current volume > 1.5x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # Skip if any required data is NaN
-        if (np.isnan(R3_1d_aligned[i]) or np.isnan(S3_1d_aligned[i]) or
-            np.isnan(adx_1w_aligned[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
+            np.isnan(ema34_12h_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade when 1w ADX > 25 (trending market)
-        trending_regime = adx_1w_aligned[i] > 25.0
+        # Get aligned 12h close for trend filter
+        close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)[i]
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above Camarilla R3
-        # 2. Volume confirmation
-        # 3. Trending regime (ADX > 25)
-        if (close[i] > R3_1d_aligned[i]) and \
-           vol_confirm and trending_regime:
+        # 1. Price breaks above upper band (close > upper_band)
+        # 2. 12h close > 12h EMA34 (uptrend)
+        # 3. Volume confirmation
+        if (close[i] > upper_band[i]) and \
+           (close_12h_aligned > ema34_12h_aligned[i]) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below Camarilla S3
-        # 2. Volume confirmation
-        # 3. Trending regime (ADX > 25)
-        elif (close[i] < S3_1d_aligned[i]) and \
-             vol_confirm and trending_regime:
+        # 1. Price breaks below lower band (close < lower_band)
+        # 2. 12h close < 12h EMA34 (downtrend)
+        # 3. Volume confirmation
+        elif (close[i] < lower_band[i]) and \
+             (close_12h_aligned < ema34_12h_aligned[i]) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -143,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_1dVolume_1wADX_Regime_v1"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA34_Volume_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
