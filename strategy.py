@@ -13,84 +13,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h HTF data once before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    # Calculate 4h EMA(50) for trend filter
-    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Get 1d HTF data for weekly ATR regime filter
+    # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d ATR(14) for volatility regime
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate 1d RSI(14)
+    delta = pd.Series(df_1d['close']).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_values = rsi_1d.values
     
-    # Calculate 1d ATR percentile rank (20-period) for regime filter
-    atr_percentile = pd.Series(atr_14_1d).rolling(window=20, min_periods=20).rank(pct=True).values
-    atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
+    # Align 1d RSI to 6h
+    rsi_1d_6h = align_htf_to_ltf(prices, df_1d, rsi_1d_values)
     
-    # Calculate 1h Donchian channels (20-period) for entry timing
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get 1w HTF data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Calculate 1h volume ratio (current vs 20-period average)
+    # Calculate 1w EMA(50)
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate 6h ATR(14) for volatility filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate 6h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
     signals = np.zeros(n)
     
-    # Session filter: 08-20 UTC (avoid Asian session noise)
+    # Precompute session filter (00-24 UTC for 6h - always true but kept for structure)
     hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    in_session = (hours >= 0) & (hours <= 23)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(atr_percentile_aligned[i]) or 
-            np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(volume_ratio[i]) or not in_session[i]):
-            signals[i] = 0.0
-            continue
-        
-        # Regime filter: only trade in low volatility environments (ATR percentile < 0.3)
-        # This avoids choppy markets and focuses on clear breakouts
-        if atr_percentile_aligned[i] >= 0.3:
+        if (np.isnan(rsi_1d_6h[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(atr_14[i]) or np.isnan(volume_ratio[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
         # Long conditions:
-        # 1. 1h price breaks above 20-period Donchian upper
-        # 2. 4h EMA(50) uptrend (price above EMA)
+        # 1. 1d RSI < 30 (oversold)
+        # 2. Price above 1w EMA50 (bullish trend)
         # 3. Volume confirmation: volume > 1.5x average
-        if (close[i] > high_roll[i] and
-            close[i] > ema_50_4h_aligned[i] and
-            volume_ratio[i] > 1.5):
-            signals[i] = 0.20
+        # 4. Volatility filter: ATR > 0.3% of price
+        if (rsi_1d_6h[i] < 30 and
+            close[i] > ema_50_1w_aligned[i] and
+            volume_ratio[i] > 1.5 and
+            atr_14[i] > 0.003 * close[i]):
+            signals[i] = 0.25
             
         # Short conditions:
-        # 1. 1h price breaks below 20-period Donchian lower
-        # 2. 4h EMA(50) downtrend (price below EMA)
+        # 1. 1d RSI > 70 (overbought)
+        # 2. Price below 1w EMA50 (bearish trend)
         # 3. Volume confirmation: volume > 1.5x average
-        elif (close[i] < low_roll[i] and
-              close[i] < ema_50_4h_aligned[i] and
-              volume_ratio[i] > 1.5):
-            signals[i] = -0.20
+        # 4. Volatility filter: ATR > 0.3% of price
+        elif (rsi_1d_6h[i] > 70 and
+              close[i] < ema_50_1w_aligned[i] and
+              volume_ratio[i] > 1.5 and
+              atr_14[i] > 0.003 * close[i]):
+            signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1h_4h_EMA50_Donchian20_Volume_ATRRegime_v1"
-timeframe = "1h"
+name = "6h_1d_RSI14_1w_EMA50_Volume_ATR_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
