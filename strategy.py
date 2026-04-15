@@ -41,7 +41,6 @@ def generate_signals(prices):
     rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any required data is NaN
@@ -57,45 +56,24 @@ def generate_signals(prices):
         # 1. Price above daily EMA20 (bullish bias)
         # 2. Daily RSI between 40 and 60 (neutral momentum, avoids extremes)
         # 3. Volatility filter
-        long_condition = (close[i] > ema_20_1d_aligned[i] and
-                          40 <= rsi_14_1d_aligned[i] <= 60 and
-                          vol_filter)
-        
+        if (close[i] > ema_20_1d_aligned[i] and
+            40 <= rsi_14_1d_aligned[i] <= 60 and
+            vol_filter):
+            signals[i] = 0.25
+            
         # Short conditions:
         # 1. Price below daily EMA20 (bearish bias)
         # 2. Daily RSI between 40 and 60 (neutral momentum, avoids extremes)
         # 3. Volatility filter
-        short_condition = (close[i] < ema_20_1d_aligned[i] and
-                           40 <= rsi_14_1d_aligned[i] <= 60 and
-                           vol_filter)
-        
-        # Entry logic with hysteresis to prevent whipsaw
-        if position == 0:  # flat
-            if long_condition:
-                signals[i] = 0.25
-                position = 1
-            elif short_condition:
-                signals[i] = -0.25
-                position = -1
-            else:
-                signals[i] = 0.0
-        elif position == 1:  # long
-            # Exit long if price crosses below EMA20 or RSI goes extreme
-            if close[i] < ema_20_1d_aligned[i] or rsi_14_1d_aligned[i] < 30 or rsi_14_1d_aligned[i] > 70:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:  # short
-            # Exit short if price crosses above EMA20 or RSI goes extreme
-            if close[i] > ema_20_1d_aligned[i] or rsi_14_1d_aligned[i] < 30 or rsi_14_1d_aligned[i] > 70:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+        elif (close[i] < ema_20_1d_aligned[i] and
+              40 <= rsi_14_1d_aligned[i] <= 60 and
+              vol_filter):
+            signals[i] = -0.25
+        else:
+            signals[i] = 0.0
     
     return signals
 
-name = "1d_EMA20_RSI14_VolFilter_v2"
+name = "1d_EMA20_RSI14_VolFilter_v1"
 timeframe = "1d"
 leverage = 1.0
