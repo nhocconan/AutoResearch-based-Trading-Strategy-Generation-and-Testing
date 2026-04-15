@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout + 1d RSI mean reversion + volume confirmation
-# Long when price breaks above Donchian(20) upper band, RSI(14) < 50 (not overbought), volume > 1.5x 20-bar median
-# Short when price breaks below Donchian(20) lower band, RSI(14) > 50 (not oversold), volume > 1.5x 20-bar median
-# Exit when price returns to Donchian middle (mean of upper/lower) or RSI reverses (>70 long, <30 short)
-# Designed to capture trends while avoiding overextended moves. Conservative sizing (0.25) to limit trade frequency.
-# Works in bull markets (breakouts) and bear markets (mean reversion via RSI filter).
+# Hypothesis: 4h Bollinger Band Width Regime + 1d ADX Trend Filter + Volume Spike
+# Uses Bollinger Band Width (BBW) to identify range vs trend regimes.
+# In trending regime (BBW > 50th percentile), trade breakouts in direction of 1d ADX trend.
+# In ranging regime (BBW <= 50th percentile), fade moves to Bollinger Bands.
+# Volume confirmation (>1.5x 20-bar median) filters low-quality signals.
+# Designed to work in both bull (trend following) and bear (mean reversion) markets.
+# Conservative sizing (0.25) to limit trade frequency and avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,23 +21,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h Donchian channels (20-period)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=1).max()
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=1).min()
-    donchian_mid = (highest_high + lowest_low) / 2
-    
-    # 1-day RSI(14)
+    # 1-day ADX(14) for trend strength and direction
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d.values)
+    
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    tr_ma = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    dm_plus_ma = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    dm_minus_ma = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_ma / (tr_ma + 1e-10)
+    di_minus = 100 * dm_minus_ma / (tr_ma + 1e-10)
+    
+    # ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    adx_value = adx.values
+    
+    # ADX trend direction: +DI > -DI = up, else down
+    adx_up = di_plus > di_minus
+    
+    # Align ADX and trend direction to 4h
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_value)
+    adx_up_aligned = align_htf_to_ltf(prices, df_1d, adx_up.astype(float))
+    
+    # Bollinger Bands (20, 2) on 4h close
+    bb_period = 20
+    bb_mid = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean()
+    bb_std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std()
+    bb_upper = bb_mid + 2 * bb_std
+    bb_lower = bb_mid - 2 * bb_std
+    bb_width = (bb_upper - bb_lower) / bb_mid  # Normalized width
+    
+    # BBW percentile rank (lookback 50 periods)
+    bb_width_series = pd.Series(bb_width)
+    bb_rank = bb_width_series.rolling(window=50, min_periods=10).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
+    )
+    bb_rank = bb_rank.fillna(0.5).values  # Default to median if not enough data
     
     # Volume confirmation: current > 1.5x median of last 20 bars
     vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
@@ -44,36 +84,57 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    for i in range(lookback, n):
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(rsi_1d_aligned[i]) or np.isnan(vol_threshold[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(adx_up_aligned[i]) or 
+            np.isnan(bb_rank[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or
+            np.isnan(vol_threshold[i])):
             continue
         
-        # Long: price above Donchian upper, RSI not overbought (<70), volume spike
-        if (close[i] > highest_high[i] and 
-            rsi_1d_aligned[i] < 70 and 
-            volume[i] > vol_threshold[i]):
-            signals[i] = 0.25
+        # Regime: trending if BBW rank > 0.5, ranging if <= 0.5
+        is_trending = bb_rank[i] > 0.5
         
-        # Short: price below Donchian lower, RSI not oversold (>30), volume spike
-        elif (close[i] < lowest_low[i] and 
-              rsi_1d_aligned[i] > 30 and 
-              volume[i] > vol_threshold[i]):
-            signals[i] = -0.25
-        
-        # Exit: price returns to Donchian mid or RSI extreme
-        elif (i > 0 and 
-              ((signals[i-1] == 0.25 and (close[i] <= donchian_mid[i] or rsi_1d_aligned[i] >= 70)) or
-               (signals[i-1] == -0.25 and (close[i] >= donchian_mid[i] or rsi_1d_aligned[i] <= 30)))):
-            signals[i] = 0.0
-        
-        # Otherwise, hold previous position
+        if is_trending:
+            # Trend following: breakout in direction of 1d ADX trend
+            if (adx_up_aligned[i] > 0.5 and  # ADX up
+                close[i] > bb_upper[i] and   # Break above upper band
+                volume[i] > vol_threshold[i]):  # Volume confirmation
+                signals[i] = 0.25
+            elif (adx_up_aligned[i] <= 0.5 and  # ADX down
+                  close[i] < bb_lower[i] and    # Break below lower band
+                  volume[i] > vol_threshold[i]):  # Volume confirmation
+                signals[i] = -0.25
+            else:
+                # Hold or exit: reverse signal if opposite breakout
+                if (i > 0 and signals[i-1] == 0.25 and 
+                    close[i] < bb_lower[i] and volume[i] > vol_threshold[i]):
+                    signals[i] = -0.25  # Reverse to short
+                elif (i > 0 and signals[i-1] == -0.25 and 
+                      close[i] > bb_upper[i] and volume[i] > vol_threshold[i]):
+                    signals[i] = 0.25   # Reverse to long
+                else:
+                    signals[i] = signals[i-1]  # Hold position
         else:
-            signals[i] = signals[i-1]
+            # Mean reversion: fade to Bollinger Band mean
+            if (close[i] > bb_upper[i] and     # Sell at upper band
+                volume[i] > vol_threshold[i]):
+                signals[i] = -0.25
+            elif (close[i] < bb_lower[i] and   # Buy at lower band
+                  volume[i] > vol_threshold[i]):
+                signals[i] = 0.25
+            else:
+                # Exit mean reversion when price returns to middle band
+                if (i > 0 and signals[i-1] == 0.25 and 
+                    close[i] <= bb_mid[i]):
+                    signals[i] = 0.0
+                elif (i > 0 and signals[i-1] == -0.25 and 
+                      close[i] >= bb_mid[i]):
+                    signals[i] = 0.0
+                else:
+                    signals[i] = signals[i-1]  # Hold position
     
     return signals
 
-name = "12h_Donchian_RSI1d_Volume"
-timeframe = "12h"
+name = "4h_BBW_ADX_Volume_Regime"
+timeframe = "4h"
 leverage = 1.0
