@@ -3,80 +3,89 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + Weekly Trend Filter
-# Elder Ray calculates Bull Power (High - EMA13) and Bear Power (Low - EMA13).
-# Long when Bull Power > 0 and rising, Bear Power < 0 and falling.
-# Short when Bear Power < 0 and falling, Bull Power < 0 and rising.
-# Weekly trend filter uses 200-period EMA on weekly timeframe: only long when price > weekly EMA200, only short when price < weekly EMA200.
-# Works in bull markets (captures strength) and bear markets (captures weakness). Target: 50-150 total trades.
-# Timeframe: 6h, HTF: 1w
+# Hypothesis: 4h Williams %R Mean Reversion with Daily Trend Filter
+# Uses Williams %R(14) for mean reversion entries (oversold/overbought) in the direction of the daily trend.
+# In bull markets (price > daily SMA50): buy oversold (%R < -80), exit overbought (%R > -20).
+# In bear markets (price < daily SMA50): sell overbought (%R > -20), exit oversold (%R < -80).
+# Includes volume confirmation to filter low-probability signals. Target: 20-50 trades/year.
+# Timeframe: 4h, HTF: 1d
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Load weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
+    # Load 1d data for trend filter and Williams %R calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA13 for Elder Ray
-    close_series = pd.Series(close)
-    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate Williams %R (14-period) on 1d
+    # Highest high and lowest low over 14 periods
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # Calculate Bull Power and Bear Power
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    williams_r = (highest_high - close_1d) / (highest_high - lowest_low + 1e-10) * -100
     
-    # Calculate EMA200 on weekly for trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema200_1w = close_1w_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate daily SMA50 for trend filter
+    sma_50 = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
     
-    # Align weekly EMA200 to 6h timeframe
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # Align Williams %R and SMA50 to 4h timeframe (wait for daily close)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    sma_50_aligned = align_htf_to_ltf(prices, df_1d, sma_50)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25  # Position size
+    base_size = 0.25  # Position size (25% of capital)
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if np.isnan(ema200_1w_aligned[i]):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(sma_50_aligned[i])):
             continue
+            
+        # Determine trend: bullish if price > SMA50, bearish if price < SMA50
+        is_bullish = close_1d[-1] > sma_50[-1] if len(close_1d) > 0 else False  # Use latest daily values
+        # More robust: use aligned values for current bar
+        # We need to get the corresponding daily values for current 4h bar
+        # Since we can't easily map, we'll use the trend from the most recent completed daily bar
+        # For simplicity, we'll check if the current 4h close is above/below the aligned SMA50
+        # This approximates the trend alignment
         
-        # Long conditions: Bull Power positive and rising, price above weekly EMA200
-        bull_rising = bull_power[i] > bull_power[i-1]
-        long_condition = (bull_power[i] > 0 and bull_rising and close[i] > ema200_1w_aligned[i])
-        
-        # Short conditions: Bear Power negative and falling, price below weekly EMA200
-        bear_falling = bear_power[i] < bear_power[i-1]
-        short_condition = (bear_power[i] < 0 and bear_falling and close[i] < ema200_1w_aligned[i])
-        
-        # Exit conditions: power signals reverse or price crosses weekly EMA200
-        exit_long = (bull_power[i] <= 0 or not bull_rising or close[i] < ema200_1w_aligned[i])
-        exit_short = (bear_power[i] >= 0 or not bear_falling or close[i] > ema200_1w_aligned[i])
-        
-        if long_condition and position <= 0:
+        # Long conditions: oversold (%R < -80) in bullish alignment + volume confirmation
+        if (williams_r_aligned[i] < -80 and 
+            close[i] > sma_50_aligned[i] and  # Price above daily SMA50 (bullish alignment)
+            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
+            position <= 0):
             position = 1
             signals[i] = base_size
-        elif short_condition and position >= 0:
+        
+        # Short conditions: overbought (%R > -20) in bearish alignment + volume confirmation
+        elif (williams_r_aligned[i] > -20 and 
+              close[i] < sma_50_aligned[i] and  # Price below daily SMA50 (bearish alignment)
+              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
+              position >= 0):
             position = -1
             signals[i] = -base_size
-        elif position == 1 and exit_long:
+        
+        # Exit conditions: reverse signal or extreme reversion
+        elif position == 1 and (williams_r_aligned[i] > -20 or close[i] < sma_50_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and exit_short:
+        elif position == -1 and (williams_r_aligned[i] < -80 or close[i] > sma_50_aligned[i]):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "6h_ElderRay_WeeklyTrend_Filter"
-timeframe = "6h"
+name = "4h_WilliamsR_MeanReversion_DailyTrend"
+timeframe = "4h"
 leverage = 1.0
