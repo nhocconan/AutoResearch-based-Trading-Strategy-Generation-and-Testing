@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h mean-reversion strategy using 1d Bollinger Bands and 1h RSI with volume confirmation
-# Uses 1d Bollinger Bands (20, 2.0) for mean-reversion zones and 1h RSI(14) for oversold/overbought
-# Volume filter ensures trades occur during high conviction periods
-# Designed for low trade frequency (target 15-35/year) to avoid fee drag
-# Works in ranging markets (mean reversion at BB extremes) and trending markets (avoid trades against trend)
+# Hypothesis: 1h momentum strategy using 4h RSI divergence with volume confirmation
+# Uses 4h RSI(14) for momentum direction and 1h volume spike for entry timing
+# Enters long when 4h RSI < 40 (bullish momentum) and 1h volume > 2x 20-period average
+# Enters short when 4h RSI > 60 (bearish momentum) and 1h volume > 2x 20-period average
+# Designed for low trade frequency (target 15-30/year) to avoid fee drag
+# Works in trending markets (momentum continuation) and avoids ranging markets
 # Uses discrete position sizing (0.20) to minimize churn
 
 def generate_signals(prices):
@@ -20,26 +21,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data once
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 4h data once
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # 1d Bollinger Bands (20, 2.0)
-    close_1d = df_1d['close'].values
-    sma20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb_1d = sma20_1d + 2.0 * std20_1d
-    lower_bb_1d = sma20_1d - 2.0 * std20_1d
-    
-    # 1h RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
+    # 4h RSI(14) for momentum
+    close_4h = df_4h['close'].values
+    delta = np.diff(close_4h, prepend=close_4h[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
     avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
     rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1h = 100 - (100 / (1 + rs))
+    rsi_4h = 100 - (100 / (1 + rs))
     
     # 1h volume moving average for confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,35 +51,34 @@ def generate_signals(prices):
         if not (8 <= hours[i] <= 20):
             continue
         
-        # Get aligned indicators
-        upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)[i]
-        lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)[i]
+        # Get aligned 4h RSI
+        rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)[i]
         
         # Skip if not enough data
-        if np.isnan(upper_bb_aligned) or np.isnan(lower_bb_aligned) or np.isnan(rsi_1h[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(rsi_4h_aligned) or np.isnan(volume_ma[i]):
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        vol_confirm = volume[i] > 1.3 * volume_ma[i]
+        # Volume confirmation: current volume > 2.0x 20-period average
+        vol_confirm = volume[i] > 2.0 * volume_ma[i]
         
-        # Long conditions: price touches lower BB (oversold) AND RSI < 30 (oversold momentum)
-        if close[i] <= lower_bb_aligned and rsi_1h[i] < 30 and vol_confirm and position <= 0:
+        # Long conditions: 4h RSI < 40 (bullish momentum) AND volume spike
+        if rsi_4h_aligned < 40 and vol_confirm and position <= 0:
             position = 1
             signals[i] = position_size
-        # Short conditions: price touches upper BB (overbought) AND RSI > 70 (overbought momentum)
-        elif close[i] >= upper_bb_aligned and rsi_1h[i] > 70 and vol_confirm and position >= 0:
+        # Short conditions: 4h RSI > 60 (bearish momentum) AND volume spike
+        elif rsi_4h_aligned > 60 and vol_confirm and position >= 0:
             position = -1
             signals[i] = -position_size
-        # Exit: price returns to middle of BB or RSI returns to neutral zone
-        elif position == 1 and (close[i] >= sma20_1d[i//24] if i >= 24 else close[i] or rsi_1h[i] > 50):
+        # Exit: 4h RSI returns to neutral zone (40-60)
+        elif position == 1 and rsi_4h_aligned >= 50:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] <= sma20_1d[i//24] if i >= 24 else close[i] or rsi_1h[i] < 50):
+        elif position == -1 and rsi_4h_aligned <= 50:
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "1h_1d_BB_RSI_MeanReversion"
+name = "1h_4h_RSI_Momentum_Volume"
 timeframe = "1h"
 leverage = 1.0
