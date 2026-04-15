@@ -13,62 +13,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h timeframe
-    daily12h = get_htf_data(prices, '12h')
-    close_12h = daily12h['close'].values
-    high_12h = daily12h['high'].values
-    low_12h = daily12h['low'].values
+    # 1d ATR(14) for volatility filter
+    daily = get_htf_data(prices, '1d')
+    high_d = daily['high'].values
+    low_d = daily['low'].values
+    close_d = daily['close'].values
     
-    # 12h EMA200 for trend filter
-    close_12h_series = pd.Series(close_12h)
-    ema200_12h = close_12h_series.ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_12h_aligned = align_htf_to_ltf(prices, daily12h, ema200_12h)
+    # Calculate True Range
+    tr1 = high_d[1:] - low_d[1:]
+    tr2 = np.abs(high_d[1:] - close_d[:-1])
+    tr3 = np.abs(low_d[1:] - close_d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # 12h ATR(14) for volatility filter
-    tr1 = np.maximum(high_12h[1:] - low_12h[1:], np.abs(high_12h[1:] - close_12h[:-1]))
-    tr2 = np.maximum(np.abs(low_12h[1:] - close_12h[:-1]), tr1)
-    tr = np.concatenate([[np.nan], tr2])
-    atr_14_12h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_12h_aligned = align_htf_to_ltf(prices, daily12h, atr_14_12h)
+    # ATR calculation with proper min_periods
+    atr_14d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14d_aligned = align_htf_to_ltf(prices, daily, atr_14d)
     
-    # 12h Donchian channels (20-period)
-    donch_high_12h = np.full(len(close_12h), np.nan)
-    donch_low_12h = np.full(len(close_12h), np.nan)
-    for i in range(20, len(close_12h)):
-        donch_high_12h[i] = np.max(high_12h[i-20:i])
-        donch_low_12h[i] = np.min(low_12h[i-20:i])
-    donch_high_12h_aligned = align_htf_to_ltf(prices, daily12h, donch_high_12h)
-    donch_low_12h_aligned = align_htf_to_ltf(prices, daily12h, donch_low_12h)
-    
-    # 6h volume filter: 2.0x median of last 20 bars
+    # Volume threshold: 2.0x median of last 20 bars (more restrictive)
     vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median()
     vol_threshold = 2.0 * vol_median
     
+    # ATR-based volatility filter: require ATR > 0.5% of price (avoid low volatility chop)
+    vol_filter = atr_14d_aligned > (0.005 * close)
+    
     signals = np.zeros(n)
     
-    for i in range(200, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema200_12h_aligned[i]) or np.isnan(atr_14_12h_aligned[i]) or
-            np.isnan(donch_high_12h_aligned[i]) or np.isnan(donch_low_12h_aligned[i]) or
-            np.isnan(vol_threshold[i])):
+        if (np.isnan(atr_14d_aligned[i]) or np.isnan(vol_threshold[i]) or 
+            np.isnan(vol_filter[i])):
             continue
         
-        # Long: Price above EMA200 + breaks above 12h Donchian high + volume spike
-        if (close[i] > ema200_12h_aligned[i] and 
-            close[i] > donch_high_12h_aligned[i] and 
+        # Only trade when volatility is sufficient (avoid chop)
+        if not vol_filter[i]:
+            signals[i] = 0.0
+            continue
+            
+        # Long: Close above prior close + volume spike
+        if (close[i] > close[i-1] and 
             volume[i] > vol_threshold[i]):
             signals[i] = 0.25
         
-        # Short: Price below EMA200 + breaks below 12h Donchian low + volume spike
-        elif (close[i] < ema200_12h_aligned[i] and 
-              close[i] < donch_low_12h_aligned[i] and 
+        # Short: Close below prior close + volume spike
+        elif (close[i] < close[i-1] and 
               volume[i] > vol_threshold[i]):
             signals[i] = -0.25
         
-        # Exit: price returns to middle of 12h Donchian channel
-        elif (i > 0 and 
-              ((signals[i-1] == 0.25 and close[i] < (donch_high_12h_aligned[i] + donch_low_12h_aligned[i]) / 2) or
-               (signals[i-1] == -0.25 and close[i] > (donch_high_12h_aligned[i] + donch_low_12h_aligned[i]) / 2))):
+        # Exit: reverse signal on opposite direction
+        elif (close[i] < close[i-1] and signals[i-1] > 0) or \
+             (close[i] > close[i-1] and signals[i-1] < 0):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -77,6 +70,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_EMA200_Donchian20_Vol2x_Trend"
-timeframe = "6h"
+name = "4h_Volatility_Volume_Momentum"
+timeframe = "4h"
 leverage = 1.0
