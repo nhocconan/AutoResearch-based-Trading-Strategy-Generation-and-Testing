@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -42,7 +42,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
         if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_20_1d_aligned[i]) or 
             np.isnan(rsi_14_1d_aligned[i])):
@@ -74,6 +74,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA20_RSI14_VolFilter_v1"
-timeframe = "4h"
+name = "1d_EMA20_RSI14_VolFilter_v1"
+timeframe = "1d"
 leverage = 1.0
