@@ -3,12 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d chop regime filter
-# Long when price breaks above Donchian high + volume > 1.8x 20-bar avg + choppy market (CHOP > 61.8)
-# Short when price breaks below Donchian low + volume > 1.8x 20-bar avg + choppy market (CHOP > 61.8)
-# Uses strict volume filter (1.8x) to reduce trades to target range (20-40/year)
-# Chop regime ensures breakouts occur in ranging markets where mean reversion fails, increasing edge
-# Designed for low trade frequency to minimize fee drag while capturing asymmetric breakouts
+# Hypothesis: 4h Bollinger Band squeeze breakout with volume confirmation and 1d trend filter
+# Long when price breaks above upper BB(20,2) + BB width < 20th percentile (squeeze) + volume > 1.5x avg + 1d close > 1d EMA50
+# Short when price breaks below lower BB(20,2) + BB width < 20th percentile + volume > 1.5x avg + 1d close < 1d EMA50
+# Designed for low trade frequency (20-40/year) to minimize fee drag while capturing volatility expansion in ranging markets
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,42 +21,37 @@ def generate_signals(prices):
     # Get 4h and 1d HTF data once before loop
     df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 30 or len(df_1d) < 30:
+    if len(df_4h) < 50 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 4h Indicators: Donchian Channel (20) ===
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    # === 4h Indicators: Bollinger Bands (20,2) ===
+    close_4h = df_4h['close'].values
+    sma_20 = pd.Series(close_4h).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_4h).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + (2 * std_20)
+    lower_bb = sma_20 - (2 * std_20)
+    bb_width = (upper_bb - lower_bb) / sma_20  # normalized width
     
-    # === 1d Indicators: ATR for Choppy Market Calculation ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    upper_bb_aligned = align_htf_to_ltf(prices, df_4h, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_4h, lower_bb)
+    bb_width_aligned = align_htf_to_ltf(prices, df_4h, bb_width)
+    
+    # === 1d Indicators: EMA50 for trend filter ===
     close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    # Set first TR to high-low (no previous close)
-    tr[0] = high_1d[0] - low_1d[0]
+    # === 1d Indicators: BB width percentile for squeeze detection ===
+    # Calculate 1d BB width for regime filter
+    sma_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb_1d = sma_20_1d + (2 * std_20_1d)
+    lower_bb_1d = sma_20_1d - (2 * std_20_1d)
+    bb_width_1d = (upper_bb_1d - lower_bb_1d) / sma_20_1d
     
-    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Choppy Market Calculation: CHOP = 100 * log10(sum(ATR14) / (max(high)-min(low))) / log10(14)
-    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
-    
-    # Avoid division by zero and invalid values
-    denominator = max_high_14 - min_low_14
-    chop_raw = np.where(denominator > 0, sum_atr_14 / denominator, 1.0)
-    choppy_market = 100 * np.log10(np.maximum(chop_raw, 1e-10)) / np.log10(14)
-    choppy_market_aligned = align_htf_to_ltf(prices, df_1d, choppy_market)
+    # 20th percentile of BB width over 50 periods
+    bb_width_percentile = pd.Series(bb_width_1d).rolling(window=50, min_periods=50).quantile(0.20).values
+    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_1d, bb_width_percentile)
     
     signals = np.zeros(n)
     
@@ -66,28 +59,37 @@ def generate_signals(prices):
     warmup = 100
     
     for i in range(warmup, n):
-        # Volume filter: current volume > 1.8x 20-period volume SMA (stricter to reduce trades)
+        # Volume filter: current volume > 1.5x 20-period volume SMA
         vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.8)
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(choppy_market_aligned[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or
+            np.isnan(ema_50_aligned[i]) or np.isnan(bb_width_percentile_aligned[i]) or
+            np.isnan(bb_width_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 4h upper Donchian
-        # 2. Volume confirmation (strict 1.8x)
-        # 3. Choppy market regime (CHOP > 61.8 = ranging/mean reverting)
-        if (close[i] > donchian_high_aligned[i]) and vol_confirm and (choppy_market_aligned[i] > 61.8):
+        # 1. Price breaks above 4h upper Bollinger Band
+        # 2. Bollinger Band squeeze (width < 20th percentile)
+        # 3. Volume confirmation
+        # 4. 1d uptrend (close > EMA50)
+        if (close[i] > upper_bb_aligned[i]) and \
+           (bb_width_aligned[i] < bb_width_percentile_aligned[i]) and \
+           vol_confirm and \
+           (close_1d[-1] > ema_50[-1] if len(close_1d) > 0 else False):  # Use last available 1d close
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 4h lower Donchian
-        # 2. Volume confirmation (strict 1.8x)
-        # 3. Choppy market regime (CHOP > 61.8 = ranging/mean reverting)
-        elif (close[i] < donchian_low_aligned[i]) and vol_confirm and (choppy_market_aligned[i] > 61.8):
+        # 1. Price breaks below 4h lower Bollinger Band
+        # 2. Bollinger Band squeeze (width < 20th percentile)
+        # 3. Volume confirmation
+        # 4. 1d downtrend (close < EMA50)
+        elif (close[i] < lower_bb_aligned[i]) and \
+             (bb_width_aligned[i] < bb_width_percentile_aligned[i]) and \
+             vol_confirm and \
+             (close_1d[-1] < ema_50[-1] if len(close_1d) > 0 else False):  # Use last available 1d close
             signals[i] = -0.25
         
         else:
@@ -95,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_VolumeStrict_Chop_Filter_v1"
+name = "4h_BB20_Squeeze_Volume_Trend_Filter_v1"
 timeframe = "4h"
 leverage = 1.0
