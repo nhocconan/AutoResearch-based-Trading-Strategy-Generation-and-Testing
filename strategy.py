@@ -8,7 +8,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Short when price breaks below Donchian lower band + 1d EMA34 downtrend + volume > 1.8x 20-period avg
 # Uses discrete position sizing (0.25) to control drawdown and minimize fee drag.
 # 1d EMA34 provides strong trend filter reducing whipsaws in both bull and bear markets.
-# Volume threshold (1.8x) targets ~25-35 trades/year on 4h timeframe to avoid overtrading.
+# Volume threshold (1.8x) targets ~25-40 trades/year on 4h timeframe to avoid overtrading.
 # Donchian channels provide clear structure-based breakout levels that work in ranging and trending markets.
 
 def generate_signals(prices):
@@ -27,7 +27,7 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # === 1d Indicator: EMA34 ===
@@ -47,7 +47,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(50, 20) + 5  # EMA34 + Donchian(20) + volume(20) + buffer
+    warmup = max(34, 20) + 5  # EMA34 + Donchian(20) + volume(20) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
