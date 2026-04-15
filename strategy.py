@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d ADX regime filter and volume confirmation
-# Long when price breaks above 12h Donchian upper + 1d ADX > 25 (trending) + volume > 1.5x 20-period avg
-# Short when price breaks below 12h Donchian lower + 1d ADX > 25 (trending) + volume > 1.5x 20-period avg
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and chop regime filter
+# Long when price breaks above 20-period Donchian high + volume > 1.5x 20-period avg + CHOP > 61.8 (range)
+# Short when price breaks below 20-period Donchian low + volume > 1.5x 20-period avg + CHOP > 61.8 (range)
 # Uses discrete position sizing (0.25) to minimize fee drag and control drawdown.
-# 1d ADX > 25 ensures we only trade in trending markets, reducing whipsaws in ranging periods.
-# Volume threshold (1.5x) targets ~20-40 trades/year to minimize fee drag on 12h timeframe.
-# Donchian channels calculated from 12h data using 20-period lookback.
+# CHOP filter ensures we only trade in ranging markets where mean reversion works well.
+# Volume confirmation ensures breakouts have conviction.
+# Designed to work in both bull and bear markets by focusing on range-bound periods.
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,64 +25,39 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d HTF data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # === Donchian Channels (20-period) ===
+    # Upper band: highest high over last 20 periods
+    # Lower band: lowest low over last 20 periods
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 1d Indicator: ADX(14) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === Choppiness Index (CHOP) - 14 period ===
+    # CHOP = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(n)
+    # Where ATR = True Range, n = period
+    # High CHOP (>61.8) indicates ranging market
+    # Low CHOP (<38.2) indicates trending market
     
     # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = np.diff(low_1d, prepend=low_1d[0]) * -1  # Invert to positive
+    # ATR (14-period)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Sum of ATR over 14 periods
+    sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
     
-    # Smoothed TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
-    atr = np.zeros_like(tr)
-    plus_dm_smooth = np.zeros_like(plus_dm)
-    minus_dm_smooth = np.zeros_like(minus_dm)
+    # Max high and min low over 14 periods
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
     
-    # Initial values (first 14 periods)
-    atr[13] = np.mean(tr[1:14])
-    plus_dm_smooth[13] = np.mean(plus_dm[1:14])
-    minus_dm_smooth[13] = np.mean(minus_dm[1:14])
-    
-    # Wilder's smoothing for the rest
-    for i in range(14, len(tr)):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-        plus_dm_smooth[i] = (plus_dm_smooth[i-1] * 13 + plus_dm[i]) / 14
-        minus_dm_smooth[i] = (minus_dm_smooth[i-1] * 13 + minus_dm[i]) / 14
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / (atr + 1e-10)
-    minus_di = 100 * minus_dm_smooth / (atr + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = np.zeros_like(dx)
-    adx[27] = np.mean(dx[14:28])  # First ADX value after DX period
-    for i in range(28, len(dx)):
-        adx[i] = (adx[i-1] * 13 + dx[i]) / 14
-    
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # === 12h Donchian Channels (20-period) ===
-    # Upper band = highest high of last 20 periods
-    # Lower band = lowest low of last 20 periods
-    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Choppiness Index
+    chop = np.full(n, np.nan)
+    for i in range(n):
+        if not (np.isnan(sum_atr[i]) or np.isnan(max_high[i]) or np.isnan(min_low[i]) or max_high[i] == min_low[i]):
+            chop[i] = 100 * np.log10(sum_atr[i] / (max_high[i] - min_low[i])) / np.log10(14)
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -90,7 +65,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(50, 20) + 5  # ADX period + Donchian period + buffer
+    warmup = max(20, 14) + 5  # Donchian(20) + CHOP(14) + volume(20) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -99,28 +74,29 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(chop[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter: current volume > 1.5x 20-period volume SMA
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
+        # Choppiness filter: CHOP > 61.8 (ranging market)
+        chop_filter = chop[i] > 61.8
+        
         # === LONG CONDITIONS ===
-        # 1. Price breaks above Donchian upper band (close > upper)
-        # 2. 1d ADX > 25 (strong trend)
-        # 3. Volume confirmation
-        if (close[i] > high_max_20[i]) and \
-           (adx_aligned[i] > 25) and vol_confirm:
+        # 1. Price breaks above Donchian high (close > upper band)
+        # 2. Volume confirmation
+        # 3. Chop filter (ranging market)
+        if (close[i] > donchian_high[i]) and vol_confirm and chop_filter:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below Donchian lower band (close < lower)
-        # 2. 1d ADX > 25 (strong trend)
-        # 3. Volume confirmation
-        elif (close[i] < low_min_20[i]) and \
-             (adx_aligned[i] > 25) and vol_confirm:
+        # 1. Price breaks below Donchian low (close < lower band)
+        # 2. Volume confirmation
+        # 3. Chop filter (ranging market)
+        elif (close[i] < donchian_low[i]) and vol_confirm and chop_filter:
             signals[i] = -0.25
         
         else:
@@ -128,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dADX25_Volume_Filter_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Volume_Chop_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
