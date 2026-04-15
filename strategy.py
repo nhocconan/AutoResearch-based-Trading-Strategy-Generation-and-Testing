@@ -3,12 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d ADX trend filter + volume confirmation
-# Uses daily ADX to filter trend strength (ADX > 25) and 12h Donchian breakouts for entry.
-# Long when price breaks above 20-bar high and ADX > 25, short when breaks below 20-bar low and ADX > 25.
-# Volume confirmation requires > 1.5x 20-bar median volume.
-# Conservative sizing (0.25) to limit trade frequency and avoid fee drag.
-# Works in bull markets (breakouts with trend) and bear markets (breakouts with trend, but fewer signals).
+# Hypothesis: 4h ADX Trend + 1d RSI Mean Reversion + Volume Spike (1h timeframe)
+# Uses ADX(14) on 4h to filter for trending markets (ADX > 25).
+# In trending markets: long when 4h EMA(21) slope > 0 and RSI(14) < 40, short when EMA slope < 0 and RSI > 60.
+# In ranging markets (ADX <= 25): long when RSI(14) < 30, short when RSI(14) > 70.
+# Volume confirmation requires > 1.5x 20-bar median volume on 1h.
+# Session filter: only trade 08-20 UTC to avoid low-liquidity hours.
+# Designed to work in bull markets (trend following) and bear markets (mean reversion via RSI extremes).
+# Conservative sizing (0.20) to limit trade frequency and avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,47 +22,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day ADX(14) for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # 4h ADX(14) for trend strength
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
     # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = high_4h[1:] - low_4h[1:]
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
     
     # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    dm_plus = np.where((high_4h[1:] - high_4h[:-1]) > (low_4h[:-1] - low_4h[1:]), 
+                       np.maximum(high_4h[1:] - high_4h[:-1], 0), 0)
+    dm_minus = np.where((low_4h[:-1] - low_4h[1:]) > (high_4h[1:] - high_4h[:-1]), 
+                        np.maximum(low_4h[:-1] - low_4h[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
     # Smoothed values
-    tr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean()
-    dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False).mean()
-    dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False).mean()
+    tr_rolled = pd.Series(tr).rolling(window=14, min_periods=14).sum()
+    dm_plus_rolled = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum()
+    dm_minus_rolled = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum()
     
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_14 / (tr_14 + 1e-10)
-    di_minus = 100 * dm_minus_14 / (tr_14 + 1e-10)
-    
-    # DX and ADX
+    # Avoid division by zero
+    tr_rolled = tr_rolled.replace(0, np.nan)
+    di_plus = 100 * dm_plus_rolled / tr_rolled
+    di_minus = 100 * dm_minus_rolled / tr_rolled
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean()
-    adx_1d = adx.values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean()
+    adx_4h = adx.values
+    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
     
-    # 12h Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max()
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min()
-    donchian_high = high_roll.values
-    donchian_low = low_roll.values
+    # 4h EMA(21) for trend direction
+    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean()
+    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h.values)
+    ema_slope_4h = np.diff(ema_21_4h_aligned, prepend=ema_21_4h_aligned[0])
+    
+    # 1-day RSI(14) for mean reversion
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d.values)
     
     # Volume confirmation: current > 1.5x median of last 20 bars
     vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
@@ -68,29 +84,51 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    for i in range(20, n):  # Start after warmup
-        # Skip if any required data is NaN
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_threshold[i])):
+    for i in range(30, n):  # Start after warmup
+        # Skip if any required data is NaN or outside session
+        if (np.isnan(adx_4h_aligned[i]) or np.isnan(ema_slope_4h[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or np.isnan(vol_threshold[i]) or
+            not in_session[i]):
             continue
         
-        # Long: price breaks above Donchian high, ADX > 25, volume spike
-        if (close[i] > donchian_high[i] and 
-            adx_1d_aligned[i] > 25 and 
-            volume[i] > vol_threshold[i]):
-            signals[i] = 0.25
+        adx_val = adx_4h_aligned[i]
+        ema_slope = ema_slope_4h[i]
+        rsi = rsi_1d_aligned[i]
+        vol = volume[i]
+        vol_thresh = vol_threshold[i]
         
-        # Short: price breaks below Donchian low, ADX > 25, volume spike
-        elif (close[i] < donchian_low[i] and 
-              adx_1d_aligned[i] > 25 and 
-              volume[i] > vol_threshold[i]):
-            signals[i] = -0.25
+        # Trending market (ADX > 25): follow EMA slope with RSI filter
+        if adx_val > 25:
+            # Long: EMA upward slope, RSI oversold (<40), volume spike
+            if (ema_slope > 0 and 
+                rsi < 40 and 
+                vol > vol_thresh):
+                signals[i] = 0.20
+            
+            # Short: EMA downward slope, RSI overbought (>60), volume spike
+            elif (ema_slope < 0 and 
+                  rsi > 60 and 
+                  vol > vol_thresh):
+                signals[i] = -0.20
         
-        # Exit: price returns to middle of Donchian channel or ADX weakens
-        elif (i > 0 and 
-              ((signals[i-1] == 0.25 and (close[i] < donchian_high[i] * 0.95 or adx_1d_aligned[i] < 20)) or
-               (signals[i-1] == -0.25 and (close[i] > donchian_low[i] * 1.05 or adx_1d_aligned[i] < 20)))):
-            signals[i] = 0.0
+        # Ranging market (ADX <= 25): pure mean reversion
+        else:
+            # Long: RSI deeply oversold (<30), volume spike
+            if (rsi < 30 and 
+                vol > vol_thresh):
+                signals[i] = 0.20
+            
+            # Short: RSI deeply overbought (>70), volume spike
+            elif (rsi > 70 and 
+                  vol > vol_thresh):
+                signals[i] = -0.20
+        
+        # Exit conditions: ADX drops below 20 (trend weakening) or RSI returns to neutral range
+        if i > 0 and signals[i-1] != 0:
+            if (adx_4h_aligned[i] < 20 or 
+                (signals[i-1] == 0.20 and rsi >= 40) or 
+                (signals[i-1] == -0.20 and rsi <= 60)):
+                signals[i] = 0.0
         
         # Otherwise, hold previous position
         else:
@@ -98,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_ADX_Volume"
-timeframe = "12h"
+name = "4h_ADX_RSI1d_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
