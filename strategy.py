@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 12h ADX trend filter
-# Long when price breaks above 20-period Donchian high + volume > 1.5x 20-period avg + 12h ADX > 25 (strong trend)
-# Short when price breaks below 20-period Donchian low + volume > 1.5x 20-period avg + 12h ADX > 25 (strong trend)
-# Uses discrete position sizing (0.30) to minimize fee churn. Designed for low trade frequency (20-40/year).
+# Hypothesis: 1d Donchian(20) breakout with volume confirmation and 1w ADX trend filter
+# Long when price breaks above 20-day Donchian high + volume > 2.0x 20-period avg + 1w ADX > 25 (strong trend)
+# Short when price breaks below 20-day Donchian low + volume > 2.0x 20-period avg + 1w ADX > 25 (strong trend)
+# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (10-20/year).
 # Donchian channels provide clear breakout levels. ADX filter ensures we only trade strong trends, avoiding chop.
 # Works in bull markets (trend continuation) and bear markets (strong downtrends) by requiring ADX > 25.
+# Volume confirmation reduces false breakouts.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,33 +25,33 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 12h HTF data once before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 1w HTF data once before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # === 12h Indicator: ADX (trend strength filter) ===
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # === 1w Indicator: ADX (trend strength filter) ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # Calculate ADX components: +DM, -DM, TR
-    high_12h_shift = np.roll(high_12h, 1)
-    low_12h_shift = np.roll(low_12h, 1)
-    high_12h_shift[0] = high_12h[0]
-    low_12h_shift[0] = low_12h[0]
+    high_1w_shift = np.roll(high_1w, 1)
+    low_1w_shift = np.roll(low_1w, 1)
+    high_1w_shift[0] = high_1w[0]
+    low_1w_shift[0] = low_1w[0]
     
-    plus_dm = np.where((high_12h - high_12h_shift) > (low_12h_shift - low_12h), 
-                       np.maximum(high_12h - high_12h_shift, 0), 0)
-    minus_dm = np.where((low_12h_shift - low_12h) > (high_12h - high_12h_shift), 
-                        np.maximum(low_12h_shift - low_12h, 0), 0)
+    plus_dm = np.where((high_1w - high_1w_shift) > (low_1w_shift - low_1w), 
+                       np.maximum(high_1w - high_1w_shift, 0), 0)
+    minus_dm = np.where((low_1w_shift - low_1w) > (high_1w - high_1w_shift), 
+                        np.maximum(low_1w_shift - low_1w, 0), 0)
     
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr1[0] = high_12h[0] - low_12h[0]
-    tr2[0] = np.abs(high_12h[0] - close_12h[0])
-    tr3[0] = np.abs(low_12h[0] - close_12h[0])
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1[0] = high_1w[0] - low_1w[0]
+    tr2[0] = np.abs(high_1w[0] - close_1w[0])
+    tr3[0] = np.abs(low_1w[0] - close_1w[0])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
     # Wilder's smoothing (alpha = 1/period)
@@ -62,8 +63,8 @@ def generate_signals(prices):
     for i in range(period, len(tr)):
         atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
     
-    plus_di = 100 * (np.zeros_like(plus_dm))
-    minus_di = 100 * (np.zeros_like(minus_dm))
+    plus_di = np.zeros_like(plus_dm)
+    minus_di = np.zeros_like(minus_dm)
     
     # Smooth +DM and -DM
     plus_dm_smooth = np.zeros_like(plus_dm)
@@ -88,19 +89,22 @@ def generate_signals(prices):
     for i in range(2*period, len(dx)):
         adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
     
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # === 1d Indicator: Donchian Channel (20-period) ===
+    lookback = 20
+    # Donchian high: max(high) over lookback period
+    donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    # Donchian low: min(low) over lookback period
+    donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Donchian(20) channels
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 50
+    warmup = 100
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -108,8 +112,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
+        # Volume filter: current volume > 2.0x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
         
         # Skip if any required data is NaN
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
@@ -118,26 +122,26 @@ def generate_signals(prices):
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 20-period Donchian high
+        # 1. Price breaks above 20-day Donchian high
         # 2. Strong trend (ADX > 25)
         # 3. Volume confirmation
         if (close[i] > donchian_high[i]) and \
            (adx_aligned[i] > 25) and vol_confirm:
-            signals[i] = 0.30
+            signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 20-period Donchian low
+        # 1. Price breaks below 20-day Donchian low
         # 2. Strong trend (ADX > 25)
         # 3. Volume confirmation
         elif (close[i] < donchian_low[i]) and \
              (adx_aligned[i] > 25) and vol_confirm:
-            signals[i] = -0.30
+            signals[i] = -0.25
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "4h_Donchian20_Volume_12hADX25_Filter_v1"
-timeframe = "4h"
+name = "1d_Donchian20_Volume_1wADX25_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
