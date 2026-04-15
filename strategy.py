@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w ADX trend filter and volume confirmation
-# Long when price breaks above 1d Donchian upper (20-period) + 1w ADX > 25 + volume > 1.5x 20-period avg
-# Short when price breaks below 1d Donchian lower (20-period) + 1w ADX > 25 + volume > 1.5x 20-period avg
-# Uses discrete position sizing (0.30) to balance profit and drawdown. Designed for low trade frequency (7-25/year).
-# Donchian channels provide objective breakout levels. ADX filter ensures we only trade strong trends, avoiding chop.
-# Works in bull markets (trend continuation) and bear markets (strong downtrends) by requiring ADX > 25.
-# 1d timeframe minimizes fee drag while capturing significant moves.
+# Hypothesis: 6h Elder Ray + 1d Regime Filter
+# Bull Power = High - EMA13(close), Bear Power = EMA13(close) - Low
+# Long when Bull Power > 0 AND Bear Power < 0 AND 1d ADX < 20 (range regime) → mean reversion
+# Short when Bear Power > 0 AND Bull Power < 0 AND 1d ADX < 20 (range regime) → mean reversion
+# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (15-30/year).
+# Elder Ray measures bull/bear strength relative to EMA. Works in ranging markets by fading extremes when ADX shows no trend.
+# In trending markets (ADX >= 20), we stay flat to avoid whipsaws. Effective in both bull and bear markets as it targets mean reversion in ranges.
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,33 +25,33 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1w HTF data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 1d HTF data once before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1w Indicator: ADX (trend strength filter) ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === 1d Indicator: ADX (regime filter) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # Calculate ADX components: +DM, -DM, TR
-    high_1w_shift = np.roll(high_1w, 1)
-    low_1w_shift = np.roll(low_1w, 1)
-    high_1w_shift[0] = high_1w[0]
-    low_1w_shift[0] = low_1w[0]
+    high_1d_shift = np.roll(high_1d, 1)
+    low_1d_shift = np.roll(low_1d, 1)
+    high_1d_shift[0] = high_1d[0]
+    low_1d_shift[0] = low_1d[0]
     
-    plus_dm = np.where((high_1w - high_1w_shift) > (low_1w_shift - low_1w), 
-                       np.maximum(high_1w - high_1w_shift, 0), 0)
-    minus_dm = np.where((low_1w_shift - low_1w) > (high_1w - high_1w_shift), 
-                        np.maximum(low_1w_shift - low_1w, 0), 0)
+    plus_dm = np.where((high_1d - high_1d_shift) > (low_1d_shift - low_1d), 
+                       np.maximum(high_1d - high_1d_shift, 0), 0)
+    minus_dm = np.where((low_1d_shift - low_1d) > (high_1d - high_1d_shift), 
+                        np.maximum(low_1d_shift - low_1d, 0), 0)
     
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1[0] = high_1w[0] - low_1w[0]
-    tr2[0] = np.abs(high_1w[0] - close_1w[0])
-    tr3[0] = np.abs(low_1w[0] - close_1w[0])
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]
+    tr2[0] = np.abs(high_1d[0] - close_1d[0])
+    tr3[0] = np.abs(low_1d[0] - close_1d[0])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
     # Wilder's smoothing (alpha = 1/period)
@@ -89,20 +89,20 @@ def generate_signals(prices):
     for i in range(2*period, len(dx)):
         adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
     
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # === 1d Indicator: Donchian Channel (20-period) ===
-    donchian_window = 20
-    donchian_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    donchian_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    # === 6h Indicator: Elder Ray (Bull Power, Bear Power) ===
+    ema_period = 13
+    close_s = pd.Series(close)
+    ema13 = close_s.ewm(span=ema_period, adjust=False, min_periods=ema_period).mean().values
     
-    # Volume SMA for confirmation (using 20-period)
-    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    bull_power = high - ema13
+    bear_power = ema13 - low
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(donchian_window, 2*period) + 20  # Donchian(20) + ADX(28) + volume(20)
+    warmup = max(ema_period, 2*period)  # EMA13 + ADX(28)
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -110,36 +110,46 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
-        
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Range regime: 1d ADX < 20 (no strong trend)
+        if adx_aligned[i] >= 20:
+            signals[i] = 0.0  # flat in trending markets
+            continue
+        
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 1d Donchian upper (20-period)
-        # 2. Trend (1w ADX > 25)
-        # 3. Volume confirmation
-        if (close[i] > donchian_high[i]) and \
-           (adx_aligned[i] > 25) and vol_confirm:
-            signals[i] = 0.30
+        # Bull Power > 0 (strong bulls) AND Bear Power < 0 (weak bears) = bullish extreme in range → mean reversion short?
+        # Actually, we want to fade extremes: when Bull Power > 0 AND Bear Power < 0, it's balanced but bulls slightly stronger
+        # Let's reverse: Long when Bear Power > 0 AND Bull Power < 0 (bears stronger but bulls weak → bullish reversal)
+        # Wait, let's think: Elder Ray interpretation:
+        # - Bull Power > 0: Bulls in control (price above EMA)
+        # - Bear Power > 0: Bears in control (price below EMA)
+        # For mean reversion in range:
+        # Long when Bear Power > 0 AND Bull Power < 0 (price below EMA but bulls weak → oversold?)
+        # Actually standard Elder Ray:
+        # - Bull Power increasing: bulls gaining strength
+        # - Bear Power increasing: bears gaining strength
+        # Let's use divergence: Long when Bull Power > 0 and rising AND Bear Power < 0 and falling
+        # But that's complex. Simpler: Long when Bear Power > 0 (bears in control) AND Bull Power < 0 (bulls weak) AND Bear Power declining?
+        # No, let's look at what works: fade when one power is extreme.
+        # Long when Bear Power > 0 (extreme bearish) AND Bull Power < 0 (bulls weak) → oversold
+        # Short when Bull Power > 0 (extreme bullish) AND Bear Power < 0 (bears weak) → overbought
         
-        # === SHORT CONDITIONS ===
-        # 1. Price breaks below 1d Donchian lower (20-period)
-        # 2. Trend (1w ADX > 25)
-        # 3. Volume confirmation
-        elif (close[i] < donchian_low[i]) and \
-             (adx_aligned[i] > 25) and vol_confirm:
-            signals[i] = -0.30
-        
+        # Extreme bearish: Bear Power > 0 AND Bull Power < 0
+        # Extreme bullish: Bull Power > 0 AND Bear Power < 0
+        if (bear_power[i] > 0) and (bull_power[i] < 0):
+            signals[i] = 0.25  # long (fade bearish extreme)
+        elif (bull_power[i] > 0) and (bear_power[i] < 0):
+            signals[i] = -0.25  # short (fade bullish extreme)
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "1d_Donchian20_1wADX25_Volume_Filter_v1"
-timeframe = "1d"
+name = "6h_ElderRay_1dADX20_RangeFilter_v1"
+timeframe = "6h"
 leverage = 1.0
