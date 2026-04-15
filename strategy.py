@@ -24,6 +24,10 @@ def generate_signals(prices):
     donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
     donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
     
+    # Calculate daily EMA(34) for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
     # Calculate daily ATR(14) for volatility filter
     tr1 = df_1d['high'] - df_1d['low']
     tr2 = np.abs(df_1d['high'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
@@ -37,7 +41,7 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if any required data is NaN
         if (np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or 
-            np.isnan(atr_14_1d_aligned[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -45,16 +49,20 @@ def generate_signals(prices):
         vol_filter = atr_14_1d_aligned[i] > 0.003 * close[i]
         
         # Long conditions:
-        # 1. Price breaks above daily Donchian(20) high
-        # 2. Volatility filter
-        if (close[i] > donchian_high_20_aligned[i] and
+        # 1. Price above daily EMA34 (bullish bias)
+        # 2. Price breaks above daily Donchian(20) high
+        # 3. Volatility filter
+        if (close[i] > ema_34_1d_aligned[i] and
+            close[i] > donchian_high_20_aligned[i] and
             vol_filter):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Price breaks below daily Donchian(20) low
-        # 2. Volatility filter
-        elif (close[i] < donchian_low_20_aligned[i] and
+        # 1. Price below daily EMA34 (bearish bias)
+        # 2. Price breaks below daily Donchian(20) low
+        # 3. Volatility filter
+        elif (close[i] < ema_34_1d_aligned[i] and
+              close[i] < donchian_low_20_aligned[i] and
               vol_filter):
             signals[i] = -0.25
         else:
@@ -62,6 +70,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_VolFilter_v1"
-timeframe = "1d"
+name = "6h_EMA34_Donchian20_VolFilter_v1"
+timeframe = "6h"
 leverage = 1.0
