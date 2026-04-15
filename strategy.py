@@ -72,7 +72,7 @@ def generate_signals(prices):
             close[i] > ema_200_1d_aligned[i] and
             volume_ratio[i] > 1.5 and
             atr_14[i] > 0.003 * close[i]):
-            signals[i] = 0.25
+            signals[i] = 0.20
             
         # Short conditions:
         # 1. 1h price breaks below 4h Donchian lower (20)
@@ -83,12 +83,12 @@ def generate_signals(prices):
               close[i] < ema_200_1d_aligned[i] and
               volume_ratio[i] > 1.5 and
               atr_14[i] > 0.003 * close[i]):
-            signals[i] = -0.25
+            signals[i] = -0.20
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1h_4h_Donchian20_1d_EMA200_Volume_Filter_v2"
+name = "1h_4h_Donchian20_1d_EMA200_Volume_Filter_v3"
 timeframe = "1h"
 leverage = 1.0
