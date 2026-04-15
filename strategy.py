@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Weekly Range Breakout with Volume Confirmation and Trend Filter
-# Uses previous week's high/low as support/resistance. Breakouts above weekly high or below weekly low
-# are traded only when confirmed by volume (1.5x median) and weekly trend (close > weekly SMA50 for long, < for short).
-# Works in bull markets (breakouts up) and bear markets (breakouts down). Target: 30-100 total trades.
-# Timeframe: 1d, HTF: 1w
+# Hypothesis: 12h Williams Alligator with 1-day ATR Filter
+# Uses Williams Alligator (Jaw/Teeth/Lips) on 12h timeframe to identify trends.
+# Enters long when Lips > Teeth > Jaw (bullish alignment) and price > Lips,
+# enters short when Lips < Teeth < Jaw (bearish alignment) and price < Lips.
+# Filters trades using 1-day ATR volatility: only trade when ATR(14) > median ATR(50) to avoid low-volatility chop.
+# Works in bull markets (captures uptrends) and bear markets (captures downtrends).
+# Target: 50-150 total trades over 4 years (12-37/year).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,69 +21,122 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data for previous week's high/low and trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 12h data for Williams Alligator
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 34:
         return np.zeros(n)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Previous week's high and low (shifted by 1 to avoid look-ahead)
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_high_1w[0] = np.nan  # First value has no previous week
-    prev_low_1w[0] = np.nan
+    # Load 1d data for ATR filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align previous week's high/low to daily timeframe
-    prev_high_1w_aligned = align_htf_to_ltf(prices, df_1w, prev_high_1w)
-    prev_low_1w_aligned = align_htf_to_ltf(prices, df_1w, prev_low_1w)
+    # Williams Alligator on 12h: SMMA (Smoothed Moving Average)
+    # Jaw: 13-period SMMA of median price, shifted 8 bars
+    # Teeth: 8-period SMMA of median price, shifted 5 bars
+    # Lips: 5-period SMMA of median price, shifted 3 bars
+    median_price_12h = (high_12h + low_12h) / 2
     
-    # Weekly trend: close > SMA50 for bullish, < SMA50 for bearish
-    sma50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
-    weekly_bullish = close_1w > sma50_1w
-    weekly_bearish = close_1w < sma50_1w
+    def smma(arr, period):
+        """Smoothed Moving Average"""
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        # First value is simple SMA
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Align weekly trend to daily timeframe
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
+    jaw = smma(median_price_12h, 13)
+    teeth = smma(median_price_12h, 8)
+    lips = smma(median_price_12h, 5)
+    
+    # Shift the lines as per Alligator definition
+    jaw = np.roll(jaw, 8)
+    teeth = np.roll(teeth, 5)
+    lips = np.roll(lips, 3)
+    
+    # Align Alligator lines to 12h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
+    
+    # ATR on 1d for volatility filter
+    def calculate_atr(high, low, close, period):
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # First value
+        atr = np.full_like(tr, np.nan)
+        for i in range(period, len(tr)):
+            if i == period:
+                atr[i] = np.mean(tr[:period])
+            else:
+                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        return atr
+    
+    atr_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
+    atr_ma_1d = np.full_like(atr_1d, np.nan)
+    for i in range(50, len(atr_1d)):
+        if i == 50:
+            atr_ma_1d[i] = np.mean(atr_1d[:50])
+        else:
+            atr_ma_1d[i] = (atr_ma_1d[i-1] * 49 + atr_1d[i]) / 50
+    
+    # Align ATR and its MA to 12h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
     
     signals = np.zeros(n)
     position = 0
     base_size = 0.25  # Position size
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(prev_high_1w_aligned[i]) or np.isnan(prev_low_1w_aligned[i]) or
-            np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(atr_ma_1d_aligned[i])):
             continue
         
-        # Long entry: price breaks above previous week's high + volume confirmation + weekly bullish trend
-        if (close[i] > prev_high_1w_aligned[i] and
-            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-            weekly_bullish_aligned[i] > 0.5 and
+        # Volatility filter: only trade when ATR > MA(ATR) (avoid low-volatility chop)
+        vol_filter = atr_1d_aligned[i] > atr_ma_1d_aligned[i]
+        
+        # Bullish alignment: Lips > Teeth > Jaw
+        bullish_alignment = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
+        # Bearish alignment: Lips < Teeth < Jaw
+        bearish_alignment = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
+        
+        # Long entry: bullish alignment + price above Lips + volatility filter
+        if (bullish_alignment and close[i] > lips_aligned[i] and vol_filter and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below previous week's low + volume confirmation + weekly bearish trend
-        elif (close[i] < prev_low_1w_aligned[i] and
-              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-              weekly_bearish_aligned[i] > 0.5 and
+        # Short entry: bearish alignment + price below Lips + volatility filter
+        elif (bearish_alignment and close[i] < lips_aligned[i] and vol_filter and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse breakout or trend change
-        elif position == 1 and (close[i] < prev_low_1w_aligned[i] or weekly_bullish_aligned[i] <= 0.5):
+        # Exit: opposite alignment or volatility filter fails
+        elif position == 1 and (not bullish_alignment or not vol_filter):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > prev_high_1w_aligned[i] or weekly_bearish_aligned[i] <= 0.5):
+        elif position == -1 and (not bearish_alignment or not vol_filter):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "1d_1w_Range_Breakout_Volume_Trend"
-timeframe = "1d"
+name = "12h_Williams_Alligator_ATR_Filter"
+timeframe = "12h"
 leverage = 1.0
