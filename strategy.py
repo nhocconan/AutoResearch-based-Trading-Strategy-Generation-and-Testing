@@ -13,96 +13,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h HTF data once before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    # Calculate 4h Donchian channels (20-period)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    upper_20_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lower_20_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    
-    # Align 4h Donchian to 15m
-    upper_20_15m = align_htf_to_ltf(prices, df_4h, upper_20_4h)
-    lower_20_15m = align_htf_to_ltf(prices, df_4h, lower_20_4h)
-    
-    # Get 1d HTF data for weekly pivot levels
+    # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate weekly pivot points from prior week (using 1d data)
-    # Weekly high/low/close from 5 trading days ago (prior week)
-    weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().shift(5).values
-    weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().shift(5).values
-    weekly_close = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).last().shift(5).values
+    # Calculate 1d Donchian channels (20-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    upper_20_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_20_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Weekly pivot: (H+L+C)/3
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    # Weekly R1: 2*P - L
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    # Weekly S1: 2*P - H
-    weekly_s1 = 2 * weekly_pivot - weekly_high
+    # Align 1d Donchian to 1d (no shift needed, already aligned to daily close)
+    upper_20_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_20_1d)
+    lower_20_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_20_1d)
     
-    # Align weekly pivot levels to 15m
-    weekly_pivot_15m = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-    weekly_r1_15m = align_htf_to_ltf(prices, df_1d, weekly_r1)
-    weekly_s1_15m = align_htf_to_ltf(prices, df_1d, weekly_s1)
+    # Get 1w HTF data for weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # Calculate 15m ATR(14) for volatility filter
+    # Calculate 1w EMA(50) for weekly trend
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 1w EMA50 to 1d
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate 1d ATR(14) for volatility filter
     tr1 = high - low
     tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
     tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 15m volume ratio (current vs 20-period average)
+    # Calculate 1d volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
     signals = np.zeros(n)
     
-    # Precompute session filter (8-20 UTC for 15m)
+    # Precompute session filter (00-24 UTC for 1d - full day)
     hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    in_session = (hours >= 0) & (hours <= 23)  # Always true for 1d, kept for structure
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_20_15m[i]) or np.isnan(lower_20_15m[i]) or 
-            np.isnan(weekly_pivot_15m[i]) or np.isnan(weekly_r1_15m[i]) or 
-            np.isnan(weekly_s1_15m[i]) or np.isnan(atr_14[i]) or 
+        if (np.isnan(upper_20_1d_aligned[i]) or np.isnan(lower_20_1d_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr_14[i]) or 
             np.isnan(volume_ratio[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
         # Long conditions:
-        # 1. 15m price breaks above 4h Donchian upper (20) - bullish breakout
-        # 2. Price above weekly pivot (bullish bias from prior week)
-        # 3. Volume confirmation: volume > 1.3x average
-        # 4. Volatility filter: ATR > 0.4% of price (avoid low volatility chop)
-        if (close[i] > upper_20_15m[i] and
-            close[i] > weekly_pivot_15m[i] and
-            volume_ratio[i] > 1.3 and
-            atr_14[i] > 0.004 * close[i]):
+        # 1. 1d price breaks above 1d Donchian upper (20) - bullish breakout
+        # 2. Price above weekly EMA50 (bullish weekly trend)
+        # 3. Volume confirmation: volume > 1.5x average
+        # 4. Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
+        if (close[i] > upper_20_1d_aligned[i] and
+            close[i] > ema_50_1w_aligned[i] and
+            volume_ratio[i] > 1.5 and
+            atr_14[i] > 0.005 * close[i]):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. 15m price breaks below 4h Donchian lower (20) - bearish breakdown
-        # 2. Price below weekly pivot (bearish bias from prior week)
-        # 3. Volume confirmation: volume > 1.3x average
-        # 4. Volatility filter: ATR > 0.4% of price
-        elif (close[i] < lower_20_15m[i] and
-              close[i] < weekly_pivot_15m[i] and
-              volume_ratio[i] > 1.3 and
-              atr_14[i] > 0.004 * close[i]):
+        # 1. 1d price breaks below 1d Donchian lower (20) - bearish breakdown
+        # 2. Price below weekly EMA50 (bearish weekly trend)
+        # 3. Volume confirmation: volume > 1.5x average
+        # 4. Volatility filter: ATR > 0.5% of price
+        elif (close[i] < lower_20_1d_aligned[i] and
+              close[i] < ema_50_1w_aligned[i] and
+              volume_ratio[i] > 1.5 and
+              atr_14[i] > 0.005 * close[i]):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "15m_4h_Donchian20_1d_WeeklyPivot_Volume_Filter_v1"
-timeframe = "15m"
+name = "1d_Donchian20_1w_EMA50_Volume_Filter_v2"
+timeframe = "1d"
 leverage = 1.0
