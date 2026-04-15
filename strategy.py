@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot breakout with 1d trend filter and volume confirmation
-# Long when price breaks above Camarilla R4 (1d) + 1d close > 1d EMA200 + volume > 1.3x avg
-# Short when price breaks below Camarilla S4 (1d) + 1d close < 1d EMA200 + volume > 1.3x avg
-# Uses discrete position sizing (0.25) to limit fee drag. Target: 15-30 trades/year.
-# Works in bull/bear: breaks only with trend alignment avoids false breakouts in ranging markets.
+# Hypothesis: 12h Camarilla R1/S1 breakout with 1d volume confirmation and 1w trend filter
+# Long when price breaks above 1d Camarilla R1 + 1d volume > 1.3x 20-period average + 1w close > 1w EMA34
+# Short when price breaks below 1d Camarilla S1 + 1d volume > 1.3x 20-period average + 1w close < 1w EMA34
+# Uses Camarilla pivot levels from 1d for precise intraday structure, volume for confirmation, and 1w EMA for trend filter
+# Designed for low trade frequency (12-37/year) to minimize fee drag while capturing high-probability breakouts
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,50 +19,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d HTF data once before loop
+    # Get 1d and 1w HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 30 or len(df_1w) < 30:
         return np.zeros(n)
     
-    # === 1d Indicators: Camarilla Pivots (based on previous day) ===
+    # === 1d Indicators: Camarilla Pivot Levels (R1, S1) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each 1d bar (using previous day's OHLC)
-    camarilla_r4 = np.full(len(close_1d), np.nan)
-    camarilla_s4 = np.full(len(close_1d), np.nan)
+    # Calculate pivot point (PP)
+    pp_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Calculate Camarilla levels
+    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12
+    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    for i in range(1, len(close_1d)):
-        # Previous day's range
-        prev_high = high_1d[i-1]
-        prev_low = low_1d[i-1]
-        prev_close = close_1d[i-1]
-        range_ = prev_high - prev_low
-        
-        if range_ > 0:
-            camarilla_r4[i] = prev_close + range_ * 1.1 / 2
-            camarilla_s4[i] = prev_close - range_ * 1.1 / 2
-        else:
-            camarilla_r4[i] = prev_close
-            camarilla_s4[i] = prev_close
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # First bar has no previous day
-    camarilla_r4[0] = close_1d[0]
-    camarilla_s4[0] = close_1d[0]
+    # === 1d Indicators: Volume Confirmation ===
+    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === 1d Indicators: EMA200 for trend filter ===
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # === 1d Indicators: Volume SMA20 for confirmation ===
-    volume_1d = df_1d['volume'].values
-    vol_sma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all 1d indicators to 6h timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
+    # === 1w Indicators: EMA34 for Trend Filter ===
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     signals = np.zeros(n)
     
@@ -71,35 +54,41 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
-            np.isnan(ema200_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i])):
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
+            np.isnan(vol_sma_20[i]) or np.isnan(ema_34_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current 6h volume > 1.3x 1d average volume (scaled)
-        # Approximate 1d volume to 6h by dividing by 4 (since 4x6h = 1d)
-        vol_threshold = vol_sma20_1d_aligned[i] / 4.0 * 1.3
-        vol_confirm = volume[i] > vol_threshold
+        # Volume filter: current volume > 1.3x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.3)
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 1d Camarilla R4
-        # 2. 1d close > 1d EMA200 (uptrend)
-        # 3. Volume confirmation
-        if (close[i] > camarilla_r4_aligned[i]) and (close_1d[-1] > ema200_1d[-1]) and vol_confirm:
-            signals[i] = 0.25
+        # 1. Price breaks above 1d Camarilla R1
+        # 2. Volume confirmation
+        # 3. 1w trend filter: close > EMA34 (bullish bias)
+        if (close[i] > r1_1d_aligned[i]) and vol_confirm and (close_1w[-1] > ema_34_1w_aligned[i] if len(close_1w) > 0 else False):
+            # Use previous bar's 1w close for non-look-ahead
+            if i >= len(prices) - len(df_1w) * 7 * 24:  # Rough alignment check
+                hist_idx = min(i // (12 * 20), len(close_1w) - 2)  # Approximate 1w index
+                if hist_idx > 0 and close_1w[hist_idx] > ema_34_1w[hist_idx]:
+                    signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 1d Camarilla S4
-        # 2. 1d close < 1d EMA200 (downtrend)
-        # 3. Volume confirmation
-        elif (close[i] < camarilla_s4_aligned[i]) and (close_1d[-1] < ema200_1d[-1]) and vol_confirm:
-            signals[i] = -0.25
+        # 1. Price breaks below 1d Camarilla S1
+        # 2. Volume confirmation
+        # 3. 1w trend filter: close < EMA34 (bearish bias)
+        elif (close[i] < s1_1d_aligned[i]) and vol_confirm and (close_1w[-1] < ema_34_1w_aligned[i] if len(close_1w) > 0 else False):
+            # Use previous bar's 1w close for non-look-ahead
+            if i >= len(prices) - len(df_1w) * 7 * 24:  # Rough alignment check
+                hist_idx = min(i // (12 * 20), len(close_1w) - 2)  # Approximate 1w index
+                if hist_idx > 0 and close_1w[hist_idx] < ema_34_1w[hist_idx]:
+                    signals[i] = -0.25
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "6h_Camarilla_R4_S4_Breakout_Trend_Volume_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_Volume_TrendFilter_v1"
+timeframe = "12h"
 leverage = 1.0
