@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d weekly Donchian breakout with volume confirmation and ADX trend filter
-# Uses weekly Donchian channels to capture long-term trends, volume to confirm breakout strength,
-# and ADX to ensure trending markets. Works in both bull and bear by taking breakouts
-# only in the direction of the weekly trend (EMA50).
-# Target: 30-100 total trades over 4 years (7-25/year) with disciplined entries.
+# Hypothesis: 6h Williams Alligator (Jaw/Teeth/Lips) with 1d volume regime filter
+# Uses Alligator to identify trends (JAW=13sma, TEETH=8sma, LIPS=5sma) and trades in direction of alignment
+# Volume filter ensures we only trade when 1d volume is above average (avoids low-volume false signals)
+# Works in bull/bear by following Alligator alignment: JAW>TEETH>LIPS = uptrend, reverse = downtrend
+# Target: 50-150 total trades over 4 years (12-37/year) with disciplined entries
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,101 +19,82 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data (HTF) for trend and Donchian channels
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 50:
+    # Load 6h data for price action
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
         return np.zeros(n)
     
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
-    volume_weekly = df_weekly['volume'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
     
-    # Calculate Donchian channels (20-period) on weekly
-    donch_high_weekly = pd.Series(high_weekly).rolling(window=20, min_periods=20).max().values
-    donch_low_weekly = pd.Series(low_weekly).rolling(window=20, min_periods=20).min().values
+    # Load 1d data for volume filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    volume_1d = df_1d['volume'].values
     
-    # Calculate EMA50 on weekly for trend filter
-    ema50_weekly = pd.Series(close_weekly).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Williams Alligator on 6h
+    # Jaw (blue): 13-period SMMA, shifted 8 bars forward
+    # Teeth (red): 8-period SMMA, shifted 5 bars forward  
+    # Lips (green): 5-period SMMA, shifted 3 bars forward
+    # Using SMA as approximation for SMMA (close enough for our purposes)
+    jaw_6h = pd.Series(close_6h).rolling(window=13, min_periods=13).mean().values
+    teeth_6h = pd.Series(close_6h).rolling(window=8, min_periods=8).mean().values
+    lips_6h = pd.Series(close_6h).rolling(window=5, min_periods=5).mean().values
     
-    # Calculate ADX (14-period) on weekly for trend strength
-    # True Range
-    tr1 = high_weekly - low_weekly
-    tr2 = np.abs(high_weekly - np.roll(close_weekly, 1))
-    tr3 = np.abs(low_weekly - np.roll(close_weekly, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    # Shift to align with Alligator methodology
+    jaw_6h = np.roll(jaw_6h, 8)
+    teeth_6h = np.roll(teeth_6h, 5)
+    lips_6h = np.roll(lips_6h, 3)
+    # Set shifted values to NaN
+    jaw_6h[:8] = np.nan
+    teeth_6h[:5] = np.nan
+    lips_6h[:3] = np.nan
     
-    # Directional Movement
-    dm_plus = np.where((high_weekly - np.roll(high_weekly, 1)) > (np.roll(low_weekly, 1) - low_weekly),
-                       np.maximum(high_weekly - np.roll(high_weekly, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_weekly, 1) - low_weekly) > (high_weekly - np.roll(high_weekly, 1)),
-                        np.maximum(np.roll(low_weekly, 1) - low_weekly, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Calculate 1d volume average (20-period)
+    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Smoothed values
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
-    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_14 / (tr14 + 1e-10)
-    di_minus = 100 * dm_minus_14 / (tr14 + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Volume average (20-period on weekly)
-    vol_avg_weekly = pd.Series(volume_weekly).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all indicators to daily timeframe
-    donch_high_weekly_aligned = align_htf_to_ltf(prices, df_weekly, donch_high_weekly)
-    donch_low_weekly_aligned = align_htf_to_ltf(prices, df_weekly, donch_low_weekly)
-    ema50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)
-    adx_aligned = align_htf_to_ltf(prices, df_weekly, adx)
-    vol_avg_aligned = align_htf_to_ltf(prices, df_weekly, vol_avg_weekly)
+    # Align all indicators to 6h timeframe
+    jaw_6h_aligned = align_htf_to_ltf(prices, df_6h, jaw_6h)
+    teeth_6h_aligned = align_htf_to_ltf(prices, df_6h, teeth_6h)
+    lips_6h_aligned = align_htf_to_ltf(prices, df_6h, lips_6h)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
     position = 0
     base_size = 0.25  # Position size
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(donch_high_weekly_aligned[i]) or np.isnan(donch_low_weekly_aligned[i]) or
-            np.isnan(ema50_weekly_aligned[i]) or np.isnan(adx_aligned[i]) or
-            np.isnan(vol_avg_aligned[i])):
+        if (np.isnan(jaw_6h_aligned[i]) or np.isnan(teeth_6h_aligned[i]) or
+            np.isnan(lips_6h_aligned[i]) or np.isnan(vol_avg_aligned[i])):
             continue
         
-        # Long entry: price breaks above weekly Donchian high + volume spike + ADX > 25 (trending) + price above weekly EMA50
-        if (close[i] > donch_high_weekly_aligned[i] and
-            volume[i] > 1.5 * vol_avg_aligned[i] and
-            adx_aligned[i] > 25 and
-            close[i] > ema50_weekly_aligned[i] and
+        # Long entry: Lips > Teeth > Jaw (bullish alignment) + volume above average
+        if (lips_6h_aligned[i] > teeth_6h_aligned[i] > jaw_6h_aligned[i] and
+            volume[i] > vol_avg_aligned[i] and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below weekly Donchian low + volume spike + ADX > 25 (trending) + price below weekly EMA50
-        elif (close[i] < donch_low_weekly_aligned[i] and
-              volume[i] > 1.5 * vol_avg_aligned[i] and
-              adx_aligned[i] > 25 and
-              close[i] < ema50_weekly_aligned[i] and
+        # Short entry: Lips < Teeth < Jaw (bearish alignment) + volume above average
+        elif (lips_6h_aligned[i] < teeth_6h_aligned[i] < jaw_6h_aligned[i] and
+              volume[i] > vol_avg_aligned[i] and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse signal or ADX < 20 (losing trend strength)
-        elif position == 1 and (close[i] < donch_low_weekly_aligned[i] or adx_aligned[i] < 20):
+        # Exit: when Alligator alignment breaks (Lips crosses Teeth)
+        elif position == 1 and lips_6h_aligned[i] < teeth_6h_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > donch_high_weekly_aligned[i] or adx_aligned[i] < 20):
+        elif position == -1 and lips_6h_aligned[i] > teeth_6h_aligned[i]:
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "1d_WeeklyDonchian_Volume_ADX_Filter"
-timeframe = "1d"
+name = "6h_WilliamsAlligator_1dVolume_Filter"
+timeframe = "6h"
 leverage = 1.0
