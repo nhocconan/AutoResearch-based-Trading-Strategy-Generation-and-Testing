@@ -26,6 +26,24 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
+    # Calculate daily Camarilla pivot levels (using prior day's OHLC)
+    prior_high = df_1d['high'].shift(1).values
+    prior_low = df_1d['low'].shift(1).values
+    prior_close = df_1d['close'].shift(1).values
+    
+    camarilla_pivot = (prior_high + prior_low + prior_close) / 3.0
+    camarilla_r3 = camarilla_pivot + 1.1 * (prior_high - prior_low)
+    camarilla_s3 = camarilla_pivot - 1.1 * (prior_high - prior_low)
+    camarilla_r4 = camarilla_pivot + 1.5 * (prior_high - prior_low)
+    camarilla_s4 = camarilla_pivot - 1.5 * (prior_high - prior_low)
+    
+    # Align Camarilla levels to 6h
+    camarilla_pivot_6h = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    camarilla_r3_6h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_6h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_r4_6h = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_6h = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    
     # Calculate 6h ATR(14) for volatility entry filter
     tr1_6h = high - low
     tr2_6h = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
@@ -41,25 +59,40 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(atr_14_6h[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(camarilla_pivot_6h[i]) or 
+            np.isnan(camarilla_r3_6h[i]) or np.isnan(camarilla_s3_6h[i]) or 
+            np.isnan(camarilla_r4_6h[i]) or np.isnan(camarilla_s4_6h[i]) or 
+            np.isnan(atr_14_6h[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
         # Volatility regime filter: only trade when daily ATR is elevated (> 0.8% of price)
+        # This avoids low-volatility chop and focuses on momentum/trend days
         vol_regime = atr_14_1d_aligned[i] > 0.008 * close[i]
         
         # Long conditions:
-        # 1. 6h ATR > 0.4% of price (ensure sufficient volatility for move)
-        # 2. Volume confirmation: volume > 1.5x average (higher threshold to reduce trades)
-        # 3. Daily volatility regime filter (avoid chop)
-        if (atr_14_6h[i] > 0.004 * close[i] and
-            volume_ratio[i] > 1.5 and
+        # 1. Price above Camarilla pivot (bullish bias)
+        # 2. Price breaks above Camarilla R3 with volume (bullish continuation)
+        # 3. Volume confirmation: volume > 1.3x average
+        # 4. 6h ATR > 0.4% of price (ensure sufficient volatility for move)
+        # 5. Daily volatility regime filter (avoid chop)
+        if (close[i] > camarilla_pivot_6h[i] and
+            close[i] > camarilla_r3_6h[i] and
+            volume_ratio[i] > 1.3 and
+            atr_14_6h[i] > 0.004 * close[i] and
             vol_regime):
             signals[i] = 0.25
             
-        # Short conditions: same as long (volatility breakout is directionless)
-        elif (atr_14_6h[i] > 0.004 * close[i] and
-              volume_ratio[i] > 1.5 and
+        # Short conditions:
+        # 1. Price below Camarilla pivot (bearish bias)
+        # 2. Price breaks below Camarilla S3 with volume (bearish continuation)
+        # 3. Volume confirmation: volume > 1.3x average
+        # 4. 6h ATR > 0.4% of price
+        # 5. Daily volatility regime filter
+        elif (close[i] < camarilla_pivot_6h[i] and
+              close[i] < camarilla_s3_6h[i] and
+              volume_ratio[i] > 1.3 and
+              atr_14_6h[i] > 0.004 * close[i] and
               vol_regime):
             signals[i] = -0.25
         else:
@@ -67,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Vol_Breakout_Directionless_v1"
+name = "6h_Vol_Regime_Camarilla_Pivot_R3S3_Breakout_v1"
 timeframe = "6h"
 leverage = 1.0
