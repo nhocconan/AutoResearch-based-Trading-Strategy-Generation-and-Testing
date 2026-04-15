@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     # Calculate 1d ATR(14) for volatility regime filter
@@ -26,11 +26,11 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate daily EMA(50) for trend filter (slower EMA for stronger trend)
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate daily EMA(34) for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate daily Donchian(20) channels
+    # Calculate 1d Donchian(20) channels
     donchian_high_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
     donchian_low_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
     donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
@@ -45,37 +45,37 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or 
             np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility regime filter: only trade when daily ATR is elevated (> 0.4% of price)
-        vol_regime = atr_14_1d_aligned[i] > 0.004 * close[i]
+        # Volatility regime filter: only trade when daily ATR is elevated (> 0.5% of price)
+        vol_regime = atr_14_1d_aligned[i] > 0.005 * close[i]
         
-        # Trend filter: price relative to daily EMA50
-        trend_filter = close[i] > ema_50_1d_aligned[i]
+        # Trend filter: price relative to daily EMA34
+        trend_filter = close[i] > ema_34_1d_aligned[i]
         
         # Long conditions:
-        # 1. Price above daily EMA50 (bullish bias)
+        # 1. Price above daily EMA34 (bullish bias)
         # 2. Price breaks above daily Donchian(20) high with volume (bullish breakout)
-        # 3. Volume confirmation: volume > 1.6x average
+        # 3. Volume confirmation: volume > 1.8x average
         # 4. Daily volatility regime filter
         if (trend_filter and
             close[i] > donchian_high_20_aligned[i] and
-            volume_ratio[i] > 1.6 and
+            volume_ratio[i] > 1.8 and
             vol_regime):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Price below daily EMA50 (bearish bias)
+        # 1. Price below daily EMA34 (bearish bias)
         # 2. Price breaks below daily Donchian(20) low with volume (bearish breakdown)
-        # 3. Volume confirmation: volume > 1.6x average
+        # 3. Volume confirmation: volume > 1.8x average
         # 4. Daily volatility regime filter
         elif (not trend_filter and
               close[i] < donchian_low_20_aligned[i] and
-              volume_ratio[i] > 1.6 and
+              volume_ratio[i] > 1.8 and
               vol_regime):
             signals[i] = -0.25
         else:
@@ -83,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Vol_Regime_Donchian20_1dEMA50_Breakout_v2"
+name = "1d_Vol_Regime_Donchian20_1dEMA34_Breakout_v3"
 timeframe = "1d"
 leverage = 1.0
