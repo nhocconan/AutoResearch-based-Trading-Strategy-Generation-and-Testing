@@ -23,91 +23,58 @@ def generate_signals(prices):
     daily_low = df_1d['low'].values
     daily_volume = df_1d['volume'].values
     
-    # Calculate daily KAMA (adaptive moving average)
-    # Efficiency Ratio (ER) = |close - close(10)| / sum(|close - close(1)|, 10)
-    change = np.abs(daily_close - np.roll(daily_close, 10))
-    change[0:10] = np.nan  # First 10 values invalid
-    
-    volatility = np.zeros_like(daily_close)
-    for i in range(1, len(daily_close)):
-        volatility[i] = volatility[i-1] + np.abs(daily_close[i] - daily_close[i-1])
-    
-    # Calculate ER with proper handling
-    er = np.full_like(daily_close, np.nan, dtype=float)
-    for i in range(10, len(daily_close)):
-        if volatility[i] > 0:
-            er[i] = change[i] / volatility[i]
-        else:
-            er[i] = 0
-    
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama = np.full_like(daily_close, np.nan, dtype=float)
-    kama[0] = daily_close[0]
-    for i in range(1, len(daily_close)):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (daily_close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    
-    # Calculate daily RSI(14)
-    delta = np.diff(daily_close)
-    delta = np.insert(delta, 0, 0)  # Same length as close
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate daily Donchian channels (20-period)
+    highest_20 = pd.Series(daily_high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(daily_low).rolling(window=20, min_periods=20).min().values
     
     # Calculate daily ATR(14) for volatility filter
-    tr1 = daily_high - daily_low
-    tr2 = np.abs(daily_high - np.roll(daily_close, 1))
-    tr3 = np.abs(daily_low - np.roll(daily_close, 1))
-    tr1[0] = tr2[0] = tr3[0] = np.nan  # First value invalid
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    tr1 = pd.Series(daily_high - daily_low)
+    tr2 = pd.Series(np.abs(daily_high - np.concatenate([[daily_close[0]], daily_close[:-1]])))
+    tr3 = pd.Series(np.abs(daily_low - np.concatenate([[daily_close[0]], daily_close[:-1]])))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14 = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align HTF indicators to 1d timeframe (no additional delay needed for KAMA/RSI/ATR)
-    kama_1d = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_1d = align_htf_to_ltf(prices, df_1d, rsi)
-    atr_14_1d = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Align HTF indicators to 6h timeframe with proper delay
+    highest_20_6h = align_htf_to_ltf(prices, df_1d, highest_20)
+    lowest_20_6h = align_htf_to_ltf(prices, df_1d, lowest_20)
+    atr_14_6h = align_htf_to_ltf(prices, df_1d, atr_14)
+    
+    # Calculate 6h volume ratio (current vs 20-period average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ratio = volume / (vol_ma_20 + 1e-10)
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_1d[i]) or np.isnan(rsi_1d[i]) or np.isnan(atr_14_1d[i])):
+        if (np.isnan(highest_20_6h[i]) or np.isnan(lowest_20_6h[i]) or 
+            np.isnan(atr_14_6h[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
         # Entry conditions:
-        # 1. Price above KAMA + RSI < 30 (oversold) → long
-        # 2. Price below KAMA + RSI > 70 (overbought) → short
-        # 3. Volatility filter: ATR > 0.3% of price (avoid extremely low volatility)
-        # 4. Discrete position sizing: 0.25
+        # 1. 6h price breaks above daily Donchian high with volume confirmation → long
+        # 2. 6h price breaks below daily Donchian low with volume confirmation → short
+        # 3. Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
+        # 4. Volume confirmation: volume > 1.5x average
+        # 5. Discrete position sizing: 0.25
         
-        # Long conditions: price above KAMA and RSI oversold
-        if (close[i] > kama_1d[i] and            # Price above KAMA (bullish bias)
-            rsi_1d[i] < 30 and                   # RSI oversold
-            atr_14_1d[i] > 0.003 * close[i]):    # Volatility filter
+        # Long conditions: 6h breakout above daily Donchian high
+        if (close[i] > highest_20_6h[i] and            # 6h price above daily Donchian high
+            volume_ratio[i] > 1.5 and                  # Volume confirmation
+            atr_14_6h[i] > 0.005 * close[i]):          # Volatility filter
             signals[i] = 0.25
             
-        # Short conditions: price below KAMA and RSI overbought
-        elif (close[i] < kama_1d[i] and          # Price below KAMA (bearish bias)
-              rsi_1d[i] > 70 and                 # RSI overbought
-              atr_14_1d[i] > 0.003 * close[i]):  # Volatility filter
+        # Short conditions: 6h breakdown below daily Donchian low
+        elif (close[i] < lowest_20_6h[i] and           # 6h price below daily Donchian low
+              volume_ratio[i] > 1.5 and                # Volume confirmation
+              atr_14_6h[i] > 0.005 * close[i]):        # Volatility filter
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1d_KAMA_RSI_Volatility_Filter"
-timeframe = "1d"
+name = "6h_DailyDonchian20_Breakout_Volume_ATR_Filter"
+timeframe = "6h"
 leverage = 1.0
