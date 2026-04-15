@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d volume confirmation + ADX trend filter
-# Donchian breakout captures trend continuation with clear entry/exit levels
-# Volume confirmation ensures breakouts have institutional participation
-# ADX > 25 filters for trending markets only, avoiding false breakouts in ranges
-# Designed for low trade frequency (target 15-25/year) with high win rate
-# Works in bull markets (breakouts continue) and bear markets (breakdowns continue)
+# Hypothesis: 4h Daily Pivot + Volume Spike + Chop Regime Filter
+# Daily pivot levels provide clear support/resistance zones from prior day's action
+# Volume spike confirms institutional interest at key levels
+# Chop filter avoids false breakouts in ranging markets (CHOP > 61.8) and
+# enables trend-following breakouts in trending markets (CHOP < 38.2)
+# Works in bull markets (breakouts continue trends) and bear markets (fades false breakouts in ranges)
+# Target: 20-40 trades/year with clear, high-probability setups
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,90 +21,87 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data once
+    # Load daily data once
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # 12h Donchian(20) channels
-    lookback = 20
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
+    # Calculate daily pivot points (using prior day's data)
+    pivot = (high_1d[:-1] + low_1d[:-1] + close_1d[:-1]) / 3
+    r1 = 2 * pivot - low_1d[:-1]
+    s1 = 2 * pivot - high_1d[:-1]
+    r2 = pivot + (high_1d[:-1] - low_1d[:-1])
+    s2 = pivot - (high_1d[:-1] - low_1d[:-1])
     
-    for i in range(lookback, n):
-        donchian_high[i] = np.max(high[i-lookback:i])
-        donchian_low[i] = np.min(low[i-lookback:i])
+    # Align pivot levels to 4h timeframe (using prior day's levels)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
-    # 1d ADX(14) for trend filter
-    # True Range
-    tr1 = np.maximum(high_1d[1:], low_1d[:-1]) - np.minimum(high_1d[1:], low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    # Calculate 4h ATR(14) for volatility
+    tr1 = np.maximum(high[1:], low[:-1]) - np.minimum(high[1:], low[:-1])
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Directional Movement
-    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
+    # Calculate 4h Choppiness Index(14)
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (max_high - min_low)) / np.log10(14)
     
-    # Directional Indicators
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr_1d + 1e-10)
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr_1d + 1e-10)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx_1d = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # 1d volume average (20-period)
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align indicators to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Calculate 4h volume average (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_aligned[i]) or
-            np.isnan(volume[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(atr[i]) or
+            np.isnan(chop[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             continue
         
-        # Only trade in trending markets (ADX > 25)
-        if adx_aligned[i] > 25:
-            # Volume confirmation: current volume > 1.5x 20-day average
-            volume_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
-            
-            # Long breakout: price closes above Donchian high
-            if close[i] > donchian_high_aligned[i] and volume_confirm and position <= 0:
-                position = 1
-                signals[i] = position_size
-            # Short breakdown: price closes below Donchian low
-            elif close[i] < donchian_low_aligned[i] and volume_confirm and position >= 0:
-                position = -1
-                signals[i] = -position_size
-            # Exit when price returns to midpoint (reversion signal)
-            elif position == 1 and close[i] < (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2:
-                position = 0
-                signals[i] = 0.0
-            elif position == -1 and close[i] > (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2:
-                position = 0
-                signals[i] = 0.0
+        # Volume spike condition (2x average volume)
+        volume_spike = volume[i] > 2 * vol_ma[i]
+        
+        # Long conditions: price breaks above resistance with volume
+        long_breakout = (close[i] > r1_aligned[i] or close[i] > r2_aligned[i]) and volume_spike
+        # Long fade in range: price at support with volume
+        long_fade = (close[i] <= s1_aligned[i] * 1.001 and close[i] >= s1_aligned[i] * 0.999) and volume_spike and chop[i] > 61.8
+        
+        # Short conditions: price breaks below support with volume
+        short_breakout = (close[i] < s1_aligned[i] or close[i] < s2_aligned[i]) and volume_spike
+        # Short fade in range: price at resistance with volume
+        short_fade = (close[i] >= r1_aligned[i] * 0.999 and close[i] <= r1_aligned[i] * 1.001) and volume_spike and chop[i] > 61.8
+        
+        # Enter long
+        if (long_breakout or long_fade) and position <= 0:
+            position = 1
+            signals[i] = position_size
+        # Enter short
+        elif (short_breakout or short_fade) and position >= 0:
+            position = -1
+            signals[i] = -position_size
+        # Exit when price returns to pivot zone
+        elif position == 1 and (close[i] <= pivot_aligned[i] * 1.001 and close[i] >= pivot_aligned[i] * 0.999):
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and (close[i] <= pivot_aligned[i] * 1.001 and close[i] >= pivot_aligned[i] * 0.999):
+            position = 0
+            signals[i] = 0.0
     
     return signals
 
-name = "12h_Donchian20_Volume_ADX_Trend"
-timeframe = "12h"
+name = "4h_DailyPivot_Volume_Chop_Filter"
+timeframe = "4h"
 leverage = 1.0
