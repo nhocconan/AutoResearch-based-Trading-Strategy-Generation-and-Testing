@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d ADX trend filter and volume confirmation
-# Long when price breaks above Camarilla R3 level + 1d ADX > 25 (trending) + volume > 1.5x 20-period avg
-# Short when price breaks below Camarilla S3 level + 1d ADX > 25 (trending) + volume > 1.5x 20-period avg
+# Hypothesis: 4h Camarilla pivot R1/S1 breakout with 1d ADX trend filter and volume confirmation
+# Long when price breaks above Camarilla R1 (1d) + 1d ADX > 25 (trending) + volume > 1.5x 20-period avg
+# Short when price breaks below Camarilla S1 (1d) + 1d ADX > 25 (trending) + volume > 1.5x 20-period avg
 # Uses discrete position sizing (0.25) to control drawdown and minimize fee drag.
-# Camarilla pivot levels provide intraday support/resistance that work in ranging markets.
-# 1d ADX > 25 ensures we only trade in trending conditions, reducing whipsaws in chop.
-# Volume confirmation (1.5x) targets ~25-35 trades/year on 12h timeframe to avoid overtrading.
-# Discrete sizing (0.25) minimizes fee churn while maintaining adequate exposure.
+# Camarilla pivots from 1d provide institutional support/resistance levels that work in both bull and bear markets.
+# 1d ADX > 25 ensures we only trade in trending conditions, reducing whipsaws in ranging markets.
+# Volume confirmation (1.5x) targets ~20-30 trades/year on 4h timeframe to avoid overtrading.
 
 def generate_signals(prices):
     n = len(prices)
@@ -31,53 +30,60 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d Indicator: ADX(14) ===
+    # === 1d Indicator: ADX(14) for trend strength ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
     # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with original index
+    tr[0] = tr1[0]  # First period
     
     # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Smoothed values
-    tr14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smoothing(values, period):
+        smoothed = np.zeros_like(values)
+        smoothed[period-1] = np.nansum(values[:period])
+        for i in range(period, len(values)):
+            smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + values[i]
+        return smoothed
     
-    # DI and DX
-    di_plus_14 = 100 * dm_plus_14 / tr14
-    di_minus_14 = 100 * dm_minus_14 / tr14
-    dx = 100 * np.abs(di_plus_14 - di_minus_14) / (di_plus_14 + di_minus_14)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    period = 14
+    tr_period = wilders_smoothing(tr, period)
+    dm_plus_period = wilders_smoothing(dm_plus, period)
+    dm_minus_period = wilders_smoothing(dm_minus, period)
+    
+    # DI+ and DI-
+    di_plus = np.where(tr_period != 0, (dm_plus_period / tr_period) * 100, 0)
+    di_minus = np.where(tr_period != 0, (dm_minus_period / tr_period) * 100, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 
+                  np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
+    adx = np.zeros_like(dx)
+    adx[2*period-1] = np.nanmean(dx[period-1:2*period-1]) if np.any(~np.isnan(dx[period-1:2*period-1])) else 0
+    for i in range(2*period, len(dx)):
+        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
     
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # === 12h Camarilla Pivot Levels (R3, S3) ===
-    # Typical price = (high + low + close) / 3
-    typical_price = (high + low + close) / 3.0
-    # Previous period's typical price for pivot calculation
-    prev_typical = pd.Series(typical_price).shift(1).values
-    prev_high = pd.Series(high).shift(1).values
-    prev_low = pd.Series(low).shift(1).values
+    # === 1d Camarilla Pivot Levels (R1, S1) ===
+    # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
+    camarilla_r1_1d = close_1d + (1.1 * (high_1d - low_1d) / 12)
+    camarilla_s1_1d = close_1d - (1.1 * (high_1d - low_1d) / 12)
     
-    pivot = (prev_high + prev_low + prev_typical) / 3.0
-    range_hl = prev_high - prev_low
-    
-    # Camarilla levels
-    r3 = pivot + (range_hl * 1.1 / 4.0)
-    s3 = pivot - (range_hl * 1.1 / 4.0)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -85,7 +91,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(30, 20) + 5  # ADX(14) + Camarilla + volume(20) + buffer
+    warmup = max(2*period, 20) + 5  # ADX(28) + Donchian(20) + volume(20) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -94,7 +100,7 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(r3[i]) or np.isnan(s3[i]) or
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
             np.isnan(adx_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
@@ -103,20 +109,22 @@ def generate_signals(prices):
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # Trend filter: 1d ADX > 25 (trending market)
-        trending = adx_aligned[i] > 25.0
+        trending = adx_aligned[i] > 25
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above Camarilla R3 level
+        # 1. Price breaks above Camarilla R1 (1d)
         # 2. 1d ADX > 25 (trending)
         # 3. Volume confirmation
-        if (close[i] > r3[i]) and trending and vol_confirm:
+        if (close[i] > camarilla_r1_aligned[i]) and \
+           trending and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below Camarilla S3 level
+        # 1. Price breaks below Camarilla S1 (1d)
         # 2. 1d ADX > 25 (trending)
         # 3. Volume confirmation
-        elif (close[i] < s3[i]) and trending and vol_confirm:
+        elif (close[i] < camarilla_s1_aligned[i]) and \
+             trending and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -124,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_1dADX_Volume_Filter_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_1dADX_Volume_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
