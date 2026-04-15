@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla pivot R3/S3 breakout with 4h ADX trend filter and volume confirmation
-# Long when price breaks above 1h Camarilla R3 + 4h ADX > 25 + volume > 1.5x 20-period avg
-# Short when price breaks below 1h Camarilla S3 + 4h ADX > 25 + volume > 1.5x 20-period avg
-# Uses discrete position sizing (0.20) to minimize fee churn. Designed for low trade frequency (15-35/year).
-# Camarilla pivots provide mathematically derived support/resistance levels. ADX filter ensures we only trade strong trends.
-# Works in bull markets (trend continuation) and bear markets (strong downtrends) by requiring ADX > 25.
-# 1h timeframe allows precise entry timing while 4h/1d HTF filters reduce noise and overtrading.
+# Hypothesis: 6h Camarilla pivot breakout with 1w trend filter and volume confirmation
+# Long when price breaks above 6h Camarilla R4 + 1w close > 1w open (bullish weekly candle) + volume > 1.5x 20-period avg
+# Short when price breaks below 6h Camarilla S4 + 1w close < 1w open (bearish weekly candle) + volume > 1.5x 20-period avg
+# Uses discrete position sizing (0.25) to minimize fee churn. Target: 50-150 total trades over 4 years.
+# Camarilla pivots provide mathematical support/resistance levels. Weekly trend filter ensures we trade with the higher timeframe momentum.
+# Volume confirmation adds conviction to breakouts. Works in bull markets (buy strength) and bear markets (sell weakness).
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,97 +19,41 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
     # Precompute session hours (08-20 UTC) for filter
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 4h HTF data once before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get 1w HTF data once before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # === 4h Indicator: ADX (trend strength filter) ===
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # === 1w Indicator: Weekly bullish/bearish candle ===
+    close_1w = df_1w['close'].values
+    open_1w = df_1w['open'].values
+    weekly_bullish = close_1w > open_1w  # True for bullish weekly candle
+    weekly_bearish = close_1w < open_1w  # True for bearish weekly candle
     
-    # Calculate ADX components: +DM, -DM, TR
-    high_4h_shift = np.roll(high_4h, 1)
-    low_4h_shift = np.roll(low_4h, 1)
-    high_4h_shift[0] = high_4h[0]
-    low_4h_shift[0] = low_4h[0]
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
     
-    plus_dm = np.where((high_4h - high_4h_shift) > (low_4h_shift - low_4h), 
-                       np.maximum(high_4h - high_4h_shift, 0), 0)
-    minus_dm = np.where((low_4h_shift - low_4h) > (high_4h - high_4h_shift), 
-                        np.maximum(low_4h_shift - low_4h, 0), 0)
+    # === 6h Indicator: Camarilla Pivot Levels (based on prior 6h bar) ===
+    # Camarilla levels calculated from previous bar's high, low, close
+    # R4 = close + ((high - low) * 1.1/2)
+    # S4 = close - ((high - low) * 1.1/2)
+    # We use the prior completed 6h bar to avoid look-ahead
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    # First bar: use current values (will be filtered out by warmup anyway)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
     
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr1[0] = high_4h[0] - low_4h[0]
-    tr2[0] = np.abs(high_4h[0] - close_4h[0])
-    tr3[0] = np.abs(low_4h[0] - close_4h[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Wilder's smoothing (alpha = 1/period)
-    period = 14
-    alpha = 1.0 / period
-    
-    atr = np.zeros_like(tr)
-    atr[period-1] = np.mean(tr[:period])
-    for i in range(period, len(tr)):
-        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-    
-    plus_di = np.zeros_like(plus_dm)
-    minus_di = np.zeros_like(minus_dm)
-    
-    # Smooth +DM and -DM
-    plus_dm_smooth = np.zeros_like(plus_dm)
-    minus_dm_smooth = np.zeros_like(minus_dm)
-    
-    plus_dm_smooth[period-1] = np.mean(plus_dm[:period])
-    minus_dm_smooth[period-1] = np.mean(minus_dm[:period])
-    
-    for i in range(period, len(plus_dm)):
-        plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
-        minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
-    
-    # Avoid division by zero
-    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
-    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
-    
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    
-    # Wilder's smoothing for ADX
-    adx = np.zeros_like(dx)
-    adx[2*period-1] = np.mean(dx[period-1:2*period])
-    for i in range(2*period, len(dx)):
-        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-    
-    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
-    
-    # === 1h Indicator: Camarilla Pivots (R3, S3) ===
-    # Camarilla levels based on previous day's range
-    # For intraday, we use rolling window of 24 periods (24*1h = 1 day)
-    lookback = 24  # 24 hours = 1 day
-    if len(high) < lookback:
-        return np.zeros(n)
-    
-    # Calculate rolling max/min for the lookback period
-    rolling_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    rolling_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    rolling_close = pd.Series(close).rolling(window=lookback, min_periods=lookback).mean().values
-    
-    # Camarilla formulas:
-    # R4 = close + (high - low) * 1.1/2
-    # R3 = close + (high - low) * 1.1/4
-    # S3 = close - (high - low) * 1.1/4
-    # S4 = close - (high - low) * 1.1/2
-    camarilla_range = rolling_high - rolling_low
-    camarilla_r3 = rolling_close + camarilla_range * 1.1 / 4
-    camarilla_s3 = rolling_close - camarilla_range * 1.1 / 4
+    camarilla_r4 = prev_close + ((prev_high - prev_low) * 1.1 / 2)
+    camarilla_s4 = prev_close - ((prev_high - prev_low) * 1.1 / 2)
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -118,7 +61,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(lookback, 2*period) + 20  # Camarilla(24) + ADX(28) + volume(20)
+    warmup = 20  # volume SMA(20) + 1 for prior bar
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -130,32 +73,33 @@ def generate_signals(prices):
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(camarilla_r4[i]) or np.isnan(camarilla_s4[i]) or
+            np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]) or
+            np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 1h Camarilla R3
-        # 2. Trend (4h ADX > 25)
+        # 1. Price breaks above 6h Camarilla R4
+        # 2. Weekly trend bullish (1w close > 1w open)
         # 3. Volume confirmation
-        if (close[i] > camarilla_r3[i]) and \
-           (adx_aligned[i] > 25) and vol_confirm:
-            signals[i] = 0.20
+        if (close[i] > camarilla_r4[i]) and \
+           (weekly_bullish_aligned[i] > 0.5) and vol_confirm:
+            signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 1h Camarilla S3
-        # 2. Trend (4h ADX > 25)
+        # 1. Price breaks below 6h Camarilla S4
+        # 2. Weekly trend bearish (1w close < 1w open)
         # 3. Volume confirmation
-        elif (close[i] < camarilla_s3[i]) and \
-             (adx_aligned[i] > 25) and vol_confirm:
-            signals[i] = -0.20
+        elif (close[i] < camarilla_s4[i]) and \
+             (weekly_bearish_aligned[i] > 0.5) and vol_confirm:
+            signals[i] = -0.25
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "1h_Camarilla_R3S3_4hADX25_Volume_Filter_v1"
-timeframe = "1h"
+name = "6h_CamarillaR4S4_1wTrend_Volume_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
