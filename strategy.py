@@ -1,4 +1,11 @@
-# 1033
+# 1h_4h_DailyVolBreakout_TrendFollow
+# Hypothesis: Use 1d ATR volatility filter (low volatility = range) and 4h EMA trend filter.
+# Enter long when price breaks above 1h high of previous 4 bars in low volatility + uptrend.
+# Enter short when price breaks below 1h low of previous 4 bars in low volatility + downtrend.
+# Low volatility reduces false breakouts; trend filter ensures directional bias.
+# Position size 0.20 to manage drawdown. Session filter 08-20 UTC to avoid low-liquidity hours.
+# Expects ~20-40 trades/year per symbol, suitable for 1h timeframe.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -12,9 +19,8 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get daily data for context
+    # Get daily data for volatility filter
     daily = get_htf_data(prices, '1d')
     daily_high = daily['high'].values
     daily_low = daily['low'].values
@@ -26,58 +32,62 @@ def generate_signals(prices):
                     np.maximum(np.abs(daily_high - daily_close_prev),
                                np.abs(daily_low - daily_close_prev)))
     atr_daily = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ratio_daily = atr_daily / daily_close
+    atr_ratio_daily = atr_daily / daily_close  # ATR as fraction of price
     
-    # Align daily ATR ratio to 6h timeframe
-    atr_ratio_6h = align_htf_to_ltf(prices, daily, atr_ratio_daily)
+    # Align daily ATR ratio to 1h timeframe
+    atr_ratio_1h = align_htf_to_ltf(prices, daily, atr_ratio_daily)
     
-    # Calculate daily RSI for momentum filter
-    delta = np.diff(daily_close, prepend=daily_close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_daily = 100 - (100 / (1 + rs))
+    # Get 4h data for trend filter
+    h4 = get_htf_data(prices, '4h')
+    h4_close = h4['close'].values
     
-    # Align daily RSI to 6h timeframe
-    rsi_6h = align_htf_to_ltf(prices, daily, rsi_daily)
+    # Calculate 4h EMA(20) for trend
+    ema_4h = pd.Series(h4_close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, h4, ema_4h)
     
-    # Calculate daily Bollinger Bands for mean reversion signals
-    sma_20 = pd.Series(daily_close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(daily_close).rolling(window=20, min_periods=20).std().values
-    upper_band = sma_20 + (2 * std_20)
-    lower_band = sma_20 - (2 * std_20)
+    # Pre-calculate 1h rolling max/min for breakout levels
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    roll_max_4 = high_series.rolling(window=4, min_periods=4).max().shift(1).values  # exclude current bar
+    roll_min_4 = low_series.rolling(window=4, min_periods=4).min().shift(1).values
     
-    # Align Bollinger Bands to 6h timeframe
-    upper_band_6h = align_htf_to_ltf(prices, daily, upper_band)
-    lower_band_6h = align_htf_to_ltf(prices, daily, lower_band)
+    # Pre-calculate hour filter
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_ratio_6h[i]) or np.isnan(rsi_6h[i]) or 
-            np.isnan(upper_band_6h[i]) or np.isnan(lower_band_6h[i])):
+        if (np.isnan(atr_ratio_1h[i]) or np.isnan(ema_4h_aligned[i]) or 
+            np.isnan(roll_max_4[i]) or np.isnan(roll_min_4[i])):
             signals[i] = 0.0
             continue
         
-        # Mean reversion strategy with volatility and momentum filters
-        # Long when price touches lower BB in low volatility + oversold RSI
-        if (close[i] <= lower_band_6h[i] and 
-            atr_ratio_6h[i] < 0.01 and  # Low volatility filter
-            rsi_6h[i] < 30):  # Oversold filter
-            signals[i] = 0.25
-        # Short when price touches upper BB in low volatility + overbought RSI
-        elif (close[i] >= upper_band_6h[i] and 
-              atr_ratio_6h[i] < 0.01 and  # Low volatility filter
-              rsi_6h[i] > 70):  # Overbought filter
-            signals[i] = -0.25
+        # Session filter: 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            signals[i] = 0.0
+            continue
+        
+        # Volatility filter: only trade in low volatility environments
+        if atr_ratio_1h[i] >= 0.015:  # High volatility = avoid breakouts
+            signals[i] = 0.0
+            continue
+        
+        # Trend filter: use 4h EMA
+        uptrend = close[i] > ema_4h_aligned[i]
+        downtrend = close[i] < ema_4h_aligned[i]
+        
+        # Breakout logic: price breaks recent 4-bar high/low
+        if uptrend and close[i] > roll_max_4[i]:
+            signals[i] = 0.20  # Long breakout
+        elif downtrend and close[i] < roll_min_4[i]:
+            signals[i] = -0.20  # Short breakdown
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "6h_DailyBB_RSI_Volatility_MeanReversion"
-timeframe = "6h"
+name = "1h_4h_DailyVolBreakout_TrendFollow"
+timeframe = "1h"
 leverage = 1.0
