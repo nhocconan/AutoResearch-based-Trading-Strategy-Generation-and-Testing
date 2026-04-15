@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d 200-day EMA trend filter + 1-day high/low breakout with volume confirmation
-# Uses long-term trend filter (200EMA) to avoid counter-trend trades, combined with
-# daily breakouts for entry timing and volume confirmation to filter false breakouts.
-# Works in bull markets (trend-following breakouts) and bear markets (avoids longs in downtrend,
-# only takes shorts when price < 200EMA and breaks down). Target: 20-60 trades over 4 years.
+# Hypothesis: 4h Donchian(20) breakout + volume confirmation + ADX trend filter
+# Uses Donchian channel breakouts for trend capture, volume to confirm breakout strength,
+# and ADX to ensure trending markets. Works in both bull and bear by only taking breakouts
+# when ADX > 25 (strong trend). Focuses on high-probability breakouts with low trade frequency.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 250:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,65 +18,101 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for EMA200 and daily high/low
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    # Load 4h data (primary timeframe) for price action and trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate 200-day EMA on 1d for trend filter
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Load 4h data for ADX calculation (same timeframe)
+    df_adx = get_htf_data(prices, '4h')
+    if len(df_adx) < 50:
+        return np.zeros(n)
+    high_adx = df_adx['high'].values
+    low_adx = df_adx['low'].values
+    close_adx = df_adx['close'].values
     
-    # Calculate daily high and low (same as input for 1d timeframe)
-    # For 1d timeframe, the daily high/low is just the 1d high/low
-    # No calculation needed - we use the raw 1d high/low
+    # Calculate Donchian channels (20-period) on 4h
+    donch_high_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donch_low_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate average volume (20-day) on 1d for volume confirmation
-    vol_avg_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate ADX (14-period) on 4h
+    # True Range
+    tr1 = high_adx - low_adx
+    tr2 = np.abs(high_adx - np.roll(close_adx, 1))
+    tr3 = np.abs(low_adx - np.roll(close_adx, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Align all indicators to 1d timeframe (identity since we're already at 1d)
-    ema200_1d_aligned = ema200_1d  # Already at 1d frequency
-    vol_avg_20_aligned = vol_avg_20  # Already at 1d frequency
+    # Directional Movement
+    dm_plus = np.where((high_adx - np.roll(high_adx, 1)) > (np.roll(low_adx, 1) - low_adx),
+                       np.maximum(high_adx - np.roll(high_adx, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_adx, 1) - low_adx) > (high_adx - np.roll(high_adx, 1)),
+                        np.maximum(np.roll(low_adx, 1) - low_adx, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus14 / (tr14 + 1e-10)
+    di_minus = 100 * dm_minus14 / (tr14 + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Volume average (20-period on 4h)
+    vol_avg_4h = pd.Series(df_4h['volume'].values).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all indicators to 4h timeframe
+    donch_high_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_high_4h)
+    donch_low_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_low_4h)
+    adx_aligned = align_htf_to_ltf(prices, df_adx, adx)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_4h, vol_avg_4h)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25  # Position size (25% of capital)
+    base_size = 0.25  # Position size
     
-    for i in range(250, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(vol_avg_20_aligned[i])):
+        if (np.isnan(donch_high_4h_aligned[i]) or np.isnan(donch_low_4h_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_avg_aligned[i])):
             continue
         
-        # Long entry: price breaks above previous day's high + volume spike + price above EMA200
-        if (high[i] > high_1d[i-1] and  # Today's high > yesterday's high (breakout)
-            volume[i] > 1.5 * vol_avg_20_aligned[i] and
-            close[i] > ema200_1d_aligned[i] and
+        # Long entry: price breaks above Donchian high + volume spike + ADX > 25 (strong trend)
+        if (close[i] > donch_high_4h_aligned[i] and
+            volume[i] > 1.5 * vol_avg_aligned[i] and
+            adx_aligned[i] > 25 and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below previous day's low + volume spike + price below EMA200
-        elif (low[i] < low_1d[i-1] and  # Today's low < yesterday's low (breakdown)
-              volume[i] > 1.5 * vol_avg_20_aligned[i] and
-              close[i] < ema200_1d_aligned[i] and
+        # Short entry: price breaks below Donchian low + volume spike + ADX > 25 (strong trend)
+        elif (close[i] < donch_low_4h_aligned[i] and
+              volume[i] > 1.5 * vol_avg_aligned[i] and
+              adx_aligned[i] > 25 and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse signal or price returns to EMA200 (mean reversion to trend)
-        elif position == 1 and close[i] < ema200_1d_aligned[i]:
+        # Exit: reverse signal or ADX < 20 (weak trend)
+        elif position == 1 and (close[i] < donch_low_4h_aligned[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > ema200_1d_aligned[i]:
+        elif position == -1 and (close[i] > donch_high_4h_aligned[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "1d_EMA200_Breakout_Volume"
-timeframe = "1d"
+name = "4h_Donchian_Volume_ADX_Filter"
+timeframe = "4h"
 leverage = 1.0
