@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ATR-based volatility filter
-# Long when price breaks above 4h Donchian high + 1d ATR ratio (ATR14/ATR50) > 1.2 (expanding volatility)
-# Short when price breaks below 4h Donchian low + 1d ATR ratio > 1.2
-# Uses discrete position sizing (0.25) to minimize fee churn
-# Designed for low trade frequency (20-40/year) to capture volatility expansion breakouts
-# Works in both bull (breakouts continue) and bear (breakdowns accelerate) markets
+# Hypothesis: 6h Williams %R + 1d Elder Ray + Volume Filter
+# Long when: Williams %R(14) < -80 (oversold) + Bull Power > 0 (bullish momentum) + volume > 1.3x 20-period average
+# Short when: Williams %R(14) > -20 (overbought) + Bear Power < 0 (bearish momentum) + volume > 1.3x 20-period average
+# Uses 6h for entry timing, 1d for Elder Ray (Bull/Bear Power) to capture institutional momentum
+# Designed for low trade frequency (12-30/year) with high win rate in mean-reverting conditions
+# Works in both bull and bear markets by fading extremes with momentum confirmation
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,62 +20,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h and 1d HTF data once before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Get 6h and 1d HTF data once before loop
+    df_6h = get_htf_data(prices, '6h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 60 or len(df_1d) < 60:
+    if len(df_6h) < 30 or len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 4h Indicators: Donchian Channel (20) ===
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    # === 6h Indicators: Williams %R(14) ===
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
     
-    # === 1d Indicators: ATR Ratio for Volatility Filter ===
+    # Williams %R calculation: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_14 = pd.Series(high_6h).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_6h).rolling(window=14, min_periods=14).min().values
+    williams_r = ((highest_high_14 - close_6h) / (highest_high_14 - lowest_low_14)) * -100
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
+    williams_r_aligned = align_htf_to_ltf(prices, df_6h, williams_r)
+    
+    # === 1d Indicators: Elder Ray (Bull Power and Bear Power) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = high_1d[0] - low_1d[0]  # First TR
+    # Calculate 13-period EMA for Elder Ray
+    ema_13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # ATR(14) and ATR(50) for volatility ratio
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_50 = pd.Series(tr).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Bull Power = High - EMA13
+    bull_power = high_1d - ema_13
+    # Bear Power = Low - EMA13
+    bear_power = low_1d - ema_13
     
-    # Volatility ratio: ATR(14)/ATR(50) > 1.2 indicates expanding volatility
-    atr_ratio = np.where(atr_50 > 0, atr_14 / atr_50, 0.0)
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 100
+    warmup = 50
     
     for i in range(warmup, n):
+        # Volume filter: current volume > 1.3x 20-period volume SMA
+        vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.3)
+        
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(atr_ratio_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 4h upper Donchian
-        # 2. Expanding volatility (ATR14/ATR50 > 1.2)
-        if (close[i] > donchian_high_aligned[i]) and (atr_ratio_aligned[i] > 1.2):
+        # 1. Williams %R indicates oversold (< -80)
+        # 2. Bull Power > 0 (bullish momentum)
+        # 3. Volume confirmation
+        if (williams_r_aligned[i] < -80) and (bull_power_aligned[i] > 0) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 4h lower Donchian
-        # 2. Expanding volatility (ATR14/ATR50 > 1.2)
-        elif (close[i] < donchian_low_aligned[i]) and (atr_ratio_aligned[i] > 1.2):
+        # 1. Williams %R indicates overbought (> -20)
+        # 2. Bear Power < 0 (bearish momentum)
+        # 3. Volume confirmation
+        elif (williams_r_aligned[i] > -20) and (bear_power_aligned[i] < 0) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -83,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_ATR_Volatility_Filter_v1"
-timeframe = "4h"
+name = "6h_WilliamsR_ElderRay_Volume_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
