@@ -63,16 +63,16 @@ def generate_signals(prices):
         
         # Long conditions: break above Donchian high in uptrend
         if (close[i] > ema_50_4h[i] and          # Daily uptrend filter
-            close[i] > highest_20[i] and          # Donchian breakout
+            close[i] > highest_20[i] and          # 4h Donchian breakout
             volume_ratio[i] > 2.0 and             # Strict volume confirmation
-            atr_14_4h[i] > 0.005 * close[i]):    # Volatility filter (ATR > 0.5% of price)
+            atr_14_4h[i] > 0.005 * close[i]):     # Volatility filter (ATR > 0.5% of price)
             signals[i] = 0.25
             
         # Short conditions: break below Donchian low in downtrend
         elif (close[i] < ema_50_4h[i] and        # Daily downtrend filter
-              close[i] < lowest_20[i] and         # Donchian breakdown
+              close[i] < lowest_20[i] and         # 4h Donchian breakdown
               volume_ratio[i] > 2.0 and           # Strict volume confirmation
-              atr_14_4h[i] > 0.005 * close[i]):  # Volatility filter
+              atr_14_4h[i] > 0.005 * close[i]):   # Volatility filter
             signals[i] = -0.25
         else:
             signals[i] = 0.0
