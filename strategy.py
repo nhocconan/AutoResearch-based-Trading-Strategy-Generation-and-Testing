@@ -3,11 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h volume-weighted VWAP deviation with 4h trend filter and session filter
-# Trades pullbacks to VWAP in trending markets (4h EMA21) during active hours (08-20 UTC).
-# Uses volume-weighted average price (VWAP) as dynamic support/resistance.
-# Long when price > VWAP and deviates below by >1.5% in uptrend; short when price < VWAP and deviates above by >1.5% in downtrend.
-# Designed for low trade frequency (15-35/year) with high win rate in both bull and bear markets.
+# Hypothesis: 6h Weekly Pivot Reversal with Volume Spike
+# Uses weekly pivot points (S1, R1, S2, R2) from prior week. 
+# Enters long when price touches S1/S2 with volume spike (>2x median) and RSI < 30 (oversold).
+# Enters short when price touches R1/R2 with volume spike and RSI > 70 (overbought).
+# Weekly pivot provides institutional support/resistance levels that work in both bull and bear markets.
+# Volume spike confirms institutional interest at these levels.
+# Target: 50-150 total trades over 4 years = 12-37/year.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,84 +21,102 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Session filter: 08-20 UTC (precomputed)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # 4h EMA for trend filter (computed once before loop)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:
+    # Load weekly data for pivot points
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 2:
         return np.zeros(n)
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # VWAP calculation (typical price * volume)
-    typical_price = (high + low + close) / 3.0
-    vwap_num = typical_price * volume
-    vwap_den = volume
+    # Calculate weekly pivot points (standard formula)
+    # P = (H + L + C) / 3
+    # S1 = (2*P) - H
+    # R1 = (2*P) - L
+    # S2 = P - (H - L)
+    # R2 = P + (H - L)
+    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    s1 = (2 * pivot) - weekly_high
+    r1 = (2 * pivot) - weekly_low
+    s2 = pivot - (weekly_high - weekly_low)
+    r2 = pivot + (weekly_high - weekly_low)
     
-    # Cumulative VWAP with reset each day
-    vwap = np.full(n, np.nan)
-    cum_num = 0.0
-    cum_den = 0.0
-    prev_day = None
+    # Shift by 1 week to avoid look-ahead (use previous week's levels)
+    pivot = np.roll(pivot, 1)
+    s1 = np.roll(s1, 1)
+    r1 = np.roll(r1, 1)
+    s2 = np.roll(s2, 1)
+    r2 = np.roll(r2, 1)
+    pivot[0] = np.nan
+    s1[0] = np.nan
+    r1[0] = np.nan
+    s2[0] = np.nan
+    r2[0] = np.nan
     
-    for i in range(n):
-        day = prices.iloc[i]['open_time'].date()
-        if prev_day is None or day != prev_day:
-            cum_num = 0.0
-            cum_den = 0.0
-            prev_day = day
-        cum_num += vwap_num[i]
-        cum_den += vwap_den[i]
-        if cum_den > 0:
-            vwap[i] = cum_num / cum_den
+    # Align weekly pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
+    s2_aligned = align_htf_to_ltf(prices, df_weekly, s2)
+    r2_aligned = align_htf_to_ltf(prices, df_weekly, r2)
+    
+    # Calculate RSI(14) on 6h
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.20  # 20% position size
+    base_size = 0.25  # Position size
     
-    for i in range(21, n):  # Start after EMA warmup
-        # Skip if outside session or missing data
-        if not in_session[i] or np.isnan(vwap[i]) or np.isnan(ema_4h_aligned[i]):
+    for i in range(50, n):
+        # Skip if any required data is NaN
+        if (np.isnan(pivot_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or
+            np.isnan(s2_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(rsi[i])):
             continue
         
-        # Calculate deviation from VWAP as percentage
-        if vwap[i] <= 0:
-            continue
-        dev_pct = (close[i] - vwap[i]) / vwap[i] * 100.0
+        # Volume spike condition: current volume > 2x median of last 20 periods
+        vol_median = np.median(volume[max(0, i-20):i+1])
+        volume_spike = volume[i] > 2.0 * vol_median
         
-        # Determine trend from 4h EMA slope (simple: current vs 3 periods ago)
-        if i >= 3:
-            ema_now = ema_4h_aligned[i]
-            ema_prev = ema_4h_aligned[i-3]
-            trending_up = ema_now > ema_prev
-            trending_down = ema_now < ema_prev
-        else:
-            trending_up = False
-            trending_down = False
+        # Long conditions: price touches S1 or S2 with volume spike and RSI oversold
+        if volume_spike and rsi[i] < 30:
+            if (abs(close[i] - s1_aligned[i]) < 0.001 * close[i] or  # Within 0.1% of S1
+                abs(close[i] - s2_aligned[i]) < 0.001 * close[i]):   # Within 0.1% of S2
+                if position <= 0:
+                    position = 1
+                    signals[i] = base_size
         
-        # Long: price below VWAP in uptrend (pullback to buy)
-        if trending_up and dev_pct < -1.5 and position <= 0:
-            position = 1
-            signals[i] = base_size
+        # Short conditions: price touches R1 or R2 with volume spike and RSI overbought
+        elif volume_spike and rsi[i] > 70:
+            if (abs(close[i] - r1_aligned[i]) < 0.001 * close[i] or  # Within 0.1% of R1
+                abs(close[i] - r2_aligned[i]) < 0.001 * close[i]):   # Within 0.1% of R2
+                if position >= 0:
+                    position = -1
+                    signals[i] = -base_size
         
-        # Short: price above VWAP in downtrend (pullback to sell)
-        elif trending_down and dev_pct > 1.5 and position >= 0:
-            position = -1
-            signals[i] = -base_size
-        
-        # Exit: price crosses VWAP or trend change
-        elif position == 1 and (close[i] >= vwap[i] or not trending_up):
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and (close[i] <= vwap[i] or not trending_down):
-            position = 0
-            signals[i] = 0.0
+        # Exit conditions: opposite touch or RSI returns to neutral zone
+        elif position == 1:
+            if (abs(close[i] - r1_aligned[i]) < 0.001 * close[i] or
+                abs(close[i] - r2_aligned[i]) < 0.001 * close[i] or
+                rsi[i] > 50):
+                position = 0
+                signals[i] = 0.0
+        elif position == -1:
+            if (abs(close[i] - s1_aligned[i]) < 0.001 * close[i] or
+                abs(close[i] - s2_aligned[i]) < 0.001 * close[i] or
+                rsi[i] < 50):
+                position = 0
+                signals[i] = 0.0
     
     return signals
 
-name = "1h_VWAP_Pullback_Trend_Filter"
-timeframe = "1h"
+name = "6h_WeeklyPivot_Reversal_Volume_RSI"
+timeframe = "6h"
 leverage = 1.0
