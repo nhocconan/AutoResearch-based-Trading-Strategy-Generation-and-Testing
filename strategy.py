@@ -3,11 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h EMA crossover with 1w trend filter and volume confirmation
-# Uses 6h EMA(12) and EMA(26) for crossover signals, filtered by 1w EMA(50) trend direction.
-# Volume confirmation (1.5x average) ensures breakout strength. Works in bull by taking
-# longs in uptrend, works in bear by taking shorts in downtrend.
-# Target: 60-120 total trades over 4 years (15-30/year) with disciplined entries.
+# Hypothesis: 12h Donchian(20) breakout + volume confirmation + 1d Choppiness regime filter
+# Uses Donchian channel breakouts for trend capture on 12h timeframe, volume to confirm breakout strength,
+# and Choppiness Index on 1d to avoid ranging markets. Targets 50-150 total trades over 4 years (12-37/year).
+# Works in both bull and bear by only taking breakouts in low-chop (trending) markets.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,41 +18,52 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 6h data (primary timeframe) for EMA crossover
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 50:
+    # Load 12h data (primary timeframe) for price action
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Load 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    close_1w = df_1w['close'].values
-    
-    # Load 1d data for volume average
+    # Load 1d data for Choppiness Index calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate EMA12 and EMA26 on 6h
-    ema12_6h = pd.Series(close_6h).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema26_6h = pd.Series(close_6h).ewm(span=26, adjust=False, min_periods=26).mean().values
+    # Calculate Donchian channels (20-period) on 12h
+    donch_high_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donch_low_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate EMA50 on 1w for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Choppiness Index (14-period) on 1d
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate volume average (20-period on 1d)
+    # Highest high and lowest low over 14 periods
+    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    
+    # Chop = 100 * log10(sum(TR14) / (HH14 - LL14)) / log10(14)
+    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    chop = 100 * np.log10(sum_tr_14 / (hh_14 - ll_14 + 1e-10)) / np.log10(14)
+    
+    # Volume average (20-period on 1d)
     vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all indicators to 6h timeframe
-    ema12_6h_aligned = align_htf_to_ltf(prices, df_6h, ema12_6h)
-    ema26_6h_aligned = align_htf_to_ltf(prices, df_6h, ema26_6h)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Align all indicators to 12h timeframe
+    donch_high_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_high_12h)
+    donch_low_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_low_12h)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
@@ -62,38 +72,36 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema12_6h_aligned[i]) or np.isnan(ema26_6h_aligned[i]) or
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_avg_aligned[i])):
+        if (np.isnan(donch_high_12h_aligned[i]) or np.isnan(donch_low_12h_aligned[i]) or
+            np.isnan(chop_aligned[i]) or np.isnan(vol_avg_aligned[i])):
             continue
         
-        # Long entry: EMA12 crosses above EMA26 + volume spike + price above 1w EMA50 (uptrend)
-        if (ema12_6h_aligned[i] > ema26_6h_aligned[i] and
-            ema12_6h_aligned[i-1] <= ema26_6h_aligned[i-1] and  # crossover confirmation
+        # Long entry: price breaks above Donchian high + volume spike + chop < 61.8 (trending)
+        if (close[i] > donch_high_12h_aligned[i] and
             volume[i] > 1.5 * vol_avg_aligned[i] and
-            close[i] > ema50_1w_aligned[i] and
+            chop_aligned[i] < 61.8 and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: EMA12 crosses below EMA26 + volume spike + price below 1w EMA50 (downtrend)
-        elif (ema12_6h_aligned[i] < ema26_6h_aligned[i] and
-              ema12_6h_aligned[i-1] >= ema26_6h_aligned[i-1] and  # crossover confirmation
+        # Short entry: price breaks below Donchian low + volume spike + chop < 61.8 (trending)
+        elif (close[i] < donch_low_12h_aligned[i] and
               volume[i] > 1.5 * vol_avg_aligned[i] and
-              close[i] < ema50_1w_aligned[i] and
+              chop_aligned[i] < 61.8 and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse signal
-        elif position == 1 and ema12_6h_aligned[i] < ema26_6h_aligned[i]:
+        # Exit: reverse signal or chop > 61.8 (ranging market)
+        elif position == 1 and (close[i] < donch_low_12h_aligned[i] or chop_aligned[i] > 61.8):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and ema12_6h_aligned[i] > ema26_6h_aligned[i]:
+        elif position == -1 and (close[i] > donch_high_12h_aligned[i] or chop_aligned[i] > 61.8):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "6h_EMA_Crossover_1wTrend_Volume"
-timeframe = "6h"
+name = "12h_Donchian_Volume_Chop_Filter"
+timeframe = "12h"
 leverage = 1.0
