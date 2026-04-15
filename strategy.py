@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R reversal with 1d EMA34 trend filter and volume spike confirmation
-# Long when Williams %R crosses above -80 from below (oversold bounce) + price > 1d EMA34 (uptrend) + volume > 2.0x 20-period avg
-# Short when Williams %R crosses below -20 from above (overbought rejection) + price < 1d EMA34 (downtrend) + volume > 2.0x 20-period avg
-# Uses discrete position sizing (0.25) to minimize fee churn. Target: 50-150 total trades over 4 years.
-# Williams %R identifies short-term exhaustion; 1d EMA34 ensures we trade with higher-timeframe trend; volume spike confirms conviction.
-# Works in bull markets (buying oversold dips in uptrend) and bear markets (selling overbought rallies in downtrend).
+# Hypothesis: 12h Donchian breakout with 1w ADX trend filter and volume confirmation
+# Long when price breaks above 20-bar Donchian high (12h) + 1w ADX > 25 + volume > 1.5x 20-bar avg
+# Short when price breaks below 20-bar Donchian low (12h) + 1w ADX > 25 + volume > 1.5x 20-bar avg
+# Uses discrete position sizing (0.25) to minimize fee churn. Target: 15-30 trades/year.
+# Donchian channels provide objective breakout levels. 1w ADX ensures we only trade strong trends, avoiding chop and whipsaws.
+# Volume confirmation adds conviction to breakouts. Works in bull markets (upward breakouts) and bear markets (downward breakouts).
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,24 +24,76 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d HTF data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    # Get 1w HTF data once before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # === 1d Indicator: EMA34 (trend filter) ===
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # === 1w Indicator: ADX (trend strength filter) ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # === Williams %R (14-period) on 6h data ===
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where((highest_high - lowest_low) != 0, 
-                          (highest_high - close) / (highest_high - lowest_low) * -100, -50)
+    # Calculate ADX components: +DM, -DM, TR
+    high_1w_shift = np.roll(high_1w, 1)
+    low_1w_shift = np.roll(low_1w, 1)
+    high_1w_shift[0] = high_1w[0]
+    low_1w_shift[0] = low_1w[0]
     
-    # Volume SMA for confirmation (using 20-period)
+    plus_dm = np.where((high_1w - high_1w_shift) > (low_1w_shift - low_1w), 
+                       np.maximum(high_1w - high_1w_shift, 0), 0)
+    minus_dm = np.where((low_1w_shift - low_1w) > (high_1w - high_1w_shift), 
+                        np.maximum(low_1w_shift - low_1w, 0), 0)
+    
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1[0] = high_1w[0] - low_1w[0]
+    tr2[0] = np.abs(high_1w[0] - close_1w[0])
+    tr3[0] = np.abs(low_1w[0] - close_1w[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Wilder's smoothing (alpha = 1/period)
+    period = 14
+    alpha = 1.0 / period
+    
+    atr = np.zeros_like(tr)
+    atr[period-1] = np.mean(tr[:period])
+    for i in range(period, len(tr)):
+        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+    
+    plus_di = np.zeros_like(plus_dm)
+    minus_di = np.zeros_like(minus_dm)
+    
+    # Smooth +DM and -DM
+    plus_dm_smooth = np.zeros_like(plus_dm)
+    minus_dm_smooth = np.zeros_like(minus_dm)
+    
+    plus_dm_smooth[period-1] = np.mean(plus_dm[:period])
+    minus_dm_smooth[period-1] = np.mean(minus_dm[:period])
+    
+    for i in range(period, len(plus_dm)):
+        plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
+        minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
+    
+    # Avoid division by zero
+    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
+    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
+    
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    
+    # Wilder's smoothing for ADX
+    adx = np.zeros_like(dx)
+    adx[2*period-1] = np.mean(dx[period-1:2*period])
+    for i in range(2*period, len(dx)):
+        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+    
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # === 12h Indicators: Donchian Channel (20) and Volume SMA ===
+    donchian_period = 20
+    highest_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lowest_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -55,29 +107,29 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
+        # Volume filter: current volume > 1.5x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
+        
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(vol_sma_20[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2.0x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
-        
         # === LONG CONDITIONS ===
-        # 1. Williams %R crosses above -80 from below (oversold bounce)
-        # 2. Price > 1d EMA34 (uptrend filter)
+        # 1. Price breaks above 20-bar Donchian high
+        # 2. Strong trend (1w ADX > 25)
         # 3. Volume confirmation
-        if (williams_r[i] > -80 and williams_r[i-1] <= -80) and \
-           (close[i] > ema_34_aligned[i]) and vol_confirm:
+        if (close[i] > highest_high[i]) and \
+           (adx_aligned[i] > 25) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Williams %R crosses below -20 from above (overbought rejection)
-        # 2. Price < 1d EMA34 (downtrend filter)
+        # 1. Price breaks below 20-bar Donchian low
+        # 2. Strong trend (1w ADX > 25)
         # 3. Volume confirmation
-        elif (williams_r[i] < -20 and williams_r[i-1] >= -20) and \
-             (close[i] < ema_34_aligned[i]) and vol_confirm:
+        elif (close[i] < lowest_low[i]) and \
+             (adx_aligned[i] > 25) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -85,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_EMA34_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1wADX25_Volume_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
