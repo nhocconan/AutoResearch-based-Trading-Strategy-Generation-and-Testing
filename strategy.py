@@ -1,4 +1,13 @@
 #!/usr/bin/env python3
+"""
+12h_1d_KAMA_RSI_Chop
+- Trend direction via KAMA on 12h
+- Entry timing via RSI pullback in trend direction on 12h
+- Regime filter: Choppiness Index on 1d < 61.8 (trending market)
+- Stops via reverse signal
+- Target: 15-30 trades/year per symbol
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -8,68 +17,108 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    # Primary 12h data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily RSI filter (14-period)
-    close_series = pd.Series(close)
-    rsi_14 = 100 - (100 / (1 + close_series.diff().clip(lower=0).rolling(14, min_periods=14).mean() / 
-                              (-close_series.diff().clip(upper=0).abs().rolling(14, min_periods=14).mean())))
-    rsi_14 = rsi_14.fillna(50).values
+    # === HTF: 1d data (loaded once) ===
+    df_1d = get_htf_data(prices, '1d')
     
-    # Daily high/low for volatility filter
-    daily_high = get_htf_data(prices, '1d')['high'].values
-    daily_low = get_htf_data(prices, '1d')['low'].values
-    daily_range = daily_high - daily_low
-    daily_atr = pd.Series(daily_range).rolling(14, min_periods=14).mean().values
+    # === Indicators on 12h (primary) ===
+    # KAMA trend (12h)
+    def kama(close, er_len=10, fast=2, slow=30):
+        change = np.abs(np.diff(close, n=er_len))
+        vol = np.sum(np.abs(np.diff(close)), axis=0)
+        er = np.where(vol != 0, change / vol, 0)
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        kama = np.full_like(close, np.nan, dtype=float)
+        kama[er_len] = close[er_len]
+        for i in range(er_len+1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    # Align daily ATR to 6h
-    daily_atr_aligned = align_htf_to_ltf(prices, get_htf_data(prices, '1d'), daily_atr)
+    kama_val = kama(close, 10, 2, 30)
+    kama_long = close > kama_val
+    kama_short = close < kama_val
     
-    # 6-period RSI for momentum
-    rsi_6 = 100 - (100 / (1 + pd.Series(close).diff().clip(lower=0).rolling(6, min_periods=6).mean() / 
-                           (-pd.Series(close).diff().clip(upper=0).abs().rolling(6, min_periods=6).mean())))
-    rsi_6 = rsi_6.fillna(50).values
+    # RSI(14) on 12h for pullback entries
+    def rsi(close, period=14):
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.full_like(close, np.nan, dtype=float)
+        avg_loss = np.full_like(close, np.nan, dtype=float)
+        avg_gain[period] = np.nanmean(gain[1:period+1])
+        avg_loss[period] = np.nanmean(loss[1:period+1])
+        for i in range(period+1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    # Volume filter: current > 1.5x median of last 24 periods (4 days)
-    vol_median = pd.Series(volume).rolling(window=24, min_periods=1).median()
-    vol_threshold = 1.5 * vol_median
+    rsi_val = rsi(close, 14)
+    rsi_oversold = rsi_val < 30
+    rsi_overbought = rsi_val > 70
     
+    # === HTF: 1d Choppiness Index (regime filter) ===
+    def choppiness_index(high, low, close, period=14):
+        atr = np.full_like(close, np.nan, dtype=float)
+        tr1 = np.abs(high[1:] - low[1:])
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.nan], tr])
+        atr = np.full_like(close, np.nan, dtype=float)
+        atr[period] = np.nanmean(tr[1:period+1])
+        for i in range(period+1, len(close)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        max_high = np.full_like(close, np.nan, dtype=float)
+        min_low = np.full_like(close, np.nan, dtype=float)
+        for i in range(period, len(close)):
+            max_high[i] = np.max(high[i-period+1:i+1])
+            min_low[i] = np.min(low[i-period+1:i+1])
+        
+        sum_atr = np.nansum(atr[1:], axis=0) if len(atr) > 1 else 0
+        range_val = max_high - min_low
+        chop = 100 * np.log10(sum_atr / range_val) / np.log10(period)
+        return chop
+    
+    chop_1d = choppiness_index(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    trending_market = chop_1d_aligned < 61.8  # trending when chop < 61.8
+    
+    # === Signal generation ===
     signals = np.zeros(n)
     
-    for i in range(24, n):
-        # Skip if any required data is NaN
-        if (np.isnan(rsi_14[i]) or np.isnan(daily_atr_aligned[i]) or 
-            np.isnan(rsi_6[i]) or np.isnan(vol_threshold[i])):
+    for i in range(30, n):  # warmup for indicators
+        # Skip if any data is NaN
+        if (np.isnan(kama_val[i]) or np.isnan(rsi_val[i]) or 
+            np.isnan(chop_1d_aligned[i])):
             continue
         
-        # Volatility regime: only trade when volatility is elevated
-        vol_regime = daily_atr_aligned[i] > np.nanmedian(daily_atr_aligned[max(0, i-100):i+1])
-        
-        # Long: RSI14 oversold + RSI6 bullish divergence + volume + vol regime
-        if (rsi_14[i] < 30 and rsi_6[i] > 50 and 
-            volume[i] > vol_threshold[i] and vol_regime):
+        # Long: KAMA uptrend + RSI oversold pullback + trending market
+        if (kama_long[i] and rsi_oversold[i] and trending_market[i]):
             signals[i] = 0.25
         
-        # Short: RSI14 overbought + RSI6 bearish divergence + volume + vol regime
-        elif (rsi_14[i] > 70 and rsi_6[i] < 50 and 
-              volume[i] > vol_threshold[i] and vol_regime):
+        # Short: KAMA downtrend + RSI overbought pullback + trending market
+        elif (kama_short[i] and rsi_overbought[i] and trending_market[i]):
             signals[i] = -0.25
         
-        # Exit: RSI returns to neutral zone
-        elif (i > 0 and 
-              ((signals[i-1] == 0.25 and rsi_14[i] >= 50) or
-               (signals[i-1] == -0.25 and rsi_14[i] <= 50))):
+        # Exit: reverse signal or chop > 61.8 (range market)
+        elif (signals[i-1] == 0.25 and (kama_short[i] or not trending_market[i])) or \
+             (signals[i-1] == -0.25 and (kama_long[i] or not trending_market[i])):
             signals[i] = 0.0
         
-        # Otherwise, hold previous position
+        # Otherwise hold
         else:
             signals[i] = signals[i-1]
     
     return signals
 
-name = "6h_RSI_Divergence_Volume"
-timeframe = "6h"
+name = "12h_1d_KAMA_RSI_Chop"
+timeframe = "12h"
 leverage = 1.0
