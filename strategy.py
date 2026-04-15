@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA Trend + 1w RSI Mean Reversion + Volume Spike
-# Uses weekly RSI(14) for mean reversion signals, buying oversold (RSI<30) and selling overbought (RSI>70).
-# Daily KAMA(10,2,30) slope confirms the intermediate-term trend direction.
-# Volume confirmation requires > 1.5x 20-day median volume to filter low-conviction moves.
-# Designed to work in bull markets (trend following via KAMA) and bear markets (mean reversion via weekly RSI extremes).
+# Hypothesis: 12h Williams Alligator + 1d Volume Spike + 1w EMA Trend Filter
+# Uses Williams Alligator (Jaw/Teeth/Lips) on 12h to identify trend direction and alignment.
+# Long when Lips > Teeth > Jaw (bullish alignment) and price > 1w EMA200 (long-term uptrend).
+# Short when Lips < Teeth < Jaw (bearish alignment) and price < 1w EMA200 (long-term downtrend).
+# Volume confirmation requires current volume > 2.0x 50-bar median volume to avoid false signals.
+# Designed to work in both bull and bear markets by requiring long-term trend alignment.
 # Conservative sizing (0.25) to limit trade frequency and avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,61 +21,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-week RSI(14) for mean reversion signals
+    # 1-week EMA200 for long-term trend filter
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1w = 100 - (100 / (1 + rs))
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w.values)
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # Kaufman's Adaptive Moving Average (KAMA) on 1d close
-    def kama(close, er_period=10, fast=2, slow=30):
-        change = np.abs(np.diff(close, prepend=close[0]))
-        volatility_rolling = pd.Series(np.abs(np.diff(close, prepend=close[0]))).rolling(window=er_period, min_periods=1).sum()
-        change_rolling = pd.Series(change).rolling(window=er_period, min_periods=1).sum()
-        er = change_rolling / (volatility_rolling + 1e-10)
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        kama_val = np.full_like(close, np.nan)
-        kama_val[0] = close[0]
-        for i in range(1, len(close)):
-            kama_val[i] = kama_val[i-1] + sc[i] * (close[i] - kama_val[i-1])
-        return kama_val
+    # Williams Alligator on 12h
+    df_12h = get_htf_data(prices, '12h')
+    median_price_12h = (df_12h['high'].values + df_12h['low'].values) / 2
     
-    kama_val = kama(close)
-    kama_slope = np.diff(kama_val, prepend=kama_val[0])
+    # Jaw (Blue): 13-period SMMA, shifted 8 bars
+    jaw = pd.Series(median_price_12h).rolling(window=13, min_periods=13).mean()
+    jaw = jaw.shift(8)
+    # Teeth (Red): 8-period SMMA, shifted 5 bars
+    teeth = pd.Series(median_price_12h).rolling(window=8, min_periods=8).mean()
+    teeth = teeth.shift(5)
+    # Lips (Green): 5-period SMMA, shifted 3 bars
+    lips = pd.Series(median_price_12h).rolling(window=5, min_periods=5).mean()
+    lips = lips.shift(3)
     
-    # Volume confirmation: current > 1.5x median of last 20 bars
-    vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
-    vol_threshold = 1.5 * vol_median
+    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw.values)
+    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth.values)
+    lips_aligned = align_htf_to_ltf(prices, df_12h, lips.values)
+    
+    # Volume confirmation: current > 2.0x median of last 50 bars
+    vol_median = pd.Series(volume).rolling(window=50, min_periods=1).median()
+    vol_threshold = 2.0 * vol_median
     
     signals = np.zeros(n)
     
-    for i in range(20, n):
-        if (np.isnan(kama_slope[i]) or np.isnan(rsi_1w_aligned[i]) or 
+    for i in range(50, n):  # Start after warmup
+        # Skip if any required data is NaN
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(ema_200_1w_aligned[i]) or 
             np.isnan(vol_threshold[i])):
             continue
         
-        # Long: KAMA upward slope, weekly RSI oversold (<30), volume spike
-        if (kama_slope[i] > 0 and 
-            rsi_1w_aligned[i] < 30 and 
+        # Bullish alignment: Lips > Teeth > Jaw
+        bullish = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
+        # Bearish alignment: Lips < Teeth < Jaw
+        bearish = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
+        
+        # Long: Bullish alignment, price above 1w EMA200, volume spike
+        if (bullish and 
+            close[i] > ema_200_1w_aligned[i] and 
             volume[i] > vol_threshold[i]):
             signals[i] = 0.25
         
-        # Short: KAMA downward slope, weekly RSI overbought (>70), volume spike
-        elif (kama_slope[i] < 0 and 
-              rsi_1w_aligned[i] > 70 and 
+        # Short: Bearish alignment, price below 1w EMA200, volume spike
+        elif (bearish and 
+              close[i] < ema_200_1w_aligned[i] and 
               volume[i] > vol_threshold[i]):
             signals[i] = -0.25
         
-        # Exit: KAMA slope changes sign or RSI returns to neutral (30-70)
+        # Exit: Alignment breaks or price crosses 1w EMA200 in opposite direction
         elif (i > 0 and 
-              ((signals[i-1] == 0.25 and (kama_slope[i] <= 0 or rsi_1w_aligned[i] >= 30)) or
-               (signals[i-1] == -0.25 and (kama_slope[i] >= 0 or rsi_1w_aligned[i] <= 70)))):
+              ((signals[i-1] == 0.25 and (not bullish or close[i] <= ema_200_1w_aligned[i])) or
+               (signals[i-1] == -0.25 and (not bearish or close[i] >= ema_200_1w_aligned[i])))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -83,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_RSI1w_Volume"
-timeframe = "1d"
+name = "12h_WilliamsAlligator_1wEMA_Volume"
+timeframe = "12h"
 leverage = 1.0
