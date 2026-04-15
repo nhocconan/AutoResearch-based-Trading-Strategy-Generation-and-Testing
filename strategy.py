@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d trend filter (EMA50) + volume confirmation + ATR stoploss.
-# Donchian breakout provides clear structure, 1d EMA50 filters counter-trend trades,
-# volume confirms momentum breakout, ATR stoploss manages risk.
-# Works in bull/bear: trend filter avoids counter-trend trades, breakout captures momentum.
-# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
+# Hypothesis: 1d Donchian channel breakout (20-period) with 1w EMA trend filter and volume confirmation.
+# Uses 1w EMA(34) for long-term trend bias and Donchian breakout for entry timing.
+# Includes volume filter (current volume > 1.5x 20-bar SMA) to avoid low-momentum breakouts.
+# Designed for very low trade frequency (7-25/year) to minimize fee drag in choppy markets.
+# Works in bull/bear: 1w EMA avoids counter-trend trades, Donchian captures breakouts with momentum.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,38 +19,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get HTF data once before loop
-    df_4h = get_htf_data(prices, '4h')  # for ATR calculation
-    df_1d = get_htf_data(prices, '1d')  # for trend filter
-    
-    if len(df_4h) < 50 or len(df_1d) < 50:
+    # Get 1d and 1w HTF data once before loop
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 50 or len(df_1w) < 50:
         return np.zeros(n)
     
-    # === 4h Indicators: ATR for stoploss and volatility filter ===
-    high_4h = pd.Series(df_4h['high'].values)
-    low_4h = pd.Series(df_4h['low'].values)
-    close_4h = pd.Series(df_4h['close'].values)
-    tr1 = high_4h - low_4h
-    tr2 = abs(high_4h - close_4h.shift(1))
-    tr3 = abs(low_4h - close_4h.shift(1))
-    tr_4h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_4h = tr_4h.rolling(window=14, min_periods=14).mean().values
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    # === 1d Indicators: Donchian Channel (20) ===
+    high_1d = pd.Series(df_1d['high'].values)
+    low_1d = pd.Series(df_1d['low'].values)
+    donchian_high = high_1d.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_1d.rolling(window=20, min_periods=20).min().values
     
-    # === 4h Donchian(20) channels ===
-    donch_high_20 = high_4h.rolling(window=20, min_periods=20).max().values
-    donch_low_20 = low_4h.rolling(window=20, min_periods=20).min().values
-    donch_high_20_aligned = align_htf_to_ltf(prices, df_4h, donch_high_20)
-    donch_low_20_aligned = align_htf_to_ltf(prices, df_4h, donch_low_20)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # === 1d Indicators: Trend Filter ===
-    # 1d EMA(50) for trend bias
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # === Volume filter: current 4h volume > 1.5x 20-bar 4h volume SMA ===
-    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_sma_20 * 1.5)
+    # === 1w Indicators: Trend Filter ===
+    # 1w EMA(34) for long-term trend bias
+    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     signals = np.zeros(n)
     
@@ -58,54 +45,39 @@ def generate_signals(prices):
     warmup = 100
     
     for i in range(warmup, n):
+        # Volume filter: current volume > 1.5x 20-period volume SMA
+        vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
+        
         # Skip if any required data is NaN
-        if (np.isnan(donch_high_20_aligned[i]) or np.isnan(donch_low_20_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_4h_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(ema_34_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above Donchian(20) high
-        # 2. 1d price above EMA50 (bullish long-term trend bias)
+        # 1. Price breaks above Donchian high (20-period breakout)
+        # 2. 1w price above EMA34 (bullish long-term trend bias)
         # 3. Volume confirmation
-        if (close[i] > donch_high_20_aligned[i] and
-            close[i] > ema_50_1d_aligned[i] and
-            vol_confirm[i]):
+        if (close[i] > donchian_high_aligned[i] and
+            close[i] > ema_34_1w_aligned[i] and
+            vol_confirm):
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below Donchian(20) low
-        # 2. 1d price below EMA50 (bearish long-term trend bias)
+        # 1. Price breaks below Donchian low (20-period breakdown)
+        # 2. 1w price below EMA34 (bearish long-term trend bias)
         # 3. Volume confirmation
-        elif (close[i] < donch_low_20_aligned[i] and
-              close[i] < ema_50_1d_aligned[i] and
-              vol_confirm[i]):
+        elif (close[i] < donchian_low_aligned[i] and
+              close[i] < ema_34_1w_aligned[i] and
+              vol_confirm):
             signals[i] = -0.25
         
-        # === STOPLOSS: ATR-based trailing stop ===
         else:
-            # Track position from previous bar
-            prev_signal = signals[i-1]
-            
-            if prev_signal > 0:  # Long position
-                # Calculate stop level: highest high since entry minus 2*ATR
-                # Simplified: use current high - 2*ATR as trailing stop proxy
-                if close[i] < (high[i] - 2.0 * atr_4h_aligned[i]):
-                    signals[i] = 0.0  # stoploss hit
-                else:
-                    signals[i] = prev_signal  # maintain position
-            elif prev_signal < 0:  # Short position
-                # Calculate stop level: lowest low since entry plus 2*ATR
-                # Simplified: use current low + 2*ATR as trailing stop proxy
-                if close[i] > (low[i] + 2.0 * atr_4h_aligned[i]):
-                    signals[i] = 0.0  # stoploss hit
-                else:
-                    signals[i] = prev_signal  # maintain position
-            else:
-                signals[i] = 0.0  # flat
+            signals[i] = 0.0  # flat
     
     return signals
 
-name = "4h_Donchian20_EMA50_Vol_ATRStop_v1"
-timeframe = "4h"
+name = "1d_Donchian20_EMA34_VolFilter_v1"
+timeframe = "1d"
 leverage = 1.0
