@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1d EMA trend filter and volume spike
-# Long when Williams %R crosses above -80 from below + price > 1d EMA34 + volume > 2x 20-period avg
-# Short when Williams %R crosses below -20 from above + price < 1d EMA34 + volume > 2x 20-period avg
-# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (12-30/year).
-# Williams %R identifies overbought/oversold conditions. EMA34 filter ensures we only trade in direction of higher timeframe trend.
-# Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend) by requiring EMA alignment.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d volume spike and choppiness regime filter
+# Long when price breaks above 1d Camarilla R3 + volume > 2x 20-period avg + CHOP(12h) < 38.2 (trending)
+# Short when price breaks below 1d Camarilla S3 + volume > 2x 20-period avg + CHOP(12h) < 38.2
+# Uses discrete position sizing (0.25) to minimize fee churn. Target: 12-30 trades/year.
+# Camarilla levels provide precise intraday support/resistance. Volume spike confirms institutional interest.
+# CHOP filter ensures we only trade in trending markets, avoiding chop/range bound conditions.
+# Works in bull markets (breakouts continue) and bear markets (breakdowns accelerate) by requiring trending regime.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,21 +27,46 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d Indicator: EMA34 (trend filter) ===
+    # === 1d Indicator: Camarilla Pivot Levels (R3, S3) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === 6h Indicator: Williams %R (14-period) ===
-    lookback = 14
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero (when highest_high == lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate pivot point
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    # Calculate Camarilla levels
+    r3 = pp + (high_1d - low_1d) * 1.1 / 4.0
+    s3 = pp - (high_1d - low_1d) * 1.1 / 4.0
+    
+    # Align to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # === 12h Indicator: Choppiness Index (CHOP) - regime filter ===
+    chop_window = 14
+    # Calculate True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]
+    tr2[0] = np.abs(high[0] - close[0])
+    tr3[0] = np.abs(low[0] - close[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Calculate sum of TR over window
+    tr_sum = pd.Series(tr).rolling(window=chop_window, min_periods=chop_window).sum().values
+    # Calculate highest high and lowest low over window
+    hh = pd.Series(high).rolling(window=chop_window, min_periods=chop_window).max().values
+    ll = pd.Series(low).rolling(window=chop_window, min_periods=chop_window).min().values
+    
+    # Avoid division by zero and invalid values
+    denominator = hh - ll
+    chop = np.where(denominator != 0, 100 * np.log10(tr_sum / denominator) / np.log10(chop_window), 50.0)
+    # Handle edge cases
+    chop = np.where(np.isnan(chop) | np.isinf(chop), 50.0, chop)
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -48,7 +74,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(lookback, 34, 20) + 5
+    warmup = max(chop_window, 20) + 5  # CHOP(14) + volume(20) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -56,29 +82,32 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2x 20-period volume SMA
+        # Volume filter: current volume > 2.0x 20-period volume SMA
         vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
         
+        # CHOP filter: trending market (CHOP < 38.2)
+        chop_filter = chop[i] < 38.2
+        
         # Skip if any required data is NaN
-        if (np.isnan(williams_r[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_sma_20[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(vol_sma_20[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Williams %R crosses above -80 from below (oversold bounce)
-        # 2. Price > 1d EMA34 (uptrend filter)
-        # 3. Volume confirmation
-        if (williams_r[i] > -80 and williams_r[i-1] <= -80) and \
-           (close[i] > ema_34_1d_aligned[i]) and vol_confirm:
+        # 1. Price breaks above 1d Camarilla R3
+        # 2. Volume confirmation
+        # 3. Trending regime (CHOP < 38.2)
+        if (close[i] > r3_aligned[i]) and \
+           vol_confirm and chop_filter:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Williams %R crosses below -20 from above (overbought rejection)
-        # 2. Price < 1d EMA34 (downtrend filter)
-        # 3. Volume confirmation
-        elif (williams_r[i] < -20 and williams_r[i-1] >= -20) and \
-             (close[i] < ema_34_1d_aligned[i]) and vol_confirm:
+        # 1. Price breaks below 1d Camarilla S3
+        # 2. Volume confirmation
+        # 3. Trending regime (CHOP < 38.2)
+        elif (close[i] < s3_aligned[i]) and \
+             vol_confirm and chop_filter:
             signals[i] = -0.25
         
         else:
@@ -86,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR14_1dEMA34_VolumeSpike_Filter_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_1dVol2x_CHOP_Filter_v2"
+timeframe = "12h"
 leverage = 1.0
