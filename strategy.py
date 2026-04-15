@@ -27,6 +27,8 @@ def generate_signals(prices):
     pivot = (daily_high + daily_low + daily_close) / 3.0
     r1 = 2 * pivot - daily_low
     s1 = 2 * pivot - daily_high
+    r2 = pivot + (daily_high - daily_low)
+    s2 = pivot - (daily_high - daily_low)
     
     # Calculate daily ATR(14) for volatility filter
     tr1 = pd.Series(daily_high - daily_low)
@@ -39,6 +41,8 @@ def generate_signals(prices):
     pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
     r1_6h = align_htf_to_ltf(prices, df_1d, r1)
     s1_6h = align_htf_to_ltf(prices, df_1d, s1)
+    r2_6h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_6h = align_htf_to_ltf(prices, df_1d, s2)
     atr_14_6h = align_htf_to_ltf(prices, df_1d, atr_14)
     
     # Calculate 6h Donchian channels (20-period) for breakout signals
@@ -49,39 +53,55 @@ def generate_signals(prices):
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
+    # Calculate 6h ADX for trend strength filter
+    plus_dm = pd.Series(np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0))
+    minus_dm = pd.Series(np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0))
+    plus_dm = pd.Series(np.concatenate([[0], plus_dm.values]))
+    minus_dm = pd.Series(np.concatenate([[0], minus_dm.values]))
+    tr_6h = pd.Series(np.maximum(np.maximum(high - low, np.abs(high - np.concatenate([[close[0]], close[:-1]]))), np.abs(low - np.concatenate([[close[0]], close[:-1]]))))
+    plus_di_14 = 100 * (plus_dm.ewm(alpha=1/14, adjust=False).mean() / tr_6h.ewm(alpha=1/14, adjust=False).mean())
+    minus_di_14 = 100 * (minus_dm.ewm(alpha=1/14, adjust=False).mean() / tr_6h.ewm(alpha=1/14, adjust=False).mean())
+    dx_14 = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
+    adx_14 = dx_14.ewm(alpha=1/14, adjust=False).mean().values
+    adx_14_6h = align_htf_to_ltf(prices, df_1d, adx_14)
+    
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
         if (np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or 
-            np.isnan(atr_14_6h[i]) or np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
-            np.isnan(volume_ratio[i])):
+            np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or np.isnan(atr_14_6h[i]) or 
+            np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
+            np.isnan(volume_ratio[i]) or np.isnan(adx_14_6h[i])):
             signals[i] = 0.0
             continue
         
         # Entry conditions:
-        # 1. 6h price breaks above R1 with volume confirmation → long
-        # 2. 6h price breaks below S1 with volume confirmation → short
+        # 1. 6h price breaks above R1 with volume confirmation and trend filter → long
+        # 2. 6h price breaks below S1 with volume confirmation and trend filter → short
         # 3. Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
         # 4. Volume confirmation: volume > 1.3x average
-        # 5. Discrete position sizing: 0.20
+        # 5. Trend filter: ADX > 20 (avoid ranging markets)
+        # 6. Discrete position sizing: 0.25
         
         # Long conditions: 6h breakout above R1
         if (close[i] > r1_6h[i] and            # 6h price above R1 pivot
             volume_ratio[i] > 1.3 and          # Volume confirmation
-            atr_14_6h[i] > 0.005 * close[i]):  # Volatility filter
-            signals[i] = 0.20
+            atr_14_6h[i] > 0.005 * close[i] and  # Volatility filter
+            adx_14_6h[i] > 20):                # Trend filter
+            signals[i] = 0.25
             
         # Short conditions: 6h breakdown below S1
         elif (close[i] < s1_6h[i] and          # 6h price below S1 pivot
               volume_ratio[i] > 1.3 and        # Volume confirmation
-              atr_14_6h[i] > 0.005 * close[i]): # Volatility filter
-            signals[i] = -0.20
+              atr_14_6h[i] > 0.005 * close[i] and  # Volatility filter
+              adx_14_6h[i] > 20):              # Trend filter
+            signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "6h_Pivot_R1_S1_Breakout_Volume_ATR_Filter_ReducedSize"
+name = "6h_Pivot_R1_S1_Breakout_Volume_ATR_ADX_Filter"
 timeframe = "6h"
 leverage = 1.0
