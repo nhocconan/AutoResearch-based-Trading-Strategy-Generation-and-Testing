@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index (Bull/Bear Power) with 1d EMA50 trend filter and volume confirmation.
-# Elder Ray measures bull/bear power relative to EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13.
-# Long when Bull Power > 0 AND Bear Power rising (less negative) AND 1d EMA50 uptrend AND volume confirmation.
-# Short when Bear Power < 0 AND Bull Power falling (less positive) AND 1d EMA50 downtrend AND volume confirmation.
-# Designed for low trade frequency (12-30/year) to minimize fee drag. Works in bull/bear: EMA50 avoids counter-trend trades,
-# Elder Ray captures momentum shifts with reduced whipsaw vs raw price crossovers.
+# Hypothesis: 12h Donchian channel breakout with 1d EMA trend filter and volume confirmation.
+# Uses 1d EMA200 for long-term trend bias and 12h Donchian(20) breakouts for entries.
+# Volume filter ensures breakouts occur with above-average participation.
+# Designed for low trade frequency (15-30/year) to minimize fee drag.
+# Works in bull markets (breakouts with trend) and bear markets (breakouts against trend filtered by EMA200).
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,30 +18,29 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Get 6h and 1d HTF data once before loop
-    df_6h = get_htf_data(prices, '6h')
+    # Get 12h and 1d HTF data once before loop
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_6h) < 50 or len(df_1d) < 50:
+    if len(df_12h) < 30 or len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 6h Indicators: Elder Ray ===
-    # EMA13 for Elder Ray base
-    close_6h = pd.Series(df_6h['close'].values)
-    ema13_6h = close_6h.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # === 12h Indicators: Donchian Channel (20) ===
+    high_12h = pd.Series(df_12h['high'].values)
+    low_12h = pd.Series(df_12h['low'].values)
+    donchian_high_20 = high_12h.rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = low_12h.rolling(window=20, min_periods=20).min().values
     
-    # Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema13_6h
-    bear_power = low - ema13_6h
-    
-    bull_power_aligned = align_htf_to_ltf(prices, df_6h, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_6h, bear_power)
+    donchian_high_20_aligned = align_htf_to_ltf(prices, df_12h, donchian_high_20)
+    donchian_low_20_aligned = align_htf_to_ltf(prices, df_12h, donchian_low_20)
     
     # === 1d Indicators: Trend Filter ===
-    # 1d EMA(50) for trend bias
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 1d EMA(200) for long-term trend bias
+    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    
+    # === Volume Filter (12h) ===
+    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
@@ -50,35 +48,30 @@ def generate_signals(prices):
     warmup = 100
     
     for i in range(warmup, n):
-        # Volume filter: current 6h volume > 1.5x 20-period 6h volume SMA
-        vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
-        
         # Skip if any required data is NaN
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or
+            np.isnan(ema_200_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation: current volume > 1.3x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.3)
+        
         # === LONG CONDITIONS ===
-        # 1. Bull Power > 0 (price above EMA13 showing bullish momentum)
-        # 2. Bear Power rising (less negative than previous bar, indicating weakening bearish pressure)
-        # 3. 1d price above EMA50 (bullish long-term trend bias)
-        # 4. Volume confirmation
-        if (bull_power_aligned[i] > 0 and
-            bear_power_aligned[i] > bear_power_aligned[i-1] and  # rising (less negative)
-            close[i] > ema_50_1d_aligned[i] and
+        # 1. Price breaks above 12h Donchian high (20)
+        # 2. 1d price above EMA200 (bullish long-term trend)
+        # 3. Volume confirmation
+        if (close[i] > donchian_high_20_aligned[i] and
+            close[i] > ema_200_1d_aligned[i] and
             vol_confirm):
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Bear Power < 0 (price below EMA13 showing bearish momentum)
-        # 2. Bull Power falling (less positive than previous bar, indicating weakening bullish pressure)
-        # 3. 1d price below EMA50 (bearish long-term trend bias)
-        # 4. Volume confirmation
-        elif (bear_power_aligned[i] < 0 and
-              bull_power_aligned[i] < bull_power_aligned[i-1] and  # falling (less positive)
-              close[i] < ema_50_1d_aligned[i] and
+        # 1. Price breaks below 12h Donchian low (20)
+        # 2. 1d price below EMA200 (bearish long-term trend)
+        # 3. Volume confirmation
+        elif (close[i] < donchian_low_20_aligned[i] and
+              close[i] < ema_200_1d_aligned[i] and
               vol_confirm):
             signals[i] = -0.25
         
@@ -87,6 +80,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Elder_Ray_EMA50_VolFilter_v1"
-timeframe = "6h"
+name = "12h_Donchian20_EMA200_VolFilter_v1"
+timeframe = "12h"
 leverage = 1.0
