@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator + Elder Ray Power with 1d regime filter
-# Uses Alligator (JAWS/TEETH/LIPS) to identify trendless markets and Elder Ray to measure bull/bear power
-# Long when: Elder Bull Power > 0 AND price above Alligator TEETH AND 1d ADX < 25 (range regime) for mean reversion
-# Short when: Elder Bear Power < 0 AND price below Alligator TEETH AND 1d ADX < 25 (range regime) for mean reversion
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above Donchian upper band + 1d EMA34 uptrend + volume > 1.5x 20-period avg
+# Short when price breaks below Donchian lower band + 1d EMA34 downtrend + volume > 1.5x 20-period avg
 # Uses discrete position sizing (0.25) to control drawdown and minimize fee drag.
-# Alligator identifies sideways markets where Elder Ray works best for mean reversion.
-# 1d ADX < 25 filter ensures we only trade in ranging conditions on higher timeframe.
+# 1d EMA34 provides strong trend filter reducing whipsaws in both bull and bear markets.
+# Volume threshold (1.5x) targets ~20-40 trades/year on 4h timeframe to avoid overtrading.
+# Donchian channels provide clear structure-based breakout levels that work in ranging and trending markets.
 
 def generate_signals(prices):
     n = len(prices)
@@ -27,80 +27,27 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # === 1d Indicator: ADX for regime filter ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === 1d Indicator: EMA34 ===
     close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # True Range calculation
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with index
+    # === 4h Donchian Channel (20-period) ===
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
-    
-    # Smoothed TR, DM+ and DM-
-    def ma_smoother(data, period):
-        return pd.Series(data).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    
-    tr_ma = ma_smoother(tr, 14)
-    dm_plus_ma = ma_smoother(dm_plus, 14)
-    dm_minus_ma = ma_smoother(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_ma / tr_ma
-    di_minus = 100 * dm_minus_ma / tr_ma
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = ma_smoother(dx, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # === 6h Indicators: Williams Alligator ===
-    # JAWS (Blue): 13-period SMMA smoothed 8 bars ahead
-    # TEETH (Red): 8-period SMMA smoothed 5 bars ahead  
-    # LIPS (Green): 5-period SMMA smoothed 3 bars ahead
-    def smma(data, period):
-        # Smoothed Moving Average
-        sma = pd.Series(data).rolling(window=period, min_periods=period).mean().values
-        smma_vals = np.full_like(data, np.nan, dtype=float)
-        if len(sma) >= period:
-            smma_vals[period-1] = sma[period-1]
-            for i in range(period, len(data)):
-                smma_vals[i] = (smma_vals[i-1] * (period-1) + data[i]) / period
-        return smma_vals
-    
-    jaws = smma(close, 13)
-    teeth = smma(close, 8)
-    lips = smma(close, 5)
-    
-    # Shift Alligator lines forward (JAWS: +8, TEETH: +5, LIPS: +3)
-    jaws_shifted = np.concatenate([np.full(8, np.nan), jaws[:-8]]) if len(jaws) > 8 else np.full_like(jaws, np.nan)
-    teeth_shifted = np.concatenate([np.full(5, np.nan), teeth[:-5]]) if len(teeth) > 5 else np.full_like(teeth, np.nan)
-    lips_shifted = np.concatenate([np.full(3, np.nan), lips[:-3]]) if len(lips) > 3 else np.full_like(lips, np.nan)
-    
-    # === 6h Indicators: Elder Ray Power ===
-    # Bull Power = High - EMA(13)
-    # Bear Power = Low - EMA(13)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # Volume SMA for confirmation (using 20-period)
+    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(50, 20) + 10  # sufficient buffer for all indicators
+    warmup = max(34, 20) + 5  # EMA34 + Donchian(20) + volume(20) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -109,27 +56,28 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(jaws_shifted[i]) or np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
+        # Volume filter: current volume > 1.5x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
+        
         # === LONG CONDITIONS ===
-        # 1. Elder Bull Power > 0 (bulls in control)
-        # 2. Price above Alligator TEETH (trend bias up)
-        # 3. 1d ADX < 25 (range regime on higher timeframe for mean reversion)
-        if (bull_power[i] > 0) and \
-           (close[i] > teeth_shifted[i]) and \
-           (adx_1d_aligned[i] < 25):
+        # 1. Price breaks above Donchian upper band (close > upper)
+        # 2. 1d EMA34 uptrend (close > EMA34)
+        # 3. Volume confirmation
+        if (close[i] > donchian_upper[i]) and \
+           (close[i] > ema_34_1d_aligned[i]) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Elder Bear Power < 0 (bears in control)
-        # 2. Price below Alligator TEETH (trend bias down)
-        # 3. 1d ADX < 25 (range regime on higher timeframe for mean reversion)
-        elif (bear_power[i] < 0) and \
-             (close[i] < teeth_shifted[i]) and \
-             (adx_1d_aligned[i] < 25):
+        # 1. Price breaks below Donchian lower band (close < lower)
+        # 2. 1d EMA34 downtrend (close < EMA34)
+        # 3. Volume confirmation
+        elif (close[i] < donchian_lower[i]) and \
+             (close[i] < ema_34_1d_aligned[i]) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -137,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Alligator_ElderRay_1dADX_RangeFilter_v1"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA34_Volume_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
