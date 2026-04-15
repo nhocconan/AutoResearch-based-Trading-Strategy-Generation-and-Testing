@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d ADX trend filter
-# Long when price breaks above 20-period Donchian high + volume > 1.5x 20-period avg + 1d ADX > 25 (strong trend)
-# Short when price breaks below 20-period Donchian low + volume > 1.5x 20-period avg + 1d ADX > 25 (strong trend)
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d ADX > 25 trend filter
+# Long when price breaks above 20-period Donchian high + volume > 1.5x 20-period avg + 1d ADX > 25
+# Short when price breaks below 20-period Donchian low + volume > 1.5x 20-period avg + 1d ADX > 25
 # Uses discrete position sizing (0.30) to balance return and drawdown. Designed for low trade frequency (20-40/year).
-# Donchian channels provide objective breakout levels. ADX > 25 ensures we only trade strong trends, avoiding chop and whipsaws.
-# Works in bull markets (trend continuation) and bear markets (strong downtrends) by requiring strong ADX.
-# Volume confirmation ensures breakouts have participation, reducing false signals.
+# Donchian channels provide clear structure; volume confirms breakout strength; ADX filter ensures trending markets only.
+# Works in bull markets (trend continuation) and bear markets (strong downtrends) by requiring ADX > 25.
 
 def generate_signals(prices):
     n = len(prices)
@@ -91,12 +90,11 @@ def generate_signals(prices):
     
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # === 4h Indicators: Donchian Channel (20-period) ===
-    # Calculate Donchian high and low using rolling window
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # === LT Indicators: Donchian Channels (20-period) ===
+    # Donchian High: highest high over 20 periods
+    # Donchian Low: lowest low over 20 periods
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -104,7 +102,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 50
+    warmup = 50  # Enough for Donchian(20) and 1d ADX
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -123,7 +121,7 @@ def generate_signals(prices):
         
         # === LONG CONDITIONS ===
         # 1. Price breaks above 20-period Donchian high
-        # 2. Strong trend (ADX > 25)
+        # 2. Trend (1d ADX > 25)
         # 3. Volume confirmation
         if (close[i] > donchian_high[i]) and \
            (adx_aligned[i] > 25) and vol_confirm:
@@ -131,7 +129,7 @@ def generate_signals(prices):
         
         # === SHORT CONDITIONS ===
         # 1. Price breaks below 20-period Donchian low
-        # 2. Strong trend (ADX > 25)
+        # 2. Trend (1d ADX > 25)
         # 3. Volume confirmation
         elif (close[i] < donchian_low[i]) and \
              (adx_aligned[i] > 25) and vol_confirm:
