@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index (Bull Power/Bear Power) with 1d EMA50 trend filter and volume confirmation.
-# Elder Ray measures bull/bear power relative to EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13.
-# Goes long when Bull Power > 0 AND rising (momentum) AND 1d trend bullish AND volume confirms.
-# Goes short when Bear Power < 0 AND falling (momentum) AND 1d trend bearish AND volume confirms.
-# Designed for low trade frequency (12-30/year) to minimize fee drag. Works in bull/bear: 1d EMA avoids counter-trend trades,
-# Elder Ray captures momentum shifts with EMA13 smoothing.
+# Hypothesis: 12h Williams Alligator with 1d trend filter and volume confirmation.
+# Uses 1d EMA50 for trend bias and Williams Alligator (SMAs with specific periods/offsets) on 12h for entry timing.
+# Includes volume filter (current volume > 1.5x 20-bar SMA) to avoid low-momentum breakouts.
+# Designed for low trade frequency (15-30/year) to minimize fee drag in choppy markets.
+# Works in bull/bear: Alligator identifies trend direction, volume confirms momentum, 1d EMA avoids counter-trend trades.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,34 +18,24 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Get 6h and 1d HTF data once before loop
-    df_6h = get_htf_data(prices, '6h')
+    # Get 12h and 1d HTF data once before loop
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_6h) < 50 or len(df_1d) < 50:
+    if len(df_12h) < 50 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 6h Indicators: Elder Ray ===
-    # EMA13 for Elder Ray base
-    close_6h = pd.Series(df_6h['close'].values)
-    ema13_6h = close_6h.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # === 12h Indicators: Williams Alligator ===
+    # Williams Alligator: Jaw (13-period SMA, 8-bar offset), Teeth (8-period SMA, 5-bar offset), Lips (5-period SMA, 3-bar offset)
+    close_12h = pd.Series(df_12h['close'].values)
+    jaw_12h = close_12h.rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth_12h = close_12h.rolling(window=8, min_periods=8).mean().shift(5).values
+    lips_12h = close_12h.rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Bull Power = High - EMA13, Bear Power = Low - EMA13
-    high_6h = pd.Series(df_6h['high'].values)
-    low_6h = pd.Series(df_6h['low'].values)
-    bull_power_6h = (high_6h - ema13_6h).values
-    bear_power_6h = (low_6h - ema13_6h).values
-    
-    # Slope of Bull/Bear Power (momentum): 3-bar change
-    bull_power_slope = pd.Series(bull_power_6h).diff(3).values
-    bear_power_slope = pd.Series(bear_power_6h).diff(3).values
-    
-    # Align to LTF
-    ema13_6h_aligned = align_htf_to_ltf(prices, df_6h, ema13_6h)
-    bull_power_6h_aligned = align_htf_to_ltf(prices, df_6h, bull_power_6h)
-    bear_power_6h_aligned = align_htf_to_ltf(prices, df_6h, bear_power_6h)
-    bull_power_slope_aligned = align_htf_to_ltf(prices, df_6h, bull_power_slope)
-    bear_power_slope_aligned = align_htf_to_ltf(prices, df_6h, bear_power_slope)
+    jaw_12h_aligned = align_htf_to_ltf(prices, df_12h, jaw_12h)
+    teeth_12h_aligned = align_htf_to_ltf(prices, df_12h, teeth_12h)
+    lips_12h_aligned = align_htf_to_ltf(prices, df_12h, lips_12h)
     
     # === 1d Indicators: Trend Filter ===
     # 1d EMA(50) for trend bias
@@ -59,39 +48,34 @@ def generate_signals(prices):
     warmup = 100
     
     for i in range(warmup, n):
-        # Volume filter: current 6h volume > 1.5x 20-period 6h volume SMA
+        # Volume filter: current 12h volume > 1.5x 20-period 12h volume SMA
         vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # Skip if any required data is NaN
-        if (np.isnan(ema13_6h_aligned[i]) or np.isnan(bull_power_6h_aligned[i]) or
-            np.isnan(bear_power_6h_aligned[i]) or np.isnan(bull_power_slope_aligned[i]) or
-            np.isnan(bear_power_slope_aligned[i]) or np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(jaw_12h_aligned[i]) or np.isnan(teeth_12h_aligned[i]) or
+            np.isnan(lips_12h_aligned[i]) or np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Bull Power > 0 (price above EMA13 = bullish momentum)
-        # 2. Bull Power rising (accelerating bullish momentum)
-        # 3. 6h close above EMA13 (additional confirmation)
-        # 4. 1d price above EMA50 (bullish long-term trend bias)
-        # 5. Volume confirmation
-        if (bull_power_6h_aligned[i] > 0 and
-            bull_power_slope_aligned[i] > 0 and
-            close[i] > ema13_6h_aligned[i] and
+        # 1. Lips > Teeth > Jaw (Alligator bullish alignment: mouth opening upward)
+        # 2. Price above Lips (confirming upward momentum)
+        # 3. 1d price above EMA50 (bullish long-term trend bias)
+        # 4. Volume confirmation
+        if (lips_12h_aligned[i] > teeth_12h_aligned[i] > jaw_12h_aligned[i] and
+            close[i] > lips_12h_aligned[i] and
             close[i] > ema_50_1d_aligned[i] and
             vol_confirm):
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Bear Power < 0 (price below EMA13 = bearish momentum)
-        # 2. Bear Power falling (accelerating bearish momentum)
-        # 3. 6h close below EMA13 (additional confirmation)
-        # 4. 1d price below EMA50 (bearish long-term trend bias)
-        # 5. Volume confirmation
-        elif (bear_power_6h_aligned[i] < 0 and
-              bear_power_slope_aligned[i] < 0 and
-              close[i] < ema13_6h_aligned[i] and
+        # 1. Jaw > Teeth > Lips (Alligator bearish alignment: mouth opening downward)
+        # 2. Price below Jaw (confirming downward momentum)
+        # 3. 1d price below EMA50 (bearish long-term trend bias)
+        # 4. Volume confirmation
+        elif (jaw_12h_aligned[i] > teeth_12h_aligned[i] > lips_12h_aligned[i] and
+              close[i] < jaw_12h_aligned[i] and
               close[i] < ema_50_1d_aligned[i] and
               vol_confirm):
             signals[i] = -0.25
@@ -101,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Elder_Ray_EMA50_VolFilter_v1"
-timeframe = "6h"
+name = "12h_Williams_Alligator_EMA50_VolFilter_v1"
+timeframe = "12h"
 leverage = 1.0
