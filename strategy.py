@@ -13,39 +13,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data once
+    # 1d ATR(14) for volatility filter
     daily = get_htf_data(prices, '1d')
     high_d = daily['high'].values
     low_d = daily['low'].values
     close_d = daily['close'].values
     
-    # Calculate True Range for 1d ATR
+    # Calculate True Range
     tr1 = high_d[1:] - low_d[1:]
     tr2 = np.abs(high_d[1:] - close_d[:-1])
     tr3 = np.abs(low_d[1:] - close_d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # ATR with proper min_periods
+    # ATR calculation with proper min_periods
     atr_14d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14d_aligned = align_htf_to_ltf(prices, daily, atr_14d)
     
-    # 12h Donchian channels (20-period) - using rolling window
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Volume threshold: 2.5x median of last 20 bars (more restrictive)
+    vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median()
+    vol_threshold = 2.5 * vol_median
     
-    # Volume threshold: 2.0x median of last 12 bars
-    vol_median = pd.Series(volume).rolling(window=12, min_periods=12).median().values
-    vol_threshold = 2.0 * vol_median
+    # ATR-based volatility filter: require ATR > 0.7% of price (avoid low volatility chop)
+    vol_filter = atr_14d_aligned > (0.007 * close)
     
-    # Volatility filter: require ATR > 0.5% of price
-    vol_filter = atr_14d_aligned > (0.005 * close)
+    # 1d ATR-based volatility filter for position sizing
+    atr_factor = atr_14d_aligned / close
+    # Scale position size by volatility (inverse vol targeting)
+    vol_scaling = np.clip(0.007 / atr_factor, 0.5, 1.5)  # Target 0.7% daily vol
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14d_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_threshold[i]) or 
+        if (np.isnan(atr_14d_aligned[i]) or np.isnan(vol_threshold[i]) or 
             np.isnan(vol_filter[i])):
             continue
         
@@ -54,19 +54,19 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        # Long: Break above Donchian high + volume spike
-        if (close[i] > donchian_high[i-1] and 
+        # Long: Close above prior close + volume spike
+        if (close[i] > close[i-1] and 
             volume[i] > vol_threshold[i]):
-            signals[i] = 0.25
+            signals[i] = 0.25 * vol_scaling[i]
         
-        # Short: Break below Donchian low + volume spike
-        elif (close[i] < donchian_low[i-1] and 
+        # Short: Close below prior close + volume spike
+        elif (close[i] < close[i-1] and 
               volume[i] > vol_threshold[i]):
-            signals[i] = -0.25
+            signals[i] = -0.25 * vol_scaling[i]
         
-        # Exit: reverse signal on opposite breakout
-        elif (close[i] < donchian_low[i-1] and signals[i-1] > 0) or \
-             (close[i] > donchian_high[i-1] and signals[i-1] < 0):
+        # Exit: reverse signal on opposite direction
+        elif (close[i] < close[i-1] and signals[i-1] > 0) or \
+             (close[i] > close[i-1] and signals[i-1] < 0):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -75,6 +75,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_Volume_Filter"
-timeframe = "12h"
+name = "4h_Volatility_Volume_Momentum_v2"
+timeframe = "4h"
 leverage = 1.0
