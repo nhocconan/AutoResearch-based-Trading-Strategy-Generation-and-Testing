@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R + 1d EMA34 trend + volume spike
-# Long when Williams %R < -80 (oversold) + 1d EMA34 uptrend + volume > 2.0x 24-period avg
-# Short when Williams %R > -20 (overbought) + 1d EMA34 downtrend + volume > 2.0x 24-period avg
-# Williams %R identifies exhaustion points in both bull and bear markets.
-# 1d EMA34 provides strong trend filter reducing whipsaws.
-# Volume threshold (2.0x) targets ~15-35 trades/year on 6h timeframe to avoid overtrading.
-# Uses discrete position sizing (0.25) to control drawdown and minimize fee churn.
+# Hypothesis: 12h Camarilla pivot R3/S3 breakout with 1d Williams %R extreme filter and volume confirmation
+# Long when price breaks above Camarilla R3 + 1d Williams %R < -80 (oversold) + volume > 1.5x 24-period avg
+# Short when price breaks below Camarilla S3 + 1d Williams %R > -20 (overbought) + volume > 1.5x 24-period avg
+# Uses discrete position sizing (0.30) to balance risk and return.
+# Williams %R on 1d provides mean-reversion edge in ranging markets while Camarilla breakouts capture momentum.
+# Volume filter (1.5x) targets ~25-40 trades/year on 12h timeframe to avoid overtrading and fee drag.
+# Camarilla R3/S3 levels provide stronger structure than R1/S1, reducing false breakouts.
 
 def generate_signals(prices):
     n = len(prices)
@@ -27,30 +27,47 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # === 1d Indicator: EMA34 ===
+    # === 1d Indicator: Williams %R (14-period) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === Williams %R (14-period) ===
     # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    # Avoid division by zero
-    hl_range = highest_high_14 - lowest_low_14
-    hl_range = np.where(hl_range == 0, 1e-10, hl_range)
-    williams_r = ((highest_high_14 - close) / hl_range) * -100
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = np.where(
+        (highest_high - lowest_low) != 0,
+        ((highest_high - close_1d) / (highest_high - lowest_low)) * -100,
+        -50.0  # neutral when range is zero
+    )
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Volume SMA for confirmation (using 24-period)
+    # === 12h Camarilla Pivot Levels (based on prior bar) ===
+    # Pivot = (H + L + C) / 3
+    # R3 = Pivot + (H - L) * 1.1 / 4
+    # S3 = Pivot - (H - L) * 1.1 / 4
+    # Using prior bar's OHLC to avoid look-ahead
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    camarilla_r3 = pivot + (prev_high - prev_low) * 1.1 / 4.0
+    camarilla_s3 = pivot - (prev_high - prev_low) * 1.1 / 4.0
+    
+    # Volume SMA for confirmation (using 24-period ~ 12h * 2 = 1 day)
     vol_sma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(34, 24, 14) + 5  # EMA34 + Williams(14) + volume(24) + buffer
+    warmup = max(24, 14) + 5  # volume(24) + Williams %R(14) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -59,35 +76,35 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(williams_r[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_sma_24[i])):
+        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or
+            np.isnan(williams_r_aligned[i]) or np.isnan(vol_sma_24[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2.0x 24-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_24[i] * 2.0)
+        # Volume filter: current volume > 1.5x 24-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_24[i] * 1.5)
         
         # === LONG CONDITIONS ===
-        # 1. Williams %R < -80 (oversold)
-        # 2. 1d EMA34 uptrend (close > EMA34)
+        # 1. Price breaks above Camarilla R3 (close > R3)
+        # 2. 1d Williams %R oversold (< -80)
         # 3. Volume confirmation
-        if (williams_r[i] < -80.0) and \
-           (close[i] > ema_34_1d_aligned[i]) and vol_confirm:
-            signals[i] = 0.25
+        if (close[i] > camarilla_r3[i]) and \
+           (williams_r_aligned[i] < -80) and vol_confirm:
+            signals[i] = 0.30
         
         # === SHORT CONDITIONS ===
-        # 1. Williams %R > -20 (overbought)
-        # 2. 1d EMA34 downtrend (close < EMA34)
+        # 1. Price breaks below Camarilla S3 (close < S3)
+        # 2. 1d Williams %R overbought (> -20)
         # 3. Volume confirmation
-        elif (williams_r[i] > -20.0) and \
-             (close[i] < ema_34_1d_aligned[i]) and vol_confirm:
-            signals[i] = -0.25
+        elif (close[i] < camarilla_s3[i]) and \
+             (williams_r_aligned[i] > -20) and vol_confirm:
+            signals[i] = -0.30
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "6h_WilliamsR14_1dEMA34_Volume_Filter_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_1dWilliamsR_Volume_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
