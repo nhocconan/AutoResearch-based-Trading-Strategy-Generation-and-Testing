@@ -3,11 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams Alligator + 1w Trend Filter + Volume Confirmation
-# Uses Williams Alligator (SMAs with forward shift) to identify trends on daily timeframe,
-# confirmed by 1-week EMA trend direction and volume spike.
-# Only takes long when price > Alligator Jaw and weekly trend up, short when price < Alligator Jaw and weekly trend down.
-# Aims for 30-100 total trades over 4 years with disciplined entries in both bull and bear markets.
+# Hypothesis: 12h Donchian(20) breakout + volume confirmation + 1d ADX trend filter
+# Uses 12h price channel breakouts for trend capture, volume to confirm breakout strength,
+# and 1d ADX to ensure trading only in trending markets (ADX > 25). Works in both bull and bear
+# by taking breakouts in the direction of the 1d trend (ADX-based). Target: 50-150 total trades over 4 years.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,37 +18,59 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Williams Alligator calculation
+    # Load 12h data (primary timeframe) for price action
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # Load 1d data for ADX calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
-    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Load 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    close_1w = df_1w['close'].values
+    # Calculate Donchian channels (20-period) on 12h
+    donch_high_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donch_low_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Williams Alligator on 1d (13,8,5 SMAs with future shift)
-    jaw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Calculate ADX (14-period) on 1d
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # 1-week EMA for trend filter
-    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / (atr + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / (atr + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
     # Volume average (20-period on 1d)
-    vol_avg_1d = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_avg_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     
-    # Align all indicators to 1d timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Align all indicators to 12h timeframe
+    donch_high_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_high_12h)
+    donch_low_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_low_12h)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
@@ -58,41 +79,36 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_avg_aligned[i])):
+        if (np.isnan(donch_high_12h_aligned[i]) or np.isnan(donch_low_12h_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_avg_aligned[i])):
             continue
         
-        # Alligator condition: lips > jaws = bullish, lips < jaws = bearish
-        bullish_alligator = lips_aligned[i] > jaw_aligned[i]
-        bearish_alligator = lips_aligned[i] < jaw_aligned[i]
-        
-        # Weekly trend: price above/below weekly EMA
-        weekly_uptrend = close[i] > ema_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_1w_aligned[i]
-        
-        # Volume confirmation
-        volume_spike = volume[i] > 1.5 * vol_avg_aligned[i]
-        
-        # Long entry: bullish alligator + weekly uptrend + volume spike
-        if bullish_alligator and weekly_uptrend and volume_spike and position <= 0:
+        # Long entry: price breaks above Donchian high + volume spike + ADX > 25 (trending)
+        if (close[i] > donch_high_12h_aligned[i] and
+            volume[i] > 1.5 * vol_avg_aligned[i] and
+            adx_aligned[i] > 25 and
+            position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: bearish alligator + weekly downtrend + volume spike
-        elif bearish_alligator and weekly_downtrend and volume_spike and position >= 0:
+        # Short entry: price breaks below Donchian low + volume spike + ADX > 25 (trending)
+        elif (close[i] < donch_low_12h_aligned[i] and
+              volume[i] > 1.5 * vol_avg_aligned[i] and
+              adx_aligned[i] > 25 and
+              position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: alligator reverses or volume dries up
-        elif position == 1 and (not bullish_alligator or not volume_spike):
+        # Exit: reverse signal or ADX < 20 (ranging market)
+        elif position == 1 and (close[i] < donch_low_12h_aligned[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (not bearish_alligator or not volume_spike):
+        elif position == -1 and (close[i] > donch_high_12h_aligned[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "1d_WilliamsAlligator_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "12h_Donchian_Volume_ADX_Filter"
+timeframe = "12h"
 leverage = 1.0
