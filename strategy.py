@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,56 +13,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot levels (1d is HTF for 12h)
+    # Get daily data for ATR-based volatility filter
     daily = get_htf_data(prices, '1d')
     daily_high = daily['high'].values
     daily_low = daily['low'].values
     daily_close = daily['close'].values
     
-    # Calculate daily pivot levels (classic floor trader pivots)
-    pivot = (daily_high + daily_low + daily_close) / 3.0
-    r1 = 2 * pivot - daily_low
-    s1 = 2 * pivot - daily_high
-    r2 = pivot + (daily_high - daily_low)
-    s2 = pivot - (daily_high - daily_low)
+    # Calculate 14-day ATR for volatility filter
+    tr1 = np.abs(daily_high[1:] - daily_low[1:])
+    tr2 = np.abs(daily_high[1:] - daily_close[:-1])
+    tr3 = np.abs(daily_low[1:] - daily_close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align pivot levels to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, daily, pivot)
-    r1_aligned = align_htf_to_ltf(prices, daily, r1)
-    s1_aligned = align_htf_to_ltf(prices, daily, s1)
-    r2_aligned = align_htf_to_ltf(prices, daily, r2)
-    s2_aligned = align_htf_to_ltf(prices, daily, s2)
+    # Calculate 4-hour Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: current 12h volume > 1.5x 20-period average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    # Calculate 4-hour EMA(50) for trend filter
+    ema50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Range filter: avoid trading when price is within 0.5% of pivot
-    price_to_pivot = np.abs(close - pivot_aligned) / pivot_aligned
-    range_filter = price_to_pivot > 0.005
+    # Align daily ATR to 4h timeframe (wait for daily close)
+    atr_aligned = align_htf_to_ltf(prices, daily, atr)
     
     signals = np.zeros(n)
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema50[i]) or np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade when volume filter and range filter both pass
-        if volume_filter[i] and range_filter[i]:
-            # Long conditions: price breaks above R1 with volume
-            if close[i] > r1_aligned[i]:
+        # Volatility filter: only trade when ATR is above its 50-period median
+        atr_median = pd.Series(atr_aligned[:i+1]).rolling(window=50, min_periods=50).median().iloc[-1]
+        vol_filter = atr_aligned[i] > atr_median
+        
+        if vol_filter:
+            # Long: price breaks above Donchian high AND above EMA50 (uptrend)
+            if close[i] > donchian_high[i] and close[i] > ema50[i]:
                 signals[i] = 0.25
-            # Long conditions: price bounces from S1 with volume (above S1, below S2)
-            elif close[i] > s1_aligned[i] and close[i] < s2_aligned[i]:
-                signals[i] = 0.25
-            # Short conditions: price breaks below S1 with volume
-            elif close[i] < s1_aligned[i]:
-                signals[i] = -0.25
-            # Short conditions: price rejected at R1 with volume (below R1, above R2)
-            elif close[i] < r1_aligned[i] and close[i] > r2_aligned[i]:
+            # Short: price breaks below Donchian low AND below EMA50 (downtrend)
+            elif close[i] < donchian_low[i] and close[i] < ema50[i]:
                 signals[i] = -0.25
             else:
                 signals[i] = signals[i-1]
@@ -71,6 +63,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_R1_S1_Breakout_Volume_RangeFilter_Strict"
-timeframe = "12h"
+name = "4h_Donchian_EMA50_VolatilityFilter"
+timeframe = "4h"
 leverage = 1.0
