@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian Breakout with 12h EMA Filter and Volume Spike
-# Uses 4-hour Donchian channel breakouts (20-period) for trend capture,
-# filtered by 12-hour EMA(50) to ensure alignment with medium-term trend,
-# and confirmed by volume spikes (2x median volume). Works in bull markets
-# (breakouts above upper band) and bear markets (breakouts below lower band).
-# Target: 50-150 total trades over 4 years.
+# Hypothesis: 1d Donchian breakout with weekly volume confirmation and volatility filter
+# Uses weekly Donchian channel (20 weeks) as trend filter, daily Donchian (5 days) for entry
+# Breakouts traded only when weekly volume > 1.5x average and ATR < 0.03*price (low volatility)
+# Designed to work in both bull (breakouts up) and bear (breakouts down) with controlled trade frequency
+# Timeframe: 1d, HTF: 1w
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,56 +19,79 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data for EMA filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load weekly data for trend filter and volume confirmation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # Calculate 12h EMA(50)
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate weekly ATR for volatility filter (14-period)
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 4h Donchian channels (20-period)
-    # Use rolling window on high/low for Donchian bands
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Weekly Donchian channel (20-period) for trend filter
+    high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    
+    # Weekly average volume for confirmation
+    avg_vol_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+    
+    # Align weekly indicators to daily timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1w, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1w, low_20)
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    avg_vol_1w_aligned = align_htf_to_ltf(prices, df_1w, avg_vol_1w)
+    
+    # Daily Donchian channel (5-period) for entry signals
+    high_5 = pd.Series(high).rolling(window=5, min_periods=5).max().values
+    low_5 = pd.Series(low).rolling(window=5, min_periods=5).min().values
     
     signals = np.zeros(n)
     position = 0
     base_size = 0.25  # Position size (25% of capital)
     
-    for i in range(20, n):  # Start after Donchian warmup
-        # Skip if EMA data not available
-        if np.isnan(ema_12h_aligned[i]):
+    for i in range(20, n):  # Start after warmup period
+        # Skip if any required data is NaN
+        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or
+            np.isnan(atr_1w_aligned[i]) or np.isnan(avg_vol_1w_aligned[i])):
             continue
-            
-        # Long entry: price breaks above Donchian high + above 12h EMA + volume spike
-        if (close[i] > donchian_high[i] and
-            close[i] > ema_12h_aligned[i] and
-            volume[i] > 2.0 * np.median(volume[max(0, i-20):i+1]) and
+        
+        # Calculate current price as percentage of ATR for volatility filter
+        atr_percent = atr_1w_aligned[i] / close[i] if close[i] > 0 else 1
+        
+        # Long entry: price breaks above weekly Donchian high + volume confirmation + low volatility
+        if (close[i] > high_20_aligned[i] and
+            volume[i] > 1.5 * avg_vol_1w_aligned[i] and
+            atr_percent < 0.03 and  # Low volatility filter
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below Donchian low + below 12h EMA + volume spike
-        elif (close[i] < donchian_low[i] and
-              close[i] < ema_12h_aligned[i] and
-              volume[i] > 2.0 * np.median(volume[max(0, i-20):i+1]) and
+        # Short entry: price breaks below weekly Donchian low + volume confirmation + low volatility
+        elif (close[i] < low_20_aligned[i] and
+              volume[i] > 1.5 * avg_vol_1w_aligned[i] and
+              atr_percent < 0.03 and  # Low volatility filter
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse Donchian breakout or price crosses 12h EMA in opposite direction
-        elif position == 1 and (close[i] < donchian_low[i] or close[i] < ema_12h_aligned[i]):
+        # Exit: opposite breakout or volatility spike
+        elif position == 1 and (close[i] < low_20_aligned[i] or atr_percent > 0.05):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > donchian_high[i] or close[i] > ema_12h_aligned[i]):
+        elif position == -1 and (close[i] > high_20_aligned[i] or atr_percent > 0.05):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian_EMA_Volume_Spike"
-timeframe = "4h"
+name = "1d_WeeklyDonchian_Volume_Volatility"
+timeframe = "1d"
 leverage = 1.0
