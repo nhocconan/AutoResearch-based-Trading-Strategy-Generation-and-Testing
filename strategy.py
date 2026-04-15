@@ -13,28 +13,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d ATR(14) for volatility filter
+    # 1d data for ATR filter (once before loop)
     daily = get_htf_data(prices, '1d')
     high_d = daily['high'].values
     low_d = daily['low'].values
     close_d = daily['close'].values
     
-    # Calculate True Range
+    # True Range calculation
     tr1 = high_d[1:] - low_d[1:]
     tr2 = np.abs(high_d[1:] - close_d[:-1])
     tr3 = np.abs(low_d[1:] - close_d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # ATR calculation with proper min_periods
+    # ATR with proper min_periods
     atr_14d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14d_aligned = align_htf_to_ltf(prices, daily, atr_14d)
     
-    # Volume threshold: 2.5x median of last 20 bars (restrictive to reduce trades)
+    # Volume filter: 2.0x median of last 20 bars
     vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median()
-    vol_threshold = 2.5 * vol_median
+    vol_threshold = 2.0 * vol_median
     
-    # ATR-based volatility filter: require ATR > 0.7% of price (avoid low volatility chop)
-    vol_filter = atr_14d_aligned > (0.007 * close)
+    # ATR filter: require ATR > 0.5% of price (avoid low volatility)
+    vol_filter = atr_14d_aligned > (0.005 * close)
     
     signals = np.zeros(n)
     
@@ -49,12 +49,12 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        # Long: Close above prior close + volume spike (restrictive condition)
+        # Long: Close above prior close + volume spike
         if (close[i] > close[i-1] and 
             volume[i] > vol_threshold[i]):
             signals[i] = 0.25
         
-        # Short: Close below prior close + volume spike (restrictive condition)
+        # Short: Close below prior close + volume spike
         elif (close[i] < close[i-1] and 
               volume[i] > vol_threshold[i]):
             signals[i] = -0.25
@@ -70,6 +70,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Volatility_Volume_Momentum"
-timeframe = "12h"
+name = "4h_Volatility_Volume_Momentum"
+timeframe = "4h"
 leverage = 1.0
