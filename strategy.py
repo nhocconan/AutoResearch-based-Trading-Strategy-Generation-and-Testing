@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,51 +19,52 @@ def generate_signals(prices):
     ema_50d = pd.Series(close_d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50d_aligned = align_htf_to_ltf(prices, daily, ema_50d)
     
-    # 1d ATR(14) for volatility filter
+    # 1d ATR(20) for volatility filter
     high_d = daily['high'].values
     low_d = daily['low'].values
     tr1 = np.maximum(high_d[1:] - low_d[1:], np.abs(high_d[1:] - close_d[:-1]))
     tr2 = np.maximum(np.abs(low_d[1:] - close_d[:-1]), tr1)
     tr = np.concatenate([[np.nan], tr2])
-    atr_14d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14d_aligned = align_htf_to_ltf(prices, daily, atr_14d)
+    atr_20d = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr_20d_aligned = align_htf_to_ltf(prices, daily, atr_20d)
     
-    # Volume threshold: 1.8x median of last 20 bars
+    # 1d volatility percentile (lookback 60 days) to filter extremes
+    atr_series = pd.Series(atr_20d_aligned)
+    atr_rank = atr_series.rolling(window=60, min_periods=60).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
+    ).values
+    
+    # Volume threshold: 2.0x median of last 20 bars
     vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median()
-    vol_threshold = 1.8 * vol_median
-    
-    # ATR regime filter: avoid low volatility (chop) and extreme volatility
-    atr_ma = pd.Series(atr_14d_aligned).rolling(window=30, min_periods=30).mean()
-    atr_std = pd.Series(atr_14d_aligned).rolling(window=30, min_periods=30).std()
-    vol_regime = (atr_14d_aligned > atr_ma - 0.5 * atr_std) & (atr_14d_aligned < atr_ma + 2.0 * atr_std)
+    vol_threshold = 2.0 * vol_median
     
     signals = np.zeros(n)
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50d_aligned[i]) or np.isnan(atr_14d_aligned[i]) or
-            np.isnan(vol_threshold[i]) or np.isnan(vol_regime[i])):
+        if (np.isnan(ema_50d_aligned[i]) or np.isnan(atr_20d_aligned[i]) or
+            np.isnan(atr_rank[i]) or np.isnan(vol_threshold[i])):
             continue
         
-        # Volatility regime filter: avoid low volatility chop and extreme volatility
-        if not vol_regime[i]:
-            signals[i] = 0.0
-            continue
+        # Volatility filter: avoid extreme volatility (bottom 20% and top 20%)
+        vol_filter = (atr_rank[i] > 0.2) and (atr_rank[i] < 0.8)
         
-        # Long: Price above daily EMA50 + volume spike + volatility regime
+        # Long: Price above daily EMA50 + volume spike + moderate volatility
         if (close[i] > ema_50d_aligned[i] and 
-            volume[i] > vol_threshold[i]):
-            signals[i] = 0.30
+            volume[i] > vol_threshold[i] and 
+            vol_filter):
+            signals[i] = 0.25
         
-        # Short: Price below daily EMA50 + volume spike + volatility regime
+        # Short: Price below daily EMA50 + volume spike + moderate volatility
         elif (close[i] < ema_50d_aligned[i] and 
-              volume[i] > vol_threshold[i]):
-            signals[i] = -0.30
+              volume[i] > vol_threshold[i] and 
+              vol_filter):
+            signals[i] = -0.25
         
         # Exit: price crosses back below/above daily EMA50
         elif (i > 0 and 
-              ((signals[i-1] == 0.30 and close[i] < ema_50d_aligned[i]) or
-               (signals[i-1] == -0.30 and close[i] > ema_50d_aligned[i]))):
+              ((signals[i-1] == 0.25 and close[i] < ema_50d_aligned[i]) or
+               (signals[i-1] == -0.25 and close[i] > ema_50d_aligned[i]))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -72,6 +73,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyEMA50_Vol1.8x_VolRegime_v1"
+name = "4h_DailyEMA50_Vol2.0x_VolRankFilter"
 timeframe = "4h"
 leverage = 1.0
