@@ -3,11 +3,6 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with volume confirmation and 1d ATR-based volatility filter.
-# In bull markets: breaks above R3 capture momentum; in bear markets: breaks below S3 capture continuation.
-# Volatility filter avoids chop, volume confirmation reduces false breakouts.
-# Target: 12-37 trades/year (50-150 total over 4 years) with discrete sizing 0.25 to minimize fee drag.
-
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
@@ -20,8 +15,13 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
+    
+    # Calculate 1d EMA(20) for trend filter
+    close_1d = df_1d['close'].values
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
     # Calculate 1d ATR(14) for volatility regime filter
     tr1 = df_1d['high'] - df_1d['low']
@@ -31,21 +31,11 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate daily Camarilla pivot levels (using prior day's OHLC)
-    prior_high = df_1d['high'].shift(1).values
-    prior_low = df_1d['low'].shift(1).values
-    prior_close = df_1d['close'].shift(1).values
+    # Calculate 6h Donchian(20) breakout levels
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    camarilla_pivot = (prior_high + prior_low + prior_close) / 3.0
-    camarilla_r3 = camarilla_pivot + 1.1 * (prior_high - prior_low)
-    camarilla_s3 = camarilla_pivot - 1.1 * (prior_high - prior_low)
-    
-    # Align Camarilla levels to 12h
-    camarilla_pivot_12h = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    camarilla_r3_12h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_12h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Calculate 12h volume ratio (current vs 20-period average)
+    # Calculate 6h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
@@ -53,8 +43,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(camarilla_pivot_12h[i]) or 
-            np.isnan(camarilla_r3_12h[i]) or np.isnan(camarilla_s3_12h[i]) or 
+        if (np.isnan(ema_20_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
+            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
             np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
@@ -62,17 +52,25 @@ def generate_signals(prices):
         # Volatility regime filter: only trade when daily ATR is elevated (> 0.6% of price)
         vol_regime = atr_14_1d_aligned[i] > 0.006 * close[i]
         
-        # Long conditions: price above pivot, breaks above R3 with volume, volatility regime
-        if (close[i] > camarilla_pivot_12h[i] and
-            close[i] > camarilla_r3_12h[i] and
-            volume_ratio[i] > 1.5 and
+        # Long conditions:
+        # 1. Price above 1d EMA20 (bullish trend bias)
+        # 2. Price breaks above 6h Donchian upper with volume
+        # 3. Volume confirmation: volume > 1.8x average
+        # 4. Daily volatility regime filter (avoid chop)
+        if (close[i] > ema_20_1d_aligned[i] and
+            close[i] > donchian_upper[i] and
+            volume_ratio[i] > 1.8 and
             vol_regime):
             signals[i] = 0.25
             
-        # Short conditions: price below pivot, breaks below S3 with volume, volatility regime
-        elif (close[i] < camarilla_pivot_12h[i] and
-              close[i] < camarilla_s3_12h[i] and
-              volume_ratio[i] > 1.5 and
+        # Short conditions:
+        # 1. Price below 1d EMA20 (bearish trend bias)
+        # 2. Price breaks below 6h Donchian lower with volume
+        # 3. Volume confirmation: volume > 1.8x average
+        # 4. Daily volatility regime filter
+        elif (close[i] < ema_20_1d_aligned[i] and
+              close[i] < donchian_lower[i] and
+              volume_ratio[i] > 1.8 and
               vol_regime):
             signals[i] = -0.25
         else:
@@ -80,6 +78,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Vol_Regime_Camarilla_Pivot_R3S3_Breakout_v3"
-timeframe = "12h"
+name = "6h_EMA20_Trend_Donchian20_Volume_Breakout_v1"
+timeframe = "6h"
 leverage = 1.0
