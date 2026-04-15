@@ -21,28 +21,26 @@ def generate_signals(prices):
     daily_close = df_1d['close'].values
     daily_high = df_1d['high'].values
     daily_low = df_1d['low'].values
+    daily_volume = df_1d['volume'].values
     
-    # Calculate daily Camarilla pivot levels (based on previous day)
-    daily_range = daily_high - daily_low
-    r4 = daily_close + (daily_range * 1.1 / 2)
-    r3 = daily_close + (daily_range * 1.1 / 4)
-    s3 = daily_close - (daily_range * 1.1 / 4)
-    s4 = daily_close - (daily_range * 1.1 / 2)
+    # Calculate daily ATR(14) for volatility regime
+    tr1 = daily_high - daily_low
+    tr2 = np.abs(daily_high - np.concatenate([[daily_close[0]], daily_close[:-1]]))
+    tr3 = np.abs(daily_low - np.concatenate([[daily_close[0]], daily_close[:-1]]))
+    daily_tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    daily_atr = pd.Series(daily_tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align HTF Camarilla levels to 12h timeframe
-    r4_12h = align_htf_to_ltf(prices, df_1d, r4)
-    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
-    s4_12h = align_htf_to_ltf(prices, df_1d, s4)
+    # Align daily ATR to 4h timeframe
+    daily_atr_4h = align_htf_to_ltf(prices, df_1d, daily_atr)
     
-    # Calculate 12h ATR(14) for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate 4h ATR(14) for stop loss
+    tr1_4h = high - low
+    tr2_4h = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    tr3_4h = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
+    atr_14_4h = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 12h volume ratio (current vs 20-period average)
+    # Calculate 4h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
@@ -50,34 +48,44 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(r4_12h[i]) or np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or 
-            np.isnan(s4_12h[i]) or np.isnan(atr_14[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(daily_atr_4h[i]) or np.isnan(atr_14_4h[i]) or 
+            np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
+        # Regime filter: High volatility environment (daily ATR > 2% of price)
+        vol_regime = daily_atr_4h[i] > 0.02 * close[i]
+        
         # Entry conditions:
-        # 1. 12h price breaks above R4 with volume confirmation → long (strong continuation)
-        # 2. 12h price breaks below S4 with volume confirmation → short (strong continuation)
-        # 3. Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
-        # 4. Volume confirmation: volume > 1.3x average
+        # 1. 4h price breaks above recent 20-period high with volume confirmation → long
+        # 2. 4h price breaks below recent 20-period low with volume confirmation → short
+        # 3. Only trade in high volatility regimes (avoid low volatility chop)
+        # 4. Volume confirmation: volume > 1.5x average
         # 5. Discrete position sizing: 0.25
         
-        # Long conditions: 12h breakout above R4 (strong continuation)
-        if (close[i] > r4_12h[i] and            # 12h price above R4 Camarilla
-            volume_ratio[i] > 1.3 and          # Volume confirmation
-            atr_14[i] > 0.005 * close[i]):     # Volatility filter
-            signals[i] = 0.25
+        # Calculate 20-period high/low for breakout levels
+        if i >= 20:
+            high_20 = np.max(high[i-20:i])
+            low_20 = np.min(low[i-20:i])
             
-        # Short conditions: 12h breakdown below S4 (strong continuation)
-        elif (close[i] < s4_12h[i] and          # 12h price below S4 Camarilla
-              volume_ratio[i] > 1.3 and        # Volume confirmation
-              atr_14[i] > 0.005 * close[i]):   # Volatility filter
-            signals[i] = -0.25
+            # Long conditions: 4h breakout above 20-period high
+            if (close[i] > high_20 and              # Break above 20-period high
+                volume_ratio[i] > 1.5 and           # Volume confirmation
+                vol_regime):                        # High volatility regime
+                signals[i] = 0.25
+                
+            # Short conditions: 4h breakdown below 20-period low
+            elif (close[i] < low_20 and             # Break below 20-period low
+                  volume_ratio[i] > 1.5 and         # Volume confirmation
+                  vol_regime):                      # High volatility regime
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "12h_Camarilla_R4_S4_Breakout_Volume_ATR_Filter"
-timeframe = "12h"
+name = "4h_Volatility_Breakout_Volume_Regime_Filter"
+timeframe = "4h"
 leverage = 1.0
