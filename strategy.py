@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Bollinger Band Width Regime + 1d ADX Trend Filter + Volume Spike
-# Uses Bollinger Band Width (BBW) to identify range vs trend regimes.
-# In trending regime (BBW > 50th percentile), trade breakouts in direction of 1d ADX trend.
-# In ranging regime (BBW <= 50th percentile), fade moves to Bollinger Bands.
-# Volume confirmation (>1.5x 20-bar median) filters low-quality signals.
-# Designed to work in both bull (trend following) and bear (mean reversion) markets.
+# Hypothesis: 6h Weekly Pivot Range with Volume Confirmation
+# Uses weekly pivot points (calculated from previous week's OHLC) to define support/resistance zones.
+# Long when price bounces above weekly pivot with volume confirmation (>1.5x 24-bar median volume).
+# Short when price breaks below weekly support with volume confirmation.
+# Designed to capture mean reversion at key weekly levels in both bull and bear markets.
 # Conservative sizing (0.25) to limit trade frequency and avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,120 +20,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day ADX(14) for trend strength and direction
+    # Get daily data for weekly pivot calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # Calculate weekly pivot points (using prior week's OHLC)
+    # For each day, we need the prior week's data (Monday to Sunday)
+    # We'll use a simplified approach: weekly pivot based on prior 5 trading days
+    # In practice, we calculate: P = (Prior Week High + Prior Week Low + Prior Week Close) / 3
+    # Then R1 = 2*P - Prior Week Low, S1 = 2*P - Prior Week High
+    # R2 = P + (Prior Week High - Prior Week Low), S2 = P - (Prior Week High - Prior Week Low)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Calculate rolling weekly high/low/close (5-day lookback for prior week)
+    week_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().shift(1)  # prior week
+    week_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().shift(1)    # prior week
+    week_close = pd.Series(close_1d).rolling(window=5, min_periods=5).last().shift(1)  # prior week
     
-    # Smoothed values
-    tr_ma = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    dm_plus_ma = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    dm_minus_ma = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    # Weekly pivot and support/resistance levels
+    pivot = (week_high + week_low + week_close) / 3
+    r1 = 2 * pivot - week_low
+    s1 = 2 * pivot - week_high
+    r2 = pivot + (week_high - week_low)
+    s2 = pivot - (week_high - week_low)
     
-    # Directional Indicators
-    di_plus = 100 * dm_plus_ma / (tr_ma + 1e-10)
-    di_minus = 100 * dm_minus_ma / (tr_ma + 1e-10)
+    # Align weekly levels to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot.values)
+    r1_6h = align_htf_to_ltf(prices, df_1d, r1.values)
+    s1_6h = align_htf_to_ltf(prices, df_1d, s1.values)
+    r2_6h = align_htf_to_ltf(prices, df_1d, r2.values)
+    s2_6h = align_htf_to_ltf(prices, df_1d, s2.values)
     
-    # ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    adx_value = adx.values
-    
-    # ADX trend direction: +DI > -DI = up, else down
-    adx_up = di_plus > di_minus
-    
-    # Align ADX and trend direction to 4h
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_value)
-    adx_up_aligned = align_htf_to_ltf(prices, df_1d, adx_up.astype(float))
-    
-    # Bollinger Bands (20, 2) on 4h close
-    bb_period = 20
-    bb_mid = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean()
-    bb_std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std()
-    bb_upper = bb_mid + 2 * bb_std
-    bb_lower = bb_mid - 2 * bb_std
-    bb_width = (bb_upper - bb_lower) / bb_mid  # Normalized width
-    
-    # BBW percentile rank (lookback 50 periods)
-    bb_width_series = pd.Series(bb_width)
-    bb_rank = bb_width_series.rolling(window=50, min_periods=10).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
-    )
-    bb_rank = bb_rank.fillna(0.5).values  # Default to median if not enough data
-    
-    # Volume confirmation: current > 1.5x median of last 20 bars
-    vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
+    # Volume confirmation: current > 1.5x median of last 24 bars (4 days of 6h data)
+    vol_median = pd.Series(volume).rolling(window=24, min_periods=24).median()
     vol_threshold = 1.5 * vol_median
     
     signals = np.zeros(n)
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(24, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(adx_aligned[i]) or np.isnan(adx_up_aligned[i]) or 
-            np.isnan(bb_rank[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or
+        if (np.isnan(pivot_6h[i]) or np.isnan(s1_6h[i]) or np.isnan(r1_6h[i]) or
             np.isnan(vol_threshold[i])):
             continue
         
-        # Regime: trending if BBW rank > 0.5, ranging if <= 0.5
-        is_trending = bb_rank[i] > 0.5
+        price = close[i]
+        vol = volume[i]
         
-        if is_trending:
-            # Trend following: breakout in direction of 1d ADX trend
-            if (adx_up_aligned[i] > 0.5 and  # ADX up
-                close[i] > bb_upper[i] and   # Break above upper band
-                volume[i] > vol_threshold[i]):  # Volume confirmation
-                signals[i] = 0.25
-            elif (adx_up_aligned[i] <= 0.5 and  # ADX down
-                  close[i] < bb_lower[i] and    # Break below lower band
-                  volume[i] > vol_threshold[i]):  # Volume confirmation
-                signals[i] = -0.25
-            else:
-                # Hold or exit: reverse signal if opposite breakout
-                if (i > 0 and signals[i-1] == 0.25 and 
-                    close[i] < bb_lower[i] and volume[i] > vol_threshold[i]):
-                    signals[i] = -0.25  # Reverse to short
-                elif (i > 0 and signals[i-1] == -0.25 and 
-                      close[i] > bb_upper[i] and volume[i] > vol_threshold[i]):
-                    signals[i] = 0.25   # Reverse to long
-                else:
-                    signals[i] = signals[i-1]  # Hold position
+        # Long: Price above weekly pivot (S1) with volume confirmation, and not too far above R1
+        # Enter long when price crosses above S1 with volume, targeting pivot/R1
+        if (price > s1_6h[i] and 
+            price <= r1_6h[i] and  # Not too far extended
+            vol > vol_threshold[i]):
+            signals[i] = 0.25
+        
+        # Short: Price below weekly pivot (R1) with volume confirmation, and not too far below S1
+        # Enter short when price crosses below R1 with volume, targeting pivot/S1
+        elif (price < r1_6h[i] and 
+              price >= s1_6h[i] and  # Not too far extended
+              vol > vol_threshold[i]):
+            signals[i] = -0.25
+        
+        # Exit: Price returns to pivot zone or volume dries up
+        elif (i > 0 and 
+              ((signals[i-1] == 0.25 and (price <= pivot_6h[i] or vol <= vol_threshold[i])) or
+               (signals[i-1] == -0.25 and (price >= pivot_6h[i] or vol <= vol_threshold[i])))):
+            signals[i] = 0.0
+        
+        # Otherwise, hold previous position
         else:
-            # Mean reversion: fade to Bollinger Band mean
-            if (close[i] > bb_upper[i] and     # Sell at upper band
-                volume[i] > vol_threshold[i]):
-                signals[i] = -0.25
-            elif (close[i] < bb_lower[i] and   # Buy at lower band
-                  volume[i] > vol_threshold[i]):
-                signals[i] = 0.25
-            else:
-                # Exit mean reversion when price returns to middle band
-                if (i > 0 and signals[i-1] == 0.25 and 
-                    close[i] <= bb_mid[i]):
-                    signals[i] = 0.0
-                elif (i > 0 and signals[i-1] == -0.25 and 
-                      close[i] >= bb_mid[i]):
-                    signals[i] = 0.0
-                else:
-                    signals[i] = signals[i-1]  # Hold position
+            signals[i] = signals[i-1]
     
     return signals
 
-name = "4h_BBW_ADX_Volume_Regime"
-timeframe = "4h"
+name = "6h_WeeklyPivot_Range_Volume"
+timeframe = "6h"
 leverage = 1.0
