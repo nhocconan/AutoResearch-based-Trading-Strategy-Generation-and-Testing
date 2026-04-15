@@ -61,33 +61,33 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volatility regime filter: only trade when daily ATR is elevated (> 0.8% of price)
+        # Volatility regime filter: only trade when daily ATR is elevated (> 0.6% of price)
         # This avoids low-volatility chop and focuses on momentum/trend days
-        vol_regime = atr_14_1d_aligned[i] > 0.008 * close[i]
+        vol_regime = atr_14_1d_aligned[i] > 0.006 * close[i]
         
         # Long conditions:
         # 1. Price above Camarilla pivot (bullish bias)
         # 2. Price breaks above Camarilla R3 with volume (bullish continuation)
-        # 3. Volume confirmation: volume > 1.3x average
-        # 4. 4h ATR > 0.4% of price (ensure sufficient volatility for move)
+        # 3. Volume confirmation: volume > 1.5x average
+        # 4. 4h ATR > 0.3% of price (ensure sufficient volatility for move)
         # 5. Daily volatility regime filter (avoid chop)
         if (close[i] > camarilla_pivot_4h[i] and
             close[i] > camarilla_r3_4h[i] and
-            volume_ratio[i] > 1.3 and
-            atr_14_4h[i] > 0.004 * close[i] and
+            volume_ratio[i] > 1.5 and
+            atr_14_4h[i] > 0.003 * close[i] and
             vol_regime):
             signals[i] = 0.25
             
         # Short conditions:
         # 1. Price below Camarilla pivot (bearish bias)
         # 2. Price breaks below Camarilla S3 with volume (bearish continuation)
-        # 3. Volume confirmation: volume > 1.3x average
-        # 4. 4h ATR > 0.4% of price
+        # 3. Volume confirmation: volume > 1.5x average
+        # 4. 4h ATR > 0.3% of price
         # 5. Daily volatility regime filter
         elif (close[i] < camarilla_pivot_4h[i] and
               close[i] < camarilla_s3_4h[i] and
-              volume_ratio[i] > 1.3 and
-              atr_14_4h[i] > 0.004 * close[i] and
+              volume_ratio[i] > 1.5 and
+              atr_14_4h[i] > 0.003 * close[i] and
               vol_regime):
             signals[i] = -0.25
         else:
@@ -95,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Vol_Regime_Camarilla_Pivot_R3S3_Breakout_v1"
+name = "4h_Vol_Regime_Camarilla_Pivot_R3S3_Breakout_v2"
 timeframe = "4h"
 leverage = 1.0
