@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R1/S1 breakout with volume spike and 12h choppiness regime filter
-# Long when price breaks above Camarilla R1 (1d) + volume > 2x 20-period avg + 12h chop > 61.8 (range)
-# Short when price breaks below Camarilla S1 (1d) + volume > 2x 20-period avg + 12h chop > 61.8 (range)
-# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (20-40/year).
-# Camarilla levels provide high-probability reversal/breakout points. Volume spike confirms participation.
-# Choppiness filter ensures we only trade in ranging markets where mean reversion at pivot levels works.
-# Works in bull markets (buying dips to S1 in range) and bear markets (selling rallies to R1 in range).
+# Hypothesis: 1h Camarilla R1/S1 breakout with 4h volume spike filter and 1d ADX trend filter
+# Long when price breaks above 1h Camarilla R1 + 1d ADX > 20 + volume > 2x 20-period avg
+# Short when price breaks below 1h Camarilla S1 + 1d ADX > 20 + volume > 2x 20-period avg
+# Uses discrete position sizing (0.20) to minimize fee churn. Target: 60-120 trades over 4 years.
+# Camarilla pivots provide precise intraday support/resistance. ADX filter ensures we only trade strong trends.
+# Volume spike confirms institutional participation. Works in bull/bear by requiring trend presence.
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,98 +24,99 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d HTF data once before loop for Camarilla levels
+    # Get 1d HTF data once before loop for ADX
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Get 12h HTF data once before loop for choppiness filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
-    
-    # === 1d Indicator: Camarilla Pivot Levels (R1, S1) ===
+    # === 1d Indicator: ADX (trend strength filter) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot point (PP)
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    # Calculate range
-    range_1d = high_1d - low_1d
+    # Calculate ADX components: +DM, -DM, TR
+    high_1d_shift = np.roll(high_1d, 1)
+    low_1d_shift = np.roll(low_1d, 1)
+    high_1d_shift[0] = high_1d[0]
+    low_1d_shift[0] = low_1d[0]
     
-    # Camarilla levels
-    r1 = pp + (range_1d * 1.1 / 12)
-    s1 = pp - (range_1d * 1.1 / 12)
+    plus_dm = np.where((high_1d - high_1d_shift) > (low_1d_shift - low_1d), 
+                       np.maximum(high_1d - high_1d_shift, 0), 0)
+    minus_dm = np.where((low_1d_shift - low_1d) > (high_1d - high_1d_shift), 
+                        np.maximum(low_1d_shift - low_1d, 0), 0)
     
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # === 12h Indicator: Choppiness Index (CHOP) ===
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Calculate True Range (TR)
-    high_12h_shift = np.roll(high_12h, 1)
-    low_12h_shift = np.roll(low_12h, 1)
-    close_12h_shift = np.roll(close_12h, 1)
-    
-    # Set first values to avoid NaN from roll
-    high_12h_shift[0] = high_12h[0]
-    low_12h_shift[0] = low_12h[0]
-    close_12h_shift[0] = close_12h[0]
-    
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - close_12h_shift)
-    tr3 = np.abs(low_12h - close_12h_shift)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]
+    tr2[0] = np.abs(high_1d[0] - close_1d[0])
+    tr3[0] = np.abs(low_1d[0] - close_1d[0])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Calculate ATR(14) using Wilder's smoothing
-    chop_period = 14
+    # Wilder's smoothing (alpha = 1/period)
+    period = 14
+    alpha = 1.0 / period
+    
     atr = np.zeros_like(tr)
-    atr[chop_period-1] = np.mean(tr[:chop_period])
-    for i in range(chop_period, len(tr)):
-        atr[i] = (atr[i-1] * (chop_period-1) + tr[i]) / chop_period
+    atr[period-1] = np.mean(tr[:period])
+    for i in range(period, len(tr)):
+        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
     
-    # Calculate maximum and minimum true range over chop_period
-    max_tr = np.zeros_like(tr)
-    min_tr = np.zeros_like(tr)
+    plus_di = np.zeros_like(plus_dm)
+    minus_di = np.zeros_like(minus_dm)
     
-    for i in range(chop_period-1, len(tr)):
-        max_tr[i] = np.max(tr[i-chop_period+1:i+1])
-        min_tr[i] = np.min(tr[i-chop_period+1:i+1])
+    # Smooth +DM and -DM
+    plus_dm_smooth = np.zeros_like(plus_dm)
+    minus_dm_smooth = np.zeros_like(minus_dm)
+    
+    plus_dm_smooth[period-1] = np.mean(plus_dm[:period])
+    minus_dm_smooth[period-1] = np.mean(minus_dm[:period])
+    
+    for i in range(period, len(plus_dm)):
+        plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
+        minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
     
     # Avoid division by zero
-    denominator = max_tr - min_tr
-    chop = np.where(denominator != 0, 
-                    -100 * np.log((sum(tr[i-chop_period+1:i+1] for i in range(chop_period-1, len(tr))) / 
-                                 (chop_period * denominator)) / np.log(2)), 100)
+    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
+    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
     
-    # Fix: Calculate CHOP properly using rolling sum
-    chop = np.full_like(tr, np.nan)
-    tr_sum = np.zeros_like(tr)
-    tr_sum[chop_period-1] = np.sum(tr[:chop_period])
-    for i in range(chop_period, len(tr)):
-        tr_sum[i] = tr_sum[i-1] - tr[i-chop_period] + tr[i]
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
     
-    for i in range(chop_period-1, len(tr)):
-        if denominator[i] != 0:
-            chop[i] = 100 * np.log10(tr_sum[i] / denominator[i]) / np.log10(chop_period)
-        else:
-            chop[i] = 50.0  # neutral value when no range
+    # Wilder's smoothing for ADX
+    adx = np.zeros_like(dx)
+    adx[2*period-1] = np.mean(dx[period-1:2*period])
+    for i in range(2*period, len(dx)):
+        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
     
-    # Align choppiness to 4h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # === 4h Indicator: Volume SMA for confirmation ===
+    # === 1h Indicator: Camarilla Pivots (R1, S1) ===
+    # Based on previous day's OHLC
+    # We need to get daily OHLC for each 1h bar
+    # Since we're on 1h timeframe, we can use rolling window of 24 bars (approx 1 day)
+    # But better: use actual daily data from prices - we'll approximate with 24-period
+    lookback = 24  # approximately 1 day of 1h bars
+    if len(high) < lookback:
+        return np.zeros(n)
+    
+    # Calculate rolling max/min/close for pseudo-daily OHLC
+    # Using 24-period window for high, low, close
+    roll_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    roll_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    roll_close = pd.Series(close).rolling(window=lookback, min_periods=lookback).last().values  # close of period
+    
+    # Camarilla levels: R1 = close + (high - low) * 1.1/12, S1 = close - (high - low) * 1.1/12
+    camarilla_range = roll_high - roll_low
+    r1 = roll_close + camarilla_range * 1.1 / 12
+    s1 = roll_close - camarilla_range * 1.1 / 12
+    
+    # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(30, chop_period) + 20  # 1d data + 12h CHOP(14) + volume(20)
+    warmup = max(lookback, 2*period) + 20  # lookback(24) + ADX(28) + volume(20)
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -128,34 +128,32 @@ def generate_signals(prices):
         vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
         
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(chop_aligned[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(r1[i]) or np.isnan(s1[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above Camarilla R1 (1d)
-        # 2. Volume confirmation
-        # 3. Choppiness > 61.8 (ranging market)
-        if (close[i] > r1_aligned[i]) and \
-           vol_confirm and \
-           (chop_aligned[i] > 61.8):
-            signals[i] = 0.25
+        # 1. Price breaks above 1h Camarilla R1
+        # 2. Trend (1d ADX > 20)
+        # 3. Volume confirmation
+        if (close[i] > r1[i]) and \
+           (adx_aligned[i] > 20) and vol_confirm:
+            signals[i] = 0.20
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below Camarilla S1 (1d)
-        # 2. Volume confirmation
-        # 3. Choppiness > 61.8 (ranging market)
-        elif (close[i] < s1_aligned[i]) and \
-             vol_confirm and \
-             (chop_aligned[i] > 61.8):
-            signals[i] = -0.25
+        # 1. Price breaks below 1h Camarilla S1
+        # 2. Trend (1d ADX > 20)
+        # 3. Volume confirmation
+        elif (close[i] < s1[i]) and \
+             (adx_aligned[i] > 20) and vol_confirm:
+            signals[i] = -0.20
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "4h_CamarillaR1S1_VolumeSpike_12hChop618_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R1S1_1dADX20_VolumeSpike_v1"
+timeframe = "1h"
 leverage = 1.0
