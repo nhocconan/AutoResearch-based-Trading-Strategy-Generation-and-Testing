@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h KAMA trend with 1d Williams %R mean reversion filter and volume confirmation
-# Long when KAMA(10,2,30) slope > 0 (uptrend) + 1d Williams %R(14) < -80 (oversold pullback) + volume > 1.5x 20-period avg
-# Short when KAMA slope < 0 (downtrend) + 1d Williams %R(14) > -20 (overbought rally) + volume > 1.5x 20-period avg
-# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (20-40/year).
-# KAMA adapts to market noise, reducing false signals in choppy conditions. 1d Williams %R ensures we enter on higher timeframe extremes.
-# Works in bull markets (buying 1d oversold in uptrend) and bear markets (selling 1d overbought in downtrend).
+# Hypothesis: 4h Donchian channel breakout with 1d ADX trend filter and volume confirmation
+# Long when price breaks above Donchian(20) high + 1d ADX > 25 (strong trend) + volume > 1.5x 20-period avg
+# Short when price breaks below Donchian(20) low + 1d ADX > 25 (strong trend) + volume > 1.5x 20-period avg
+# Uses discrete position sizing (0.30) to balance profit potential and drawdown control.
+# Donchian breakouts capture momentum, 1d ADX filter ensures we trade only in strong trends (works in bull/bear),
+# volume confirmation adds conviction. Designed for low trade frequency (20-40/year) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -29,37 +29,44 @@ def generate_signals(prices):
     if len(df_1d) < 40:
         return np.zeros(n)
     
-    # === 1d Indicator: Williams %R (14-period) ===
+    # === 1d Indicator: ADX (14-period) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    lookback_1d = 14
-    highest_high_1d = pd.Series(high_1d).rolling(window=lookback_1d, min_periods=lookback_1d).max().values
-    lowest_low_1d = pd.Series(low_1d).rolling(window=lookback_1d, min_periods=lookback_1d).min().values
-    denominator_1d = highest_high_1d - lowest_low_1d
-    williams_r_1d = np.where(denominator_1d != 0, -100 * (highest_high_1d - close_1d) / denominator_1d, -50)
-    williams_r_1d_aligned = align_htf_to_ltf(prices, df_1d, williams_r_1d)
     
-    # === 4h Indicator: KAMA (10,2,30) ===
-    # Efficiency Ratio (ER)
-    change = np.abs(np.diff(close, n=10))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # placeholder, will compute properly below
-    # Recalculate volatility correctly
-    volatility = np.zeros_like(close)
-    for i in range(10, len(close)):
-        volatility[i] = np.sum(np.abs(np.diff(close[i-10:i+1])))
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    fastest = 2 / (2 + 1)   # EMA(2)
-    slowest = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fastest - slowest) + slowest) ** 2
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[9] = close[9]  # seed
-    for i in range(10, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    # Slope of KAMA (trend direction)
-    kama_slope = np.diff(kama, prepend=kama[0])
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smoothing(data, period):
+        result = np.zeros_like(data)
+        result[period-1] = np.nansum(data[:period])  # first value is simple average
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    period = 14
+    atr_1d = wilders_smoothing(tr, period)
+    plus_di_1d = 100 * wilders_smoothing(plus_dm, period) / atr_1d
+    minus_di_1d = 100 * wilders_smoothing(minus_dm, period) / atr_1d
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    adx_1d = wilders_smoothing(dx_1d, period)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # === 4h Indicator: Donchian Channel (20-period) ===
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -67,7 +74,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(30, 20) + 10  # KAMA(30) + volume(20) + ER(10)
+    warmup = max(lookback, period*2) + 20  # Donchian(20) + ADX(14*2) + volume(20)
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -79,33 +86,32 @@ def generate_signals(prices):
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # Skip if any required data is NaN
-        if (np.isnan(highest_high_1d[i]) or np.isnan(lowest_low_1d[i]) or
-            np.isnan(williams_r_1d_aligned[i]) or np.isnan(vol_sma_20[i]) or
-            np.isnan(kama_slope[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. KAMA slope > 0 (uptrend)
-        # 2. 1d Williams %R < -80 (oversold pullback)
+        # 1. Price breaks above Donchian upper band
+        # 2. 1d ADX > 25 (strong trend)
         # 3. Volume confirmation
-        if (kama_slope[i] > 0) and \
-           (williams_r_1d_aligned[i] < -80) and vol_confirm:
-            signals[i] = 0.25
+        if (close[i] > highest_high[i]) and \
+           (adx_1d_aligned[i] > 25) and vol_confirm:
+            signals[i] = 0.30
         
         # === SHORT CONDITIONS ===
-        # 1. KAMA slope < 0 (downtrend)
-        # 2. 1d Williams %R > -20 (overbought rally)
+        # 1. Price breaks below Donchian lower band
+        # 2. 1d ADX > 25 (strong trend)
         # 3. Volume confirmation
-        elif (kama_slope[i] < 0) and \
-             (williams_r_1d_aligned[i] > -20) and vol_confirm:
-            signals[i] = -0.25
+        elif (close[i] < lowest_low[i]) and \
+             (adx_1d_aligned[i] > 25) and vol_confirm:
+            signals[i] = -0.30
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "4h_KAMA10_2_30_1dWilliamsR14_Volume_Filter_v1"
+name = "4h_Donchian20_1dADX25_Volume_Filter_v1"
 timeframe = "4h"
 leverage = 1.0
