@@ -3,9 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 12h Camarilla R1/S1 breakout with 1d volume spike and chop regime filter.
+# Camarilla pivot levels provide institutional support/resistance. Breakouts with volume
+# indicate institutional participation. Chop filter avoids whipsaws in ranging markets.
+# Works in bull (breakouts continue) and bear (fades at S1/R1) regimes.
+# Target: 12-37 trades/year (50-150 over 4 years) to avoid fee drag.
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,55 +19,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly HTF data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d HTF data once before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate weekly Donchian channel (20)
-    highest_20 = pd.Series(df_1w['high'].values).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(df_1w['low'].values).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d Camarilla pivot levels (R1, S1, R4, S4)
+    # Based on previous day's OHLC
+    ph = df_1d['high'].shift(1).values
+    pl = df_1d['low'].shift(1).values
+    pc = df_1d['close'].shift(1).values
     
-    # Align to daily timeframe
-    highest_20_aligned = align_htf_to_ltf(prices, df_1w, highest_20)
-    lowest_20_aligned = align_htf_to_ltf(prices, df_1w, lowest_20)
+    # Camarilla calculations
+    camarilla_range = ph - pl
+    r1 = pc + (camarilla_range * 1.1 / 12)
+    s1 = pc - (camarilla_range * 1.1 / 12)
+    r4 = pc + (camarilla_range * 1.1 / 2)
+    s4 = pc - (camarilla_range * 1.1 / 2)
     
-    # Calculate weekly ATR(14) for volatility filter
-    tr1 = df_1w['high'] - df_1w['low']
-    tr2 = np.abs(df_1w['high'] - np.concatenate([[df_1w['close'].iloc[0]], df_1w['close'].iloc[:-1]]))
-    tr3 = np.abs(df_1w['low'] - np.concatenate([[df_1w['close'].iloc[0]], df_1w['close'].iloc[:-1]]))
-    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1w = pd.Series(tr_1w).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_14_1w)
+    # Align Camarilla levels to 12h timeframe (completed 1d bar only)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Calculate 1d volume spike (volume > 1.5x 20-period EMA)
+    vol_ema = pd.Series(df_1d['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_spike = df_1d['volume'].values > (1.5 * vol_ema)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
+    
+    # Calculate 1d choppiness index (CHOP) for regime filter
+    # CHOP > 61.8 = ranging, CHOP < 38.2 = trending
+    # We want trending markets (CHOP < 50) for breakout strategies
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
+    tr3 = np.abs(df_1d['low'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_sum = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    high_low_range = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values - \
+                     pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / high_low_range) / np.log10(14)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_20_aligned[i]) or np.isnan(lowest_20_aligned[i]) or 
-            np.isnan(atr_14_1w_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(vol_spike_aligned[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when weekly ATR is elevated (> 0.8% of price)
-        vol_filter = atr_14_1w_aligned[i] > 0.008 * close[i]
+        # Regime filter: only trade when market is trending (CHOP < 50)
+        regime_filter = chop_aligned[i] < 50
         
-        # Long conditions:
-        # 1. Price breaks above weekly Donchian high (20-period breakout)
-        # 2. Volatility filter
-        if (close[i] > highest_20_aligned[i] and vol_filter):
+        # Volume confirmation: current 1d bar had volume spike
+        vol_confirm = vol_spike_aligned[i] > 0.5
+        
+        # Long breakout: price breaks above R1 with volume and in trending regime
+        if (close[i] > r1_aligned[i] and vol_confirm and regime_filter):
             signals[i] = 0.25
             
-        # Short conditions:
-        # 1. Price breaks below weekly Donchian low (20-period breakout)
-        # 2. Volatility filter
-        elif (close[i] < lowest_20_aligned[i] and vol_filter):
+        # Short breakdown: price breaks below S1 with volume and in trending regime
+        elif (close[i] < s1_aligned[i] and vol_confirm and regime_filter):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1d_WeeklyDonchian20_VolFilter_v1"
-timeframe = "1d"
+name = "12h_Camarilla_R1S1_Breakout_Volume_ChopFilter_v1"
+timeframe = "12h"
 leverage = 1.0
