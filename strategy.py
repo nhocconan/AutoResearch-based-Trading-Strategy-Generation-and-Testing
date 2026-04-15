@@ -13,13 +13,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d close for Donchian calculation
+    # Daily data for Donchian and ATR
     daily = get_htf_data(prices, '1d')
     close_d = daily['close'].values
     high_d = daily['high'].values
     low_d = daily['low'].values
     
-    # 1d Donchian channels (20-period)
+    # Daily Donchian channels (20-period)
     donch_high = np.full(len(close_d), np.nan)
     donch_low = np.full(len(close_d), np.nan)
     for i in range(20, len(close_d)):
@@ -28,16 +28,16 @@ def generate_signals(prices):
     donch_high_aligned = align_htf_to_ltf(prices, daily, donch_high)
     donch_low_aligned = align_htf_to_ltf(prices, daily, donch_low)
     
-    # 1d ATR(14) for volatility filter
+    # Daily ATR(14)
     tr1 = np.maximum(high_d[1:] - low_d[1:], np.abs(high_d[1:] - close_d[:-1]))
     tr2 = np.maximum(np.abs(low_d[1:] - close_d[:-1]), tr1)
     tr = np.concatenate([[np.nan], tr2])
     atr_14d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14d_aligned = align_htf_to_ltf(prices, daily, atr_14d)
     
-    # Volume threshold: 1.8x median of last 20 bars
+    # Volume threshold: 2.0x median of last 20 bars (stricter to reduce trades)
     vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median()
-    vol_threshold = 1.8 * vol_median
+    vol_threshold = 2.0 * vol_median
     
     signals = np.zeros(n)
     
@@ -69,6 +69,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Donchian20_Vol1.8x_Breakout"
-timeframe = "4h"
+name = "12h_1d_Donchian20_Vol2.0x_Breakout"
+timeframe = "12h"
 leverage = 1.0
