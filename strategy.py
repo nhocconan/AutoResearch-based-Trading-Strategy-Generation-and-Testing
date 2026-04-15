@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Bollinger Band breakout with 1d ADX trend filter and volume confirmation
-# Long when price closes above upper BB(20,2) + 1d ADX > 25 (trending) + volume > 1.5x 20-period avg
-# Short when price closes below lower BB(20,2) + 1d ADX > 25 + volume confirmation
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above 4h Donchian upper(20) + 1d EMA34 uptrend + volume > 1.5x 20-period avg
+# Short when price breaks below 4h Donchian lower(20) + 1d EMA34 downtrend + volume > 1.5x 20-period avg
 # Uses discrete position sizing (0.25) to minimize fee drag and control drawdown.
-# 1d ADX > 25 ensures we only trade in trending markets, reducing whipsaws in ranging periods.
-# Bollinger Bands provide dynamic support/resistance that adapts to volatility.
-# Volume filter ensures breakouts have conviction.
+# 1d EMA34 provides strong trend filter reducing whipsaws in both bull and bear markets.
+# Volume threshold (1.5x) targets ~20-40 trades/year to minimize fee drag on 4h timeframe.
+# Donchian channels calculated from 4h HTF data for proper structure.
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,65 +25,35 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d HTF data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 4h HTF data once before loop (primary timeframe is 4h, so we use 4h for Donchian)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # === 1d Indicator: ADX(14) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Get 1d HTF data once before loop for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # === 4h Indicator: Donchian Channel(20) ===
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    # Calculate Donchian upper(20) and lower(20) on 4h data
+    donchian_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    
+    # Align to lower timeframe (15m) - but since primary is 4h, we need to align 4h to 4h (identity)
+    # Actually, since we're using 4h as primary timeframe, we need to align the 4h indicators to 4h bars
+    # The get_htf_data returns 4h data, we need to map it back to the original price array
+    # Since primary timeframe is 4h, prices array IS the 4h data
+    donchian_high_20_4h = donchian_high_20
+    donchian_low_20_4h = donchian_low_20
+    
+    # === 1d Indicator: EMA34 ===
     close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values (Wilder's smoothing = EMA with alpha=1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        alpha = 1.0 / period
-        for i in range(len(data)):
-            if np.isnan(result[i-1]) if i > 0 else True:
-                result[i] = data[i]
-            else:
-                result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-        return result
-    
-    period = 14
-    atr = wilders_smoothing(tr, period)
-    dm_plus_smooth = wilders_smoothing(dm_plus, period)
-    dm_minus_smooth = wilders_smoothing(dm_minus, period)
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / atr
-    di_minus = 100 * dm_minus_smooth / atr
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = wilders_smoothing(dx, period)
-    
-    adx_1d = adx
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # === 12h Bollinger Bands (20,2) ===
-    bb_period = 20
-    bb_std = 2
-    sma_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_bb = sma_20 + (bb_std * std_20)
-    lower_bb = sma_20 - (bb_std * std_20)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -91,7 +61,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(bb_period, 20) + period + 5  # BB(20) + ADX(14) + buffer
+    warmup = max(34, 20) + 5  # EMA34 + Donchian(20) + volume(20) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -100,29 +70,28 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or
-            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(donchian_high_20_4h[i]) or np.isnan(donchian_low_20_4h[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter: current volume > 1.5x 20-period volume SMA
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
-        # Trend filter: 1d ADX > 25 (trending market)
-        trending = adx_1d_aligned[i] > 25
-        
         # === LONG CONDITIONS ===
-        # 1. Price closes above upper Bollinger Band
-        # 2. 1d ADX > 25 (trending)
+        # 1. Price breaks above Donchian upper(20) (close > upper)
+        # 2. 1d EMA34 uptrend (close > EMA34)
         # 3. Volume confirmation
-        if (close[i] > upper_bb[i]) and trending and vol_confirm:
+        if (close[i] > donchian_high_20_4h[i]) and \
+           (close[i] > ema_34_1d_aligned[i]) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price closes below lower Bollinger Band
-        # 2. 1d ADX > 25 (trending)
+        # 1. Price breaks below Donchian lower(20) (close < lower)
+        # 2. 1d EMA34 downtrend (close < EMA34)
         # 3. Volume confirmation
-        elif (close[i] < lower_bb[i]) and trending and vol_confirm:
+        elif (close[i] < donchian_low_20_4h[i]) and \
+             (close[i] < ema_34_1d_aligned[i]) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -130,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_BB_Breakout_1dADX_Volume_Filter_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA34_Volume_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
