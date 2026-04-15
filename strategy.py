@@ -3,10 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 12h Donchian breakout for trend direction and 1d Elder Ray (Bull/Bear Power) for entry timing.
-# In 12h uptrend (price > upper Donchian), go long when 1d Bull Power turns positive (buying pressure emerging).
-# In 12h downtrend (price < lower Donchian), go short when 1d Bear Power turns negative (selling pressure emerging).
-# Volume confirmation ensures institutional participation. Target: 12-30 trades/year to minimize fee drag.
+# Hypothesis: 4h strategy using 1d Donchian breakout with 4h EMA(34) trend filter and volume confirmation.
+# In 1d uptrend (price > 1d upper Donchian) and 4h EMA rising, go long on pullback to 4h EMA.
+# In 1d downtrend (price < 1d lower Donchian) and 4h EMA falling, go short on bounce to 4h EMA.
+# Volume confirmation ensures momentum validity. Designed for low trade frequency (20-40/year) to minimize fee drag.
+# Works in bull via breakouts and in bear via mean reversion to EMA within HTF trend.
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,33 +18,29 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
     # Pre-compute session hours to avoid datetime operations in loop
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    hours = pd.DatetimeIndex(open_time).hour
     
-    # Get HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Get 1d and 4h HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_12h) < 30 or len(df_1d) < 30:
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_1d) < 30 or len(df_4h) < 30:
         return np.zeros(n)
     
-    # === 12h Indicators: Donchian Channel (20) ===
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    donchian_high_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_low_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donchian_high_12h_aligned = align_htf_to_ltf(prices, df_12h, donchian_high_12h)
-    donchian_low_12h_aligned = align_htf_to_ltf(prices, df_12h, donchian_low_12h)
-    
-    # === 1d Indicators: Elder Ray (Bull Power / Bear Power) ===
-    close_1d = df_1d['close'].values
+    # === 1d Indicators: Donchian Channel (20) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power_1d = high_1d - ema13_1d  # Bull Power = High - EMA13
-    bear_power_1d = low_1d - ema13_1d   # Bear Power = Low - EMA13
-    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    donchian_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_1d)
+    donchian_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_1d)
+    
+    # === 4h Indicators: EMA(34) ===
+    close_4h = df_4h['close'].values
+    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
     signals = np.zeros(n)
     
@@ -51,7 +48,7 @@ def generate_signals(prices):
     warmup = 100
     
     for i in range(warmup, n):
-        # Session filter: 08-20 UTC only (reduces noise, maintains edge)
+        # Session filter: 08-20 UTC only
         hour = hours[i]
         if hour < 8 or hour > 20:
             signals[i] = 0.0
@@ -62,23 +59,31 @@ def generate_signals(prices):
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_12h_aligned[i]) or np.isnan(donchian_low_12h_aligned[i]) or
-            np.isnan(bull_power_1d_aligned[i]) or np.isnan(bear_power_1d_aligned[i])):
+        if (np.isnan(donchian_high_1d_aligned[i]) or np.isnan(donchian_low_1d_aligned[i]) or
+            np.isnan(ema_34_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. In 12h uptrend (price > 12h upper Donchian)
-        # 2. 1d Bull Power > 0 (buying pressure > EMA13)
-        # 3. Volume confirmation
-        if (close[i] > donchian_high_12h_aligned[i]) and (bull_power_1d_aligned[i] > 0) and vol_confirm:
+        # 1. In 1d uptrend (price > 1d upper Donchian)
+        # 2. 4h EMA rising (EMA > EMA_prev)
+        # 3. Price near 4h EMA (pullback entry)
+        # 4. Volume confirmation
+        if (close[i] > donchian_high_1d_aligned[i]) and \
+           (ema_34_4h_aligned[i] > ema_34_4h_aligned[i-1]) and \
+           (abs(close[i] - ema_34_4h_aligned[i]) / ema_34_4h_aligned[i] < 0.02) and \
+           vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. In 12h downtrend (price < 12h lower Donchian)
-        # 2. 1d Bear Power < 0 (selling pressure > EMA13)
-        # 3. Volume confirmation
-        elif (close[i] < donchian_low_12h_aligned[i]) and (bear_power_1d_aligned[i] < 0) and vol_confirm:
+        # 1. In 1d downtrend (price < 1d lower Donchian)
+        # 2. 4h EMA falling (EMA < EMA_prev)
+        # 3. Price near 4h EMA (bounce entry)
+        # 4. Volume confirmation
+        elif (close[i] < donchian_low_1d_aligned[i]) and \
+             (ema_34_4h_aligned[i] < ema_34_4h_aligned[i-1]) and \
+             (abs(close[i] - ema_34_4h_aligned[i]) / ema_34_4h_aligned[i] < 0.02) and \
+             vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -86,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_1dElderRay_VolumeFilter_v1"
-timeframe = "6h"
+name = "4h_1dDonchian20_4hEMA34_VolumeFilter_v1"
+timeframe = "4h"
 leverage = 1.0
