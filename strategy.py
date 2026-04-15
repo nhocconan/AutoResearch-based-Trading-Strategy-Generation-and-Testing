@@ -3,12 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d trend filter and volume confirmation
-# Williams Alligator (Jaw=13, Teeth=8, Lips=5 SMAs) identifies trend direction.
-# Long when Lips > Teeth > Jaw (bullish alignment), Short when Lips < Teeth < Jaw (bearish).
-# Entry confirmed by 1d EMA50 trend and volume > 1.5x median volume.
-# Works in bull markets (follow Alligator up) and bear markets (follow Alligator down).
-# Target: 50-150 total trades over 4 years.
+# Hypothesis: 1d Range Breakout with Volume Confirmation and Weekly Trend Filter
+# Uses previous week's high/low as support/resistance levels. Breakouts above previous week's high
+# or below previous week's low are traded only when confirmed by volume and weekly EMA trend.
+# Works in bull markets (breakouts up) and bear markets (breakouts down). Target: 30-100 total trades.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,42 +18,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for EMA50 trend filter
+    # Load 1d data for previous day's high/low
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate EMA50 on 1d
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Load 12h data for Williams Alligator
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 13:
+    # Load 1w data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 21:
         return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    close_1w = df_1w['close'].values
     
-    # Williams Alligator components (all SMAs)
-    # Jaw: 13-period SMMA of median price, shifted 8 bars
-    median_price_12h = (high_12h + low_12h) / 2
-    sma_13 = pd.Series(median_price_12h).rolling(window=13, min_periods=13).mean().values
-    jaw = np.roll(sma_13, 8)  # shifted 8 bars forward
+    # Previous day's high and low (shifted by 1 to avoid look-ahead)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_high_1d[0] = np.nan  # First value has no previous day
+    prev_low_1d[0] = np.nan
     
-    # Teeth: 8-period SMMA of median price, shifted 5 bars
-    sma_8 = pd.Series(median_price_12h).rolling(window=8, min_periods=8).mean().values
-    teeth = np.roll(sma_8, 5)  # shifted 5 bars forward
+    # Align previous day's high/low to 1d timeframe (already aligned, but using for consistency)
+    prev_high_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_high_1d)
+    prev_low_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_low_1d)
     
-    # Lips: 5-period SMMA of median price, shifted 3 bars
-    sma_5 = pd.Series(median_price_12h).rolling(window=5, min_periods=5).mean().values
-    lips = np.roll(sma_5, 3)  # shifted 3 bars forward
+    # Calculate EMA(21) on weekly close
+    ema_21 = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Align indicators to 12h timeframe (already on 12h, just need to align to main timeframe)
-    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align EMA to 1d timeframe
+    ema_aligned = align_htf_to_ltf(prices, df_1w, ema_21)
     
     signals = np.zeros(n)
     position = 0
@@ -63,43 +53,36 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(prev_high_1d_aligned[i]) or np.isnan(prev_low_1d_aligned[i]) or
+            np.isnan(ema_aligned[i])):
             continue
         
-        # Bullish Alligator alignment: Lips > Teeth > Jaw
-        bullish_alignment = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
-        # Bearish Alligator alignment: Lips < Teeth < Jaw
-        bearish_alignment = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
-        
-        # Volume confirmation: current volume > 1.5x median of last 20 bars
-        vol_median = np.median(volume[max(0, i-20):i+1]) if i >= 20 else np.mean(volume[:i+1])
-        volume_confirm = volume[i] > 1.5 * vol_median
-        
-        # 1d trend filter: price above/below EMA50
-        price_above_ema = close[i] > ema50_1d_aligned[i]
-        price_below_ema = close[i] < ema50_1d_aligned[i]
-        
-        # Long entry: bullish alignment + volume + price above EMA50
-        if bullish_alignment and volume_confirm and price_above_ema and position <= 0:
+        # Long entry: price breaks above previous day's high + volume confirmation + price > weekly EMA
+        if (close[i] > prev_high_1d_aligned[i] and
+            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
+            close[i] > ema_aligned[i] and
+            position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: bearish alignment + volume + price below EMA50
-        elif bearish_alignment and volume_confirm and price_below_ema and position >= 0:
+        # Short entry: price breaks below previous day's low + volume confirmation + price < weekly EMA
+        elif (close[i] < prev_low_1d_aligned[i] and
+              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
+              close[i] < ema_aligned[i] and
+              position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: opposite Alligator alignment or loss of volume confirmation
-        elif position == 1 and (bearish_alignment or not volume_confirm):
+        # Exit: reverse breakout
+        elif position == 1 and close[i] < prev_low_1d_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (bullish_alignment or not volume_confirm):
+        elif position == -1 and close[i] > prev_high_1d_aligned[i]:
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "12h_WilliamsAlligator_1dEMA50_Volume"
-timeframe = "12h"
+name = "1d_1d_Range_Breakout_Volume_EMA"
+timeframe = "1d"
 leverage = 1.0
