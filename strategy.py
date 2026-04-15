@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1w ADX > 25 and volume confirmation
-# Long when price breaks above 12h Donchian upper + 1w ADX > 25 + volume > 1.5x 20-period avg
-# Short when price breaks below 12h Donchian lower + 1w ADX > 25 + volume > 1.5x 20-period avg
-# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (12-37/year).
-# Donchian channels provide objective breakout levels. ADX filter ensures we only trade strong trends, avoiding chop.
-# Works in bull markets (trend continuation) and bear markets (strong downtrends) by requiring ADX > 25.
-# 12h timeframe targets 50-150 total trades over 4 years as per experiment guidance.
+# Hypothesis: 4h Camarilla pivot R1/S1 breakout with 1d ADX trend filter and volume confirmation
+# Long when price breaks above Camarilla R1 (1d) + 1d ADX > 25 + volume > 1.8x 20-period avg
+# Short when price breaks below Camarilla S1 (1d) + 1d ADX > 25 + volume > 1.8x 20-period avg
+# Uses discrete position sizing (0.25) to minimize fee churn. Target: 20-40 trades/year.
+# Camarilla levels provide intraday support/resistance. ADX filter ensures strong trends only.
+# Works in bull/bear by trading breakouts in direction of 1d trend.
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,33 +24,33 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1w HTF data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 1d HTF data once before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1w Indicator: ADX (trend strength filter) ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === 1d Indicator: ADX (trend strength filter) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # Calculate ADX components: +DM, -DM, TR
-    high_1w_shift = np.roll(high_1w, 1)
-    low_1w_shift = np.roll(low_1w, 1)
-    high_1w_shift[0] = high_1w[0]
-    low_1w_shift[0] = low_1w[0]
+    high_1d_shift = np.roll(high_1d, 1)
+    low_1d_shift = np.roll(low_1d, 1)
+    high_1d_shift[0] = high_1d[0]
+    low_1d_shift[0] = low_1d[0]
     
-    plus_dm = np.where((high_1w - high_1w_shift) > (low_1w_shift - low_1w), 
-                       np.maximum(high_1w - high_1w_shift, 0), 0)
-    minus_dm = np.where((low_1w_shift - low_1w) > (high_1w - high_1w_shift), 
-                        np.maximum(low_1w_shift - low_1w, 0), 0)
+    plus_dm = np.where((high_1d - high_1d_shift) > (low_1d_shift - low_1d), 
+                       np.maximum(high_1d - high_1d_shift, 0), 0)
+    minus_dm = np.where((low_1d_shift - low_1d) > (high_1d - high_1d_shift), 
+                        np.maximum(low_1d_shift - low_1d, 0), 0)
     
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1[0] = high_1w[0] - low_1w[0]
-    tr2[0] = np.abs(high_1w[0] - close_1w[0])
-    tr3[0] = np.abs(low_1w[0] - close_1w[0])
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]
+    tr2[0] = np.abs(high_1d[0] - close_1d[0])
+    tr3[0] = np.abs(low_1d[0] - close_1d[0])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
     # Wilder's smoothing (alpha = 1/period)
@@ -89,20 +88,34 @@ def generate_signals(prices):
     for i in range(2*period, len(dx)):
         adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
     
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # === 12h Indicator: Donchian Channel (20-period) ===
-    donchian_window = 20
-    donchian_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    donchian_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    # === 1d Indicator: Camarilla Pivot Levels (R1, S1) ===
+    # Camarilla: based on previous day's OHLC
+    # R1 = close + (high - low) * 1.1/12
+    # S1 = close - (high - low) * 1.1/12
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = close_1d[0]
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
     
-    # Volume SMA for confirmation (using 20-period)
+    camarilla_range = prev_high - prev_low
+    camarilla_r1 = prev_close + camarilla_range * 1.1 / 12
+    camarilla_s1 = prev_close - camarilla_range * 1.1 / 12
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # === 4h Indicator: Volume SMA (20-period) ===
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(donchian_window, 2*period) + 20  # Donchian(20) + ADX(28) + volume(20)
+    warmup = max(2*period, 20) + 5  # ADX(28) + volume(20) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -110,28 +123,28 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
+        # Volume filter: current volume > 1.8x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.8)
         
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
             np.isnan(adx_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 12h Donchian upper (20-period)
-        # 2. Trend (1w ADX > 25)
+        # 1. Price breaks above 1d Camarilla R1
+        # 2. Trend (1d ADX > 25)
         # 3. Volume confirmation
-        if (close[i] > donchian_high[i]) and \
+        if (close[i] > camarilla_r1_aligned[i]) and \
            (adx_aligned[i] > 25) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 12h Donchian lower (20-period)
-        # 2. Trend (1w ADX > 25)
+        # 1. Price breaks below 1d Camarilla S1
+        # 2. Trend (1d ADX > 25)
         # 3. Volume confirmation
-        elif (close[i] < donchian_low[i]) and \
+        elif (close[i] < camarilla_s1_aligned[i]) and \
              (adx_aligned[i] > 25) and vol_confirm:
             signals[i] = -0.25
         
@@ -140,6 +153,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1wADX25_Volume_Filter_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_1dADX25_Volume_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
