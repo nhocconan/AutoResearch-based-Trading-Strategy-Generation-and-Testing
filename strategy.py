@@ -3,10 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R (14) combined with 1d trend filter (EMA50) and volume confirmation
-# Williams %R identifies overbought/oversold conditions; EMA50 on 1d filters trend direction;
-# Volume confirms momentum. Works in bull/bear by taking reversals against extreme readings
-# only when aligned with higher timeframe trend. Target: 80-180 trades over 4 years.
+# Hypothesis: 12h Donchian(20) breakout + volume confirmation + 1d ADX trend filter
+# Uses Donchian channel breakouts for trend capture, volume to confirm breakout strength,
+# and ADX to filter ranging markets. Works in both bull and bear by
+# only taking breakouts in the direction of the 1d trend (EMA50).
+# Target: 100-200 total trades over 4 years (25-50/year) with disciplined entries.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,39 +19,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data (primary timeframe) for Williams %R calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Load 12h data (primary timeframe) for price action
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Load 1d data for trend filter (EMA50) and volume average
+    # Load 1d data for ADX and EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate Williams %R (14-period) on 4h
-    highest_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_4h) / (highest_high - lowest_low + 1e-10)
+    # Calculate Donchian channels (20-period) on 12h
+    donch_high_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donch_low_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate ADX (14-period) on 1d
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    atr_14_smooth = pd.Series(atr_14).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / (atr_14_smooth + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / (atr_14_smooth + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
     # Calculate EMA50 on 1d for trend filter
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate volume average (20-period) on 1d
-    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Volume average (20-period on 12h)
+    vol_avg_12h = pd.Series(df_12h['volume'].values).rolling(window=20, min_periods=20).mean().values
     
-    # Align all indicators to 4h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_4h, williams_r)
+    # Align all indicators to 12h timeframe
+    donch_high_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_high_12h)
+    donch_low_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_low_12h)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_12h)
     
     signals = np.zeros(n)
     position = 0
@@ -58,36 +83,39 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or
+        if (np.isnan(donch_high_12h_aligned[i]) or np.isnan(donch_low_12h_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or
             np.isnan(vol_avg_aligned[i])):
             continue
         
-        # Long entry: Williams %R oversold (< -80) + price above 1d EMA50 + volume above average
-        if (williams_r_aligned[i] < -80 and
+        # Long entry: price breaks above Donchian high + volume spike + ADX > 25 (trending) + price above EMA50
+        if (close[i] > donch_high_12h_aligned[i] and
+            volume[i] > 1.5 * vol_avg_aligned[i] and
+            adx_aligned[i] > 25 and
             close[i] > ema50_1d_aligned[i] and
-            volume[i] > 1.2 * vol_avg_aligned[i] and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: Williams %R overbought (> -20) + price below 1d EMA50 + volume above average
-        elif (williams_r_aligned[i] > -20 and
+        # Short entry: price breaks below Donchian low + volume spike + ADX > 25 (trending) + price below EMA50
+        elif (close[i] < donch_low_12h_aligned[i] and
+              volume[i] > 1.5 * vol_avg_aligned[i] and
+              adx_aligned[i] > 25 and
               close[i] < ema50_1d_aligned[i] and
-              volume[i] > 1.2 * vol_avg_aligned[i] and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: Williams %R returns to neutral range (-50 to -50) or reverse signal
-        elif position == 1 and williams_r_aligned[i] > -50:
+        # Exit: reverse signal or ADX < 20 (ranging market)
+        elif position == 1 and (close[i] < donch_low_12h_aligned[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and williams_r_aligned[i] < -50:
+        elif position == -1 and (close[i] > donch_high_12h_aligned[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_WilliamsR_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Donchian_Volume_ADX_Filter"
+timeframe = "12h"
 leverage = 1.0
