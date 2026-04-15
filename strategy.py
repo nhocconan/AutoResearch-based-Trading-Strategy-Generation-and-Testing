@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with volume spike and 4h trend filter
-# Long when price breaks above 1h Camarilla R3 + volume > 2.0x 20-period avg + 4h close > 4h EMA34
-# Short when price breaks below 1h Camarilla S3 + volume > 2.0x 20-period avg + 4h close < 4h EMA34
-# Uses Camarilla pivots from 1h OHLC (no look-ahead) and 4h EMA for trend direction
-# Designed for low trade frequency (15-35/year) to minimize fee drag while capturing institutional breakouts
-# Session filter: 08-20 UTC to avoid low-volume Asian session noise
+# Hypothesis: 6h Williams %R + 1d Elder Ray + Volume Spike
+# Long when Williams %R(14) < -80 (oversold) + Elder Bull Power > 0 (bullish momentum) + volume > 2x 20-period average
+# Short when Williams %R(14) > -20 (overbought) + Elder Bear Power < 0 (bearish momentum) + volume > 2x 20-period average
+# Uses 1d HTF for Elder Ray to avoid look-ahead and capture higher timeframe momentum
+# Designed for low trade frequency (12-30/year) to minimize fee drag while capturing mean reversion in 6h timeframe
+# Williams %R identifies extreme price levels, Elder Ray confirms underlying bull/bear power, volume spike validates conviction
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,68 +20,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h HTF data once before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 40:
+    # Get 1d HTF data once before loop for Elder Ray calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 4h Indicators: EMA34 for trend filter ===
-    close_4h = df_4h['close'].values
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    # === 1d Indicators: Elder Ray (Bull Power and Bear Power) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate 13-period EMA (standard for Elder Ray)
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Bull Power = High - EMA13
+    bull_power_1d = high_1d - ema13_1d
+    # Bear Power = Low - EMA13
+    bear_power_1d = low_1d - ema13_1d
+    
+    # Align Elder Ray to 6h timeframe (completed 1d bar only)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     
     signals = np.zeros(n)
-    
-    # Precompute session hours (08-20 UTC) for efficiency
-    hours = prices.index.hour
     
     # Warmup: ensure all indicators are valid
     warmup = 100
     
     for i in range(warmup, n):
-        # Session filter: only trade during 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
+        # Williams %R(14) calculation on 6h data
+        # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+        highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().iloc[i]
+        lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().iloc[i]
         
-        # === 1h Camarilla Pivot Levels (R3, S3) ===
-        # Based on previous 1h bar's OHLC (no look-ahead)
-        prev_high = high[i-1]
-        prev_low = low[i-1]
-        prev_close = close[i-1]
-        pivot = (prev_high + prev_low + prev_close) / 3.0
-        r3 = pivot + (prev_high - prev_low) * 1.1 / 2.0
-        s3 = pivot - (prev_high - prev_low) * 1.1 / 2.0
+        if highest_high_14 == lowest_low_14:
+            williams_r = -50.0  # avoid division by zero
+        else:
+            williams_r = ((highest_high_14 - close[i]) / (highest_high_14 - lowest_low_14)) * -100
         
-        # Volume filter: current volume > 2.0x 20-period volume SMA
-        vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
+        # Volume filter: current volume > 2x 20-period volume SMA
+        vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().iloc[i]
+        vol_confirm = volume[i] > (vol_sma_20 * 2.0)
         
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
+            np.isnan(vol_sma_20)):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 1h Camarilla R3
-        # 2. Volume spike confirmation
-        # 3. 4h trend filter: close > EMA34 (uptrend)
-        if (close[i] > r3) and vol_confirm and (close[i] > ema_34_4h_aligned[i]):
-            signals[i] = 0.20
+        # 1. Williams %R indicates oversold (< -80)
+        # 2. Elder Bull Power > 0 (bullish momentum on 1d)
+        # 3. Volume confirmation (> 2x average)
+        if (williams_r < -80.0) and (bull_power_aligned[i] > 0) and vol_confirm:
+            signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 1h Camarilla S3
-        # 2. Volume spike confirmation
-        # 3. 4h trend filter: close < EMA34 (downtrend)
-        elif (close[i] < s3) and vol_confirm and (close[i] < ema_34_4h_aligned[i]):
-            signals[i] = -0.20
+        # 1. Williams %R indicates overbought (> -20)
+        # 2. Elder Bear Power < 0 (bearish momentum on 1d)
+        # 3. Volume confirmation (> 2x average)
+        elif (williams_r > -20.0) and (bear_power_aligned[i] < 0) and vol_confirm:
+            signals[i] = -0.25
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "1h_Camarilla_R3S3_VolumeSpike_4hEMA34_v1"
-timeframe = "1h"
+name = "6h_WilliamsR_ElderRay_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
