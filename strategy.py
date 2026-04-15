@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,68 +13,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for context
-    weekly = get_htf_data(prices, '1w')
-    weekly_high = weekly['high'].values
-    weekly_low = weekly['low'].values
-    weekly_close = weekly['close'].values
+    # Get daily data for context
+    daily = get_htf_data(prices, '1d')
+    daily_high = daily['high'].values
+    daily_low = daily['low'].values
+    daily_close = daily['close'].values
     
-    # Calculate weekly ATR for volatility filter
-    weekly_close_prev = np.concatenate([[weekly_close[0]], weekly_close[:-1]])
-    tr = np.maximum(weekly_high - weekly_low,
-                    np.maximum(np.abs(weekly_high - weekly_close_prev),
-                               np.abs(weekly_low - weekly_close_prev)))
-    atr_weekly = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ratio_weekly = atr_weekly / weekly_close
+    # Calculate daily ADX for trend strength
+    # True Range
+    tr1 = daily_high - daily_low
+    tr2 = np.abs(daily_high - np.concatenate([[daily_close[0]], daily_close[:-1]]))
+    tr3 = np.abs(daily_low - np.concatenate([[daily_close[0]], daily_close[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Align weekly ATR ratio to daily timeframe
-    atr_ratio_daily = align_htf_to_ltf(prices, weekly, atr_ratio_weekly)
+    # Directional Movement
+    up_move = daily_high - np.concatenate([[daily_high[0]], daily_high[:-1]])
+    down_move = np.concatenate([[daily_low[0]], daily_low[:-1]]) - daily_low
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Calculate weekly RSI for momentum filter
-    delta = np.diff(weekly_close, prepend=weekly_close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_weekly = 100 - (100 / (1 + rs))
+    # Smoothed values
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    plus_dm14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
+    minus_dm14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
     
-    # Align weekly RSI to daily timeframe
-    rsi_daily = align_htf_to_ltf(prices, weekly, rsi_weekly)
+    # Directional Indicators
+    plus_di = 100 * plus_dm14 / (tr14 + 1e-10)
+    minus_di = 100 * minus_dm14 / (tr14 + 1e-10)
     
-    # Calculate weekly Donchian channels (breakout levels)
-    donch_high = pd.Series(weekly_high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(weekly_low).rolling(window=20, min_periods=20).min().values
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Align Donchian channels to daily timeframe
-    donch_high_daily = align_htf_to_ltf(prices, weekly, donch_high)
-    donch_low_daily = align_htf_to_ltf(prices, weekly, donch_low)
+    # Align daily ADX to 6h timeframe
+    adx_6h = align_htf_to_ltf(prices, daily, adx)
+    
+    # Calculate daily EMA for trend direction
+    ema_20 = pd.Series(daily_close).ewm(span=20, adjust=False).mean().values
+    ema_50 = pd.Series(daily_close).ewm(span=50, adjust=False).mean().values
+    
+    # Align EMAs to 6h timeframe
+    ema_20_6h = align_htf_to_ltf(prices, daily, ema_20)
+    ema_50_6h = align_htf_to_ltf(prices, daily, ema_50)
+    
+    # Calculate daily volume ratio for volume filter
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / (vol_ma + 1e-10)
     
     signals = np.zeros(n)
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_ratio_daily[i]) or np.isnan(rsi_daily[i]) or 
-            np.isnan(donch_high_daily[i]) or np.isnan(donch_low_daily[i])):
+        if (np.isnan(adx_6h[i]) or np.isnan(ema_20_6h[i]) or np.isnan(ema_50_6h[i]) or 
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Breakout strategy with volatility and momentum filters
-        # Long when price breaks above weekly Donchian high in low volatility + bullish momentum
-        if (close[i] > donch_high_daily[i] and 
-            atr_ratio_daily[i] < 0.02 and  # Low volatility filter
-            rsi_daily[i] > 50):  # Bullish momentum filter
+        # Trend strength filter: ADX > 25
+        if adx_6h[i] < 25:
+            signals[i] = 0.0
+            continue
+        
+        # Trend direction: EMA20 > EMA50 = uptrend, EMA20 < EMA50 = downtrend
+        # Volume filter: volume > 1.5x average
+        if (ema_20_6h[i] > ema_50_6h[i] and vol_ratio[i] > 1.5):
+            # Uptrend with volume - go long
             signals[i] = 0.25
-        # Short when price breaks below weekly Donchian low in low volatility + bearish momentum
-        elif (close[i] < donch_low_daily[i] and 
-              atr_ratio_daily[i] < 0.02 and  # Low volatility filter
-              rsi_daily[i] < 50):  # Bearish momentum filter
+        elif (ema_20_6h[i] < ema_50_6h[i] and vol_ratio[i] > 1.5):
+            # Downtrend with volume - go short
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1d_WeeklyDonchian_RSI_Volatility_Breakout"
-timeframe = "1d"
+name = "6h_ADX_EMA_Volume_Trend"
+timeframe = "6h"
 leverage = 1.0
