@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla Pivot Reversion with Volume Spike
-# Uses 1d Camarilla pivot levels (H3, L3) for mean reversion entries.
-# Long when price touches L3 with volume spike, short when touches H3 with volume spike.
-# Exits at opposite H3/L3 or when volume dries up.
-# Works in ranging markets (reversion) and trending markets (breakouts at H4/L4).
-# Target: 50-150 total trades over 4 years.
+# Hypothesis: 4h volume-weighted breakout with 12h trend filter
+# Uses 4h price crossing above/below 20-period VWAP as entry signal,
+# confirmed by volume > 1.5x 20-period volume average and 12h ADX > 25.
+# Exits when price crosses back below/above VWAP or ADX < 20 (ranging).
+# Designed to capture trending moves with institutional volume confirmation,
+# working in both bull and bear markets by following the 12h trend.
+# Target: 80-150 total trades over 4 years (20-38/year).
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,86 +21,97 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load 12h data for ADX trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Camarilla levels for each day
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # H4 = Pivot + Range * 1.1/2
-    # H3 = Pivot + Range * 1.1/4
-    # L3 = Pivot - Range * 1.1/4
-    # L4 = Pivot - Range * 1.1/2
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    range_1d = df_1d['high'] - df_1d['low']
+    # Calculate 4h VWAP (20-period)
+    typical_price = (high + low + close) / 3.0
+    vp = typical_price * volume
+    cum_vp = np.nancumsum(vp)
+    cum_vol = np.nancumsum(volume)
+    vwap = np.where(cum_vol > 0, cum_vp / cum_vol, typical_price)
     
-    pivot = typical_price.values
-    H3 = pivot + range_1d.values * 1.1 / 4
-    L3 = pivot - range_1d.values * 1.1 / 4
-    H4 = pivot + range_1d.values * 1.1 / 2
-    L4 = pivot - range_1d.values * 1.1 / 2
+    # Calculate ADX (14-period) on 12h
+    # True Range
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Shift to avoid look-ahead (use previous day's levels)
-    H3 = np.roll(H3, 1)
-    L3 = np.roll(L3, 1)
-    H4 = np.roll(H4, 1)
-    L4 = np.roll(L4, 1)
-    H3[0] = np.nan
-    L3[0] = np.nan
-    H4[0] = np.nan
-    L4[0] = np.nan
+    # Directional Movement
+    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
+                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)), 
+                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Align to 6h timeframe
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    # Smoothed values with min_periods
+    tr_series = pd.Series(tr)
+    atr = tr_series.rolling(window=14, min_periods=14).mean().values
     
-    # Volume spike detection (volume > 2x 20-period median)
-    vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median().values
+    dm_plus_series = pd.Series(dm_plus)
+    dm_minus_series = pd.Series(dm_minus)
+    dm_plus_smooth = dm_plus_series.rolling(window=14, min_periods=14).mean().values
+    dm_minus_smooth = dm_minus_series.rolling(window=14, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
+    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    dx_series = pd.Series(dx)
+    adx = dx_series.rolling(window=14, min_periods=14).mean().values
+    
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    
+    # Calculate 20-period volume average for confirmation
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     base_size = 0.25  # Position size
     
-    for i in range(50, n):
+    for i in range(20, n):  # Start after VWAP warmup
         # Skip if any required data is NaN
-        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
-            np.isnan(vol_median[i])):
+        if (np.isnan(vwap[i]) or np.isnan(vol_ma[i]) or np.isnan(adx_aligned[i])):
             continue
         
-        # Long entry: price touches L3 with volume spike, not already long
-        if (low[i] <= L3_aligned[i] and
-            volume[i] > 2.0 * vol_median[i] and
+        # Long entry: price crosses above VWAP + volume confirmation + ADX > 25
+        if (close[i] > vwap[i] and close[i-1] <= vwap[i-1] and
+            volume[i] > 1.5 * vol_ma[i] and
+            adx_aligned[i] > 25 and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price touches H3 with volume spike, not already short
-        elif (high[i] >= H3_aligned[i] and
-              volume[i] > 2.0 * vol_median[i] and
+        # Short entry: price crosses below VWAP + volume confirmation + ADX > 25
+        elif (close[i] < vwap[i] and close[i-1] >= vwap[i-1] and
+              volume[i] > 1.5 * vol_ma[i] and
+              adx_aligned[i] > 25 and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit conditions
-        elif position == 1:
-            # Exit long: price reaches H3 (opposite level) or volume dries up
-            if (high[i] >= H3_aligned[i] or
-                volume[i] < 0.5 * vol_median[i]):
-                position = 0
-                signals[i] = 0.0
-        elif position == -1:
-            # Exit short: price reaches L3 (opposite level) or volume dries up
-            if (low[i] <= L3_aligned[i] or
-                volume[i] < 0.5 * vol_median[i]):
-                position = 0
-                signals[i] = 0.0
+        # Exit: price crosses back below/above VWAP or ADX < 20 (ranging)
+        elif position == 1 and (close[i] < vwap[i] or adx_aligned[i] < 20):
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and (close[i] > vwap[i] or adx_aligned[i] < 20):
+            position = 0
+            signals[i] = 0.0
     
     return signals
 
-name = "6h_Camarilla_Pivot_Reversion_Volume"
-timeframe = "6h"
+name = "4h_VWAP_Breakout_Volume_ADX"
+timeframe = "4h"
 leverage = 1.0
