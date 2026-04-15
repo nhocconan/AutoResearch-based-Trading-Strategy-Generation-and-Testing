@@ -3,10 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Fractal Breakout + 1d ADX Trend Filter + Volume Confirmation
-# Uses 6h Williams fractal breakouts (bullish/bearish) as entry signals, filtered by 1d ADX > 25 (trending market)
-# and volume > 1.5x average to avoid false breakouts. Works in bull/bear by only taking breakouts
-# in the direction of the 1d ADX trend. Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 12h Williams %R with 1d trend filter and volume confirmation
+# Williams %R identifies overbought/oversold conditions. Combined with 1d EMA trend filter
+# and volume spike to confirm momentum. Works in both bull and bear by only taking
+# counter-trend moves during pullbacks in the direction of the higher timeframe trend.
+# Target: 50-150 total trades over 4 years (12-37/year) with disciplined entries.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,93 +19,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 6h data for Williams fractal calculation
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 10:
+    # Load 12h data (primary timeframe) for Williams %R
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Load 1d data for ADX and volume average
+    # Load 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate Williams Fractals on 6h
-    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n] > high[n+1] and high[n+1] > high[n+2]
-    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n] < low[n+1] and low[n+1] < low[n+2]
-    n_6h = len(high_6h)
-    bearish_fractal = np.zeros(n_6h, dtype=bool)
-    bullish_fractal = np.zeros(n_6h, dtype=bool)
+    # Calculate Williams %R (14-period) on 12h
+    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_12h) / (highest_high - lowest_low + 1e-10)
     
-    for i in range(2, n_6h - 2):
-        if (high_6h[i-2] < high_6h[i-1] and 
-            high_6h[i-1] > high_6h[i] and 
-            high_6h[i] > high_6h[i+1] and 
-            high_6h[i+1] > high_6h[i+2]):
-            bearish_fractal[i] = True
-        if (low_6h[i-2] > low_6h[i-1] and 
-            low_6h[i-1] < low_6h[i] and 
-            low_6h[i] < low_6h[i+1] and 
-            low_6h[i+1] < low_6h[i+2]):
-            bullish_fractal[i] = True
+    # Calculate EMA50 on 1d for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Convert to arrays: 1 at fractal point, 0 otherwise
-    bearish_fractal_val = bearish_fractal.astype(float)
-    bullish_fractal_val = bullish_fractal.astype(float)
+    # Volume average (20-period on 12h)
+    vol_avg_12h = pd.Series(df_12h['volume'].values).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate ADX (14-period) on 1d
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    # Directional Movement
-    plus_dm = np.zeros_like(high_1d)
-    minus_dm = np.zeros_like(high_1d)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
-    for i in range(1, len(high_1d)):
-        up_move = high_1d[i] - high_1d[i-1]
-        down_move = low_1d[i-1] - low_1d[i]
-        if up_move > down_move and up_move > 0:
-            plus_dm[i] = up_move
-        else:
-            plus_dm[i] = 0
-        if down_move > up_move and down_move > 0:
-            minus_dm[i] = down_move
-        else:
-            minus_dm[i] = 0
-    
-    # Smoothed values
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
-    
-    # DI values
-    plus_di = 100 * plus_dm_smooth / (atr + 1e-10)
-    minus_di = 100 * minus_dm_smooth / (atr + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Volume average (20-period on 1d)
-    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all indicators to 6h timeframe
-    # Williams fractals need 2 extra bars for confirmation (wait for 2 subsequent 6b candles)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_6h, bullish_fractal_val, additional_delay_bars=2)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_6h, bearish_fractal_val, additional_delay_bars=2)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    # Align all indicators to 12h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_12h)
     
     signals = np.zeros(n)
     position = 0
@@ -112,36 +56,36 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(bullish_fractal_aligned[i]) or np.isnan(bearish_fractal_aligned[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(vol_avg_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or
+            np.isnan(vol_avg_aligned[i])):
             continue
         
-        # Long entry: bullish fractal breakout + ADX > 25 (trending) + volume spike
-        if (bullish_fractal_aligned[i] > 0 and
-            adx_aligned[i] > 25 and
+        # Long entry: Williams %R crosses above -80 (oversold) + volume spike + price above 1d EMA50
+        if (williams_r_aligned[i] > -80 and williams_r_aligned[i-1] <= -80 and
             volume[i] > 1.5 * vol_avg_aligned[i] and
+            close[i] > ema50_1d_aligned[i] and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: bearish fractal breakout + ADX > 25 (trending) + volume spike
-        elif (bearish_fractal_aligned[i] > 0 and
-              adx_aligned[i] > 25 and
+        # Short entry: Williams %R crosses below -20 (overbought) + volume spike + price below 1d EMA50
+        elif (williams_r_aligned[i] < -20 and williams_r_aligned[i-1] >= -20 and
               volume[i] > 1.5 * vol_avg_aligned[i] and
+              close[i] < ema50_1d_aligned[i] and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: opposite fractal signal or ADX < 20 (ranging market)
-        elif position == 1 and (bearish_fractal_aligned[i] > 0 or adx_aligned[i] < 20):
+        # Exit: reverse Williams %R signal
+        elif position == 1 and williams_r_aligned[i] < -50:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (bullish_fractal_aligned[i] > 0 or adx_aligned[i] < 20):
+        elif position == -1 and williams_r_aligned[i] > -50:
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "6h_WilliamsFractal_ADX_Volume"
-timeframe = "6h"
+name = "12h_WilliamsR_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
