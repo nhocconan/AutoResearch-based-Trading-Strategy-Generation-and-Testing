@@ -3,95 +3,124 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Weekly Pivot Breakout with Volume Confirmation and Volume Weighted Average Price (VWAP) Filter
-# Uses weekly pivot points (S1, S2, R1, R2) as support/resistance levels.
-# Long when price breaks above R1 with volume > 1.5x average and price > VWAP.
-# Short when price breaks below S1 with volume > 1.5x average and price < VWAP.
-# Weekly pivots calculated from prior week's high/low/close to avoid look-ahead.
-# Designed to work in both bull (breakouts up) and bear (breakouts down) markets.
-# Target: 20-60 total trades over 4 years (5-15/year) to minimize fee drag.
+# Hypothesis: 12h 1-day Williams Fractal Breakout with Volume Confirmation and ADX Trend Filter
+# Uses daily Williams Fractal highs/lows as support/resistance. Breakouts above bullish fractal high or below bearish fractal low are traded only when confirmed by volume and ADX > 25 (trending market).
+# Works in bull markets (breakouts up) and bear markets (breakouts down). Target: 50-150 total trades over 4 years (12-37/year).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data for pivot points
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 2:
+    # Load 1d data for Williams Fractals
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 5:
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate weekly pivot points from prior week (avoid look-ahead)
-    # Shift by 1 to use only completed weeks
-    prev_week_high = np.roll(df_weekly['high'].values, 1)
-    prev_week_low = np.roll(df_weekly['low'].values, 1)
-    prev_week_close = np.roll(df_weekly['close'].values, 1)
+    # Load 12h data for ADX trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # First values have no prior week
-    prev_week_high[0] = np.nan
-    prev_week_low[0] = np.nan
-    prev_week_close[0] = np.nan
+    # Calculate Williams Fractals (5-bar window: 2 bars on each side)
+    # Bearish fractal: high is highest of 5 bars
+    # Bullish fractal: low is lowest of 5 bars
+    bearish_fractal = np.full(len(high_1d), np.nan)
+    bullish_fractal = np.full(len(low_1d), np.nan)
     
-    # Pivot point calculation
-    pivot = (prev_week_high + prev_week_low + prev_week_close) / 3.0
-    r1 = 2 * pivot - prev_week_low
-    s1 = 2 * pivot - prev_week_high
-    r2 = pivot + (prev_week_high - prev_week_low)
-    s2 = pivot - (prev_week_high - prev_week_low)
+    for i in range(2, len(high_1d) - 2):
+        # Bearish fractal: current high is highest in window
+        if (high_1d[i] >= high_1d[i-2] and high_1d[i] >= high_1d[i-1] and
+            high_1d[i] >= high_1d[i+1] and high_1d[i] >= high_1d[i+2]):
+            bearish_fractal[i] = high_1d[i]
+        
+        # Bullish fractal: current low is lowest in window
+        if (low_1d[i] <= low_1d[i-2] and low_1d[i] <= low_1d[i-1] and
+            low_1d[i] <= low_1d[i+1] and low_1d[i] <= low_1d[i+2]):
+            bullish_fractal[i] = low_1d[i]
     
-    # Align weekly pivot levels to daily timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_weekly, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_weekly, s2)
+    # Williams Fractals need 2 extra bars for confirmation (they form at bar i, confirmed at bar i+2)
+    bearish_fractal_confirmed = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_confirmed = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     
-    # Calculate daily VWAP (typical price * volume) / cumulative volume
-    typical_price = (high + low + close) / 3.0
-    vwap_num = np.cumsum(typical_price * volume)
-    vwap_den = np.cumsum(volume)
-    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
+    # Calculate ADX (14-period) on 12h
+    # True Range
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    
+    # Directional Movement
+    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
+                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)), 
+                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
+    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25  # Position size: 25% of capital
+    base_size = 0.25  # Position size
     
-    for i in range(50, n):  # Start after sufficient data for VWAP
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(vwap[i])):
+        if (np.isnan(bearish_fractal_confirmed[i]) or np.isnan(bullish_fractal_confirmed[i]) or
+            np.isnan(adx_aligned[i])):
             continue
         
-        # Long entry: price breaks above R1 with volume confirmation and price > VWAP
-        if (close[i] > r1_aligned[i] and
-            volume[i] > 1.5 * np.median(window := volume[max(0, i-20):i+1]) and
-            close[i] > vwap[i] and
+        # Long entry: price breaks above bullish fractal high + volume confirmation + ADX > 25
+        if (close[i] > bullish_fractal_confirmed[i] and
+            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
+            adx_aligned[i] > 25 and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below S1 with volume confirmation and price < VWAP
-        elif (close[i] < s1_aligned[i] and
-              volume[i] > 1.5 * np.median(window := volume[max(0, i-20):i+1]) and
-              close[i] < vwap[i] and
+        # Short entry: price breaks below bearish fractal low + volume confirmation + ADX > 25
+        elif (close[i] < bearish_fractal_confirmed[i] and
+              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
+              adx_aligned[i] > 25 and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse breakout to opposite S2/R2 level
-        elif position == 1 and close[i] < s2_aligned[i]:
+        # Exit: reverse breakout or ADX < 20 (ranging market)
+        elif position == 1 and (close[i] < bearish_fractal_confirmed[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > r2_aligned[i]:
+        elif position == -1 and (close[i] > bullish_fractal_confirmed[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "1d_1w_Pivot_Breakout_Volume_VWAP"
-timeframe = "1d"
+name = "12h_1d_Williams_Fractal_Breakout_Volume_ADX"
+timeframe = "12h"
 leverage = 1.0
