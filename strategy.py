@@ -3,10 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h 12h EMA crossover + volume spike + 1d ADX trend filter
-# Uses EMA crossover for trend changes, volume to confirm momentum,
-# and ADX to ensure trading only in trending markets. Works in bull/bear
-# by taking crossovers only when ADX > 25. Target: 50-150 total trades over 4 years.
+# Hypothesis: 1d Donchian(20) breakout + volume confirmation + weekly trend filter
+# Uses daily Donchian channel breakouts for trend capture, volume to confirm breakout strength,
+# and weekly EMA to filter trend direction. Works in both bull and bear by
+# only taking breakouts in the direction of the weekly trend.
+# Target: 30-100 total trades over 4 years (7-25/year) with disciplined entries.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,103 +19,74 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data for price action and EMA calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    
-    # Load 12h data for faster EMA
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    
-    # Load 1d data for ADX calculation
+    # Load 1d data for Donchian calculation (primary timeframe)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate EMA9 on 4h and EMA21 on 12h for crossover
-    ema9_4h = pd.Series(close_4h).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Load 1w data for weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    close_1w = df_1w['close'].values
     
-    # Calculate ADX (14-period) on 1d
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    # Calculate Donchian channels (20-period) on 1d
+    donch_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Directional Movement
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = np.diff(low_1d, prepend=low_1d[0])
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Calculate EMA20 on 1w for trend filter
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Smoothed values
-    tr14 = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
-    plus_dm14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values
-    minus_dm14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values
+    # Calculate volume average (20-period on 1d)
+    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Directional Indicators
-    plus_di = 100 * plus_dm14 / (tr14 + 1e-10)
-    minus_di = 100 * minus_dm14 / (tr14 + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # Align indicators to 4h timeframe
-    ema9_4h_aligned = align_htf_to_ltf(prices, df_4h, ema9_4h)
-    ema21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema21_12h)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align all indicators to 1d timeframe
+    donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
+    donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25
+    base_size = 0.25  # Position size
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema9_4h_aligned[i]) or np.isnan(ema21_12h_aligned[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(donch_high_1d_aligned[i]) or np.isnan(donch_low_1d_aligned[i]) or
+            np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_avg_1d_aligned[i])):
             continue
         
-        # Long entry: EMA9_4h crosses above EMA21_12h + volume spike + ADX > 25
-        if (ema9_4h_aligned[i] > ema21_12h_aligned[i] and
-            ema9_4h_aligned[i-1] <= ema21_12h_aligned[i-1] and
-            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-            adx_aligned[i] > 25 and
+        # Long entry: price breaks above Donchian high + volume spike + price above weekly EMA20
+        if (close[i] > donch_high_1d_aligned[i] and
+            volume[i] > 1.5 * vol_avg_1d_aligned[i] and
+            close[i] > ema20_1w_aligned[i] and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: EMA9_4h crosses below EMA21_12h + volume spike + ADX > 25
-        elif (ema9_4h_aligned[i] < ema21_12h_aligned[i] and
-              ema9_4h_aligned[i-1] >= ema21_12h_aligned[i-1] and
-              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-              adx_aligned[i] > 25 and
+        # Short entry: price breaks below Donchian low + volume spike + price below weekly EMA20
+        elif (close[i] < donch_low_1d_aligned[i] and
+              volume[i] > 1.5 * vol_avg_1d_aligned[i] and
+              close[i] < ema20_1w_aligned[i] and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse crossover or ADX < 20 (trend weakening)
-        elif position == 1 and (ema9_4h_aligned[i] < ema21_12h_aligned[i] or adx_aligned[i] < 20):
+        # Exit: reverse signal or price crosses weekly EMA20 in opposite direction
+        elif position == 1 and close[i] < ema20_1w_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (ema9_4h_aligned[i] > ema21_12h_aligned[i] or adx_aligned[i] < 20):
+        elif position == -1 and close[i] > ema20_1w_aligned[i]:
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_12h_EMA_Crossover_Volume_ADX"
-timeframe = "4h"
+name = "1d_Donchian_Volume_WeeklyTrend"
+timeframe = "1d"
 leverage = 1.0
