@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot breakout with 1d volume confirmation and 1w ADX trend filter
-# Long when price breaks above Camarilla R4 (1d) + volume > 1.5x 20-period 6h avg + 1w ADX > 25
-# Short when price breaks below Camarilla S4 (1d) + volume > 1.5x 20-period 6h avg + 1w ADX > 25
-# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (12-30/year).
-# Camarilla pivots provide mathematically derived support/resistance levels. 1w ADX ensures we only trade strong weekly trends.
-# Volume confirmation avoids false breakouts. Works in bull markets (continuation at R4/S4) and bear markets (strong trends).
+# Hypothesis: 12h strategy using 1d Camarilla pivot levels (R1/S1) breakout with volume confirmation
+# and 1w ADX > 20 trend filter. Long when price breaks above 1d Camarilla R1 + 1w ADX > 20 + volume > 1.5x 20-period avg
+# Short when price breaks below 1d Camarilla S1 + 1w ADX > 20 + volume > 1.5x 20-period avg
+# Uses discrete position sizing (0.25) to minimize fee churn. Target: 12-30 trades/year on 12h.
+# Camarilla pivots provide intraday support/resistance levels that work in ranging and trending markets.
+# 1w ADX filter ensures we only trade when there's sufficient trend strength on weekly timeframe.
+# Volume confirmation avoids false breakouts. Designed for low trade frequency to overcome fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -29,43 +30,24 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Get 1w HTF data once before loop for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    # === 1d Indicator: Camarilla Pivot Levels (based on previous day) ===
-    # Camarilla levels calculated from previous day's OHLC
+    # === 1d Indicator: Camarilla Pivot Levels (R1, S1) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Shift by 1 to use previous day's data (no look-ahead)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    # First value: use first available data (no look-ahead)
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # Calculate pivot point
+    pivot = (high_1d + low_1d + close_1d) / 3.0
     
-    # Camarilla calculations
-    range_1d = prev_high - prev_low
-    camarilla_r4 = prev_close + range_1d * 1.1 / 2
-    camarilla_s4 = prev_close - range_1d * 1.1 / 2
-    camarilla_r3 = prev_close + range_1d * 1.1 / 4
-    camarilla_s3 = prev_close - range_1d * 1.1 / 4
-    camarilla_r2 = prev_close + range_1d * 1.1 / 6
-    camarilla_s2 = prev_close - range_1d * 1.1 / 6
-    camarilla_r1 = prev_close + range_1d * 1.1 / 12
-    camarilla_s1 = prev_close - range_1d * 1.1 / 12
-    camarilla_pivot = (prev_high + prev_low + prev_close) / 3
+    # Calculate Camarilla levels
+    # R1 = close + (high - low) * 1.1/12
+    # S1 = close - (high - low) * 1.1/12
+    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
     
-    # Align to 6h timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Get 1w HTF data once before loop for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
     
     # === 1w Indicator: ADX (trend strength filter) ===
     high_1w = df_1w['high'].values
@@ -128,13 +110,17 @@ def generate_signals(prices):
     
     adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
-    # === 6h Indicator: Volume SMA for confirmation (using 20-period) ===
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(20, 2*period) + 20  # volume(20) + ADX(28) + Camarilla (needs prev day)
+    warmup = max(2*period, 20) + 5  # ADX(28) + volume(20) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -146,25 +132,25 @@ def generate_signals(prices):
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
             np.isnan(adx_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above Camarilla R4 (1d)
-        # 2. Trend (1w ADX > 25)
+        # 1. Price breaks above 1d Camarilla R1
+        # 2. Trend (1w ADX > 20)
         # 3. Volume confirmation
-        if (close[i] > camarilla_r4_aligned[i]) and \
-           (adx_aligned[i] > 25) and vol_confirm:
+        if (close[i] > camarilla_r1_aligned[i]) and \
+           (adx_aligned[i] > 20) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below Camarilla S4 (1d)
-        # 2. Trend (1w ADX > 25)
+        # 1. Price breaks below 1d Camarilla S1
+        # 2. Trend (1w ADX > 20)
         # 3. Volume confirmation
-        elif (close[i] < camarilla_s4_aligned[i]) and \
-             (adx_aligned[i] > 25) and vol_confirm:
+        elif (close[i] < camarilla_s1_aligned[i]) and \
+             (adx_aligned[i] > 20) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -172,6 +158,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_CamarillaR4S4_1wADX25_Volume_Filter_v1"
-timeframe = "6h"
+name = "12h_CamarillaR1S1_1wADX20_Volume_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
