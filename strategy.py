@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA trend with 1w ADX regime filter and volume confirmation
-# Long when price > KAMA(10) + 1w ADX > 25 + volume > 1.5x 20-period avg
-# Short when price < KAMA(10) + 1w ADX > 25 + volume > 1.5x 20-period avg
-# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (7-25/year).
-# KAMA adapts to market noise, reducing whipsaw in choppy markets. 1w ADX ensures we only trade strong weekly trends.
-# Works in bull markets (trend continuation) and bear markets (strong downtrends) by requiring ADX > 25.
+# Hypothesis: 6h Elder Ray Index (Bull/Bear Power) with 1d EMA34 trend filter and volume confirmation
+# Long when Bull Power > 0 (close > EMA13) AND Bear Power < 0 (close < EMA13) AND 1d EMA34 rising AND volume > 1.5x 20-period avg
+# Short when Bear Power < 0 (close < EMA13) AND Bull Power < 0 (close < EMA13) AND 1d EMA34 falling AND volume > 1.5x 20-period avg
+# Elder Ray measures bull/bear power relative to EMA13. 1d EMA34 filter ensures we trade with higher timeframe trend.
+# Works in bull markets (buy strength on dips) and bear markets (sell weakness on rallies) by requiring alignment with 1d trend.
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,88 +23,22 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1w HTF data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 1d HTF data once before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    # === 1w Indicator: ADX (trend strength filter) ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === 1d Indicator: EMA34 (trend direction) ===
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ADX components: +DM, -DM, TR
-    high_1w_shift = np.roll(high_1w, 1)
-    low_1w_shift = np.roll(low_1w, 1)
-    high_1w_shift[0] = high_1w[0]
-    low_1w_shift[0] = low_1w[0]
+    # === 6h Indicators: EMA13 (for Elder Ray) ===
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    plus_dm = np.where((high_1w - high_1w_shift) > (low_1w_shift - low_1w), 
-                       np.maximum(high_1w - high_1w_shift, 0), 0)
-    minus_dm = np.where((low_1w_shift - low_1w) > (high_1w - high_1w_shift), 
-                        np.maximum(low_1w_shift - low_1w, 0), 0)
-    
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1[0] = high_1w[0] - low_1w[0]
-    tr2[0] = np.abs(high_1w[0] - close_1w[0])
-    tr3[0] = np.abs(low_1w[0] - close_1w[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Wilder's smoothing (alpha = 1/period)
-    period = 14
-    alpha = 1.0 / period
-    
-    atr = np.zeros_like(tr)
-    atr[period-1] = np.mean(tr[:period])
-    for i in range(period, len(tr)):
-        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-    
-    plus_di = np.zeros_like(plus_dm)
-    minus_di = np.zeros_like(minus_dm)
-    
-    # Smooth +DM and -DM
-    plus_dm_smooth = np.zeros_like(plus_dm)
-    minus_dm_smooth = np.zeros_like(minus_dm)
-    
-    plus_dm_smooth[period-1] = np.mean(plus_dm[:period])
-    minus_dm_smooth[period-1] = np.mean(minus_dm[:period])
-    
-    for i in range(period, len(plus_dm)):
-        plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
-        minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
-    
-    # Avoid division by zero
-    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
-    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
-    
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    
-    # Wilder's smoothing for ADX
-    adx = np.zeros_like(dx)
-    adx[2*period-1] = np.mean(dx[period-1:2*period])
-    for i in range(2*period, len(dx)):
-        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-    
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # === 1d Indicator: KAMA (adaptive trend) ===
-    # Efficiency Ratio (ER) = |change| / volatility
-    change = np.abs(np.diff(close, 10))  # 10-period net change
-    volatility = np.sum(np.abs(np.diff(close, 1)), axis=1)  # 10-period sum of abs changes
-    # Pad arrays to match length
-    change = np.concatenate([np.full(10, np.nan), change])
-    volatility = np.concatenate([np.full(10, np.nan), volatility])
-    
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants: fastest EMA(2), slowest EMA(30)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    # Initialize KAMA
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # Start at first close after 10 periods
-    for i in range(10, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Elder Ray components
+    bull_power = high - ema_13  # Bull Power: high - EMA13
+    bear_power = low - ema_13   # Bear Power: low - EMA13
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -113,7 +46,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(30, 2*period) + 20  # KAMA(10) needs 10, ADX(28) needs 28, volume(20) needs 20
+    warmup = max(34, 13, 20) + 5  # EMA34(34) + EMA13(13) + volume(20)
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -125,24 +58,31 @@ def generate_signals(prices):
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or np.isnan(adx_aligned[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price > KAMA(10) (uptrend)
-        # 2. Trend (1w ADX > 25)
-        # 3. Volume confirmation
-        if (close[i] > kama[i]) and \
-           (adx_aligned[i] > 25) and vol_confirm:
+        # 1. Bull Power > 0 (high > EMA13) - buying strength
+        # 2. Bear Power < 0 (low < EMA13) - no selling pressure
+        # 3. 1d EMA34 rising (today > yesterday)
+        # 4. Volume confirmation
+        if (bull_power[i] > 0) and \
+           (bear_power[i] < 0) and \
+           (ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]) and \
+           vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price < KAMA(10) (downtrend)
-        # 2. Trend (1w ADX > 25)
-        # 3. Volume confirmation
-        elif (close[i] < kama[i]) and \
-             (adx_aligned[i] > 25) and vol_confirm:
+        # 1. Bear Power < 0 (low < EMA13) - selling pressure
+        # 2. Bull Power < 0 (high < EMA13) - no buying strength
+        # 3. 1d EMA34 falling (today < yesterday)
+        # 4. Volume confirmation
+        elif (bear_power[i] < 0) and \
+             (bull_power[i] < 0) and \
+             (ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]) and \
+             vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -150,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA10_1wADX25_Volume_Filter_v1"
-timeframe = "1d"
+name = "6h_ElderRay_EMA13_1dEMA34_Volume_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
