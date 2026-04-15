@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h EMA crossover with 4h EMA trend filter and volume confirmation
-# Uses 4h EMA(20) for trend direction (bull/bear) and 1h EMA(8/21) for entry timing.
-# Volume > 1.5x 20-period median ensures institutional participation.
-# Trades only during 08-20 UTC to avoid low-liquidity Asian session.
-# Conservative position size (0.20) to manage drawdown in volatile markets.
-# Designed to work in both bull and bear markets by following higher timeframe trend.
+# Hypothesis: 6h Donchian(40) breakout with weekly pivot bias and volume confirmation
+# Uses weekly Pivot Point (from prior week) to filter direction: only long when price > weekly pivot, short when < weekly pivot
+# Donchian(40) breakouts capture momentum; volume > 1.5x 50-bar median ensures institutional participation
+# Designed for trend following in both bull and bear markets with conservative sizing
+# Weekly pivot acts as regime filter: avoids counter-trend trades in ranging markets
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,54 +19,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute hour filter for 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Donchian(40) channels
+    high_40 = pd.Series(high).rolling(window=40, min_periods=40).max()
+    low_40 = pd.Series(low).rolling(window=40, min_periods=40).min()
     
-    # 4h EMA(20) for trend direction - calculated ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # Weekly Pivot Point from prior week (H+L+C)/3
+    df_1w = get_htf_data(prices, '1w')
+    # Weekly pivot requires previous week's data (already complete when 1w bar closes)
+    high_w = df_1w['high'].values
+    low_w = df_1w['low'].values
+    close_w = df_1w['close'].values
+    weekly_pivot = (high_w + low_w + close_w) / 3.0
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
     
-    # 1h EMA(8) and EMA(21) for entry timing
-    ema_8 = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Volume confirmation: current > 1.5x median of last 20 bars
-    vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
+    # Volume confirmation: current > 1.5x median of last 50 bars
+    vol_median = pd.Series(volume).rolling(window=50, min_periods=1).median()
     vol_threshold = 1.5 * vol_median
     
     signals = np.zeros(n)
     
-    for i in range(21, n):  # Start after warmup for EMA(21)
-        # Skip if outside trading session
-        if not in_session[i]:
-            continue
-            
+    for i in range(40, n):  # Start after warmup for Donchian(40)
         # Skip if any required data is NaN
-        if (np.isnan(ema_20_4h_aligned[i]) or np.isnan(ema_8[i]) or 
-            np.isnan(ema_21[i]) or np.isnan(vol_threshold[i])):
+        if (np.isnan(high_40[i]) or np.isnan(low_40[i]) or
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_threshold[i])):
             continue
         
-        # Determine trend from 4h EMA
-        uptrend = ema_20_4h_aligned[i] > ema_20_4h_aligned[i-1]
-        downtrend = ema_20_4h_aligned[i] < ema_20_4h_aligned[i-1]
-        
-        # Long: uptrend on 4h + EMA(8) crosses above EMA(21) on 1h + volume
-        if (uptrend and ema_8[i] > ema_21[i] and ema_8[i-1] <= ema_21[i-1] and
+        # Long: Donchian breakout up + price above weekly pivot + volume spike
+        if (close[i] > high_40[i] and 
+            close[i] > weekly_pivot_aligned[i] and 
             volume[i] > vol_threshold[i]):
-            signals[i] = 0.20
+            signals[i] = 0.25
         
-        # Short: downtrend on 4h + EMA(8) crosses below EMA(21) on 1h + volume
-        elif (downtrend and ema_8[i] < ema_21[i] and ema_8[i-1] >= ema_21[i-1] and
+        # Short: Donchian breakout down + price below weekly pivot + volume spike
+        elif (close[i] < low_40[i] and 
+              close[i] < weekly_pivot_aligned[i] and 
               volume[i] > vol_threshold[i]):
-            signals[i] = -0.20
+            signals[i] = -0.25
         
-        # Exit: EMA crossover in opposite direction
+        # Exit: price re-enters Donchian channel
         elif (i > 0 and 
-              ((signals[i-1] == 0.20 and ema_8[i] < ema_21[i]) or
-               (signals[i-1] == -0.20 and ema_8[i] > ema_21[i]))):
+              ((signals[i-1] == 0.25 and close[i] < high_40[i]) or
+               (signals[i-1] == -0.25 and close[i] > low_40[i]))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -76,6 +68,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_EMACrossover_4hTrend_VolumeFilter"
-timeframe = "1h"
+name = "6h_DonchianBreakout40_WeeklyPivot_Volume1.5x"
+timeframe = "6h"
 leverage = 1.0
