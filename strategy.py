@@ -13,15 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly ATR for volatility filter
-    df_1w = get_htf_data(prices, '1w')
-    tr_1w = np.maximum(df_1w['high'].values - df_1w['low'].values,
-                       np.maximum(np.abs(df_1w['high'].values - np.concatenate([[df_1w['close'][0]], df_1w['close'][:-1]])),
-                                  np.abs(df_1w['low'].values - np.concatenate([[df_1w['close'][0]], df_1w['close'][:-1]]))))
-    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
-    
-    # Daily ATR for volatility filter (used for exit)
+    # 1-day ATR for volatility filter
     df_1d = get_htf_data(prices, '1d')
     tr_1d = np.maximum(df_1d['high'].values - df_1d['low'].values,
                        np.maximum(np.abs(df_1d['high'].values - np.concatenate([[df_1d['close'][0]], df_1d['close'][:-1]])),
@@ -29,42 +21,38 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # 12h Bollinger Bands (20, 2)
-    sma_12h = pd.Series(close).rolling(window=20, min_periods=20).mean()
-    std_12h = pd.Series(close).rolling(window=20, min_periods=20).std()
-    upper_12h = sma_12h + 2 * std_12h
-    lower_12h = sma_12h - 2 * std_12h
+    # 6-hour Donchian channels (20 periods)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max()
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min()
     
-    # Volume confirmation: current > 2.0x median of last 20 bars (more stringent)
+    # Volume confirmation: current > 2x median of last 20 bars
     vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
     vol_threshold = 2.0 * vol_median
     
-    # Volatility filter: require ATR > 0.5 * median ATR (more stringent)
-    atr_median = pd.Series(atr_1w_aligned).rolling(window=50, min_periods=1).median()
-    vol_filter = atr_1w_aligned > 0.5 * atr_median
+    # ATR-based volatility filter: require ATR > 0.4 * median ATR
+    atr_median = pd.Series(atr_1d_aligned).rolling(window=50, min_periods=1).median()
+    vol_filter = atr_1d_aligned > 0.4 * atr_median
     
     signals = np.zeros(n)
     
     for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_12h[i]) or np.isnan(lower_12h[i]) or 
-            np.isnan(vol_threshold[i]) or np.isnan(vol_filter[i]) or
-            np.isnan(atr_1d_aligned[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(vol_threshold[i]) or np.isnan(vol_filter[i])):
             continue
         
-        # Long: close breaks above upper band + volume + volatility filter
-        if close[i] > upper_12h[i] and volume[i] > vol_threshold[i] and vol_filter[i]:
+        # Long: close breaks above Donchian high + volume + volatility filter
+        if close[i] > donch_high[i] and volume[i] > vol_threshold[i] and vol_filter[i]:
             signals[i] = 0.25
         
-        # Short: close breaks below lower band + volume + volatility filter
-        elif close[i] < lower_12h[i] and volume[i] > vol_threshold[i] and vol_filter[i]:
+        # Short: close breaks below Donchian low + volume + volatility filter
+        elif close[i] < donch_low[i] and volume[i] > vol_threshold[i] and vol_filter[i]:
             signals[i] = -0.25
         
-        # Exit: price crosses back inside bands with daily ATR filter to avoid whipsaw
+        # Exit: close crosses back inside Donchian channels (mean reversion)
         elif (i > 0 and 
-              ((signals[i-1] == 0.25 and close[i] < upper_12h[i]) or
-               (signals[i-1] == -0.25 and close[i] > lower_12h[i])) and
-              atr_1d_aligned[i] > 0.2 * pd.Series(atr_1d_aligned).rolling(window=20, min_periods=1).median()[i]):
+              ((signals[i-1] == 0.25 and close[i] < donch_high[i]) or
+               (signals[i-1] == -0.25 and close[i] > donch_low[i]))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -73,6 +61,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Bollinger_Breakout_Volume_VolFilter"
-timeframe = "12h"
+name = "6h_Donchian_Breakout_Volume_VolFilter"
+timeframe = "6h"
 leverage = 1.0
