@@ -29,19 +29,23 @@ def generate_signals(prices):
     atr_14d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14d_aligned = align_htf_to_ltf(prices, daily, atr_14d)
     
-    # Volume threshold: 2.0x median of last 20 bars (more restrictive)
+    # Volume threshold: 3.0x median of last 20 bars (more restrictive)
     vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median()
-    vol_threshold = 2.0 * vol_median
+    vol_threshold = 3.0 * vol_median
     
-    # ATR-based volatility filter: require ATR > 0.5% of price (avoid low volatility chop)
-    vol_filter = atr_14d_aligned > (0.005 * close)
+    # ATR-based volatility filter: require ATR > 1.0% of price (avoid low volatility chop)
+    vol_filter = atr_14d_aligned > (0.01 * close)
+    
+    # Daily EMA(50) for trend filter
+    ema_50d = pd.Series(close_d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50d_aligned = align_htf_to_ltf(prices, daily, ema_50d)
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
         if (np.isnan(atr_14d_aligned[i]) or np.isnan(vol_threshold[i]) or 
-            np.isnan(vol_filter[i])):
+            np.isnan(vol_filter[i]) or np.isnan(ema_50d_aligned[i])):
             continue
         
         # Only trade when volatility is sufficient (avoid chop)
@@ -49,14 +53,16 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        # Long: Close above prior close + volume spike
+        # Long: Close above prior close + volume spike + above daily EMA50
         if (close[i] > close[i-1] and 
-            volume[i] > vol_threshold[i]):
+            volume[i] > vol_threshold[i] and
+            close[i] > ema_50d_aligned[i]):
             signals[i] = 0.25
         
-        # Short: Close below prior close + volume spike
+        # Short: Close below prior close + volume spike + below daily EMA50
         elif (close[i] < close[i-1] and 
-              volume[i] > vol_threshold[i]):
+              volume[i] > vol_threshold[i] and
+              close[i] < ema_50d_aligned[i]):
             signals[i] = -0.25
         
         # Exit: reverse signal on opposite direction
@@ -70,6 +76,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Volatility_Volume_Momentum"
+name = "4h_Volatility_Volume_Trend_Filter"
 timeframe = "4h"
 leverage = 1.0
