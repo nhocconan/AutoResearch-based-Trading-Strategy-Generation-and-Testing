@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Choppiness Index + Volume Spike + Previous Day Range Breakout
-# Uses Choppiness Index (14) on 12h to filter range (CHOP > 61.8) vs trend (CHOP < 38.2).
-# In ranging markets: mean-reversion at previous day's high/low with volume spike.
-# In trending markets: breakout of previous day's high/low with volume spike.
-# Volume confirmation: current volume > 2.0 * 20-period median volume.
-# Works in bull (breakouts up) and bear (breakouts down) markets.
-# Target: 50-150 total trades over 4 years.
+# Hypothesis: 6h Williams %R + Volume Spike + Weekly Trend Filter
+# Uses Williams %R(14) for mean reversion entries in overbought/oversold conditions.
+# Entry conditions: Williams %R < -80 (oversold) or > -20 (overbought) + volume spike (2x median) + weekly trend alignment.
+# Weekly trend: price above/below weekly 20-period EMA. Works in both bull and bear markets by fading extremes in the direction of the weekly trend.
+# Target: 50-150 total trades over 4 years (12-37/year).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,125 +19,60 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for previous day's high/low
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1w = df_1w['close'].values
     
-    # Load 12h data for Choppiness Index
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate weekly 20-period EMA
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Previous day's high and low (shifted by 1 to avoid look-ahead)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
-    
-    # Align previous day's high/low to 4h timeframe
-    prev_high_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_high_1d)
-    prev_low_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_low_1d)
-    
-    # Calculate True Range for Choppiness Index
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    # Calculate +DI and -DI for ADX component of Choppiness
-    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
-                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)), 
-                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed TR, DM+, DM- (14-period)
-    tr_smooth = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / (tr_smooth + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (tr_smooth + 1e-10)
-    
-    # Calculate DX and ADX (14-period)
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate Choppiness Index: CHOP = 100 * log10(SUM(TR,14) / (ATR(14)*14)) / log10(14)
-    atr_14 = tr_smooth  # Already smoothed TR = ATR
-    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(sum_tr_14 / (atr_14 * 14 + 1e-10)) / np.log10(14)
-    
-    # Align Choppiness Index to 4h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
+    # Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25  # Position size
+    base_size = 0.25  # Position size (25% of capital)
     
-    for i in range(100, n):
+    for i in range(20, n):  # Start after Williams %R warmup
         # Skip if any required data is NaN
-        if (np.isnan(prev_high_1d_aligned[i]) or np.isnan(prev_low_1d_aligned[i]) or
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_20_1w_aligned[i])):
             continue
         
-        # Volume spike condition: current volume > 2.0 * 20-period median
-        vol_median = np.median(volume[max(0, i-19):i+1])
-        volume_spike = volume[i] > 2.0 * vol_median
+        # Volume spike: current volume > 2x median of past 20 periods
+        vol_median = np.median(volume[max(0, i-20):i+1])
+        volume_spike = volume[i] > 2 * vol_median
         
-        # Range market: CHOP > 61.8 -> mean reversion at previous day levels
-        if chop_aligned[i] > 61.8:
-            # Long: price near previous day low + volume spike
-            if (close[i] <= prev_low_1d_aligned[i] * 1.005 and  # Within 0.5% of low
-                volume_spike and
-                position <= 0):
-                position = 1
-                signals[i] = base_size
-            
-            # Short: price near previous day high + volume spike
-            elif (close[i] >= prev_high_1d_aligned[i] * 0.995 and  # Within 0.5% of high
-                  volume_spike and
-                  position >= 0):
-                position = -1
-                signals[i] = -base_size
+        # Long entry: oversold + volume spike + price above weekly EMA (uptrend)
+        if (williams_r[i] < -80 and
+            volume_spike and
+            close[i] > ema_20_1w_aligned[i] and
+            position <= 0):
+            position = 1
+            signals[i] = base_size
         
-        # Trending market: CHOP < 38.2 -> breakout of previous day levels
-        elif chop_aligned[i] < 38.2:
-            # Long: breakout above previous day high + volume spike
-            if (close[i] > prev_high_1d_aligned[i] and
-                volume_spike and
-                position <= 0):
-                position = 1
-                signals[i] = base_size
-            
-            # Short: breakout below previous day low + volume spike
-            elif (close[i] < prev_low_1d_aligned[i] and
-                  volume_spike and
-                  position >= 0):
-                position = -1
-                signals[i] = -base_size
+        # Short entry: overbought + volume spike + price below weekly EMA (downtrend)
+        elif (williams_r[i] > -20 and
+              volume_spike and
+              close[i] < ema_20_1w_aligned[i] and
+              position >= 0):
+            position = -1
+            signals[i] = -base_size
         
-        # Exit conditions: opposite signal or CHOP in middle range (40-60)
-        elif position == 1 and (close[i] < prev_low_1d_aligned[i] * 0.995 or
-                                40 <= chop_aligned[i] <= 60):
+        # Exit: Williams %R returns to neutral range (-50) or opposite extreme
+        elif position == 1 and williams_r[i] > -50:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > prev_high_1d_aligned[i] * 1.005 or
-                                 40 <= chop_aligned[i] <= 60):
+        elif position == -1 and williams_r[i] < -50:
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Chop_Volume_Pivot_MR_Trend"
-timeframe = "4h"
+name = "6h_WilliamsR_Volume_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
