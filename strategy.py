@@ -1,10 +1,14 @@
-# ITERATION 44976: 12h Donchian Breakout + Volume + Volatility Regime
-# Hypothesis: Breakouts of 20-period Donchian channel on 12h timeframe, filtered by volume surge and low volatility regime (choppy markets avoided), work in both bull and bear markets by capturing strong directional moves. Uses 1d timeframe for volatility regime filter to avoid false breakouts in chop. Target: 50-150 total trades over 4 years (12-37/year).
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 1d Choppiness Index + 1d RSI + 1d Volume Spike
+# Uses Choppiness Index to detect ranging markets (CHOP > 61.8) for mean reversion,
+# RSI(14) for overbought/oversold signals, and volume spike for confirmation.
+# Works in both bull and bear markets by adapting to market regime - 
+# in ranging markets, mean reversion at RSI extremes with volume confirmation.
+# Target: 50-100 total trades over 4 years (12-25/year).
 
 def generate_signals(prices):
     n = len(prices)
@@ -16,87 +20,112 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h price data for Donchian calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Load 1d data for volatility regime filter (ATR-based chop filter)
+    # Load 1d data for calculations
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
+    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 12-period ATR on 1d for volatility regime
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_12_1d = pd.Series(tr).rolling(window=12, min_periods=12).mean().values
+    # Calculate Choppiness Index (14-period)
+    def calculate_chop(high_arr, low_arr, close_arr, period=14):
+        atr = np.zeros(len(close_arr))
+        tr = np.zeros(len(close_arr))
+        for i in range(1, len(close_arr)):
+            tr[i] = max(high_arr[i] - low_arr[i], 
+                       abs(high_arr[i] - close_arr[i-1]),
+                       abs(low_arr[i] - close_arr[i-1]))
+        # Smooth TR using Wilder's smoothing (equivalent to RMA)
+        atr[period-1] = np.sum(tr[1:period]) / period
+        for i in range(period, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        # Calculate highest high and lowest low over period
+        highest_high = np.zeros(len(close_arr))
+        lowest_low = np.zeros(len(close_arr))
+        for i in range(period-1, len(close_arr)):
+            highest_high[i] = np.max(high_arr[i-period+1:i+1])
+            lowest_low[i] = np.min(low_arr[i-period+1:i+1])
+        
+        # Avoid division by zero
+        range_hl = highest_high - lowest_low
+        range_hl[range_hl == 0] = 1e-10
+        
+        chop = 100 * np.log10(atr * period / range_hl) / np.log10(period)
+        return chop
     
-    # Calculate 50-period SMA of ATR for regime threshold (high ATR = trending, low ATR = chop)
-    atr_ma_50_1d = pd.Series(atr_12_1d).rolling(window=50, min_periods=50).mean().values
+    chop = calculate_chop(high_1d, low_1d, close_1d, 14)
     
-    # Volatility regime: 1 = trending (high volatility), 0 = chop (low volatility)
-    vol_regime = (atr_12_1d > atr_ma_50_1d).astype(float)
+    # Calculate RSI (14-period)
+    def calculate_rsi(close_arr, period=14):
+        delta = np.diff(close_arr)
+        delta = np.insert(delta, 0, 0)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.zeros(len(close_arr))
+        avg_loss = np.zeros(len(close_arr))
+        
+        avg_gain[period] = np.mean(gain[1:period+1])
+        avg_loss[period] = np.mean(loss[1:period+1])
+        
+        for i in range(period+1, len(close_arr)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    # Calculate Donchian channels (20-period) on 12h
-    highest_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    rsi = calculate_rsi(close_1d, 14)
     
-    # Al indicators to 12h timeframe
-    vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime)
-    atr_ma_50_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_50_1d)
-    highest_20_aligned = align_htf_to_ltf(prices, df_12h, highest_20)
-    lowest_20_aligned = align_htf_to_ltf(prices, df_12h, lowest_20)
+    # Volume average (20-period)
+    vol_avg = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Volume average (20-period) on 12h for confirmation
-    vol_avg_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values  # volume is already 12h aligned via prices
+    # Align all indicators to 1d timeframe (prices are already 1d)
+    chop_aligned = chop
+    rsi_aligned = rsi
+    vol_avg_aligned = vol_avg
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25  # Position size: 25% of capital
+    base_size = 0.25  # Position size
     
-    for i in range(50, n):
+    for i in range(30, n):  # Start after warmup period
         # Skip if any required data is NaN
-        if (np.isnan(vol_regime_aligned[i]) or np.isnan(atr_ma_50_aligned[i]) or 
-            np.isnan(highest_20_aligned[i]) or np.isnan(lowest_20_aligned[i]) or
-            np.isnan(vol_avg_12h[i])):
+        if (np.isnan(chop_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(vol_avg_aligned[i])):
             continue
         
-        # Long entry: price breaks above upper Donchian + volume surge + trending regime
-        if (close[i] > highest_20_aligned[i] and 
-            volume[i] > 2.0 * vol_avg_12h[i] and 
-            vol_regime_aligned[i] > 0.5 and 
+        # Long entry: Choppy market (CHOP > 61.8) + RSI oversold (< 30) + volume spike
+        if (chop_aligned[i] > 61.8 and 
+            rsi_aligned[i] < 30 and 
+            volume_1d[i] > 1.5 * vol_avg_aligned[i] and 
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below lower Donchian + volume surge + trending regime
-        elif (close[i] < lowest_20_aligned[i] and 
-              volume[i] > 2.0 * vol_avg_12h[i] and 
-              vol_regime_aligned[i] > 0.5 and 
+        # Short entry: Choppy market (CHOP > 61.8) + RSI overbought (> 70) + volume spike
+        elif (chop_aligned[i] > 61.8 and 
+              rsi_aligned[i] > 70 and 
+              volume_1d[i] > 1.5 * vol_avg_aligned[i] and 
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse signal or loss of volatility regime (avoid whipsaw in chop)
-        elif position == 1 and vol_regime_aligned[i] <= 0.5:
+        # Exit: RSI returns to neutral zone (40-60) or chop market ends
+        elif position == 1 and (rsi_aligned[i] > 40 or chop_aligned[i] <= 61.8):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and vol_regime_aligned[i] <= 0.5:
+        elif position == -1 and (rsi_aligned[i] < 60 or chop_aligned[i] <= 61.8):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "12h_Donchian_Breakout_Volume_VolRegime"
-timeframe = "12h"
+name = "1d_Chop_RSI_Volume_MeanReversion"
+timeframe = "1d"
 leverage = 1.0
