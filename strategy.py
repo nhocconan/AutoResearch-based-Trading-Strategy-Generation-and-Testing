@@ -3,11 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Weekly Pivot Range with Volume Confirmation
-# Uses weekly pivot points (calculated from previous week's OHLC) to define support/resistance zones.
-# Long when price bounces above weekly pivot with volume confirmation (>1.5x 24-bar median volume).
-# Short when price breaks below weekly support with volume confirmation.
-# Designed to capture mean reversion at key weekly levels in both bull and bear markets.
+# Hypothesis: 4h Donchian Breakout + 1d Volume Spike + ADX Trend Filter
+# Uses Donchian channel breakouts for directional entries, confirmed by 1d volume spikes.
+# ADX filter ensures we only trade in trending regimes (ADX > 25) to avoid whipsaws in ranging markets.
+# Designed to work in both bull and bear markets by capturing strong momentum moves.
 # Conservative sizing (0.25) to limit trade frequency and avoid fee drag.
 
 def generate_signals(prices):
@@ -20,71 +19,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for weekly pivot calculation
+    # 1-day volume for spike detection
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean()
+    vol_spike_1d = volume_1d > (2.0 * vol_ma_1d)  # 2x 20-day average volume
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
-    # Calculate weekly pivot points (using prior week's OHLC)
-    # For each day, we need the prior week's data (Monday to Sunday)
-    # We'll use a simplified approach: weekly pivot based on prior 5 trading days
-    # In practice, we calculate: P = (Prior Week High + Prior Week Low + Prior Week Close) / 3
-    # Then R1 = 2*P - Prior Week Low, S1 = 2*P - Prior Week High
-    # R2 = P + (Prior Week High - Prior Week Low), S2 = P - (Prior Week High - Prior Week Low)
+    # Donchian channel (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max()
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min()
     
-    # Calculate rolling weekly high/low/close (5-day lookback for prior week)
-    week_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().shift(1)  # prior week
-    week_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().shift(1)    # prior week
-    week_close = pd.Series(close_1d).rolling(window=5, min_periods=5).last().shift(1)  # prior week
+    # ADX for trend strength (14-period)
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    plus_dm = np.insert(plus_dm, 0, 0)
+    minus_dm = np.insert(minus_dm, 0, 0)
     
-    # Weekly pivot and support/resistance levels
-    pivot = (week_high + week_low + week_close) / 3
-    r1 = 2 * pivot - week_low
-    s1 = 2 * pivot - week_high
-    r2 = pivot + (week_high - week_low)
-    s2 = pivot - (week_high - week_low)
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
     
-    # Align weekly levels to 6h timeframe
-    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot.values)
-    r1_6h = align_htf_to_ltf(prices, df_1d, r1.values)
-    s1_6h = align_htf_to_ltf(prices, df_1d, s1.values)
-    r2_6h = align_htf_to_ltf(prices, df_1d, r2.values)
-    s2_6h = align_htf_to_ltf(prices, df_1d, s2.values)
-    
-    # Volume confirmation: current > 1.5x median of last 24 bars (4 days of 6h data)
-    vol_median = pd.Series(volume).rolling(window=24, min_periods=24).median()
-    vol_threshold = 1.5 * vol_median
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean()
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean() / (atr + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean() / (atr + 1e-10)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean()
     
     signals = np.zeros(n)
     
-    for i in range(24, n):  # Start after warmup
+    for i in range(40, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(pivot_6h[i]) or np.isnan(s1_6h[i]) or np.isnan(r1_6h[i]) or
-            np.isnan(vol_threshold[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(adx[i]) or np.isnan(vol_spike_1d_aligned[i])):
             continue
         
-        price = close[i]
-        vol = volume[i]
-        
-        # Long: Price above weekly pivot (S1) with volume confirmation, and not too far above R1
-        # Enter long when price crosses above S1 with volume, targeting pivot/R1
-        if (price > s1_6h[i] and 
-            price <= r1_6h[i] and  # Not too far extended
-            vol > vol_threshold[i]):
+        # Long: Price breaks above Donchian high, ADX > 25 (trending), volume spike
+        if (close[i] > donchian_high[i-1] and 
+            adx[i] > 25 and 
+            vol_spike_1d_aligned[i]):
             signals[i] = 0.25
         
-        # Short: Price below weekly pivot (R1) with volume confirmation, and not too far below S1
-        # Enter short when price crosses below R1 with volume, targeting pivot/S1
-        elif (price < r1_6h[i] and 
-              price >= s1_6h[i] and  # Not too far extended
-              vol > vol_threshold[i]):
+        # Short: Price breaks below Donchian low, ADX > 25 (trending), volume spike
+        elif (close[i] < donchian_low[i-1] and 
+              adx[i] > 25 and 
+              vol_spike_1d_aligned[i]):
             signals[i] = -0.25
         
-        # Exit: Price returns to pivot zone or volume dries up
+        # Exit: Price returns to middle of Donchian channel or ADX weakens
         elif (i > 0 and 
-              ((signals[i-1] == 0.25 and (price <= pivot_6h[i] or vol <= vol_threshold[i])) or
-               (signals[i-1] == -0.25 and (price >= pivot_6h[i] or vol <= vol_threshold[i])))):
+              ((signals[i-1] == 0.25 and (close[i] < (donchian_high[i-1] + donchian_low[i-1]) / 2 or adx[i] < 20)) or
+               (signals[i-1] == -0.25 and (close[i] > (donchian_high[i-1] + donchian_low[i-1]) / 2 or adx[i] < 20)))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -93,6 +77,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_Range_Volume"
-timeframe = "6h"
+name = "4h_Donchian_Volume_ADX"
+timeframe = "4h"
 leverage = 1.0
