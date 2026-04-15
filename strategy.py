@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,104 +13,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for 1d timeframe (primary)
+    # Get 12h HTF data once before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
+    
+    # Calculate 12h Donchian channels (20-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    upper_20_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    lower_20_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    
+    # Align 12h Donchian to 12h (no shift needed as we use completed bars)
+    upper_20_12h_aligned = align_htf_to_ltf(prices, df_12h, upper_20_12h)
+    lower_20_12h_aligned = align_htf_to_ltf(prices, df_12h, lower_20_12h)
+    
+    # Get 1d HTF data for ATR
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Get weekly HTF data
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
+    # Calculate 1d ATR(14) for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14_12h_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate 1d KAMA ( Kaufman Adaptive Moving Average )
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if len(close) > 1 else 0
-    # Simplified ER calculation for array
-    er = np.zeros_like(close)
-    for i in range(10, len(close)):
-        if i >= 10:
-            dir_change = np.abs(close[i] - close[i-10])
-            vol_sum = np.sum(np.abs(np.diff(close[i-9:i+1]))) if i >= 9 else 1
-            er[i] = dir_change / (vol_sum + 1e-10)
-    er = np.where(er > 1, 1, er)  # Cap at 1
-    
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # Align 1d KAMA to 1d (no alignment needed as we're on 1d timeframe)
-    kama_1d = kama
-    
-    # Calculate weekly RSI from weekly data
-    weekly_close = df_1w['close'].values
-    delta = np.diff(weekly_close, prepend=weekly_close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing for RSI
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    weekly_rsi = 100 - (100 / (1 + rs))
-    
-    # Align weekly RSI to 1d
-    weekly_rsi_aligned = align_htf_to_ltf(prices, df_1w, weekly_rsi)
-    
-    # Calculate 1d ATR for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Calculate 1d volume ratio
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ratio = volume / (vol_ma + 1e-10)
+    # Calculate 12h volume ratio (current vs 20-period average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ratio = volume / (vol_ma_20 + 1e-10)
     
     signals = np.zeros(n)
     
-    for i in range(50, n):
+    # Precompute session filter (00-24 UTC for 12h - less restrictive)
+    hours = prices.index.hour
+    in_session = (hours >= 0) & (hours <= 23)  # Always true for 12h, kept for structure
+    
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_1d[i]) or np.isnan(weekly_rsi_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(upper_20_12h_aligned[i]) or np.isnan(lower_20_12h_aligned[i]) or 
+            np.isnan(atr_14_12h_aligned[i]) or np.isnan(volume_ratio[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
         # Long conditions:
-        # 1. Price above KAMA (bullish trend)
-        # 2. Weekly RSI not overbought (< 60) 
-        # 3. Volume confirmation: volume > 1.2x average
-        # 4. Volatility filter: ATR > 0.3% of price (avoid extremely low volatility)
-        if (close[i] > kama_1d[i] and
-            weekly_rsi_aligned[i] < 60 and
-            volume_ratio[i] > 1.2 and
-            atr[i] > 0.003 * close[i]):
+        # 1. 12h price breaks above 12h Donchian upper (20) - bullish breakout
+        # 2. Volume confirmation: volume > 1.5x average
+        # 3. Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
+        if (close[i] > upper_20_12h_aligned[i] and
+            volume_ratio[i] > 1.5 and
+            atr_14_12h_aligned[i] > 0.005 * close[i]):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Price below KAMA (bearish trend)
-        # 2. Weekly RSI not oversold (> 40)
-        # 3. Volume confirmation: volume > 1.2x average
-        # 4. Volatility filter: ATR > 0.3% of price
-        elif (close[i] < kama_1d[i] and
-              weekly_rsi_aligned[i] > 40 and
-              volume_ratio[i] > 1.2 and
-              atr[i] > 0.003 * close[i]):
+        # 1. 12h price breaks below 12h Donchian lower (20) - bearish breakdown
+        # 2. Volume confirmation: volume > 1.5x average
+        # 3. Volatility filter: ATR > 0.5% of price
+        elif (close[i] < lower_20_12h_aligned[i] and
+              volume_ratio[i] > 1.5 and
+              atr_14_12h_aligned[i] > 0.005 * close[i]):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1d_KAMA_WeeklyRSI_Volume_Filter_v1"
-timeframe = "1d"
+name = "12h_Donchian20_Volume_ATR_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
