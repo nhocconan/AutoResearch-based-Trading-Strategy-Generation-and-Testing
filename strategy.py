@@ -15,50 +15,58 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily Williams %R(14) for momentum extreme
-    highest_high_14 = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
-    williams_r_14_1d = -100 * (highest_high_14 - df_1d['close'].values) / (highest_high_14 - lowest_low_14 + 1e-10)
-    williams_r_14_1d_aligned = align_htf_to_ltf(prices, df_1d, williams_r_14_1d)
+    # Calculate daily ATR(14) for volatility filter
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
+    tr3 = np.abs(df_1d['low'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
     # Calculate daily EMA(50) for trend filter
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 6h ATR(14) for volatility filter
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.concatenate([[close[0]], close[:-1]])), np.abs(low - np.concatenate([[close[0]], close[:-1]]))))
-    atr_14_6h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate daily RSI(14) for momentum filter
+    delta = pd.Series(df_1d['close'].values).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_14_1d = 100 - (100 / (1 + rs))
+    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_14_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(atr_14_6h[i])):
+        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(rsi_14_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when 6h ATR is elevated (> 0.8% of price)
-        vol_filter = atr_14_6h[i] > 0.008 * close[i]
+        # Volatility filter: only trade when daily ATR is elevated (> 0.3% of price)
+        vol_filter = atr_14_1d_aligned[i] > 0.003 * close[i]
         
         # Long conditions:
         # 1. Price above daily EMA50 (bullish bias)
-        # 2. Daily Williams %R oversold (< -80) - extreme pessimism
+        # 2. Daily RSI between 45 and 55 (tight momentum range)
         # 3. Volatility filter
         if (close[i] > ema_50_1d_aligned[i] and
-            williams_r_14_1d_aligned[i] < -80 and
+            45 <= rsi_14_1d_aligned[i] <= 55 and
             vol_filter):
             signals[i] = 0.25
             
         # Short conditions:
         # 1. Price below daily EMA50 (bearish bias)
-        # 2. Daily Williams %R overbought (> -20) - extreme optimism
+        # 2. Daily RSI between 45 and 55 (tight momentum range)
         # 3. Volatility filter
         elif (close[i] < ema_50_1d_aligned[i] and
-              williams_r_14_1d_aligned[i] > -20 and
+              45 <= rsi_14_1d_aligned[i] <= 55 and
               vol_filter):
             signals[i] = -0.25
         else:
@@ -66,6 +74,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_EMA50_VolFilter_v1"
-timeframe = "6h"
+name = "12h_EMA50_RSI14_TightVolFilter_v1"
+timeframe = "12h"
 leverage = 1.0
