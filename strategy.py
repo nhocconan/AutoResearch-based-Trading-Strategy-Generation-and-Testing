@@ -15,8 +15,12 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
+    
+    # Calculate daily EMA(50) for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate daily ATR(14) for volatility filter
     tr1 = df_1d['high'] - df_1d['low']
@@ -26,54 +30,29 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate daily EMA(34) for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate daily RSI(14) for momentum filter
-    delta = pd.Series(df_1d['close'].values).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14_1d = 100 - (100 / (1 + rs))
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
-    
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(rsi_14_1d_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade when daily ATR is elevated (> 0.4% of price)
-        vol_filter = atr_14_1d_aligned[i] > 0.004 * close[i]
+        # Volatility filter: trade when ATR > 0.5% of price
+        vol_filter = atr_14_1d_aligned[i] > 0.005 * close[i]
         
-        # Long conditions:
-        # 1. Price above daily EMA34 (bullish bias)
-        # 2. Daily RSI between 40 and 60 (neutral momentum, avoids extremes)
-        # 3. Volatility filter
-        if (close[i] > ema_34_1d_aligned[i] and
-            40 <= rsi_14_1d_aligned[i] <= 60 and
-            vol_filter):
+        # Long conditions: price above EMA50 and elevated volatility
+        if close[i] > ema_50_1d_aligned[i] and vol_filter:
             signals[i] = 0.25
             
-        # Short conditions:
-        # 1. Price below daily EMA34 (bearish bias)
-        # 2. Daily RSI between 40 and 60 (neutral momentum, avoids extremes)
-        # 3. Volatility filter
-        elif (close[i] < ema_34_1d_aligned[i] and
-              40 <= rsi_14_1d_aligned[i] <= 60 and
-              vol_filter):
+        # Short conditions: price below EMA50 and elevated volatility
+        elif close[i] < ema_50_1d_aligned[i] and vol_filter:
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "6h_EMA34_RSI14_VolFilter_v1"
-timeframe = "6h"
+name = "12h_EMA50_ATR_VolFilter_v1"
+timeframe = "12h"
 leverage = 1.0
