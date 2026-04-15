@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,78 +13,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d HTF data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 1w HTF data once before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 1d ATR(14) for volatility filter
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
-    tr3 = np.abs(df_1d['low'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Calculate 1w EMA(34) for long-term trend
+    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1w ATR(14) for volatility regime filter
+    tr1 = df_1w['high'] - df_1w['low']
+    tr2 = np.abs(df_1w['high'] - np.concatenate([[df_1w['close'].iloc[0]], df_1w['close'].iloc[:-1]]))
+    tr3 = np.abs(df_1w['low'] - np.concatenate([[df_1w['close'].iloc[0]], df_1w['close'].iloc[:-1]]))
+    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14_1w = pd.Series(tr_1w).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_14_1w)
     
-    # Calculate 1d RSI(14) for mean reversion in ranging markets
-    delta = pd.Series(df_1d['close'].values).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14_1d = 100 - (100 / (1 + rs))
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d.values)
-    
-    # Calculate 1d Bollinger Bands(20,2) for mean reversion signals
-    sma_20_1d = pd.Series(df_1d['close'].values).rolling(window=20, min_periods=20).mean().values
-    std_20_1d = pd.Series(df_1d['close'].values).rolling(window=20, min_periods=20).std().values
-    upper_bb_1d = sma_20_1d + 2 * std_20_1d
-    lower_bb_1d = sma_20_1d - 2 * std_20_1d
-    upper_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
-    lower_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
+    # Calculate 1w Donchian(20) channels
+    donchian_high_20 = pd.Series(df_1w['high'].values).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(df_1w['low'].values).rolling(window=20, min_periods=20).min().values
+    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_20)
+    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_20)
     
     signals = np.zeros(n)
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(rsi_14_1d_aligned[i]) or np.isnan(upper_bb_1d_aligned[i]) or 
-            np.isnan(lower_bb_1d_aligned[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr_14_1w_aligned[i]) or 
+            np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when daily ATR is reasonable (> 0.3% of price)
-        vol_filter = atr_14_1d_aligned[i] > 0.003 * close[i]
-        
-        # Trend regime: price relative to daily EMA50
-        bullish_trend = close[i] > ema_50_1d_aligned[i]
-        bearish_trend = close[i] < ema_50_1d_aligned[i]
-        
-        # Mean reversion conditions: RSI extremes + Bollinger Band touch
-        oversold = rsi_14_1d_aligned[i] < 30 and close[i] <= lower_bb_1d_aligned[i]
-        overbought = rsi_14_1d_aligned[i] > 70 and close[i] >= upper_bb_1d_aligned[i]
+        # Volatility regime filter: only trade when weekly ATR is elevated (> 0.8% of price)
+        vol_regime = atr_14_1w_aligned[i] > 0.008 * close[i]
         
         # Long conditions:
-        # 1. Bullish trend OR mean reversion from oversold
-        # 2. Volatility filter
-        if ((bullish_trend or oversold) and vol_filter):
+        # 1. Price above weekly EMA34 (bullish long-term bias)
+        # 2. Price breaks above weekly Donchian(20) high with volume confirmation
+        # 3. Volume spike: volume > 2.0x average daily volume
+        if (close[i] > ema_34_1w_aligned[i] and
+            close[i] > donchian_high_20_aligned[i] and
+            volume[i] > 2.0 * np.mean(volume[max(0, i-20):i+1]) and
+            vol_regime):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Bearish trend OR mean reversion from overbought
-        # 2. Volatility filter
-        elif ((bearish_trend or overbought) and vol_filter):
+        # 1. Price below weekly EMA34 (bearish long-term bias)
+        # 2. Price breaks below weekly Donchian(20) low with volume confirmation
+        # 3. Volume spike: volume > 2.0x average daily volume
+        elif (close[i] < ema_34_1w_aligned[i] and
+              close[i] < donchian_low_20_aligned[i] and
+              volume[i] > 2.0 * np.mean(volume[max(0, i-20):i+1]) and
+              vol_regime):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1d_EMA50_RSI14_BB20_MeanRev_Trend_Filter_v1"
+name = "1d_Vol_Regime_Donchian20_1wEMA34_Breakout_v1"
 timeframe = "1d"
 leverage = 1.0
