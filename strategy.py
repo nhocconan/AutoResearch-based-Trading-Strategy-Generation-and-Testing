@@ -3,45 +3,76 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Power + 12h EMA50 Trend Filter + Volume Spike
-# Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-# Long when Bull Power > 0 and Bear Power < 0 and price > 12h EMA50 and volume > 1.5x median
-# Short when Bear Power < 0 and Bull Power < 0 and price < 12h EMA50 and volume > 1.5x median
-# Uses 12h EMA50 for trend filter to avoid counter-trend trades
-# Volume spike confirms institutional interest
-# Target: 50-150 total trades over 4 years = 12-37/year
-# Timeframe: 6h, HTF: 12h
+# Hypothesis: 12h Bollinger Bands Squeeze Breakout with Volume Spike and ADX Trend Filter
+# Uses Bollinger Bands width percentile to detect low volatility squeeze. Breakouts above/below
+# Bollinger Bands are traded only when confirmed by volume spike (>2x median) and ADX > 25 (trending).
+# Works in bull markets (breakouts up) and bear markets (breakouts down). Target: 50-150 total trades.
+# Timeframe: 12h, HTF: 1d for Bollinger Bands
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate EMA13 for Elder Ray
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Load 1d data for Bollinger Bands calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    close_1d = df_1d['close'].values
     
-    # Bull Power and Bear Power
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Calculate Bollinger Bands (20-period, 2 std dev)
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean()
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std()
+    upper_bb = sma_20 + (2 * std_20)
+    lower_bb = sma_20 - (2 * std_20)
+    bb_width = upper_bb - lower_bb
     
-    # Load 12h data for EMA50 trend filter
+    # Bollinger Bands width percentile (50-period lookback) to detect squeeze
+    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
+    
+    # Load 12h data for ADX trend filter
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 50:
         return np.zeros(n)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     
-    # Calculate EMA50 on 12h
-    close_12h_s = pd.Series(close_12h)
-    ema50_12h = close_12h_s.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate ADX (14-period) on 12h
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    # Align EMA50 to 6h timeframe
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
+                       np.maximum(high_12h - np.roll(close_12h, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(close_12h, 1)), 
+                        np.maximum(np.roll(close_12h, 1) - low_12h, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    
+    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
+    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align indicators to 12h timeframe
+    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_1d, bb_width_percentile)
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb.values)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb.values)
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
     signals = np.zeros(n)
     position = 0
@@ -49,40 +80,44 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(ema50_12h_aligned[i])):
+        if (np.isnan(bb_width_percentile_aligned[i]) or 
+            np.isnan(upper_bb_aligned[i]) or 
+            np.isnan(lower_bb_aligned[i]) or
+            np.isnan(adx_aligned[i])):
             continue
         
-        # Volume condition: current volume > 1.5x median of last 20 bars
-        vol_median = np.median(volume[max(0, i-20):i+1])
-        volume_ok = volume[i] > 1.5 * vol_median
-        
-        # Long entry: Bull Power > 0, Bear Power < 0, price > EMA50, volume spike
-        if (bull_power[i] > 0 and bear_power[i] < 0 and
-            close[i] > ema50_12h_aligned[i] and volume_ok and
+        # Long entry: Bollinger squeeze breakout up + volume spike + ADX > 25
+        if (bb_width_percentile_aligned[i] <= 20 and  # Squeeze condition (low volatility)
+            close[i] > upper_bb_aligned[i] and        # Breakout above upper BB
+            volume[i] > 2.0 * np.median(volume[max(0, i-20):i+1]) and  # Volume spike
+            adx_aligned[i] > 25 and                   # Trending market
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: Bear Power < 0, Bull Power < 0, price < EMA50, volume spike
-        elif (bear_power[i] < 0 and bull_power[i] < 0 and
-              close[i] < ema50_12h_aligned[i] and volume_ok and
+        # Short entry: Bollinger squeeze breakout down + volume spike + ADX > 25
+        elif (bb_width_percentile_aligned[i] <= 20 and  # Squeeze condition
+              close[i] < lower_bb_aligned[i] and        # Breakout below lower BB
+              volume[i] > 2.0 * np.median(volume[max(0, i-20):i+1]) and  # Volume spike
+              adx_aligned[i] > 25 and                   # Trending market
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: Power signals reverse or trend fails
-        elif position == 1 and (bull_power[i] <= 0 or bear_power[i] >= 0 or
-                                close[i] <= ema50_12h_aligned[i]):
+        # Exit: reverse breakout or BB width expansion (end of squeeze) or ADX < 20
+        elif position == 1 and (close[i] < lower_bb_aligned[i] or 
+                                bb_width_percentile_aligned[i] > 80 or 
+                                adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (bull_power[i] >= 0 or bear_power[i] >= 0 or
-                                 close[i] >= ema50_12h_aligned[i]):
+        elif position == -1 and (close[i] > upper_bb_aligned[i] or 
+                                 bb_width_percentile_aligned[i] > 80 or 
+                                 adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "6h_ElderRay_12hEMA50_Volume"
-timeframe = "6h"
+name = "12h_Bollinger_Squeeze_Breakout_Volume_ADX"
+timeframe = "12h"
 leverage = 1.0
