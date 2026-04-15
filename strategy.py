@@ -1,20 +1,19 @@
-# 4h_MultiFactor_Breakout_Trend
-# Hypothesis: 4h strategy combining Donchian breakouts (20-period) with volume confirmation and ADX trend filter.
-# Donchian breakouts provide clear entry/exit levels based on price extremes.
-# Volume confirmation ensures breakouts are supported by participation.
-# ADX > 25 filters for trending markets, avoiding false breakouts in ranging conditions.
-# Works in bull markets (long breakouts) and bear markets (short breakdowns).
-# Target: 20-50 trades/year per symbol (80-200 total over 4 years).
-# Timeframe: 4h
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 4h Williams Alligator + 1d Volume Spike + ADX Trend Filter
+# Williams Alligator identifies trend direction via smoothed medians (Jaw/Teeth/Lips).
+# Long when Lips > Teeth > Jaw (bullish alignment), Short when Lips < Teeth < Jaw (bearish).
+# Volume spike confirms breakout strength. ADX > 25 filters for trending markets.
+# Works in bull markets (catch uptrends) and bear markets (catch downtrends).
+# Target: 50-150 total trades over 4 years.
+# Timeframe: 4h, HTF: 1d
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,23 +21,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Load 1d data for volume spike and ADX
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    vol_1d = df_1d['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # ADX (14-period) for trend strength
+    # Williams Alligator on 4h (13,8,5 SMAs of median price)
+    median_price = (high + low) / 2
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().rolling(window=8, min_periods=8).mean()
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().rolling(window=5, min_periods=5).mean()
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().rolling(window=3, min_periods=3).mean()
+    jaw_vals = jaw.values
+    teeth_vals = teeth.values
+    lips_vals = lips.values
+    
+    # 1d volume spike (current vs 20-period average)
+    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike = vol_1d / (vol_ma_20 + 1e-10)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
+    
+    # ADX (14-period) on 1d
     # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    tr[0] = tr1[0]
     
     # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(close, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(close, 1)), 
-                        np.maximum(np.roll(close, 1) - low, 0), 0)
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(close_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(close_1d, 1)), 
+                        np.maximum(np.roll(close_1d, 1) - low_1d, 0), 0)
     dm_plus[0] = 0
     dm_minus[0] = 0
     
@@ -54,43 +72,43 @@ def generate_signals(prices):
     # DX and ADX
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25  # Position size (25% of capital)
+    base_size = 0.25
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(adx[i])):
+        if (np.isnan(lips_vals[i]) or np.isnan(teeth_vals[i]) or np.isnan(jaw_vals[i]) or
+            np.isnan(vol_spike_aligned[i]) or np.isnan(adx_aligned[i])):
             continue
         
-        # Long entry: price breaks above Donchian high + volume confirmation + ADX > 25
-        if (close[i] > donchian_high[i] and
-            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-            adx[i] > 25 and
-            position <= 0):
+        # Bullish Alligator alignment: Lips > Teeth > Jaw
+        bullish = lips_vals[i] > teeth_vals[i] and teeth_vals[i] > jaw_vals[i]
+        # Bearish Alligator alignment: Lips < Teeth < Jaw
+        bearish = lips_vals[i] < teeth_vals[i] and teeth_vals[i] < jaw_vals[i]
+        
+        # Long entry: Bullish alignment + volume spike + ADX > 25
+        if bullish and vol_spike_aligned[i] > 2.0 and adx_aligned[i] > 25 and position <= 0:
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below Donchian low + volume confirmation + ADX > 25
-        elif (close[i] < donchian_low[i] and
-              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-              adx[i] > 25 and
-              position >= 0):
+        # Short entry: Bearish alignment + volume spike + ADX > 25
+        elif bearish and vol_spike_aligned[i] > 2.0 and adx_aligned[i] > 25 and position >= 0:
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse breakout or ADX < 20 (ranging market)
-        elif position == 1 and (close[i] < donchian_low[i] or adx[i] < 20):
+        # Exit: Opposite Alligator alignment or ADX < 20 (ranging market)
+        elif position == 1 and (bearish or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > donchian_high[i] or adx[i] < 20):
+        elif position == -1 and (bullish or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_MultiFactor_Breakout_Trend"
+name = "4h_WilliamsAlligator_1dVolumeSpike_ADX"
 timeframe = "4h"
 leverage = 1.0
