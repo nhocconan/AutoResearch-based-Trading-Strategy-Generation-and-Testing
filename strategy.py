@@ -3,10 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Camarilla pivot (R1/S1) breakout with volume confirmation and 4h ADX regime filter.
-# In bull/bear markets, price breaking above R1 or below S1 on 1d chart indicates strong momentum.
-# Volume confirms institutional participation. ADX > 25 ensures trending regime to avoid false breakouts in chop.
-# Designed for low trade frequency (20-40/year) to minimize fee drag while capturing strong directional moves.
+# Hypothesis: 4h strategy using 1d Williams %R for mean reversion timing and 4h Donchian channel (20) for trend structure.
+# In 4h uptrend (price > upper Donchian), wait for 1d Williams %R < -80 to go long (oversold pullback).
+# In 4h downtrend (price < lower Donchian), wait for 1d Williams %R > -20 to go short (overbought bounce).
+# Volume confirmation ensures momentum validity. Session filter (08-20 UTC) reduces noise.
+# Designed for low trade frequency (20-40/year) to minimize fee drag while adapting to trend and mean reversion.
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,49 +26,26 @@ def generate_signals(prices):
     # Get 4h and 1d HTF data once before loop
     df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 30 or len(df_1d) < 30:
+    if len(df_4h) < 30 or len(df_1d) < 14:
         return np.zeros(n)
     
-    # === 1d Indicators: Camarilla Pivot Levels (R1, S1) ===
+    # === 4h Indicators: Donchian Channel (20) ===
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    
+    # === 1d Indicators: Williams %R(14) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r1 = pivot + (range_1d * 1.1 / 12)
-    s1 = pivot - (range_1d * 1.1 / 12)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # === 4h Indicators: ADX(14) for trend regime ===
-    # +DI, -DI, DX calculation
-    up_move = np.diff(high, prepend=high[0])
-    down_move = np.diff(low[::-1])[::-1]  # reversed for proper alignment
-    down_move = np.append(down_move[1:], down_move[-1])  # fix length
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]  # first period
-    tr2[0] = np.abs(high[0] - close[0])
-    tr3[0] = np.abs(low[0] - close[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Smoothed values
-    period = 14
-    tr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
-    plus_dm_sum = pd.Series(plus_dm).rolling(window=period, min_periods=period).sum().values
-    minus_dm_sum = pd.Series(minus_dm).rolling(window=period, min_periods=period).sum().values
-    
-    plus_di = 100 * plus_dm_sum / (tr_sum + 1e-10)
-    minus_di = 100 * minus_dm_sum / (tr_sum + 1e-10)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * ((highest_high - close_1d) / (highest_high - lowest_low + 1e-10))
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
     signals = np.zeros(n)
     
@@ -86,22 +64,23 @@ def generate_signals(prices):
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(williams_r_aligned[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 1d R1 (resistance)
-        # 2. Volume confirmation
-        # 3. ADX > 25 (trending regime)
-        if (close[i] > r1_aligned[i]) and vol_confirm and (adx_aligned[i] > 25):
+        # 1. In 4h uptrend (price > 4h upper Donchian)
+        # 2. 1d Williams %R < -80 (oversold)
+        # 3. Volume confirmation
+        if (close[i] > donchian_high_aligned[i]) and (williams_r_aligned[i] < -80) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 1d S1 (support)
-        # 2. Volume confirmation
-        # 3. ADX > 25 (trending regime)
-        elif (close[i] < s1_aligned[i]) and vol_confirm and (adx_aligned[i] > 25):
+        # 1. In 4h downtrend (price < 4h lower Donchian)
+        # 2. 1d Williams %R > -20 (overbought)
+        # 3. Volume confirmation
+        elif (close[i] < donchian_low_aligned[i]) and (williams_r_aligned[i] > -20) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -109,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Volume_ADXFilter_v1"
+name = "4h_WilliamsR14_Donchian20_VolumeFilter_v1"
 timeframe = "4h"
 leverage = 1.0
