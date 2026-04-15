@@ -13,63 +13,99 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d HTF data once before loop for daily ATR regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get 4h HTF data once before loop (primary trend filter)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate daily ATR(14) for volatility regime filter
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
-    tr3 = np.abs(df_1d['low'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    # Align daily ATR to 12h timeframe
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Calculate 4h EMA34 for trend filter
+    ema_34_4h = pd.Series(df_4h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
-    # Calculate 12h ATR(14) for position sizing and stoploss reference
-    tr1_12h = high - low
-    tr2_12h = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3_12h = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
-    atr_14_12h = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Get 12h HTF data for regime filter (choppiness)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 14:
+        return np.zeros(n)
     
-    # Calculate 12h Donchian(20) channels
-    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 12h Choppiness Index (CHOP)
+    hl_range = df_12h['high'].values - df_12h['low'].values
+    atr_12h = pd.Series(np.maximum(
+        hl_range,
+        np.maximum(
+            np.abs(df_12h['high'].values - np.concatenate([[df_12h['close'].values[0]], df_12h['close'].values[:-1]])),
+            np.abs(df_12h['low'].values - np.concatenate([[df_12h['close'].values[0]], df_12h['close'].values[:-1]]))
+        )
+    )).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    sum_atr_12h = pd.Series(atr_12h).rolling(window=14, min_periods=14).sum().values
+    max_h_12h = pd.Series(df_12h['high'].values).rolling(window=14, min_periods=14).max().values
+    min_l_12h = pd.Series(df_12h['low'].values).rolling(window=14, min_periods=14).min().values
+    chop_12h = 100 * np.log10(sum_atr_12h / (max_h_12h - min_l_12h + 1e-10)) / np.log10(14)
+    chop_12h_aligned = align_htf_to_ltf(prices, df_12h, chop_12h)
+    
+    # Calculate 12h ATR for volatility filter
+    tr_12h = pd.Series(np.maximum(
+        hl_range,
+        np.maximum(
+            np.abs(df_12h['high'].values - np.concatenate([[df_12h['close'].values[0]], df_12h['close'].values[:-1]])),
+            np.abs(df_12h['low'].values - np.concatenate([[df_12h['close'].values[0]], df_12h['close'].values[:-1]]))
+        )
+    )).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, tr_12h)
+    
+    # Calculate 12h volume ratio (current vs 20-period average)
+    vol_ma_20_12h = pd.Series(df_12h['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_12h = df_12h['volume'].values / (vol_ma_20_12h + 1e-10)
+    vol_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio_12h)
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or 
-            np.isnan(atr_14_12h[i]) or np.isnan(atr_14_1d_aligned[i])):
+        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(chop_12h_aligned[i]) or 
+            np.isnan(atr_12h_aligned[i]) or np.isnan(vol_ratio_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: Only trade when volatility is elevated (ATR > 0.8% of price)
-        # This avoids choppy low-volatility periods and focuses on meaningful moves
-        if atr_14_1d_aligned[i] <= 0.008 * close[i]:
-            signals[i] = 0.0
-            continue
+        # Range regime: CHOP > 50 indicates choppy market (mean reversion favorable)
+        in_chop = chop_12h_aligned[i] > 50
+        
+        # Volatility filter: avoid extremely low volatility
+        vol_filter = atr_12h_aligned[i] > 0.005 * close[i]
+        
+        # Volume confirmation
+        vol_confirm = vol_ratio_12h_aligned[i] > 1.3
+        
+        # Mean reversion conditions in choppy market
+        if in_chop and vol_filter and vol_confirm:
+            # Calculate 12h RSI for mean reversion signals
+            delta = pd.Series(df_12h['close'].values).diff().values
+            gain = np.where(delta > 0, delta, 0)
+            loss = np.where(delta < 0, -delta, 0)
+            avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+            avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+            rs = avg_gain / (avg_loss + 1e-10)
+            rsi_12h = 100 - (100 / (1 + rs))
+            rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
             
-        # Long: Break above 20-period high with volume confirmation
-        # Short: Break below 20-period low with volume confirmation
-        if close[i] > highest_high_20[i]:
-            # Volume confirmation: current volume > 1.3x 20-period average
-            vol_ma_20 = pd.Series(volume[max(0, i-19):i+1]).mean()
-            if volume[i] > 1.3 * vol_ma_20:
-                signals[i] = 0.25  # 25% position
-        elif close[i] < lowest_low_20[i]:
-            # Volume confirmation: current volume > 1.3x 20-period average
-            vol_ma_20 = pd.Series(volume[max(0, i-19):i+1]).mean()
-            if volume[i] > 1.3 * vol_ma_20:
-                signals[i] = -0.25  # 25% position
+            if not np.isnan(rsi_12h_aligned[i]):
+                # Oversold: RSI < 30 -> long
+                if rsi_12h_aligned[i] < 30:
+                    signals[i] = 0.25
+                # Overbought: RSI > 70 -> short
+                elif rsi_12h_aligned[i] > 70:
+                    signals[i] = -0.25
+        
+        # Trending regime: CHOP <= 50 indicates trending market
         else:
-            signals[i] = 0.0
+            # Trend following: price above/below 4h EMA34 with volume
+            if close[i] > ema_34_4h_aligned[i] and vol_confirm:
+                signals[i] = 0.25
+            elif close[i] < ema_34_4h_aligned[i] and vol_confirm:
+                signals[i] = -0.25
     
     return signals
 
-name = "12h_Donchian20_Volume_ATR_Regime_Filter_v1"
+name = "12h_CHOP_Regime_4h_EMA34_Volume_Filter_v1"
 timeframe = "12h"
 leverage = 1.0
