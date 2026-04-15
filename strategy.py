@@ -3,10 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d weekly pivot levels (R1/S1) for breakout direction with volume confirmation.
-# In ranging markets, price often respects daily pivot levels. Breakouts above R1 or below S1 with volume
-# indicate institutional participation and continuation. Uses discrete position sizing (0.25) to limit drawdown.
-# Designed for low trade frequency (12-25/year) to minimize fee drag while capturing strong moves.
+# Hypothesis: 12h strategy using 1d Donchian channel (20) for trend direction and 1d RSI(14) for mean reversion timing.
+# In 1d uptrend (price > upper Donchian), wait for 12h RSI < 30 to go long (pullback entry).
+# In 1d downtrend (price < lower Donchian), wait for 12h RSI > 70 to go short (bounce entry).
+# Volume confirmation ensures momentum validity. Session filter (08-20 UTC) reduces noise.
+# Designed for low trade frequency (12-37/year) to minimize fee drag while adapting to trend and mean reversion.
 
 def generate_signals(prices):
     n = len(prices)
@@ -27,27 +28,23 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d Indicators: Weekly Pivot Points (based on prior week) ===
-    # Weekly high, low, close from Friday's data (using prior 5 trading days approx)
-    # Simplified: use prior 1d high/low/close for daily pivot calculation
+    # === 1d Indicators: Donchian Channel (20) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Daily pivot: P = (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # R1 = 2*P - L
-    r1_1d = 2 * pivot_1d - low_1d
-    # S1 = 2*P - H
-    s1_1d = 2 * pivot_1d - high_1d
-    
-    # Align to 6h timeframe (wait for prior day's close)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # Volume filter: current volume > 2.0x 24-period volume SMA (4 days of 6h bars)
-    vol_sma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # === 12h Indicators: RSI(14) ===
+    # Need to compute RSI on 12h data - we'll use the prices directly since timeframe is 12h
+    delta = pd.Series(close).diff().values
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_12h = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     
@@ -55,29 +52,34 @@ def generate_signals(prices):
     warmup = 100
     
     for i in range(warmup, n):
-        # Session filter: 08-20 UTC only (avoid Asian session noise)
+        # Session filter: 08-20 UTC only
         hour = hours[i]
         if hour < 8 or hour > 20:
             signals[i] = 0.0
             continue
             
-        # Volume confirmation
-        vol_confirm = volume[i] > (vol_sma_24[i] * 2.0)
+        # Volume filter: current volume > 1.5x 20-period volume SMA
+        vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # Skip if any required data is NaN
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or
-            np.isnan(s1_1d_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(rsi_12h[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # Break above R1 with volume
-        if (close[i] > r1_1d_aligned[i]) and vol_confirm:
+        # 1. In 1d uptrend (price > 1d upper Donchian)
+        # 2. 12h RSI < 30 (oversold pullback)
+        # 3. Volume confirmation
+        if (close[i] > donchian_high_aligned[i]) and (rsi_12h[i] < 30) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # Break below S1 with volume
-        elif (close[i] < s1_1d_aligned[i]) and vol_confirm:
+        # 1. In 1d downtrend (price < 1d lower Donchian)
+        # 2. 12h RSI > 70 (overbought bounce)
+        # 3. Volume confirmation
+        elif (close[i] < donchian_low_aligned[i]) and (rsi_12h[i] > 70) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -85,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Pivot_R1_S1_Breakout_Volume_v1"
-timeframe = "6h"
+name = "12h_Donchian20_RSI12_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
