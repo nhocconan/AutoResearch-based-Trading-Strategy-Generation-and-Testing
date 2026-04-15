@@ -34,65 +34,71 @@ def generate_signals(prices):
     # Calculate 1d EMA50 for trend filter
     ema_50 = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 1d RSI(14) for momentum filter
-    delta = np.diff(daily_close, prepend=daily_close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14 = 100 - (100 / (1 + rs))
-    
-    # Calculate 1d ATR(14) for volatility filter
-    tr1 = np.abs(daily_high - daily_low)
-    tr2 = np.abs(np.concatenate([[daily_high[0]], daily_high[:-1]]) - daily_close)
-    tr3 = np.abs(np.concatenate([[daily_low[0]], daily_low[:-1]]) - daily_close)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate 1d ATR(14) for volatility filter and stoploss
+    tr1 = np.abs(daily_high[1:] - daily_low[1:])
+    tr2 = np.abs(daily_high[1:] - daily_close[:-1])
+    tr3 = np.abs(daily_low[1:] - daily_close[:-1])
+    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     # Align HTF indicators to 4h timeframe with proper delay
     ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50)
-    rsi_14_4h = align_htf_to_ltf(prices, df_1d, rsi_14)
     atr_14_4h = align_htf_to_ltf(prices, df_1d, atr_14)
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_4h[i]) or np.isnan(rsi_14_4h[i]) or 
-            np.isnan(atr_14_4h[i]) or np.isnan(highest_20[i]) or 
-            np.isnan(lowest_20[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(ema_50_4h[i]) or np.isnan(atr_14_4h[i]) or 
+            np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
         # Entry conditions:
         # 1. 1d trend filter: price above/below daily EMA50
-        # 2. 1d momentum filter: RSI not extreme (avoid overbought/oversold)
-        # 3. 4h Donchian breakout: price breaks 20-period channel
-        # 4. 4h volume confirmation: volume > 1.3x average
-        # 5. 1d volatility filter: ATR > 0.5% of price (avoid low volatility chop)
-        # 6. Discrete position sizing: 0.25
+        # 2. 4h Donchian breakout: price breaks above/below 20-period channel
+        # 3. 4h volume confirmation: volume > 2.0x average
+        # 4. ATR-based stoploss: exit when price moves against position by 2.5x ATR
+        # 5. Discrete position sizing: 0.25
         
-        # Long conditions: break above Donchian high in uptrend
-        if (close[i] > ema_50_4h[i] and          # Daily uptrend filter
-            rsi_14_4h[i] < 70 and                # Not overbought
-            close[i] > highest_20[i] and         # Donchian breakout high
-            volume_ratio[i] > 1.3 and            # Volume confirmation
-            atr_14_4h[i] > 0.005 * close[i]):    # Minimum volatility filter
-            signals[i] = 0.25
-            
-        # Short conditions: break below Donchian low in downtrend
-        elif (close[i] < ema_50_4h[i] and        # Daily downtrend filter
-              rsi_14_4h[i] > 30 and              # Not oversold
-              close[i] < lowest_20[i] and        # Donchian breakdown low
-              volume_ratio[i] > 1.3 and          # Volume confirmation
-              atr_14_4h[i] > 0.005 * close[i]):  # Minimum volatility filter
-            signals[i] = -0.25
-        else:
+        # Track position for stoploss
+        if i == 100:
+            position = 0
+            entry_price = 0
+        
+        # Update position based on signal
+        if signals[i-1] != 0:
+            position = np.sign(signals[i-1])
+            entry_price = close[i-1]  # Approximate entry at previous bar's close
+        
+        # Check stoploss
+        if position == 1 and close[i] < entry_price - 2.5 * atr_14_4h[i]:
             signals[i] = 0.0
+            position = 0
+        elif position == -1 and close[i] > entry_price + 2.5 * atr_14_4h[i]:
+            signals[i] = 0.0
+            position = 0
+        elif position == 0:
+            # Look for new entries only when flat
+            # Long conditions: break above Donchian high in uptrend
+            if (close[i] > ema_50_4h[i] and          # Daily uptrend filter
+                close[i] > highest_20[i] and         # Donchian breakout
+                volume_ratio[i] > 2.0):              # Volume confirmation
+                signals[i] = 0.25
+                
+            # Short conditions: break below Donchian low in downtrend
+            elif (close[i] < ema_50_4h[i] and        # Daily downtrend filter
+                  close[i] < lowest_20[i] and        # Donchian breakdown
+                  volume_ratio[i] > 2.0):            # Volume confirmation
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
+        else:
+            # Maintain current position
+            signals[i] = signals[i-1]
     
     return signals
 
-name = "4h_Donchian_Breakout_EMA50_RSI_Volume_VolatilityFilter"
+name = "4h_Donchian_Breakout_EMA50_Volume_ATRStop"
 timeframe = "4h"
 leverage = 1.0
