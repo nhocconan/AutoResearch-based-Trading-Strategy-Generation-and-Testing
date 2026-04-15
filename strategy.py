@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
-"""
-6h Elder Ray + Regime Filter
-Uses Elder Ray (Bull/Bear Power) with EMA13 from 1d trend filter.
-Long when Bull Power > 0 and Bear Power < 0 (bullish divergence) in uptrend.
-Short when Bear Power > 0 and Bull Power < 0 (bearish divergence) in downtrend.
-Adds volume confirmation to avoid whipsaws.
-Target: 20-50 trades/year.
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 12h 20-period Donchian breakout with weekly trend filter and volume confirmation
+# In bull markets: price breaks above 20-period high with weekly uptrend and volume
+# In bear markets: price breaks below 20-period low with weekly downtrend and volume
+# Weekly trend uses 50-period EMA to avoid whipsaw
+# Volume confirms breakout strength
+# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:  # Need enough data for 20-period lookback and weekly EMA
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,17 +20,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once
-    df_1d = get_htf_data(prices, '1d')
+    # 12h Donchian channel (20-period)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max()
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min()
     
-    # Calculate EMA13 on 1d close for trend filter
-    ema13_1d = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
-    
-    # Calculate Elder Ray components on 6h data
-    ema13_6h = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13_6h
-    bear_power = low - ema13_6h
+    # Weekly trend: 50-period EMA on weekly close
+    df_1w = get_htf_data(prices, '1w')
+    weekly_close = df_1w['close'].values
+    weekly_ema = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean()
+    weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
     
     # Volume confirmation: current > 1.5x median of last 20 bars
     vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
@@ -40,42 +36,36 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    for i in range(20, n):
+    for i in range(50, n):  # Start after weekly EMA warmup
         # Skip if any required data is NaN
-        if (np.isnan(ema13_1d_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(vol_threshold[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(weekly_ema_aligned[i]) or np.isnan(vol_threshold[i])):
             continue
         
-        # Determine trend from 1d EMA13
-        uptrend = close[i] > ema13_1d_aligned[i]
-        downtrend = close[i] < ema13_1d_aligned[i]
-        
-        # Long: Bull power positive AND Bear power negative (bullish divergence) in uptrend + volume
-        if (bull_power[i] > 0 and bear_power[i] < 0 and uptrend and 
+        # Long: price breaks above Donchian high + weekly uptrend + volume
+        if (close[i] > donch_high[i] and 
+            close[i] > weekly_ema_aligned[i] and 
             volume[i] > vol_threshold[i]):
             signals[i] = 0.25
         
-        # Short: Bear power positive AND Bull power negative (bearish divergence) in downtrend + volume
-        elif (bear_power[i] > 0 and bull_power[i] < 0 and downtrend and 
+        # Short: price breaks below Donchian low + weekly downtrend + volume
+        elif (close[i] < donch_low[i] and 
+              close[i] < weekly_ema_aligned[i] and 
               volume[i] > vol_threshold[i]):
             signals[i] = -0.25
         
-        # Exit: when divergence disappears or trend changes
-        elif i > 0 and signals[i-1] != 0:
-            prev_signal = signals[i-1]
-            # Exit long if bull power turns negative or bear power turns positive
-            if prev_signal == 0.25 and (bull_power[i] <= 0 or bear_power[i] >= 0):
-                signals[i] = 0.0
-            # Exit short if bear power turns negative or bull power turns positive
-            elif prev_signal == -0.25 and (bear_power[i] <= 0 or bull_power[i] >= 0):
-                signals[i] = 0.0
-            else:
-                signals[i] = prev_signal
+        # Exit: price crosses back to weekly EMA (trend reversal signal)
+        elif (i > 0 and 
+              ((signals[i-1] == 0.25 and close[i] < weekly_ema_aligned[i]) or
+               (signals[i-1] == -0.25 and close[i] > weekly_ema_aligned[i]))):
+            signals[i] = 0.0
+        
+        # Otherwise, hold previous position
         else:
             signals[i] = signals[i-1]
     
     return signals
 
-name = "6h_ElderRay_1dEMA13_Volume"
-timeframe = "6h"
+name = "12h_Donchian20_WeeklyEMA_Volume"
+timeframe = "12h"
 leverage = 1.0
