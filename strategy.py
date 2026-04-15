@@ -3,11 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Intraday Range Breakout with Volume Spike and ADX Trend Filter
-# Uses the session high/low (UTC 00:00-12:00 and 12:00-00:00) as dynamic support/resistance.
-# Breakouts are traded only with volume > 2x average and ADX > 25 (trending market).
-# Works in bull markets (breakouts up) and bear markets (breakouts down).
-# Target: 50-150 total trades over 4 years.
+# Hypothesis: 12h 1-day Range Breakout with Volume Confirmation and ADX Trend Filter
+# Uses the previous day's high/low as support/resistance levels. Breakouts above previous day's high
+# or below previous day's low are traded only when confirmed by volume and ADX > 25 (trending market).
+# Works in bull markets (breakouts up) and bear markets (breakouts down). Target: 50-150 total trades over 4 years.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,23 +18,12 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Determine session: 0-11 = first 12h (00:00-12:00 UTC), 12-23 = second 12h (12:00-00:00 UTC)
-    hours = prices.index.hour
-    session = (hours // 12).astype(int)  # 0 for first 12h, 1 for second 12h
-    
-    # Calculate session high/low
-    session_high = np.full(n, np.nan)
-    session_low = np.full(n, np.nan)
-    
-    for i in range(n):
-        if i == 0 or session[i] != session[i-1]:
-            # New session
-            session_high[i] = high[i]
-            session_low[i] = low[i]
-        else:
-            # Continue session
-            session_high[i] = max(session_high[i-1], high[i])
-            session_low[i] = min(session_low[i-1], low[i])
+    # Load 1d data for previous day's high/low
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
     # Load 12h data for ADX trend filter
     df_12h = get_htf_data(prices, '12h')
@@ -44,6 +32,16 @@ def generate_signals(prices):
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
+    
+    # Previous day's high and low (shifted by 1 to avoid look-ahead)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_high_1d[0] = np.nan  # First value has no previous day
+    prev_low_1d[0] = np.nan
+    
+    # Align previous day's high/low to 12h timeframe
+    prev_high_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_high_1d)
+    prev_low_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_low_1d)
     
     # Calculate ADX (14-period) on 12h
     # True Range
@@ -74,7 +72,7 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Align ADX to 4h timeframe
+    # Align ADX to 12h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
     signals = np.zeros(n)
@@ -83,40 +81,36 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(session_high[i]) or np.isnan(session_low[i]) or
+        if (np.isnan(prev_high_1d_aligned[i]) or np.isnan(prev_low_1d_aligned[i]) or
             np.isnan(adx_aligned[i])):
             continue
         
-        # Volume condition: current volume > 2x median of last 20 bars
-        vol_median = np.median(volume[max(0, i-20):i+1])
-        volume_ok = volume[i] > 2.0 * vol_median
-        
-        # Long entry: price breaks above session high + volume + ADX > 25
-        if (close[i] > session_high[i] and
-            volume_ok and
+        # Long entry: price breaks above previous day's high + volume confirmation + ADX > 25
+        if (close[i] > prev_high_1d_aligned[i] and
+            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
             adx_aligned[i] > 25 and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below session low + volume + ADX > 25
-        elif (close[i] < session_low[i] and
-              volume_ok and
+        # Short entry: price breaks below previous day's low + volume confirmation + ADX > 25
+        elif (close[i] < prev_low_1d_aligned[i] and
+              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
               adx_aligned[i] > 25 and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
         # Exit: reverse breakout or ADX < 20 (ranging market)
-        elif position == 1 and (close[i] < session_low[i] or adx_aligned[i] < 20):
+        elif position == 1 and (close[i] < prev_low_1d_aligned[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > session_high[i] or adx_aligned[i] < 20):
+        elif position == -1 and (close[i] > prev_high_1d_aligned[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Intraday_Range_Breakout_Volume_ADX"
-timeframe = "4h"
+name = "12h_1d_Range_Breakout_Volume_ADX"
+timeframe = "12h"
 leverage = 1.0
