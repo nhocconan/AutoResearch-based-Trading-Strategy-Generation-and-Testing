@@ -3,11 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-hour RSI mean reversion with 4-hour EMA filter and volume confirmation
-# RSI(14) < 30 for long entry, > 70 for short entry, only in direction of 4h EMA(20)
-# Volume must be > 1.5x 20-bar median to ensure participation
-# Designed to work in both bull (buy dips in uptrend) and bear (sell rallies in downtrend)
-# Conservative sizing (0.20) to limit trade frequency and avoid fee drag
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 1d ADX regime filter
+# Elder Ray measures bull power (high - EMA) and bear power (low - EMA) to detect trend strength.
+# ADX > 25 indicates trending market; < 20 indicates ranging.
+# In trending markets (ADX > 25): go long when bull power > 0 and rising, short when bear power < 0 and falling.
+# In ranging markets (ADX < 20): fade extreme Elder Ray values (mean reversion).
+# Weekly trend filter: only trade in direction of weekly EMA(50) to avoid counter-trend moves.
+# Designed to work in bull (trend following) and bear (mean reversion in ranges) markets.
+# Conservative sizing (0.25) to limit trade frequency and avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,69 +20,102 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # 4h EMA(20) for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Elder Ray: 13-period EMA of close
+    close_s = pd.Series(close)
+    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).values
     
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    bull_power = high - ema13  # bull power: high - EMA
+    bear_power = low - ema13   # bear power: low - EMA
     
-    # Volume confirmation: current > 1.5x median of last 20 bars
-    vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
-    vol_threshold = 1.5 * vol_median
+    # 1d ADX for regime filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed values
+    tr14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).values
+    dm_plus14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).values
+    dm_minus14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).values
+    
+    # DI and DX
+    di_plus = 100 * dm_plus14 / tr14
+    di_minus = 100 * dm_minus14 / tr14
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).values
+    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Weekly trend filter: EMA(50) on weekly
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # Signals
     signals = np.zeros(n)
     
-    for i in range(20, n):
+    for i in range(14, n):  # Start after warmup for ADX
         # Skip if any required data is NaN
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(rsi[i]) or
-            np.isnan(vol_threshold[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(adx_14_aligned[i]) or np.isnan(ema50_1w_aligned[i])):
             continue
         
-        # Session filter
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = signals[i-1] if i > 0 else 0.0
-            continue
+        # Determine market regime
+        is_trending = adx_14_aligned[i] > 25
+        is_ranging = adx_14_aligned[i] < 20
         
-        # Long: RSI < 30 + price above 4h EMA + volume spike
-        if (rsi[i] < 30 and 
-            close[i] > ema_4h_aligned[i] and 
-            volume[i] > vol_threshold[i]):
-            signals[i] = 0.20
+        # Determine weekly trend bias
+        weekly_bullish = close[i] > ema50_1w_aligned[i]
+        weekly_bearish = close[i] < ema50_1w_aligned[i]
         
-        # Short: RSI > 70 + price below 4h EMA + volume spike
-        elif (rsi[i] > 70 and 
-              close[i] < ema_4h_aligned[i] and 
-              volume[i] > vol_threshold[i]):
-            signals[i] = -0.20
+        # Initialize signal as hold
+        signals[i] = signals[i-1] if i > 0 else 0.0
         
-        # Exit: RSI returns to neutral zone (40-60)
-        elif (i > 0 and 
-              ((signals[i-1] == 0.20 and rsi[i] > 40) or
-               (signals[i-1] == -0.20 and rsi[i] < 60))):
-            signals[i] = 0.0
-        
-        # Otherwise, hold previous position
-        else:
-            signals[i] = signals[i-1]
+        if is_trending:
+            # Trending market: trend following with Elder Ray
+            # Long: bull power positive and rising (bulls in control)
+            if bull_power[i] > 0 and bull_power[i] > bull_power[i-1] and weekly_bullish:
+                signals[i] = 0.25
+            # Short: bear power negative and falling (bears in control)
+            elif bear_power[i] < 0 and bear_power[i] < bear_power[i-1] and weekly_bearish:
+                signals[i] = -0.25
+        elif is_ranging:
+            # Ranging market: mean reversion at extreme Elder Ray
+            # Calculate z-score of bull/bear power over last 50 periods
+            bull_ma = pd.Series(bull_power).rolling(window=50, min_periods=20).mean()[i]
+            bull_std = pd.Series(bull_power).rolling(window=50, min_periods=20).std()[i]
+            bear_ma = pd.Series(bear_power).rolling(window=50, min_periods=20).mean()[i]
+            bear_std = pd.Series(bear_power).rolling(window=50, min_periods=20).std()[i]
+            
+            if not (np.isnan(bull_ma) or np.isnan(bull_std) or 
+                    np.isnan(bear_ma) or np.isnan(bear_std)):
+                bull_z = (bull_power[i] - bull_ma) / bull_std if bull_std > 0 else 0
+                bear_z = (bear_power[i] - bear_ma) / bear_std if bear_std > 0 else 0
+                
+                # Long: extreme bear power (oversold) in ranging market
+                if bear_z < -1.5 and weekly_bullish:  # not strongly against weekly trend
+                    signals[i] = 0.25
+                # Short: extreme bull power (overbought) in ranging market
+                elif bull_z > 1.5 and weekly_bearish:  # not strongly against weekly trend
+                    signals[i] = -0.25
     
     return signals
 
-name = "1h_RSI_MeanReversion_4hEMAFilter_Volume"
-timeframe = "1h"
+name = "6h_ElderRay_ADX_Regime_WeeklyFilter"
+timeframe = "6h"
 leverage = 1.0
