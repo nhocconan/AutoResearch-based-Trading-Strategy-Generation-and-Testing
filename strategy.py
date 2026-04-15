@@ -1,58 +1,47 @@
-# 2025-07-01: Simple 4h Bollinger Band Breakout with Volume Confirmation
-# Based on #45733 (BollingerSqueeze_RSI_Volume) which had 0 trades due to over-filtering.
-# New: Relaxed Bollinger Band breakout with volume confirmation only.
-# Long: Close > Upper Band + Volume > 1.5x median volume
-# Short: Close < Lower Band + Volume > 1.5x median volume
-# Exit: Close crosses back inside bands
-# Target: 30-50 trades/year to avoid fee drag.
-# Bollinger Bands: 20-period SMA, 2 std dev (standard)
-# Volume: Current > 1.5x median of last 20 bars
-# No trend filter to avoid over-filtering; relies on mean reversion in ranging markets.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
     if n < 40:
         return np.zeros(n)
     
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
+    # Load 1h data for volatility calculation
+    df_1h = get_htf_data(prices, '1h')
+    atr_1h = calculate_atr(df_1h['high'].values, df_1h['low'].values, df_1h['close'].values, 14)
+    atr_1h_aligned = align_htf_to_ltf(prices, df_1h, atr_1h)
     
-    # Bollinger Bands (20, 2) on close
-    sma = pd.Series(close).rolling(window=20, min_periods=20).mean()
-    std = pd.Series(close).rolling(window=20, min_periods=20).std()
-    upper = sma + 2 * std
-    lower = sma - 2 * std
+    # Calculate ATR-based volatility threshold
+    vol_threshold = atr_1h_aligned * 1.5
     
-    # Volume confirmation: current > 1.5x median of last 20 bars
-    vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
-    vol_threshold = 1.5 * vol_median
+    # Price range for the last 24 hours (2 periods on 12h)
+    high_24h = pd.Series(prices['high']).rolling(window=2, min_periods=2).max()
+    low_24h = pd.Series(prices['low']).rolling(window=2, min_periods=2).min()
+    range_24h = high_24h - low_24h
     
     signals = np.zeros(n)
     
-    for i in range(20, n):
+    for i in range(2, n):
         # Skip if any required data is NaN
-        if np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(vol_threshold[i]):
+        if np.isnan(range_24h[i]) or np.isnan(vol_threshold[i]):
             continue
         
-        # Long: close breaks above upper band + volume confirmation
-        if close[i] > upper[i] and volume[i] > vol_threshold[i]:
+        # Long: price breaks above 24h high with sufficient volatility
+        if prices['high'][i] > high_24h[i] and range_24h[i] > vol_threshold[i]:
             signals[i] = 0.25
         
-        # Short: close breaks below lower band + volume confirmation
-        elif close[i] < lower[i] and volume[i] > vol_threshold[i]:
+        # Short: price breaks below 24h low with sufficient volatility
+        elif prices['low'][i] < low_24h[i] and range_24h[i] > vol_threshold[i]:
             signals[i] = -0.25
         
-        # Exit: close crosses back inside bands (mean reversion)
-        elif (i > 0 and 
-              ((signals[i-1] == 0.25 and close[i] < upper[i]) or
-               (signals[i-1] == -0.25 and close[i] > lower[i]))):
-            signals[i] = 0.0
+        # Exit: price returns to the middle of the 24h range
+        elif i > 0 and signals[i-1] != 0:
+            mid_point = (high_24h[i] + low_24h[i]) / 2
+            if (signals[i-1] == 0.25 and prices['close'][i] < mid_point) or \
+               (signals[i-1] == -0.25 and prices['close'][i] > mid_point):
+                signals[i] = 0.0
         
         # Otherwise, hold previous position
         else:
@@ -60,6 +49,19 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Bollinger_Breakout_Volume"
-timeframe = "4h"
+def calculate_atr(high, low, close, period):
+    """Calculate Average True Range"""
+    high = pd.Series(high)
+    low = pd.Series(low)
+    close = pd.Series(close)
+    
+    tr1 = high - low
+    tr2 = abs(high - close.shift())
+    tr3 = abs(low - close.shift())
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=period, min_periods=period).mean()
+    return atr.values
+
+name = "12h_Volatility_Breakout"
+timeframe = "12h"
 leverage = 1.0
