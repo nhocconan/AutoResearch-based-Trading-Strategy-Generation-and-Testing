@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA34 trend filter and volume confirmation
-# Long when price breaks above 4h Donchian upper + 12h EMA34 uptrend + volume > 1.5x 20-period avg
-# Short when price breaks below 4h Donchian lower + 12h EMA34 downtrend + volume > 1.5x 20-period avg
-# Uses discrete position sizing (0.25) to minimize fee drag and control drawdown.
-# 12h EMA34 provides strong trend filter reducing whipsaws in both bull and bear markets.
-# Volume threshold (1.5x) targets ~20-40 trades/year to minimize fee drag on 4h timeframe.
-# Donchian channels calculated from 20-period high/low on primary timeframe.
+# Hypothesis: 1h 4h Donchian breakout with 1d volume confirmation and session filter
+# Long when price breaks above 4h Donchian upper (20) + 1d volume > 1.5x 20-period average + in session (08-20 UTC)
+# Short when price breaks below 4h Donchian lower (20) + 1d volume > 1.5x 20-period average + in session
+# Uses 4h for signal direction (structure), 1h for entry timing precision, 1d volume filter for conviction
+# Discrete position size 0.20 to minimize fee drag and control drawdown in bear markets.
+# Target: 15-30 trades/year per symbol to avoid fee drag on 1h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,30 +24,33 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 12h HTF data once before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Get 4h HTF data once before loop for Donchian channels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # === 12h Indicator: EMA34 ===
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # === 4h Indicator: Donchian Channel (20) ===
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    donchian_high_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_high_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_4h)
+    donchian_low_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_4h)
     
-    # === 4h Donchian Channel (20-period) ===
-    # Upper = highest high of last 20 periods, Lower = lowest low of last 20 periods
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Get 1d HTF data once before loop for volume filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # Volume SMA for confirmation (using 20-period)
-    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # === 1d Indicator: Volume SMA (20) ===
+    volume_1d = df_1d['volume'].values
+    vol_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_20_1d)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(34, 20) + 5  # EMA34 + Donchian(20) + volume(20) + buffer
+    warmup = max(20, 20) + 5  # Donchian(20) + volume(20) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -57,35 +59,34 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(donchian_high_4h_aligned[i]) or np.isnan(donchian_low_4h_aligned[i]) or
+            np.isnan(vol_sma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
+        # Volume filter: current 1d volume > 1.5x 20-period volume SMA
+        # Note: we use the 1d volume value aligned to current 1h bar
+        vol_confirm = (df_1d['volume'].iloc[-1] if len(df_1d) > 0 else 0) > (vol_sma_20_1d_aligned[i] * 1.5)
+        # Alternative: use current 1h volume vs 1d volume average (more responsive)
+        vol_confirm = volume[i] > (vol_sma_20_1d_aligned[i] * 1.5)
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above Donchian upper (close > upper)
-        # 2. 12h EMA34 uptrend (close > EMA34)
-        # 3. Volume confirmation
-        if (close[i] > donchian_upper[i]) and \
-           (close[i] > ema_34_12h_aligned[i]) and vol_confirm:
-            signals[i] = 0.25
+        # 1. Price breaks above 4h Donchian upper (close > upper)
+        # 2. Volume confirmation
+        if (close[i] > donchian_high_4h_aligned[i]) and vol_confirm:
+            signals[i] = 0.20
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below Donchian lower (close < lower)
-        # 2. 12h EMA34 downtrend (close < EMA34)
-        # 3. Volume confirmation
-        elif (close[i] < donchian_lower[i]) and \
-             (close[i] < ema_34_12h_aligned[i]) and vol_confirm:
-            signals[i] = -0.25
+        # 1. Price breaks below 4h Donchian lower (close < lower)
+        # 2. Volume confirmation
+        elif (close[i] < donchian_low_4h_aligned[i]) and vol_confirm:
+            signals[i] = -0.20
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "4h_Donchian20_12hEMA34_Volume_Filter_v1"
-timeframe = "4h"
+name = "1h_Donchian20_1dVolumeFilter_Session_v1"
+timeframe = "1h"
 leverage = 1.0
