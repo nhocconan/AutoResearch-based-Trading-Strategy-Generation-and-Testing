@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for ATR filter (once before loop)
+    # Daily data for ATR filter (once before loop)
     daily = get_htf_data(prices, '1d')
     high_d = daily['high'].values
     low_d = daily['low'].values
@@ -29,6 +29,14 @@ def generate_signals(prices):
     atr_14d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14d_aligned = align_htf_to_ltf(prices, daily, atr_14d)
     
+    # Weekly data for trend filter (once before loop)
+    weekly = get_htf_data(prices, '1w')
+    close_w = weekly['close'].values
+    
+    # Weekly EMA200 trend filter
+    ema200_w = pd.Series(close_w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_w_aligned = align_htf_to_ltf(prices, weekly, ema200_w)
+    
     # Volume filter: 2.0x median of last 20 bars
     vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median()
     vol_threshold = 2.0 * vol_median
@@ -38,10 +46,10 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if any required data is NaN
         if (np.isnan(atr_14d_aligned[i]) or np.isnan(vol_threshold[i]) or 
-            np.isnan(vol_filter[i])):
+            np.isnan(vol_filter[i]) or np.isnan(ema200_w_aligned[i])):
             continue
         
         # Only trade when volatility is sufficient (avoid chop)
@@ -49,19 +57,19 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        # Long: Close above prior close + volume spike
-        if (close[i] > close[i-1] and 
+        # Long: Close above weekly EMA200 + volume spike
+        if (close[i] > ema200_w_aligned[i] and 
             volume[i] > vol_threshold[i]):
             signals[i] = 0.25
         
-        # Short: Close below prior close + volume spike
-        elif (close[i] < close[i-1] and 
+        # Short: Close below weekly EMA200 + volume spike
+        elif (close[i] < ema200_w_aligned[i] and 
               volume[i] > vol_threshold[i]):
             signals[i] = -0.25
         
         # Exit: reverse signal on opposite direction
-        elif (close[i] < close[i-1] and signals[i-1] > 0) or \
-             (close[i] > close[i-1] and signals[i-1] < 0):
+        elif (close[i] < ema200_w_aligned[i] and signals[i-1] > 0) or \
+             (close[i] > ema200_w_aligned[i] and signals[i-1] < 0):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -70,6 +78,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Volatility_Volume_Momentum"
-timeframe = "4h"
+name = "1d_WeeklyEMA200_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
