@@ -1,112 +1,86 @@
-#!/usr/bin/env python3
+# 1d_GoldenCross_Pullback_Momentum
+# Hypothesis: Daily Golden Cross (EMA50 > EMA200) + pullback to EMA200 with momentum confirmation (RSI > 55)
+# Works in bull markets via trend continuation and in bear markets via avoidance of false signals.
+# Uses EMA for smooth trend, RSI for momentum filter, and pullback logic for better entry.
+# Target: 20-50 trades over 4 years (5-12/year) with high win rate and low turnover.
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h KAMA + RSI + Chop Filter
-# Uses KAMA for adaptive trend detection, RSI for momentum confirmation,
-# and Choppiness Index to filter range-bound markets. KAMA adapts to volatility,
-# making it robust in both bull and bear markets. RSI avoids overextended entries.
-# Target: 80-180 total trades over 4 years (20-45/year) with disciplined entries.
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data (primary timeframe)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    
-    # Load 1d data for Chop and RSI
+    # Load daily data for EMA and RSI calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate KAMA on 4h (ER=10, fast=2, slow=30)
-    change_4h = np.abs(np.diff(close_4h, k=10))
-    volatility_4h = np.sum(np.abs(np.diff(close_4h, k=1)), axis=0)
-    er_4h = np.where(volatility_4h != 0, change_4h / volatility_4h, 0)
-    sc_4h = (er_4h * (2/(2) - 2/(30)) + 2/(30)) ** 2
-    kama_4h = np.full_like(close_4h, np.nan)
-    kama_4h[9] = close_4h[9]  # Seed
-    for i in range(10, len(close_4h)):
-        kama_4h[i] = kama_4h[i-1] + sc_4h[i] * (close_4h[i] - kama_4h[i-1])
+    # Calculate EMA50 and EMA200 on daily
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate RSI (14) on 1d
+    # Calculate RSI(14) on daily
     delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1d = 100 - (100 / (1 + rs))
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate Choppiness Index (14) on 1d
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(sum_tr_14 / (hh_14 - ll_14 + 1e-10)) / np.log10(14)
+    # Calculate average volume (20-period) on daily
+    vol_avg_20 = pd.Series(volume_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align indicators to 4h timeframe
-    kama_4h_aligned = align_htf_to_ltf(prices, df_4h, kama_4h)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Align all indicators to 1d timeframe (already aligned since we're using daily data)
+    # But we need to map daily values to 15m bars via forward fill of the previous day's close
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short (we only go long in this strategy)
     base_size = 0.25
     
-    for i in range(100, n):
-        if (np.isnan(kama_4h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or
-            np.isnan(chop_aligned[i])):
+    for i in range(200, n):
+        # Skip if any required data is NaN
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or
+            np.isnan(rsi_aligned[i]) or np.isnan(vol_avg_20_aligned[i])):
             continue
         
-        # Long: price > KAMA, RSI > 50 and < 70, chop < 61.8 (trending)
-        if (close[i] > kama_4h_aligned[i] and
-            50 < rsi_1d_aligned[i] < 70 and
-            chop_aligned[i] < 61.8 and
-            position <= 0):
+        # Golden Cross condition: EMA50 > EMA200
+        golden_cross = ema50_1d_aligned[i] > ema200_1d_aligned[i]
+        
+        # Pullback condition: price is near EMA200 (within 1.5% of EMA200)
+        pullback = abs(close[i] - ema200_1d_aligned[i]) / ema200_1d_aligned[i] < 0.015
+        
+        # Momentum condition: RSI > 55 (bullish momentum)
+        momentum = rsi_aligned[i] > 55
+        
+        # Volume confirmation: volume > 1.2x average volume
+        volume_confirm = volume[i] > 1.2 * vol_avg_20_aligned[i]
+        
+        # Long entry: Golden Cross + pullback + momentum + volume confirmation
+        if golden_cross and pullback and momentum and volume_confirm and position <= 0:
             position = 1
             signals[i] = base_size
         
-        # Short: price < KAMA, RSI < 50 and > 30, chop < 61.8 (trending)
-        elif (close[i] < kama_4h_aligned[i] and
-              30 < rsi_1d_aligned[i] < 50 and
-              chop_aligned[i] < 61.8 and
-              position >= 0):
-            position = -1
-            signals[i] = -base_size
-        
-        # Exit: reverse signal or chop > 61.8 (ranging)
-        elif position == 1 and (close[i] < kama_4h_aligned[i] or chop_aligned[i] > 61.8):
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and (close[i] > kama_4h_aligned[i] or chop_aligned[i] > 61.8):
+        # Exit: if golden cross breaks down or RSI becomes overbought (>70)
+        elif position == 1 and (not golden_cross or rsi_aligned[i] > 70):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_KAMA_RSI_Chop_Filter"
-timeframe = "4h"
+name = "1d_GoldenCross_Pullback_Momentum"
+timeframe = "1d"
 leverage = 1.0
