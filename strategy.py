@@ -13,42 +13,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d daily high-low range for volatility filter
+    # Weekly Donchian (20) - trend filter
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    donch_high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donch_low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    donch_high_20_aligned = align_htf_to_ltf(prices, df_1w, donch_high_20)
+    donch_low_20_aligned = align_htf_to_ltf(prices, df_1w, donch_low_20)
+    
+    # Daily pivot direction - bias
     df_1d = get_htf_data(prices, '1d')
-    hl_range = df_1d['high'].values - df_1d['low'].values
-    range_ma = pd.Series(hl_range).rolling(window=20, min_periods=20).mean().values
-    range_ma_aligned = align_htf_to_ltf(prices, df_1d, range_ma)
+    pivot = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3
+    r1 = 2 * pivot - df_1d['low'].values
+    s1 = 2 * pivot - df_1d['high'].values
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # 12h Donchian channel (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: current > 2.0x median of last 50 periods
-    vol_median = pd.Series(volume).rolling(window=50, min_periods=1).median().values
-    
-    # Volatility filter: require current daily range > 0.5x its MA
-    vol_filter = hl_range > 0.5 * range_ma_aligned
+    # Volume confirmation: current > 2.0x median of last 50 bars
+    vol_median = pd.Series(volume).rolling(window=50, min_periods=1).median()
+    vol_threshold = 2.0 * vol_median
     
     signals = np.zeros(n)
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(vol_median[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(donch_high_20_aligned[i]) or np.isnan(donch_low_20_aligned[i]) or
+            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(vol_threshold[i])):
             continue
         
-        # Long: price breaks above Donchian high + volume + volatility filter
-        if close[i] > donch_high[i] and volume[i] > 2.0 * vol_median[i] and vol_filter[i]:
+        # Long: price > weekly Donchian high AND price > daily pivot + volume
+        if (close[i] > donch_high_20_aligned[i] and 
+            close[i] > pivot_aligned[i] and 
+            volume[i] > vol_threshold[i]):
             signals[i] = 0.25
         
-        # Short: price breaks below Donchian low + volume + volatility filter
-        elif close[i] < donch_low[i] and volume[i] > 2.0 * vol_median[i] and vol_filter[i]:
+        # Short: price < weekly Donchian low AND price < daily pivot - volume
+        elif (close[i] < donch_low_20_aligned[i] and 
+              close[i] < pivot_aligned[i] and 
+              volume[i] > vol_threshold[i]):
             signals[i] = -0.25
         
-        # Exit: price returns inside Donchian channel (mean reversion)
+        # Exit: price crosses back to daily pivot (mean reversion to pivot)
         elif (i > 0 and 
-              ((signals[i-1] == 0.25 and close[i] < donch_high[i]) or
-               (signals[i-1] == -0.25 and close[i] > donch_low[i]))):
+              ((signals[i-1] == 0.25 and close[i] < pivot_aligned[i]) or
+               (signals[i-1] == -0.25 and close[i] > pivot_aligned[i]))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -57,6 +68,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_Volume_VolFilter"
-timeframe = "12h"
+name = "6h_WeeklyDonchian_Pivot_Volume"
+timeframe = "6h"
 leverage = 1.0
