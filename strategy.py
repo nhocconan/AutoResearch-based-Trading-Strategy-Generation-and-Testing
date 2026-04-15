@@ -3,11 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout (R1/S1) with 1d EMA trend filter and volume confirmation.
-# Uses 1d EMA(50) for trend bias and Camarilla R1/S1 levels for entry timing.
-# Includes volume filter (current volume > 1.3x 20-bar volume SMA) to avoid false breakouts.
-# Designed for low trade frequency (12-37/year) on 12h timeframe to minimize fee drag.
-# Works in bull/bear: 1d EMA avoids counter-trend trades, Camarilla captures institutional levels.
+# Hypothesis: 1h mean reversion strategy using 4h RSI extremes and 1d trend filter.
+# - 4h RSI(14) < 30 for long, > 70 for short (mean reversion in 4h)
+# - 1d close above/below 50 EMA for trend filter (avoid counter-trend trades)
+# - Session filter: 08-20 UTC to avoid low-volume Asian session noise
+# - Fixed position size: 0.20 (20% of capital) to limit drawdown
+# - Target: 15-30 trades/year by using strict 4h RSI thresholds and 1d EMA filter
+# - Works in bull/bear: 1d EMA filter ensures we only trade with higher timeframe trend,
+#   while 4h RSI captures short-term mean reversion within that trend.
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,27 +20,32 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d HTF data once before loop
+    # Get HTF data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_4h) < 50 or len(df_1d) < 50:
         return np.zeros(n)
+    
+    # === 4h Indicators: RSI(14) for mean reversion signals ===
+    close_4h = pd.Series(df_4h['close'].values)
+    delta = close_4h.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi_14_4h = 100 - (100 / (1 + rs))
+    rsi_14_4h = rsi_14_4h.fillna(50).values  # neutral RSI when insufficient data
+    
+    rsi_14_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_14_4h)
     
     # === 1d Indicators: EMA(50) for trend filter ===
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === 1d Indicators: Camarilla pivot levels (R1, S1) ===
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    close_1d = pd.Series(df_1d['close'].values)
-    high_1d = pd.Series(df_1d['high'].values)
-    low_1d = pd.Series(df_1d['low'].values)
-    camarilla_r1 = (close_1d + (high_1d - low_1d) * 1.1 / 12).values
-    camarilla_s1 = (close_1d - (high_1d - low_1d) * 1.1 / 12).values
-    
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Pre-compute session hours (08-20 UTC)
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     
@@ -45,39 +53,36 @@ def generate_signals(prices):
     warmup = 100
     
     for i in range(warmup, n):
-        # Volume filter: current volume > 1.3x 20-period volume SMA
-        vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.3)
+        # Session filter: only trade 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            signals[i] = 0.0
+            continue
         
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i])):
+        if (np.isnan(rsi_14_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above Camarilla R1
-        # 2. 1d price above EMA50 (bullish trend bias)
-        # 3. Volume confirmation
-        if (close[i] > camarilla_r1_aligned[i] and
-            close[i] > ema_50_1d_aligned[i] and
-            vol_confirm):
-            signals[i] = 0.25
+        # 1. 4h RSI < 30 (oversold mean reversion)
+        # 2. 1d close above 50 EMA (bullish higher timeframe trend)
+        if (rsi_14_4h_aligned[i] < 30 and
+            close[i] > ema_50_1d_aligned[i]):
+            signals[i] = 0.20
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below Camarilla S1
-        # 2. 1d price below EMA50 (bearish trend bias)
-        # 3. Volume confirmation
-        elif (close[i] < camarilla_s1_aligned[i] and
-              close[i] < ema_50_1d_aligned[i] and
-              vol_confirm):
-            signals[i] = -0.25
+        # 1. 4h RSI > 70 (overbought mean reversion)
+        # 2. 1d close below 50 EMA (bearish higher timeframe trend)
+        elif (rsi_14_4h_aligned[i] > 70 and
+              close[i] < ema_50_1d_aligned[i]):
+            signals[i] = -0.20
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "12h_Camarilla_R1S1_EMA50_VolFilter_v1"
-timeframe = "12h"
+name = "1h_RSI14_4h_EMA50_1d_SessionFilter_v1"
+timeframe = "1h"
 leverage = 1.0
