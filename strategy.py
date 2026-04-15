@@ -13,78 +13,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for HTF context
-    daily = get_htf_data(prices, '1d')
-    daily_close = daily['close'].values
-    daily_high = daily['high'].values
-    daily_low = daily['low'].values
-    daily_volume = daily['volume'].values
+    # Get 12h data for HTF context
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate daily Donchian channels (20-period)
-    donchian_high = pd.Series(daily_high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(daily_low).rolling(window=20, min_periods=20).min().values
+    # Calculate 12h Donchian channels (20-period)
+    lookback = 20
+    highest_12h = pd.Series(high_12h).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_12h = pd.Series(low_12h).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Align Donchian levels to 12h timeframe
-    donchian_high_12h = align_htf_to_ltf(prices, daily, donchian_high)
-    donchian_low_12h = align_htf_to_ltf(prices, daily, donchian_low)
+    # Align 12h Donchian to 4h timeframe
+    highest_12h_aligned = align_htf_to_ltf(prices, df_12h, highest_12h)
+    lowest_12h_aligned = align_htf_to_ltf(prices, df_12h, lowest_12h)
     
-    # Calculate daily volume average (20-period)
-    vol_ma_20 = pd.Series(daily_volume).rolling(window=20, min_periods=20).mean().values
-    vol_ma_12h = align_htf_to_ltf(prices, daily, vol_ma_20)
+    # Calculate 12h ATR for volatility filter
+    prev_close_12h = np.concatenate([[close_12h[0]], close_12h[:-1]])
+    tr_12h = np.maximum(high_12h - low_12h,
+                        np.maximum(np.abs(high_12h - prev_close_12h),
+                                   np.abs(low_12h - prev_close_12h)))
+    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
+    atr_ratio_12h = atr_12h / close_12h
     
-    # Calculate daily ADX for trend strength (14-period)
-    # True Range
-    tr1 = daily_high - daily_low
-    tr2 = np.abs(daily_high - np.concatenate([[daily_close[0]], daily_close[:-1]]))
-    tr3 = np.abs(daily_low - np.concatenate([[daily_close[0]], daily_close[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Align 12h ATR ratio to 4h timeframe
+    atr_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_ratio_12h)
     
-    # Directional Movement
-    dm_plus = np.where((daily_high - np.concatenate([[daily_high[0]], daily_high[:-1]])) > 
-                       (np.concatenate([[daily_low[0]], daily_low[:-1]]) - daily_low), 
-                       np.maximum(daily_high - np.concatenate([[daily_high[0]], daily_high[:-1]]), 0), 0)
-    dm_minus = np.where((np.concatenate([[daily_low[0]], daily_low[:-1]]) - daily_low) > 
-                        (daily_high - np.concatenate([[daily_high[0]], daily_high[:-1]])), 
-                        np.maximum(np.concatenate([[daily_low[0]], daily_low[:-1]]) - daily_low, 0), 0)
-    
-    # Smoothed values
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
-    
-    # DI and DX
-    di_plus = 100 * dm_plus_14 / (atr_14 + 1e-10)
-    di_minus = 100 * dm_minus_14 / (atr_14 + 1e-10)
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align ADX to 12h timeframe
-    adx_12h = align_htf_to_ltf(prices, daily, adx)
+    # Calculate 12h volume ratio (current vs 20-period average)
+    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_12h = volume / (vol_ma_12h + 1e-10)
+    vol_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio_12h)
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_12h[i]) or np.isnan(donchian_low_12h[i]) or 
-            np.isnan(vol_ma_12h[i]) or np.isnan(adx_12h[i])):
+        if (np.isnan(highest_12h_aligned[i]) or np.isnan(lowest_12h_aligned[i]) or
+            np.isnan(atr_ratio_12h_aligned[i]) or np.isnan(vol_ratio_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long condition: price breaks above daily Donchian high with volume confirmation and weak trend (choppy market)
-        if (close[i] > donchian_high_12h[i] and 
-            volume[i] > vol_ma_12h[i] * 1.5 and  # Volume spike
-            adx_12h[i] < 25):  # Choppy/range market (ADX < 25)
+        # Breakout logic with volume and volatility confirmation
+        # Long when price breaks above 12h Donchian high with volume spike and moderate volatility
+        if (close[i] > highest_12h_aligned[i] and
+            vol_ratio_12h_aligned[i] > 1.5 and  # Volume confirmation
+            atr_ratio_12h_aligned[i] > 0.008 and  # Minimum volatility
+            atr_ratio_12h_aligned[i] < 0.025):   # Maximum volatility filter
             signals[i] = 0.25
-        # Short condition: price breaks below daily Donchian low with volume confirmation and weak trend
-        elif (close[i] < donchian_low_12h[i] and 
-              volume[i] > vol_ma_12h[i] * 1.5 and  # Volume spike
-              adx_12h[i] < 25):  # Choppy/range market (ADX < 25)
+        # Short when price breaks below 12h Donchian low with volume spike and moderate volatility
+        elif (close[i] < lowest_12h_aligned[i] and
+              vol_ratio_12h_aligned[i] > 1.5 and  # Volume confirmation
+              atr_ratio_12h_aligned[i] > 0.008 and  # Minimum volatility
+              atr_ratio_12h_aligned[i] < 0.025):   # Maximum volatility filter
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "12h_DailyDonchian_Breakout_Volume_ADXFilter"
-timeframe = "12h"
+name = "4h_12h_Donchian_Breakout_Volume_VolatilityFilter"
+timeframe = "4h"
 leverage = 1.0
