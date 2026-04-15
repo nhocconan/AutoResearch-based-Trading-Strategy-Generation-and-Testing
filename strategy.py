@@ -1,19 +1,15 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-"""
-Hypothesis: 6h KAMA + RSI with Chop Regime Filter
-- Uses Kaufman Adaptive Moving Average (KAMA) on 6h for trend direction
-- Uses RSI(14) on 6h for momentum confirmation
-- Uses Choppiness Index (CHOP) on 1d to filter regimes: CHOP > 61.8 = range (mean revert), CHOP < 38.2 = trending (trend follow)
-- In trending regime (CHOP < 38.2): follow KAMA direction
-- In ranging regime (CHOP > 61.8): mean revert at RSI extremes (RSI < 30 long, RSI > 70 short)
-- Works in bull markets (trend following) and bear markets (mean reversion in ranges)
-- Target: 50-150 total trades over 4 years (12-37/year)
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 12h ADX trend filter
+# Uses the last 20-period high/low on 4h as breakout levels. Trades only when:
+# 1. Price breaks above/below Donchian channel
+# 2. Volume > 1.5x 20-period median volume (confirmation)
+# 3. 12h ADX > 25 (trending market)
+# Works in both bull and bear markets by capturing breakouts in the direction of trend.
+# Target: 50-150 total trades over 4 years.
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,148 +21,86 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # ===== KAMA calculation on 6h =====
-    # Efficiency Ratio (ER) and Smoothing Constant (SC)
-    change = np.abs(close - np.roll(close, 10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # will be replaced with proper calculation
+    # Calculate Donchian channels (20-period) on 4h
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Proper volatility calculation (sum of absolute changes over 10 periods)
-    volatility = np.zeros_like(close)
-    for i in range(10, len(close)):
-        volatility[i] = np.sum(np.abs(np.diff(close[i-9:i+1])))
-    
-    # Avoid division by zero
-    er = np.where(volatility != 0, change / volatility, 0)
-    
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # for fast EMA = 2
-    slow_sc = 2 / (30 + 1)  # for slow EMA = 30
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # KAMA calculation
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # ===== RSI calculation on 6h =====
-    delta = np.diff(close)
-    delta = np.insert(delta, 0, 0)  # same length as close
-    
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    
-    # First average (simple average)
-    avg_gain[14] = np.mean(gain[1:15])
-    avg_loss[14] = np.mean(loss[1:15])
-    
-    # Subsequent averages (Wilder's smoothing)
-    for i in range(15, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    # Avoid division by zero
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # ===== 1d Choppiness Index (CHOP) for regime filter =====
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Load 12h data for ADX trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
+    # Calculate ADX (14-period) on 12h
     # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First value
     
-    # ATR (14-period)
-    atr_1d = np.zeros_like(tr)
-    atr_1d[13] = np.mean(tr[1:15])  # First ATR
-    for i in range(14, len(tr)):
-        atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
+    # Directional Movement
+    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
+                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)), 
+                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Maximum and minimum close over 14 periods
-    max_close_1d = np.zeros_like(close_1d)
-    min_close_1d = np.zeros_like(close_1d)
+    # Smoothed values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
     
-    for i in range(13, len(close_1d)):
-        max_close_1d[i] = np.max(close_1d[i-13:i+1])
-        min_close_1d[i] = np.min(close_1d[i-13:i+1])
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
+    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
     
-    # Choppiness Index
-    chop = np.zeros_like(close_1d)
-    for i in range(13, len(close_1d)):
-        if atr_1d[i] > 0 and (max_close_1d[i] - min_close_1d[i]) > 0:
-            chop[i] = 100 * np.log10(np.sum(tr[i-13:i+1]) / atr_1d[i]) / np.log10(14)
-        else:
-            chop[i] = 50  # Neutral value
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Align KAMA, RSI, and CHOP to 6h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)  # Using 1d index for alignment
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25  # Position size (25% of capital)
+    base_size = 0.25  # Position size
     
-    for i in range(50, n):  # Start after warmup period
-        # Skip if any required data is NaN or not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(chop_aligned[i])):
+    for i in range(20, n):
+        # Skip if any required data is NaN
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(adx_aligned[i])):
             continue
         
-        chop_val = chop_aligned[i]
+        # Volume condition: current volume > 1.5x median of last 20 periods
+        vol_median = np.median(volume[max(0, i-19):i+1])
+        vol_ok = volume[i] > 1.5 * vol_median
         
-        if chop_val < 38.2:  # Trending regime - follow KAMA
-            # Long when price above KAMA
-            if close[i] > kama_aligned[i] and position <= 0:
-                position = 1
-                signals[i] = base_size
-            # Short when price below KAMA
-            elif close[i] < kama_aligned[i] and position >= 0:
-                position = -1
-                signals[i] = -base_size
-                
-        elif chop_val > 61.8:  # Ranging regime - mean revert at RSI extremes
-            # Long when RSI oversold
-            if rsi_aligned[i] < 30 and position <= 0:
-                position = 1
-                signals[i] = base_size
-            # Short when RSI overbought
-            elif rsi_aligned[i] > 70 and position >= 0:
-                position = -1
-                signals[i] = -base_size
-                
-        # Exit conditions: regime change or opposite signal
-        if position == 1:
-            # Exit long if: chop shifts to trending and price below KAMA, 
-            # or chop shifts to ranging and RSI > 50, or RSI > 70 in ranging
-            if ((chop_val < 38.2 and close[i] < kama_aligned[i]) or
-                (chop_val > 61.8 and (rsi_aligned[i] > 50 or rsi_aligned[i] > 70))):
-                position = 0
-                signals[i] = 0.0
-                
-        elif position == -1:
-            # Exit short if: chop shifts to trending and price above KAMA,
-            # or chop shifts to ranging and RSI < 50, or RSI < 30 in ranging
-            if ((chop_val < 38.2 and close[i] > kama_aligned[i]) or
-                (chop_val > 61.8 and (rsi_aligned[i] < 50 or rsi_aligned[i] < 30))):
-                position = 0
-                signals[i] = 0.0
+        # Long entry: price breaks above Donchian high + volume + ADX > 25
+        if (close[i] > donchian_high[i] and vol_ok and
+            adx_aligned[i] > 25 and position <= 0):
+            position = 1
+            signals[i] = base_size
+        
+        # Short entry: price breaks below Donchian low + volume + ADX > 25
+        elif (close[i] < donchian_low[i] and vol_ok and
+              adx_aligned[i] > 25 and position >= 0):
+            position = -1
+            signals[i] = -base_size
+        
+        # Exit: reverse breakout or ADX < 20 (ranging market)
+        elif position == 1 and (close[i] < donchian_low[i] or adx_aligned[i] < 20):
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and (close[i] > donchian_high[i] or adx_aligned[i] < 20):
+            position = 0
+            signals[i] = 0.0
     
     return signals
 
-name = "6h_KAMA_RSI_Chop_Regime"
-timeframe = "6h"
+name = "4h_Donchian_Breakout_Volume_ADX"
+timeframe = "4h"
 leverage = 1.0
