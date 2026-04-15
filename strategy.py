@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d Daily ATR for volatility filter (14-period)
+    # Daily ATR (14-period) for volatility filter
     daily = get_htf_data(prices, '1d')
     high_d = daily['high'].values
     low_d = daily['low'].values
@@ -24,7 +24,7 @@ def generate_signals(prices):
     atr_14d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14d_aligned = align_htf_to_ltf(prices, daily, atr_14d)
     
-    # 1w Weekly Donchian channel (20-period)
+    # Weekly Donchian channel (20-period)
     weekly = get_htf_data(prices, '1w')
     high_w = weekly['high'].values
     low_w = weekly['low'].values
@@ -73,6 +73,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WeeklyDonchian20_Vol1.5x_ATR14dFilter"
-timeframe = "12h"
+name = "4h_WeeklyDonchian20_Vol1.5x_ATR14dFilter"
+timeframe = "4h"
 leverage = 1.0
