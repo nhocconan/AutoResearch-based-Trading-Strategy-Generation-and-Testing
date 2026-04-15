@@ -3,13 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1w trend filter and volume confirmation.
-# Uses 1w EMA200 for long-term trend bias and Donchian channel breakouts on 6h for entry timing.
-# Includes volume filter (current volume > 1.8x 20-bar 6h volume SMA) to avoid low-momentum breakouts.
-# Designed for low trade frequency (12-30/year) to minimize fee drag. Works in bull/bear:
-# - Bull: long when price breaks above Donchian upper AND above 1w EMA200
-# - Bear: short when price breaks below Donchian lower AND below 1w EMA200
-# Volume confirmation ensures breakouts have conviction, reducing false signals in chop.
+# Hypothesis: 12h EMA crossover (21/55) with 1d ADX regime filter and volume confirmation.
+# Uses 1d ADX(14) > 25 to identify trending markets (avoid chop) and 12h EMA21/EMA55 cross for entries.
+# Volume filter ensures breakouts have sufficient momentum. Designed for low trade frequency
+# (15-30/year) to minimize fee drag. Works in bull/bear: ADX filters non-trending, EMA crossover
+# captures trend direction with confirmation.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,25 +19,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 6h and 1w HTF data once before loop
-    df_6h = get_htf_data(prices, '6h')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_6h) < 50 or len(df_1w) < 50:
+    # Get 12h and 1d HTF data once before loop
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_12h) < 60 or len(df_1d) < 60:
         return np.zeros(n)
     
-    # === 6h Indicators: Donchian Channel (20) ===
-    high_6h = pd.Series(df_6h['high'].values)
-    low_6h = pd.Series(df_6h['low'].values)
-    donchian_upper = high_6h.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_6h.rolling(window=20, min_periods=20).min().values
+    # === 12h Indicators: EMA Crossover ===
+    close_12h = pd.Series(df_12h['close'].values)
+    ema_21_12h = close_12h.ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_55_12h = close_12h.ewm(span=55, adjust=False, min_periods=55).mean().values
     
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_6h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_6h, donchian_lower)
+    ema_21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_21_12h)
+    ema_55_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_55_12h)
     
-    # === 1w Indicators: Trend Filter ===
-    # 1w EMA(200) for long-term trend bias
-    ema_200_1w = pd.Series(df_1w['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # === 1d Indicators: ADX Trend Filter ===
+    high_1d = pd.Series(df_1d['high'].values)
+    low_1d = pd.Series(df_1d['low'].values)
+    close_1d = pd.Series(df_1d['close'].values)
+    
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = abs(high_1d - close_1d.shift(1))
+    tr3 = abs(low_1d - close_1d.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    # Directional Movement
+    dm_plus = high_1d.diff()
+    dm_minus = low_1d.diff() * -1  # inverted so down movement is positive
+    dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0.0)
+    dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0.0)
+    
+    # Smoothed values
+    tr_14 = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    dm_plus_14 = dm_plus.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    dm_minus_14 = dm_minus.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    
+    # Directional Indicators
+    di_plus = 100 * (dm_plus_14 / tr_14)
+    di_minus = 100 * (dm_minus_14 / tr_14)
+    
+    # DX and ADX
+    dx = (abs(di_plus - di_minus) / (di_plus + di_minus)) * 100
+    adx = dx.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    
+    adx_values = adx.values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
     
     signals = np.zeros(n)
     
@@ -47,31 +72,31 @@ def generate_signals(prices):
     warmup = 100
     
     for i in range(warmup, n):
-        # Volume filter: current 6h volume > 1.8x 20-period 6h volume SMA
+        # Volume filter: current 12h volume > 1.3x 20-period 12h volume SMA
         vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.8)
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.3)
         
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
-            np.isnan(ema_200_1w_aligned[i])):
+        if (np.isnan(ema_21_12h_aligned[i]) or np.isnan(ema_55_12h_aligned[i]) or
+            np.isnan(adx_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above Donchian upper channel (breakout)
-        # 2. Price above 1w EMA200 (bullish long-term trend)
+        # 1. EMA21 > EMA55 (bullish crossover)
+        # 2. 1d ADX > 25 (strong trending market)
         # 3. Volume confirmation
-        if (close[i] > donchian_upper_aligned[i] and
-            close[i] > ema_200_1w_aligned[i] and
+        if (ema_21_12h_aligned[i] > ema_55_12h_aligned[i] and
+            adx_1d_aligned[i] > 25.0 and
             vol_confirm):
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below Donchian lower channel (breakdown)
-        # 2. Price below 1w EMA200 (bearish long-term trend)
+        # 1. EMA21 < EMA55 (bearish crossover)
+        # 2. 1d ADX > 25 (strong trending market)
         # 3. Volume confirmation
-        elif (close[i] < donchian_lower_aligned[i] and
-              close[i] < ema_200_1w_aligned[i] and
+        elif (ema_21_12h_aligned[i] < ema_55_12h_aligned[i] and
+              adx_1d_aligned[i] > 25.0 and
               vol_confirm):
             signals[i] = -0.25
         
@@ -80,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_1wEMA200_VolumeFilter_v1"
-timeframe = "6h"
+name = "12h_EMA21_55_ADX1d_VolFilter_v1"
+timeframe = "12h"
 leverage = 1.0
