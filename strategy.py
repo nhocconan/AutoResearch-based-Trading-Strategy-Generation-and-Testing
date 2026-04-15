@@ -3,94 +3,80 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h KAMA Direction with RSI Filter and Volume Confirmation
-# Uses KAMA to determine trend direction, RSI for overbought/oversold conditions, and volume for confirmation.
-# Works in both bull and bear markets by adapting to volatility via KAMA's efficiency ratio.
-# Target: 50-150 total trades over 4 years.
+# Hypothesis: 6h Williams %R + Volume Spike + Weekly Trend Filter
+# Williams %R identifies overbought/oversold conditions. Enter on reversals from extreme levels
+# when confirmed by volume spike and aligned with weekly trend (using EMA50 on weekly).
+# Works in ranging markets (reversals from extremes) and trending markets (pullbacks in trend).
+# Target: 60-120 total trades over 4 years (15-30/year).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data for RSI filter (trend context)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Load weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate KAMA (2-period ER, 30-period smoothing) on close
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0)  # placeholder, will compute properly
+    # Calculate EMA50 on weekly for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Proper ER calculation
-    er = np.zeros_like(close)
-    for i in range(1, len(close)):
-        if i == 0:
-            er[i] = 0
-        else:
-            direction = np.abs(close[i] - close[i-14]) if i >= 14 else np.abs(close[i] - close[0])
-            volatility_sum = np.sum(np.abs(np.diff(close[max(0, i-13):i+1])))
-            er[i] = direction / (volatility_sum + 1e-10) if volatility_sum > 0 else 0
+    # Calculate Williams %R (14-period) on 6h
+    # Highest high and lowest low over 14 periods
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
     
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # smoothing constant
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    wr = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
     
-    # Calculate RSI (14) on 12h
-    delta = np.diff(close_12h, prepend=close_12h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[0:14] = 50  # initialize
-    
-    # Align KAMA and RSI to 4h timeframe
-    kama_aligned = align_htf_to_ltf(prices, close, kama)  # using close as dummy for alignment
-    rsi_aligned = align_htf_to_ltf(prices, df_12h, rsi)
+    # Volume spike: current volume > 2.0 * median of last 20 periods
+    vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median().values
+    vol_spike = volume > (2.0 * vol_median)
     
     signals = np.zeros(n)
     position = 0
     base_size = 0.25  # Position size
     
-    for i in range(30, n):
+    for i in range(14, n):
         # Skip if any required data is NaN
-        if np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]):
+        if (np.isnan(wr[i]) or np.isnan(ema50_1w_aligned[i]) or
+            np.isnan(vol_median[i])):
             continue
         
-        # Long: price above KAMA, RSI < 70 (not overbought), volume confirmation
-        if (close[i] > kama_aligned[i] and
-            rsi_aligned[i] < 70 and
-            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
+        # Long entry: Williams %R crosses above -80 from oversold + volume spike + price above weekly EMA50 (uptrend)
+        if (wr[i] > -80 and wr[i-1] <= -80 and  # Cross above -80
+            vol_spike[i] and
+            close[i] > ema50_1w_aligned[i] and   # Weekly uptrend filter
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short: price below KAMA, RSI > 30 (not oversold), volume confirmation
-        elif (close[i] < kama_aligned[i] and
-              rsi_aligned[i] > 30 and
-              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
+        # Short entry: Williams %R crosses below -20 from overbought + volume spike + price below weekly EMA50 (downtrend)
+        elif (wr[i] < -20 and wr[i-1] >= -20 and  # Cross below -20
+              vol_spike[i] and
+              close[i] < ema50_1w_aligned[i] and  # Weekly downtrend filter
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse signal or RSI extreme
-        elif position == 1 and (close[i] < kama_aligned[i] or rsi_aligned[i] > 80):
+        # Exit: Williams %R crosses opposite extreme or trend fails
+        elif position == 1 and (wr[i] < -20 or close[i] < ema50_1w_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > kama_aligned[i] or rsi_aligned[i] < 20):
+        elif position == -1 and (wr[i] > -80 or close[i] > ema50_1w_aligned[i]):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_KAMA_Direction_RSI_Volume"
-timeframe = "4h"
+name = "6h_WilliamsR_Volume_Spike_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
