@@ -3,9 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 1h Camarilla R1/S1 breakout with volume confirmation and session filter (08-20 UTC).
+# Uses 4h trend (EMA50 > EMA200) for direction, 1h for precise entry timing.
+# Designed to work in both bull and bear markets by aligning with higher timeframe trend.
+# Target: 15-30 trades/year (60-120 over 4 years) to avoid fee drag.
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,63 +18,97 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h HTF data once before loop (per experiment instructions)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 4h HTF data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 12h Donchian channels (20-period) for breakout signals
-    highest_20 = pd.Series(df_12h['high'].values).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(df_12h['low'].values).rolling(window=20, min_periods=20).min().values
+    # Calculate 4h EMA50 and EMA200 for trend filter
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200_4h = pd.Series(close_4h).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate 12h ATR(14) for volatility filter
-    tr1 = pd.Series(df_12h['high'].values - df_12h['low'].values)
-    tr2 = pd.Series(np.abs(df_12h['high'].values - np.concatenate([[df_12h['close'].values[0]], df_12h['close'].values[:-1]])))
-    tr3 = pd.Series(np.abs(df_12h['low'].values - np.concatenate([[df_12h['close'].values[0]], df_12h['close'].values[:-1]])))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14 = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Align 4h EMAs to 1h timeframe
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
     
-    # Align HTF indicators to 4h timeframe with proper delay
-    highest_20_4h = align_htf_to_ltf(prices, df_12h, highest_20)
-    lowest_20_4h = align_htf_to_ltf(prices, df_12h, lowest_20)
-    atr_14_4h = align_htf_to_ltf(prices, df_12h, atr_14)
+    # Get daily HTF data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Calculate 4h volume ratio (current vs 20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ratio = volume / (vol_ma_20 + 1e-10)
+    # Calculate daily Camarilla pivots
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r1_1d = pivot_1d + range_1d * 1.1 / 12
+    s1_1d = pivot_1d - range_1d * 1.1 / 12
+    r2_1d = pivot_1d + range_1d * 1.1 / 6
+    s2_1d = pivot_1d - range_1d * 1.1 / 6
+    r3_1d = pivot_1d + range_1d * 1.1 / 4
+    s3_1d = pivot_1d - range_1d * 1.1 / 4
+    r4_1d = pivot_1d + range_1d * 1.1 / 2
+    s4_1d = pivot_1d - range_1d * 1.1 / 2
+    
+    # Align daily Camarilla levels to 1h timeframe
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    
+    # Calculate 1h volume ratio (current vs 24-period average)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_ratio = volume / (vol_ma_24 + 1e-10)
+    
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_20_4h[i]) or np.isnan(lowest_20_4h[i]) or 
-            np.isnan(atr_14_4h[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(ema200_4h_aligned[i]) or
+            np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
+            np.isnan(r2_1d_aligned[i]) or np.isnan(s2_1d_aligned[i]) or
+            np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
+            np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
+            np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions:
-        # 1. 4h price breaks above 12h Donchian upper with volume confirmation → long
-        # 2. 4h price breaks below 12h Donchian lower with volume confirmation → short
-        # 3. Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
-        # 4. Volume confirmation: volume > 1.5x average (tighter filter to reduce trades)
-        # 5. Discrete position sizing: 0.25
+        # Skip if outside trading session
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
         
-        # Long conditions: 4h breakout above 12h Donchian upper
-        if (close[i] > highest_20_4h[i] and            # 4h price above 12h Donchian upper
-            volume_ratio[i] > 1.5 and                  # Volume confirmation (tighter)
-            atr_14_4h[i] > 0.005 * close[i]):          # Volatility filter
-            signals[i] = 0.25
-            
-        # Short conditions: 4h breakdown below 12h Donchian lower
-        elif (close[i] < lowest_20_4h[i] and           # 4h price below 12h Donchian lower
-              volume_ratio[i] > 1.5 and                # Volume confirmation (tighter)
-              atr_14_4h[i] > 0.005 * close[i]):        # Volatility filter
-            signals[i] = -0.25
+        # Determine trend direction from 4h EMAs
+        uptrend = ema50_4h_aligned[i] > ema200_4h_aligned[i]
+        downtrend = ema50_4h_aligned[i] < ema200_4h_aligned[i]
+        
+        # Long conditions: uptrend + price breaks above R1 with volume confirmation
+        if (uptrend and
+            close[i] > r1_1d_aligned[i] and
+            volume_ratio[i] > 1.5):
+            signals[i] = 0.20
+        
+        # Short conditions: downtrend + price breaks below S1 with volume confirmation
+        elif (downtrend and
+              close[i] < s1_1d_aligned[i] and
+              volume_ratio[i] > 1.5):
+            signals[i] = -0.20
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "4h_12h_Donchian_Breakout_Volume_ATR_Filter"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
