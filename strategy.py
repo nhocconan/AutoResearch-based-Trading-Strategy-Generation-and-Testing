@@ -1,23 +1,11 @@
-# -*- coding: utf-8 -*-
-# -*- mode: python -*-
 #!/usr/bin/env python3
-
-# HYPOTHESIS:
-# 4h Donchian breakout with volume confirmation and volume regime filter.
-# Long when price breaks above 20-period Donchian high + volume spike + volume in expansion regime.
-# Short when price breaks below 20-period Donchian low + volume spike + volume in expansion regime.
-# Exit when price crosses back through the Donchian midpoint.
-# Uses 12h volume expansion regime filter to avoid chop and reduce whipsaws.
-# Designed to work in both bull (trend continuation) and bear (mean reversion bounces) markets.
-# Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag.
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,50 +13,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for volume regime filter
-    df_12h = get_htf_data(prices, '12h')
+    # Get weekly data for 1w HTF context
+    weekly = get_htf_data(prices, '1w')
     
-    # Calculate 12h volume moving average (20-period) for regime detection
-    vol_ma_20_12h = pd.Series(df_12h['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
+    # Calculate weekly ATR for volatility filter
+    tr1 = weekly['high'].values[1:] - weekly['low'].values[1:]
+    tr2 = np.abs(weekly['high'].values[1:] - weekly['close'].values[:-1])
+    tr3 = np.abs(weekly['low'].values[1:] - weekly['close'].values[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_14w = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14w_aligned = align_htf_to_ltf(prices, weekly, atr_14w)
     
-    # Volume expansion regime: current 12h volume > 1.5x 20-period average
-    vol_expansion = df_12h['volume'].values > (1.5 * vol_ma_20_12h)
-    vol_expansion_aligned = align_htf_to_ltf(prices, df_12h, vol_expansion)
+    # Volatility filter: ATR > 0.5% of price to avoid low volatility chop
+    vol_filter = atr_14w_aligned > (0.005 * close)
     
-    # Calculate Donchian channels (20-period) on 4h data
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_20 + lowest_20) / 2.0
+    # Calculate weekly EMA10 for trend direction
+    weekly_ema_10 = pd.Series(weekly['close'].values).ewm(span=10, adjust=False, min_periods=10).mean().values
+    weekly_ema_10_aligned = align_htf_to_ltf(prices, weekly, weekly_ema_10)
     
-    # Volume spike: current volume > 2.0x 20-period volume average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_ma_20)
+    # Calculate weekly EMA30 for additional trend confirmation
+    weekly_ema_30 = pd.Series(weekly['close'].values).ewm(span=30, adjust=False, min_periods=30).mean().values
+    weekly_ema_30_aligned = align_htf_to_ltf(prices, weekly, weekly_ema_30)
+    
+    # Calculate weekly volume average for volume spike detection
+    vol_ma_4w = pd.Series(weekly['volume'].values).rolling(window=4, min_periods=4).mean().values
+    vol_ma_4w_aligned = align_htf_to_ltf(prices, weekly, vol_ma_4w)
+    
+    # Volume filter: current volume > 1.3x 4-week average volume
+    vol_threshold = 1.3 * vol_ma_4w_aligned
+    vol_spike = volume > vol_threshold
     
     signals = np.zeros(n)
     
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(vol_expansion_aligned[i])):
+        if (np.isnan(atr_14w_aligned[i]) or np.isnan(weekly_ema_10_aligned[i]) or 
+            np.isnan(weekly_ema_30_aligned[i]) or np.isnan(vol_ma_4w_aligned[i])):
             continue
         
-        # Only trade in volume expansion regime (avoid chop)
-        if not vol_expansion_aligned[i]:
+        # Only trade when volatility is sufficient (avoid chop)
+        if not vol_filter[i]:
             signals[i] = 0.0
             continue
             
-        # Long: Donchian breakout above + volume spike
-        if (close[i] > highest_20[i] and vol_spike[i]):
+        # Long: Price above both EMA10 and EMA30 + volume spike
+        if (close[i] > weekly_ema_10_aligned[i] and 
+            close[i] > weekly_ema_30_aligned[i] and 
+            vol_spike[i]):
             signals[i] = 0.25
         
-        # Short: Donchian breakdown below + volume spike
-        elif (close[i] < lowest_20[i] and vol_spike[i]):
+        # Short: Price below both EMA10 and EMA30 + volume spike
+        elif (close[i] < weekly_ema_10_aligned[i] and 
+              close[i] < weekly_ema_30_aligned[i] and 
+              vol_spike[i]):
             signals[i] = -0.25
         
-        # Exit: price crosses back through Donchian midpoint
-        elif (signals[i-1] > 0 and close[i] < donchian_mid[i]) or \
-             (signals[i-1] < 0 and close[i] > donchian_mid[i]):
+        # Exit: reverse signal on opposite direction
+        elif (close[i] < weekly_ema_10_aligned[i] and signals[i-1] > 0) or \
+             (close[i] > weekly_ema_10_aligned[i] and signals[i-1] < 0):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -77,6 +79,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Volume_Spike_Expansion_Filter"
-timeframe = "4h"
+name = "1d_WeeklyEMA10_30_Volume_Spike_Filter"
+timeframe = "1d"
 leverage = 1.0
