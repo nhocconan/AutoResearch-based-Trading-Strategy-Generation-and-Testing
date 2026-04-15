@@ -3,11 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla H4/L4 breakout with 1d EMA34 trend filter and volume confirmation
-# H4/L4 represent strong intraday support/resistance; breakouts with volume and 1d trend alignment
-# capture sustained moves. EMA34 on 1d filters counter-trend breakouts in ranging markets.
-# Works in bull/bear: in uptrend, longs from H4 breakouts; in downtrend, shorts from L4 breakdowns.
-# Volume confirmation reduces false breakouts. Target 12-35 trades/year.
+# Hypothesis: 12h Camarilla H3/L3 breakout with volume confirmation and weekly ATR filter
+# Uses 1w ATR to avoid low volatility regimes and 1d Camarilla levels for structure
+# Discrete position sizing (0.25) to minimize fee drag. Designed for BTC/ETH in both bull/bear markets.
+# Target: 12-37 trades/year (50-150 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,30 +18,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily HTF data once before loop
+    # Get daily HTF data once before loop for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    daily_close = df_1d['close'].values
     daily_high = df_1d['high'].values
     daily_low = df_1d['low'].values
-    daily_volume = df_1d['volume'].values
+    daily_close = df_1d['close'].values
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate daily Camarilla levels (H3, L3, H4, L4)
+    daily_range = daily_high - daily_low
+    camarilla_h3 = daily_close + 1.1 * daily_range / 2
+    camarilla_l3 = daily_close - 1.1 * daily_range / 2
+    camarilla_h4 = daily_close + 1.1 * daily_range
+    camarilla_l4 = daily_close - 1.1 * daily_range
     
-    # Calculate daily Camarilla pivot levels (based on previous day)
-    # Camarilla: H4 = close + 1.1*(high-low)/2, L4 = close - 1.1*(high-low)/2
-    camarilla_h4 = daily_close + 1.1 * (daily_high - daily_low) / 2.0
-    camarilla_l4 = daily_close - 1.1 * (daily_high - daily_low) / 2.0
+    # Get weekly HTF data once before loop for ATR filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Align HTF Camarilla levels to 6h timeframe
-    h4_6h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_6h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Calculate 6h volume ratio (current vs 20-period average)
+    # Calculate weekly ATR(14) for volatility filter
+    tr1 = pd.Series(weekly_high - weekly_low)
+    tr2 = pd.Series(np.abs(weekly_high - np.concatenate([[weekly_close[0]], weekly_close[:-1]])))
+    tr3 = pd.Series(np.abs(weekly_low - np.concatenate([[weekly_close[0]], weekly_close[:-1]])))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14_w = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align HTF indicators to 12h timeframe with proper delay
+    camarilla_h3_12h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_12h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_h4_12h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_12h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    atr_14_w_12h = align_htf_to_ltf(prices, df_1w, atr_14_w)
+    
+    # Calculate 12h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
@@ -50,27 +65,35 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(h4_6h[i]) or np.isnan(l4_6h[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(camarilla_h3_12h[i]) or np.isnan(camarilla_l3_12h[i]) or 
+            np.isnan(camarilla_h4_12h[i]) or np.isnan(camarilla_l4_12h[i]) or 
+            np.isnan(atr_14_w_12h[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions: 6h breakout above H4 with volume confirmation and 1d uptrend
-        if (close[i] > h4_6h[i] and                    # 6h price above H4 camarilla level
-            volume_ratio[i] > 1.5 and                  # Strong volume confirmation
-            close[i] > ema_34_1d_aligned[i]):          # 1d uptrend filter
+        # Entry conditions:
+        # 1. 12h price breaks above H3 with volume confirmation → long
+        # 2. 12h price breaks below L3 with volume confirmation → short
+        # 3. Volatility filter: weekly ATR > 1% of price (avoid low volatility chop)
+        # 4. Volume confirmation: volume > 1.5x average
+        # 5. Discrete position sizing: 0.25
+        
+        # Long conditions: 12h breakout above H3
+        if (close[i] > camarilla_h3_12h[i] and            # 12h price above H3
+            volume_ratio[i] > 1.5 and                     # Volume confirmation
+            atr_14_w_12h[i] > 0.01 * close[i]):           # Volatility filter
             signals[i] = 0.25
             
-        # Short conditions: 6h breakdown below L4 with volume confirmation and 1d downtrend
-        elif (close[i] < l4_6h[i] and                  # 6h price below L4 camarilla level
-              volume_ratio[i] > 1.5 and                # Strong volume confirmation
-              close[i] < ema_34_1d_aligned[i]):        # 1d downtrend filter
+        # Short conditions: 12h breakdown below L3
+        elif (close[i] < camarilla_l3_12h[i] and          # 12h price below L3
+              volume_ratio[i] > 1.5 and                   # Volume confirmation
+              atr_14_w_12h[i] > 0.01 * close[i]):         # Volatility filter
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "6h_Camarilla_H4_L4_Breakout_Volume_EMA34_Filter"
-timeframe = "6h"
+name = "12h_Camarilla_H3_L3_Breakout_Volume_ATR_Filter"
+timeframe = "12h"
 leverage = 1.0
