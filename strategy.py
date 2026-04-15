@@ -19,7 +19,7 @@ def generate_signals(prices):
     daily_low = daily['low'].values
     daily_close = daily['close'].values
     
-    # Calculate weekly pivot levels from daily data (5-day window)
+    # Calculate weekly pivot levels from daily data
     weekly_high = pd.Series(daily_high).rolling(window=5, min_periods=5).max().values
     weekly_low = pd.Series(daily_low).rolling(window=5, min_periods=5).min().values
     weekly_close = pd.Series(daily_close).rolling(window=5, min_periods=5).last().values
@@ -28,12 +28,12 @@ def generate_signals(prices):
     weekly_r1 = 2 * weekly_pivot - weekly_low
     weekly_s1 = 2 * weekly_pivot - weekly_high
     
-    # Align weekly pivot levels to 4h timeframe
+    # Align weekly pivot levels to 12h timeframe
     weekly_pivot_aligned = align_htf_to_ltf(prices, daily, weekly_pivot)
     weekly_r1_aligned = align_htf_to_ltf(prices, daily, weekly_r1)
     weekly_s1_aligned = align_htf_to_ltf(prices, daily, weekly_s1)
     
-    # Volume filter: current 4h volume > 1.5x 20-period average volume
+    # Volume filter: current 12h volume > 1.5x 20-period average volume
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
@@ -70,6 +70,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WeeklyPivot_R1_S1_Breakout_Volume_RangeFilter_Session"
-timeframe = "4h"
+name = "12h_WeeklyPivot_R1_S1_Breakout_Volume_RangeFilter_Session"
+timeframe = "12h"
 leverage = 1.0
