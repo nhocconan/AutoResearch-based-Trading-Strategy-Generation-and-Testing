@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud + 1d Trend Filter
-# Uses Ichimoku (Tenkan/Kijun/Senkou) on 6h for entry signals and 1d trend (price vs EMA50) as filter.
-# Long when Tenkan > Kijun and price above Kumo (cloud) and 1d uptrend.
-# Short when Tenkan < Kijun and price below Kumo and 1d downtrend.
-# Ichimoku works well in both trending and ranging markets; 1d filter avoids counter-trend trades.
-# Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 12h Williams Alligator + Volume Spike + ADX Trend Filter
+# The Williams Alligator (Jaw/Teeth/Lips) identifies trend direction via SMAs.
+# Trades only when price is outside the Alligator's mouth (trending) with volume spike and ADX > 25.
+# Works in bull markets (price above Lips) and bear markets (price below Jaw).
+# Target: 50-150 total trades over 4 years. Timeframe: 12h, HTF: 1d for Alligator.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,44 +19,72 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Ichimoku parameters
-    tenkan_period = 9
-    kijun_period = 26
-    senkou_span_b_period = 52
-    kumo_shift = 26
-    
-    # Calculate Tenkan-sen (Conversion Line): (9-period high + low)/2
-    tenkan_sen = (pd.Series(high).rolling(window=tenkan_period, min_periods=tenkan_period).max() +
-                  pd.Series(low).rolling(window=tenkan_period, min_periods=tenkan_period).min()) / 2
-    
-    # Calculate Kijun-sen (Base Line): (26-period high + low)/2
-    kijun_sen = (pd.Series(high).rolling(window=kijun_period, min_periods=kijun_period).max() +
-                 pd.Series(low).rolling(window=kijun_period, min_periods=kijun_period).min()) / 2
-    
-    # Calculate Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(kumo_shift)
-    
-    # Calculate Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
-    senkou_span_b = ((pd.Series(high).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).max() +
-                      pd.Series(low).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).min()) / 2).shift(kumo_shift)
-    
-    # Load 1d data for trend filter
+    # Load 1d data for Williams Alligator
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 13:
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA50 on 1d for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Williams Alligator (13,8,5 SMAs with future shift)
+    # Jaw: 13-period SMMA of median price, shifted 8 bars forward
+    median_price_1d = (high_1d + low_1d) / 2
+    jaw_raw = pd.Series(median_price_1d).rolling(window=13, min_periods=13).mean()
+    jaw = jaw_raw.shift(8)  # Shift forward 8 bars
     
-    # Align Ichimoku components to 6h timeframe
-    tenkan_sen_aligned = align_htf_to_ltf(prices, prices, tenkan_sen.values)  # same timeframe
-    kijun_sen_aligned = align_htf_to_ltf(prices, prices, kijun_sen.values)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, prices, senkou_span_a.values)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, prices, senkou_span_b.values)
+    # Teeth: 8-period SMMA of median price, shifted 5 bars forward
+    teeth_raw = pd.Series(median_price_1d).rolling(window=8, min_periods=8).mean()
+    teeth = teeth_raw.shift(5)  # Shift forward 5 bars
     
-    # Align 1d EMA50 to 6h
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Lips: 5-period SMMA of median price, shifted 3 bars forward
+    lips_raw = pd.Series(median_price_1d).rolling(window=5, min_periods=5).mean()
+    lips = lips_raw.shift(3)  # Shift forward 3 bars
+    
+    # Align Alligator lines to 12h timeframe (wait for 1d bar to close)
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw.values)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth.values)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips.values)
+    
+    # Load 12h data for ADX trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # Calculate ADX (14-period) on 12h
+    # True Range
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    
+    # Directional Movement
+    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
+                       np.maximum(high_12h - np.roll(close_12h, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(close_12h, 1)), 
+                        np.maximum(np.roll(close_12h, 1) - low_12h, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
+    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
     signals = np.zeros(n)
     position = 0
@@ -65,41 +92,36 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or
-            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(adx_aligned[i])):
             continue
         
-        # Determine Kumo (cloud) boundaries
-        upper_kumo = np.maximum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        lower_kumo = np.minimum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        
-        # Long entry: Tenkan > Kijun, price above Kumo, and 1d uptrend (price > EMA50)
-        if (tenkan_sen_aligned[i] > kijun_sen_aligned[i] and
-            close[i] > upper_kumo and
-            close[i] > ema_50_1d_aligned[i] and
+        # Long entry: price above Lips (bullish alignment) + volume spike + ADX > 25
+        if (close[i] > lips_aligned[i] and
+            volume[i] > 2.0 * np.median(volume[max(0, i-20):i+1]) and
+            adx_aligned[i] > 25 and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: Tenkan < Kijun, price below Kumo, and 1d downtrend (price < EMA50)
-        elif (tenkan_sen_aligned[i] < kijun_sen_aligned[i] and
-              close[i] < lower_kumo and
-              close[i] < ema_50_1d_aligned[i] and
+        # Short entry: price below Jaw (bearish alignment) + volume spike + ADX > 25
+        elif (close[i] < jaw_aligned[i] and
+              volume[i] > 2.0 * np.median(volume[max(0, i-20):i+1]) and
+              adx_aligned[i] > 25 and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: opposite Ichimoku cross or price crosses EMA50 (trend change)
-        elif position == 1 and (tenkan_sen_aligned[i] < kijun_sen_aligned[i] or close[i] < ema_50_1d_aligned[i]):
+        # Exit: price re-enters Alligator's mouth or ADX < 20 (ranging market)
+        elif position == 1 and (close[i] < teeth_aligned[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (tenkan_sen_aligned[i] > kijun_sen_aligned[i] or close[i] > ema_50_1d_aligned[i]):
+        elif position == -1 and (close[i] > teeth_aligned[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "6h_Ichimoku_1dEMA50_Trend"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_Volume_ADX"
+timeframe = "12h"
 leverage = 1.0
