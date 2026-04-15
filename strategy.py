@@ -23,27 +23,22 @@ def generate_signals(prices):
     daily_low = df_1d['low'].values
     daily_volume = df_1d['volume'].values
     
-    # Calculate daily Camarilla pivot levels (based on previous day)
-    daily_range = daily_high - daily_low
-    r4 = daily_close + (daily_range * 1.1 / 2)
-    r3 = daily_close + (daily_range * 1.1 / 4)
-    s3 = daily_close - (daily_range * 1.1 / 4)
-    s4 = daily_close - (daily_range * 1.1 / 2)
+    # Calculate daily Donchian(20) channels (based on previous 20 days)
+    donchian_upper = pd.Series(daily_high).rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_lower = pd.Series(daily_low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Align HTF Camarilla levels to 12h timeframe
-    r4_12h = align_htf_to_ltf(prices, df_1d, r4)
-    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
-    s4_12h = align_htf_to_ltf(prices, df_1d, s4)
+    # Align HTF Donchian levels to 4h timeframe
+    donchian_upper_4h = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    donchian_lower_4h = align_htf_to_ltf(prices, df_1d, donchian_lower)
     
-    # Calculate 12h ATR(14) for volatility filter
+    # Calculate 4h ATR(14) for volatility filter and stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
     tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 12h volume ratio (current vs 20-period average)
+    # Calculate 4h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
@@ -51,34 +46,34 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(r4_12h[i]) or np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or 
-            np.isnan(s4_12h[i]) or np.isnan(atr_14[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(donchian_upper_4h[i]) or np.isnan(donchian_lower_4h[i]) or 
+            np.isnan(atr_14[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
         # Entry conditions:
-        # 1. 12h price breaks above R4 with volume confirmation → long (strong continuation)
-        # 2. 12h price breaks below S4 with volume confirmation → short (strong continuation)
+        # 1. 4h price breaks above daily Donchian upper with volume confirmation → long
+        # 2. 4h price breaks below daily Donchian lower with volume confirmation → short
         # 3. Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
         # 4. Volume confirmation: volume > 1.3x average
         # 5. Discrete position sizing: 0.25
         
-        # Long conditions: 12h breakout above R4 (strong continuation)
-        if (close[i] > r4_12h[i] and            # 12h price above R4 Camarilla
-            volume_ratio[i] > 1.3 and          # Volume confirmation
-            atr_14[i] > 0.005 * close[i]):     # Volatility filter
+        # Long conditions: 4h breakout above daily Donchian upper
+        if (close[i] > donchian_upper_4h[i] and            # 4h price above daily Donchian upper
+            volume_ratio[i] > 1.3 and                      # Volume confirmation
+            atr_14[i] > 0.005 * close[i]):                 # Volatility filter
             signals[i] = 0.25
             
-        # Short conditions: 12h breakdown below S4 (strong continuation)
-        elif (close[i] < s4_12h[i] and          # 12h price below S4 Camarilla
-              volume_ratio[i] > 1.3 and        # Volume confirmation
-              atr_14[i] > 0.005 * close[i]):   # Volatility filter
+        # Short conditions: 4h breakdown below daily Donchian lower
+        elif (close[i] < donchian_lower_4h[i] and          # 4h price below daily Donchian lower
+              volume_ratio[i] > 1.3 and                    # Volume confirmation
+              atr_14[i] > 0.005 * close[i]):               # Volatility filter
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "12h_Camarilla_R4_S4_Breakout_Volume_ATR_Filter"
-timeframe = "12h"
+name = "4h_DailyDonchian20_Breakout_Volume_ATR_Filter"
+timeframe = "4h"
 leverage = 1.0
