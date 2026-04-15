@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d Williams Alligator for trend direction and 1w Camarilla pivot levels for entry/exit.
-# Long when price > Alligator Jaw (teeth) and breaks above R1 pivot with volume confirmation.
-# Short when price < Alligator Jaw (teeth) and breaks below S1 pivot with volume confirmation.
-# Uses 1w HTF for pivot calculation to reduce noise and increase trade quality.
-# Designed for low trade frequency (12-25/year) to minimize fee drag while capturing trending moves.
+# Hypothesis: 12h strategy using 1d Donchian channel (20) for trend direction and 12h RSI(14) for mean reversion timing.
+# In 1d uptrend (price > upper Donchian), wait for 12h RSI < 30 to go long (pullback entry).
+# In 1d downtrend (price < lower Donchian), wait for 12h RSI > 70 to go short (bounce entry).
+# Volume confirmation ensures momentum validity. Session filter (00-23 UTC) to allow full 12h bar coverage.
+# Designed for low trade frequency (12-37/year) to minimize fee drag while adapting to trend and mean reversion.
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,61 +23,30 @@ def generate_signals(prices):
     # Pre-compute session hours to avoid datetime operations in loop
     hours = pd.DatetimeIndex(open_time).hour
     
-    # Get 1d and 1w HTF data once before loop
+    # Get 1d and 12h HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 50 or len(df_1w) < 20:
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_1d) < 30 or len(df_12h) < 30:
         return np.zeros(n)
     
-    # === 1d Indicators: Williams Alligator (13,8,5) ===
+    # === 1d Indicators: Donchian Channel (20) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    median_price_1d = (high_1d + low_1d) / 2.0
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Alligator lines: Jaw (13,8), Teeth (8,5), Lips (5,3)
-    jaw = pd.Series(median_price_1d).rolling(window=13, min_periods=13).mean()
-    jaw = jaw.shift(8)  # shift forward by 8 bars
-    teeth = pd.Series(median_price_1d).rolling(window=8, min_periods=8).mean()
-    teeth = teeth.shift(5)  # shift forward by 5 bars
-    lips = pd.Series(median_price_1d).rolling(window=5, min_periods=5).mean()
-    lips = lips.shift(3)  # shift forward by 3 bars
-    
-    # Use Jaw as the primary trend filter (slowest line)
-    jaw_values = jaw.values
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_values)
-    
-    # === 1w Indicators: Camarilla Pivot Levels ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate Camarilla pivot levels for weekly timeframe
-    pivot_1w = (high_1w[-1] + low_1w[-1] + close_1w[-1]) / 3.0
-    range_1w = high_1w[-1] - low_1w[-1]
-    
-    # Camarilla levels: R4, R3, R2, R1, PP, S1, S2, S3, S4
-    r1_1w = pivot_1w + (range_1w * 1.1 / 12)
-    r2_1w = pivot_1w + (range_1w * 1.1 / 6)
-    r3_1w = pivot_1w + (range_1w * 1.1 / 4)
-    r4_1w = pivot_1w + (range_1w * 1.1 / 2)
-    pp_1w = pivot_1w
-    s1_1w = pivot_1w - (range_1w * 1.1 / 12)
-    s2_1w = pivot_1w - (range_1w * 1.1 / 6)
-    s3_1w = pivot_1w - (range_1w * 1.1 / 4)
-    s4_1w = pivot_1w - (range_1w * 1.1 / 2)
-    
-    # Align the weekly pivot levels to 6h timeframe (constant values)
-    # Since these are weekly levels, they remain constant throughout the week
-    r1_aligned = np.full(n, r1_1w)
-    r2_aligned = np.full(n, r2_1w)
-    r3_aligned = np.full(n, r3_1w)
-    r4_aligned = np.full(n, r4_1w)
-    pp_aligned = np.full(n, pp_1w)
-    s1_aligned = np.full(n, s1_1w)
-    s2_aligned = np.full(n, s2_1w)
-    s3_aligned = np.full(n, s3_1w)
-    s4_aligned = np.full(n, s4_1w)
+    # === 12h Indicators: RSI(14) ===
+    close_12h = df_12h['close'].values
+    delta = pd.Series(close_12h).diff().values
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_12h = 100 - (100 / (1 + rs))
+    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
     
     signals = np.zeros(n)
     
@@ -85,35 +54,31 @@ def generate_signals(prices):
     warmup = 100
     
     for i in range(warmup, n):
-        # Session filter: 08-20 UTC only
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
-            
+        # Session filter: allow all hours for 12h timeframe (full coverage)
+        # No session restriction needed for 12h bars
+        
         # Volume filter: current volume > 1.5x 20-period volume SMA
         vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # Skip if any required data is NaN
-        if (np.isnan(jaw_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(pp_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(rsi_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price above Alligator Jaw (uptrend)
-        # 2. Price breaks above R1 pivot level
+        # 1. In 1d uptrend (price > 1d upper Donchian)
+        # 2. 12h RSI < 30 (oversold pullback)
         # 3. Volume confirmation
-        if (close[i] > jaw_aligned[i]) and (close[i] > r1_aligned[i]) and vol_confirm:
+        if (close[i] > donchian_high_aligned[i]) and (rsi_12h_aligned[i] < 30) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price below Alligator Jaw (downtrend)
-        # 2. Price breaks below S1 pivot level
+        # 1. In 1d downtrend (price < 1d lower Donchian)
+        # 2. 12h RSI > 70 (overbought bounce)
         # 3. Volume confirmation
-        elif (close[i] < jaw_aligned[i]) and (close[i] < s1_aligned[i]) and vol_confirm:
+        elif (close[i] < donchian_low_aligned[i]) and (rsi_12h_aligned[i] > 70) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -121,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Alligator_Jaw_Camarilla1w_R1S1_v1"
-timeframe = "6h"
+name = "12h_1d_Donchian20_12h_RSI14_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
