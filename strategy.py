@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R with 1-week trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions; in trending markets, 
-# extreme readings can signal continuation rather than reversal. 
-# Uses 1-week EMA for trend direction and volume surge for confirmation.
-# Designed for fewer trades (target: 15-30/year) to minimize fee drag on 12h timeframe.
-# Works in bull (buy oversold in uptrend) and bear (sell overbought in downtrend).
+# Hypothesis: 4h Donchian breakout (20) with 1d ADX trend filter and volume confirmation
+# Long when price breaks above 20-period high + ADX>25 + volume>1.5x median
+# Short when price breaks below 20-period low + ADX>25 + volume>1.5x median
+# Exit when price crosses back inside the channel or ADX<20 (trend weakening)
+# Works in bull (breakouts continue) and bear (strong trends persist)
+# Uses discrete sizing (0.25) to limit overtrading and fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,52 +20,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-week trend filter: EMA(21) on weekly close
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # 1-day ADX for trend strength filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 1-week high/low for Williams %R calculation (14-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Calculate 14-period Williams %R on weekly data
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    wsr = (highest_high - close_1w) / (highest_high - lowest_low) * -100
-    wsr[highest_high == lowest_low] = -50  # avoid division by zero
+    # Directional Movement
+    up_move = high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])
+    down_move = np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Align Williams %R to 12h timeframe (no extra delay needed as it's contemporaneous)
-    wsr_aligned = align_htf_to_ltf(prices, df_1w, wsr)
+    # Smoothed values
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum()
+    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum()
+    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum()
     
-    # Volume confirmation: current volume > 2.0x median of last 28 periods
-    vol_median = pd.Series(volume).rolling(window=28, min_periods=1).median()
-    vol_threshold = 2.0 * vol_median
+    # Directional Indicators
+    plus_di = 100 * plus_dm_14 / tr_14
+    minus_di = 100 * minus_dm_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # 4-hour Donchian Channel (20)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max()
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min()
+    
+    # Volume confirmation: current > 1.5x median of last 20 bars
+    vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
+    vol_threshold = 1.5 * vol_median
     
     signals = np.zeros(n)
     
-    for i in range(28, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(wsr_aligned[i]) or 
-            np.isnan(vol_threshold[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(vol_threshold[i]) or np.isnan(adx_aligned[i])):
             continue
         
-        # Long: Williams %R oversold (< -80) + uptrend (price > weekly EMA) + volume surge
-        if (wsr_aligned[i] < -80 and close[i] > ema_1w_aligned[i] and 
+        # Long: breakout above upper band + strong trend + volume
+        if (close[i] > donch_high[i] and 
+            adx_aligned[i] > 25 and 
             volume[i] > vol_threshold[i]):
             signals[i] = 0.25
         
-        # Short: Williams %R overbought (> -20) + downtrend (price < weekly EMA) + volume surge
-        elif (wsr_aligned[i] > -20 and close[i] < ema_1w_aligned[i] and 
+        # Short: breakout below lower band + strong trend + volume
+        elif (close[i] < donch_low[i] and 
+              adx_aligned[i] > 25 and 
               volume[i] > vol_threshold[i]):
             signals[i] = -0.25
         
-        # Exit: Williams %R returns to neutral range (-50 to -30 for longs, -70 to -50 for shorts)
+        # Exit: price crosses back inside channel OR trend weakens (ADX<20)
         elif (i > 0 and 
-              ((signals[i-1] == 0.25 and wsr_aligned[i] > -50) or
-               (signals[i-1] == -0.25 and wsr_aligned[i] < -70))):
+              ((signals[i-1] == 0.25 and close[i] < donch_high[i]) or
+               (signals[i-1] == -0.25 and close[i] > donch_low[i]) or
+               adx_aligned[i] < 20)):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -74,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsR_Trend_Volume"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_ADX_Volume"
+timeframe = "4h"
 leverage = 1.0
