@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day Donchian breakout with weekly trend filter and volume confirmation
-# Uses weekly Donchian channels for trend direction and daily breakouts for entry.
-# Works in bull markets (breakouts above weekly high) and bear markets (breakouts below weekly low).
-# Volume confirmation filters false breakouts. Target: 30-100 total trades over 4 years.
+# Hypothesis: 12h Williams %R Mean Reversion with 1d Trend Filter
+# Williams %R identifies overbought/oversold conditions. We buy when %R < -80 (oversold) 
+# and sell when %R > -20 (overbought), but only in the direction of the 1d trend (EMA50).
+# This combines mean reversion entries with trend filtering to work in both bull and bear markets.
+# Target: 50-150 total trades over 4 years.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,64 +19,56 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data for Donchian trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
+    # Load 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly Donchian channels (20-period)
-    high_max = pd.Series(high_weekly).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low_weekly).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align weekly Donchian to daily timeframe
-    high_max_aligned = align_htf_to_ltf(prices, df_weekly, high_max)
-    low_min_aligned = align_htf_to_ltf(prices, df_weekly, low_min)
-    
-    # Calculate daily Donchian breakout levels (previous day's high/low)
-    # Shift by 1 to avoid look-ahead: use previous day's levels
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
+    # Calculate Williams %R (14-period)
+    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low + 1e-10) * -100
     
     signals = np.zeros(n)
     position = 0
     base_size = 0.25  # Position size (25% of capital)
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_max_aligned[i]) or np.isnan(low_min_aligned[i]) or
-            np.isnan(prev_high[i]) or np.isnan(prev_low[i])):
+        if (np.isnan(williams_r[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
             continue
         
-        # Long entry: price breaks above previous day's high AND above weekly Donchian high
-        # with volume confirmation
-        if (close[i] > prev_high[i] and close[i] > high_max_aligned[i] and
-            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
+        # Long entry: Williams %R oversold (< -80) and price above 1d EMA50 (uptrend)
+        if (williams_r[i] < -80 and
+            close[i] > ema_50_1d_aligned[i] and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below previous day's low AND below weekly Donchian low
-        # with volume confirmation
-        elif (close[i] < prev_low[i] and close[i] < low_min_aligned[i] and
-              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
+        # Short entry: Williams %R overbought (> -20) and price below 1d EMA50 (downtrend)
+        elif (williams_r[i] > -20 and
+              close[i] < ema_50_1d_aligned[i] and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse breakout (opposite Donchian break)
-        elif position == 1 and close[i] < low_min_aligned[i]:
+        # Exit: reverse Williams %R signal or trend change
+        elif position == 1 and (williams_r[i] > -20 or close[i] < ema_50_1d_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > high_max_aligned[i]:
+        elif position == -1 and (williams_r[i] < -80 or close[i] > ema_50_1d_aligned[i]):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "1d_Donchian_Breakout_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "12h_WilliamsR_MeanReversion_TrendFilter"
+timeframe = "12h"
 leverage = 1.0
