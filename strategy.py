@@ -3,12 +3,6 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian breakout with volume confirmation and EMA trend filter
-# Uses 4h timeframe for better trade frequency control. The strategy captures
-# strong trending moves after consolidation with institutional volume confirmation.
-# Works in bull markets via breakouts and bear markets via breakdowns with trend filter.
-# Discrete sizing (0.25) minimizes fee churn while maintaining sufficient exposure.
-
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
@@ -24,55 +18,74 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily Donchian channel (20-period) for breakout signals
-    donchian_high_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
-    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
-    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
+    # Calculate 1d RSI(14) for momentum filter
+    close_1d = pd.Series(df_1d['close'].values)
+    delta = close_1d.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_14 = 100 - (100 / (1 + rs))
+    rsi_14_values = rsi_14.fillna(50).values
+    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_values)
     
-    # Calculate daily EMA(34) for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1d ATR(14) for volatility filter
+    high_1d = pd.Series(df_1d['high'].values)
+    low_1d = pd.Series(df_1d['low'].values)
+    close_1d_shift = close_1d.shift(1)
+    tr1 = high_1d - low_1d
+    tr2 = abs(high_1d - close_1d_shift)
+    tr3 = abs(low_1d - close_1d_shift)
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14 = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    atr_14_values = atr_14.fillna(0).values
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14_values)
     
-    # Calculate daily volume SMA(20) for volume confirmation
-    vol_sma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_sma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_20)
+    # Calculate 6h ATR(14) for position sizing normalization
+    tr_6h = pd.Series(np.maximum(
+        high - low,
+        np.maximum(
+            np.abs(high - np.concatenate([[np.nan], close[:-1]])),
+            np.abs(low - np.concatenate([[np.nan], close[:-1]]))
+        )
+    ))
+    atr_6h = tr_6h.ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_sma_20_aligned[i])):
+        if (np.isnan(rsi_14_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
+            np.isnan(atr_6h[i]) or atr_6h[i] == 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > daily average volume
-        # Using 4h volume directly vs daily average (more appropriate for 4h timeframe)
-        vol_confirm = volume[i] > vol_sma_20_aligned[i] / 6.0  # Approximate 4h as 1/6 of daily
+        # Normalize 6h ATR by 1d ATR for volatility regime filter
+        atr_ratio = atr_6h[i] / atr_14_aligned[i]
         
         # Long conditions:
-        # 1. Price breaks above daily Donchian high (breakout)
-        # 2. Price above daily EMA34 (bullish bias)
-        # 3. Volume confirmation
-        if (close[i] > donchian_high_20_aligned[i] and 
-            close[i] > ema_34_1d_aligned[i] and 
-            vol_confirm):
+        # 1. 1d RSI < 30 (oversold on higher timeframe)
+        # 2. Current 6h volatility is low relative to daily (mean reversion setup)
+        # 3. Price below 6h VWAP (mean reentry opportunity)
+        if (rsi_14_aligned[i] < 30 and 
+            atr_ratio < 0.8 and 
+            close[i] < np.mean([high[i], low[i], close[i]]) * (volume[i] > 0)):  # Simplified VWAP proxy
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Price breaks below daily Donchian low (breakdown)
-        # 2. Price below daily EMA34 (bearish bias)
-        # 3. Volume confirmation
-        elif (close[i] < donchian_low_20_aligned[i] and 
-              close[i] < ema_34_1d_aligned[i] and 
-              vol_confirm):
+        # 1. 1d RSI > 70 (overbought on higher timeframe)
+        # 2. Current 6h volatility is low relative to daily (mean reversion setup)
+        # 3. Price above 6h VWAP (mean reentry opportunity)
+        elif (rsi_14_aligned[i] > 70 and 
+              atr_ratio < 0.8 and 
+              close[i] > np.mean([high[i], low[i], close[i]]) * (volume[i] > 0)):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian20_EMA34_VolFilter_v1"
-timeframe = "4h"
+name = "6h_RSI14_MeanReversion_VolFilter_v1"
+timeframe = "6h"
 leverage = 1.0
