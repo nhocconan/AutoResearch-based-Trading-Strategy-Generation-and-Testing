@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h mean reversion with 4h trend filter and volume confirmation
-# Long when 1h price < Bollinger lower band (20,2) + 4h EMA50 > EMA200 (bullish trend) + volume > 1.5x 20-period avg
-# Short when 1h price > Bollinger upper band (20,2) + 4h EMA50 < EMA200 (bearish trend) + volume > 1.5x 20-period avg
-# Uses Bollinger bands for mean reversion entries in ranging markets, filtered by 4h trend direction to avoid counter-trend trades.
-# Volume confirmation reduces false breakouts. Designed for low trade frequency (15-35/year) on 1h timeframe.
-# Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
+# Hypothesis: 6h Elder Ray Index (Bull/Bear Power) with 1d EMA trend filter and volume confirmation
+# Long when Bull Power > 0 (close > EMA13) AND Bear Power < 0 (close < EMA34) AND 1d EMA50 > EMA200 (uptrend) AND volume > 1.5x 20-period avg
+# Short when Bear Power < 0 (close < EMA13) AND Bull Power > 0 (close > EMA34) AND 1d EMA50 < EMA200 (downtrend) AND volume > 1.5x 20-period avg
+# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (12-30/year).
+# Elder Ray measures bull/bear power relative to EMAs, providing clear trend strength signals.
+# Works in bull markets (strong bull power) and bear markets (strong bear power) by requiring 1d trend alignment.
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,25 +24,26 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 4h HTF data once before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1d HTF data once before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 4h Indicators: EMA50 and EMA200 (trend filter) ===
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema200_4h = pd.Series(close_4h).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
+    # === 1d Indicators: EMA50 and EMA200 (trend filter) ===
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # === 1h Indicators: Bollinger Bands (20,2) ===
-    bb_window = 20
-    bb_std = 2
-    sma_20 = pd.Series(close).rolling(window=bb_window, min_periods=bb_window).mean().values
-    std_20 = pd.Series(close).rolling(window=bb_window, min_periods=bb_window).std().values
-    bb_upper = sma_20 + (bb_std * std_20)
-    bb_lower = sma_20 - (bb_std * std_20)
+    # === 6h Indicators: EMA13 and EMA34 for Elder Ray ===
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Bull Power = close - EMA13
+    bull_power = close - ema13
+    # Bear Power = close - EMA34
+    bear_power = close - ema34
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -50,7 +51,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(bb_window, 200) + 20  # Bollinger(20) + EMA200(200) + volume(20)
+    warmup = max(34, 200) + 20  # EMA34 + EMA200(1d) + volume(20)
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -62,37 +63,33 @@ def generate_signals(prices):
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # Skip if any required data is NaN
-        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or
-            np.isnan(ema50_4h_aligned[i]) or np.isnan(ema200_4h_aligned[i]) or
+        if (np.isnan(ema13[i]) or np.isnan(ema34[i]) or
+            np.isnan(ema50_aligned[i]) or np.isnan(ema200_aligned[i]) or
             np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Determine 4h trend: bullish if EMA50 > EMA200, bearish if EMA50 < EMA200
-        bullish_trend = ema50_4h_aligned[i] > ema200_4h_aligned[i]
-        bearish_trend = ema50_4h_aligned[i] < ema200_4h_aligned[i]
-        
         # === LONG CONDITIONS ===
-        # 1. Price touches/below Bollinger lower band (mean reversion long)
-        # 2. 4h trend is bullish (only long in uptrend)
+        # 1. Bull Power > 0 (close > EMA13) AND Bear Power < 0 (close < EMA34) = strong bullish momentum
+        # 2. 1d Uptrend (EMA50 > EMA200)
         # 3. Volume confirmation
-        if (close[i] <= bb_lower[i]) and \
-           bullish_trend and vol_confirm:
-            signals[i] = 0.20
+        if (bull_power[i] > 0) and (bear_power[i] < 0) and \
+           (ema50_aligned[i] > ema200_aligned[i]) and vol_confirm:
+            signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price touches/above Bollinger upper band (mean reversion short)
-        # 2. 4h trend is bearish (only short in downtrend)
+        # 1. Bear Power < 0 (close < EMA13) AND Bull Power > 0 (close > EMA34) = strong bearish momentum
+        # 2. 1d Downtrend (EMA50 < EMA200)
         # 3. Volume confirmation
-        elif (close[i] >= bb_upper[i]) and \
-             bearish_trend and vol_confirm:
-            signals[i] = -0.20
+        elif (bear_power[i] < 0) and (bull_power[i] > 0) and \
+             (ema50_aligned[i] < ema200_aligned[i]) and vol_confirm:
+            signals[i] = -0.25
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "1h_BB20_2_4hEMA50_200_Volume_Filter_v1"
-timeframe = "1h"
+name = "6h_ElderRay_EMA13_EMA34_1dEMA50_200_Volume_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
