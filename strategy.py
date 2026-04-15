@@ -3,17 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with Donchian(20) breakout + volume confirmation + ATR filter
-# Uses 1d HTF for trend alignment (price > 1d EMA50 for longs, < for shorts)
-# Designed for low trade frequency (<30/year) to minimize fee drag and work in both bull/bear markets
-# Entry: 12h price breaks Donchian(20) with volume > 1.5x average and ATR > 0.6% of price
-# Trend filter: 1d EMA50 direction (long only when price > EMA50, short only when price < EMA50)
-# Exit: signal=0 when conditions not met or opposite signal triggers
-# Position size: 0.25 (discrete to reduce churn)
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,53 +18,74 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = pd.Series(df_1d['close'].values)
-    ema_50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
+    daily_volume = df_1d['volume'].values
     
-    # Calculate 12h Donchian channels (20-period)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate daily pivot points (standard floor trader's pivots)
+    pivot = (daily_high + daily_low + daily_close) / 3.0
+    r1 = 2 * pivot - daily_low
+    s1 = 2 * pivot - daily_high
+    r2 = pivot + (daily_high - daily_low)
+    s2 = pivot - (daily_high - daily_low)
     
-    # Calculate 12h ATR(14) for volatility filter
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.concatenate([[close[0]], close[:-1]])))
-    tr3 = pd.Series(np.abs(low - np.concatenate([[close[0]], close[:-1]])))
+    # Calculate daily ATR(14) for volatility filter
+    tr1 = pd.Series(daily_high - daily_low)
+    tr2 = pd.Series(np.abs(daily_high - np.concatenate([[daily_close[0]], daily_close[:-1]])))
+    tr3 = pd.Series(np.abs(daily_low - np.concatenate([[daily_close[0]], daily_close[:-1]])))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr_14 = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 12h volume ratio (current vs 20-period average)
+    # Align HTF indicators to 4h timeframe with proper delay
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
+    atr_14_4h = align_htf_to_ltf(prices, df_1d, atr_14)
+    
+    # Calculate 4h Donchian channels (20-period) for breakout signals
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 4h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
     signals = np.zeros(n)
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(highest_20[i]) or 
-            np.isnan(lowest_20[i]) or np.isnan(atr_14[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
+            np.isnan(r2_4h[i]) or np.isnan(s2_4h[i]) or np.isnan(atr_14_4h[i]) or 
+            np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions: price breaks above Donchian high with volume and trend filter
-        if (close[i] > highest_20[i] and            # Breakout above 20-period high
-            close[i] > ema_50_1d_aligned[i] and    # Above 1d EMA50 (uptrend filter)
-            volume_ratio[i] > 1.5 and              # Strong volume confirmation
-            atr_14[i] > 0.006 * close[i]):         # Adequate volatility
+        # Entry conditions:
+        # 1. 4h price breaks above R2 with volume confirmation → long (strong breakout)
+        # 2. 4h price breaks below S2 with volume confirmation → short (strong breakdown)
+        # 3. Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
+        # 4. Volume confirmation: volume > 1.3x average
+        # 5. Discrete position sizing: 0.25
+        
+        # Long conditions: 4h breakout above R2 (strong breakout)
+        if (close[i] > r2_4h[i] and            # 4h price above R2 pivot
+            volume_ratio[i] > 1.3 and          # Volume confirmation
+            atr_14_4h[i] > 0.005 * close[i]):  # Volatility filter
             signals[i] = 0.25
             
-        # Short conditions: price breaks below Donchian low with volume and trend filter
-        elif (close[i] < lowest_20[i] and          # Breakdown below 20-period low
-              close[i] < ema_50_1d_aligned[i] and  # Below 1d EMA50 (downtrend filter)
-              volume_ratio[i] > 1.5 and            # Strong volume confirmation
-              atr_14[i] > 0.006 * close[i]):       # Adequate volatility
+        # Short conditions: 4h breakdown below S2 (strong breakdown)
+        elif (close[i] < s2_4h[i] and          # 4h price below S2 pivot
+              volume_ratio[i] > 1.3 and        # Volume confirmation
+              atr_14_4h[i] > 0.005 * close[i]): # Volatility filter
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "12h_Donchian20_Breakout_Volume_EMA50_Trend_Filter"
-timeframe = "12h"
+name = "4h_Pivot_R2_S2_Breakout_Volume_ATR_Filter"
+timeframe = "4h"
 leverage = 1.0
