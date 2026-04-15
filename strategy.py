@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Calculate 1d ATR(14) for volatility regime filter
@@ -26,11 +26,11 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate daily EMA(34) for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate daily Donchian(20) channels
+    # Calculate 1d Donchian(20) channels
     donchian_high_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
     donchian_low_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
     donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
@@ -40,48 +40,67 @@ def generate_signals(prices):
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
+    # Calculate 4h ADX(14) for trend strength filter
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.concatenate([[close[0]], close[:-1]])), np.abs(low - np.concatenate([[close[0]], close[:-1]]))))
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean()
+    plus_di_14 = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean() / (atr_14 + 1e-10)
+    minus_di_14 = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean() / (atr_14 + 1e-10)
+    dx_14 = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
+    adx_14 = pd.Series(dx_14).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or 
-            np.isnan(volume_ratio[i])):
+            np.isnan(volume_ratio[i]) or np.isnan(adx_14[i])):
             signals[i] = 0.0
             continue
         
         # Volatility regime filter: only trade when daily ATR is elevated (> 0.5% of price)
         vol_regime = atr_14_1d_aligned[i] > 0.005 * close[i]
         
-        # Trend filter: price relative to daily EMA34
-        trend_filter = close[i] > ema_34_1d_aligned[i]
+        # Trend filter: price relative to daily EMA50
+        trend_filter = close[i] > ema_50_1d_aligned[i]
+        
+        # Trend strength filter: ADX > 25
+        trend_strength = adx_14[i] > 25
         
         # Long conditions:
-        # 1. Price above daily EMA34 (bullish bias)
+        # 1. Price above daily EMA50 (bullish bias)
         # 2. Price breaks above daily Donchian(20) high with volume (bullish breakout)
-        # 3. Volume confirmation: volume > 1.8x average
+        # 3. Volume confirmation: volume > 2.0x average
         # 4. Daily volatility regime filter
+        # 5. Strong trend (ADX > 25)
         if (trend_filter and
             close[i] > donchian_high_20_aligned[i] and
-            volume_ratio[i] > 1.8 and
-            vol_regime):
+            volume_ratio[i] > 2.0 and
+            vol_regime and
+            trend_strength):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Price below daily EMA34 (bearish bias)
+        # 1. Price below daily EMA50 (bearish bias)
         # 2. Price breaks below daily Donchian(20) low with volume (bearish breakdown)
-        # 3. Volume confirmation: volume > 1.8x average
+        # 3. Volume confirmation: volume > 2.0x average
         # 4. Daily volatility regime filter
+        # 5. Strong trend (ADX > 25)
         elif (not trend_filter and
               close[i] < donchian_low_20_aligned[i] and
-              volume_ratio[i] > 1.8 and
-              vol_regime):
+              volume_ratio[i] > 2.0 and
+              vol_regime and
+              trend_strength):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Vol_Regime_Donchian20_1dEMA34_Breakout_v1"
+name = "4h_TrendStrength_Donchian20_1dEMA50_VolBreakout_v1"
 timeframe = "4h"
 leverage = 1.0
