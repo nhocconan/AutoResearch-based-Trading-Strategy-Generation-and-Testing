@@ -13,15 +13,10 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily HTF data once before loop (12h primary, 1d HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h HTF data once before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
-    
-    daily_close = df_1d['close'].values
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_volume = df_1d['volume'].values
     
     # Calculate 12h Donchian channels (20-period) for breakout signals
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -31,54 +26,73 @@ def generate_signals(prices):
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
-    # Calculate 1d ATR(14) for volatility filter
-    tr1 = pd.Series(daily_high).shift(1) - pd.Series(daily_low)
-    tr2 = abs(pd.Series(daily_high).shift(1) - pd.Series(daily_close).shift(1))
-    tr3 = abs(pd.Series(daily_low).shift(1) - pd.Series(daily_close).shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14 = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate 12h Camarilla pivot levels (based on previous 12h bar)
+    prev_close = np.concatenate([[df_12h['close'].iloc[0]], df_12h['close'].iloc[:-1]].values)
+    prev_high = np.concatenate([[df_12h['high'].iloc[0]], df_12h['high'].iloc[:-1]].values)
+    prev_low = np.concatenate([[df_12h['low'].iloc[0]], df_12h['low'].iloc[:-1]].values)
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50 = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    camarilla_range = prev_high - prev_low
+    camarilla_r4 = prev_close + (camarilla_range * 1.1 / 2)
+    camarilla_r3 = prev_close + (camarilla_range * 1.1 / 4)
+    camarilla_s3 = prev_close - (camarilla_range * 1.1 / 4)
+    camarilla_s4 = prev_close - (camarilla_range * 1.1 / 2)
     
-    # Align HTF indicators to 12h timeframe with proper delay
-    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50)
-    atr_14_12h = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Calculate 12h EMA20 for trend filter
+    ema_20 = pd.Series(df_12h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Calculate 12h RSI(14) for momentum filter
+    delta = np.diff(df_12h['close'].values, prepend=df_12h['close'].iloc[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_14 = 100 - (100 / (1 + rs))
+    
+    # Align HTF indicators to 4h timeframe with proper delay
+    ema_20_4h = align_htf_to_ltf(prices, df_12h, ema_20)
+    rsi_14_4h = align_htf_to_ltf(prices, df_12h, rsi_14)
+    camarilla_r4_4h = align_htf_to_ltf(prices, df_12h, camarilla_r4)
+    camarilla_r3_4h = align_htf_to_ltf(prices, df_12h, camarilla_r3)
+    camarilla_s3_4h = align_htf_to_ltf(prices, df_12h, camarilla_s3)
+    camarilla_s4_4h = align_htf_to_ltf(prices, df_12h, camarilla_s4)
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h[i]) or np.isnan(atr_14_12h[i]) or 
+        if (np.isnan(ema_20_4h[i]) or np.isnan(rsi_14_4h[i]) or 
+            np.isnan(camarilla_r4_4h[i]) or np.isnan(camarilla_r3_4h[i]) or
+            np.isnan(camarilla_s3_4h[i]) or np.isnan(camarilla_s4_4h[i]) or
             np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
         # Entry conditions:
-        # 1. 1d trend filter: price above/below daily EMA50
-        # 2. 12h Donchian breakout: price breaks 20-period channel
-        # 3. 12h volume confirmation: volume > 1.3x average
-        # 4. 12h volatility filter: ATR > 0.5 * price (avoid low volatility chop)
+        # 1. 12h trend filter: price above/below 12h EMA20
+        # 2. 12h momentum filter: RSI not extreme (avoid overbought/oversold)
+        # 3. 4h Camarilla breakout: price breaks R4/S4 for continuation
+        # 4. 4h volume confirmation: volume > 1.5x average
         # 5. Discrete position sizing: 0.25
         
-        # Long conditions: break above upper Donchian in uptrend
-        if (close[i] > ema_50_12h[i] and          # Daily uptrend filter
-            close[i] > highest_20[i] and          # Donchian breakout
-            volume_ratio[i] > 1.3 and             # Volume confirmation
-            atr_14_12h[i] > 0.005 * close[i]):    # Volatility filter (avoid chop)
+        # Long conditions: break above R4 in uptrend
+        if (close[i] > ema_20_4h[i] and          # 12h uptrend filter
+            rsi_14_4h[i] < 70 and                # Not overbought
+            close[i] > camarilla_r4_4h[i] and    # Camarilla R4 breakout
+            volume_ratio[i] > 1.5):              # Volume confirmation
             signals[i] = 0.25
             
-        # Short conditions: break below lower Donchian in downtrend
-        elif (close[i] < ema_50_12h[i] and        # Daily downtrend filter
-              close[i] < lowest_20[i] and         # Donchian breakdown
-              volume_ratio[i] > 1.3 and           # Volume confirmation
-              atr_14_12h[i] > 0.005 * close[i]):  # Volatility filter
+        # Short conditions: break below S4 in downtrend
+        elif (close[i] < ema_20_4h[i] and        # 12h downtrend filter
+              rsi_14_4h[i] > 30 and              # Not oversold
+              close[i] < camarilla_s4_4h[i] and  # Camarilla S4 breakdown
+              volume_ratio[i] > 1.5):            # Volume confirmation
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "12h_Donchian_Breakout_EMA50_Volume_VolatilityFilter"
-timeframe = "12h"
+name = "4h_12h_Camarilla_R3_S3_R4_S4_Breakout_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
