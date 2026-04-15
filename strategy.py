@@ -40,52 +40,33 @@ def generate_signals(prices):
     rsi_14_1d = 100 - (100 / (1 + rs))
     rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
     
-    # Calculate 12h Donchian(20) breakout for entry timing
-    # Get 12h HTF data
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
-    
-    # Calculate 12h Donchian channels (20-period)
-    donch_high_20 = pd.Series(df_12h['high'].values).rolling(window=20, min_periods=20).max().values
-    donch_low_20 = pd.Series(df_12h['low'].values).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to 12h timeframe
-    donch_high_20_aligned = align_htf_to_ltf(prices, df_12h, donch_high_20)
-    donch_low_20_aligned = align_htf_to_ltf(prices, df_12h, donch_low_20)
-    
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
         if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_20_1d_aligned[i]) or 
-            np.isnan(rsi_14_1d_aligned[i]) or np.isnan(donch_high_20_aligned[i]) or 
-            np.isnan(donch_low_20_aligned[i])):
+            np.isnan(rsi_14_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade when daily ATR is elevated (> 0.3% of price)
-        vol_filter = atr_14_1d_aligned[i] > 0.003 * close[i]
+        # Regime filter: only trade when daily ATR is elevated (> 0.4% of price)
+        vol_filter = atr_14_1d_aligned[i] > 0.004 * close[i]
         
         # Long conditions:
-        # 1. Price breaks above 12h Donchian(20) high
-        # 2. Price above daily EMA20 (bullish bias)
-        # 3. Daily RSI between 45 and 55 (tight momentum filter)
-        # 4. Volatility filter
-        if (close[i] > donch_high_20_aligned[i] and
-            close[i] > ema_20_1d_aligned[i] and
-            45 <= rsi_14_1d_aligned[i] <= 55 and
+        # 1. Price above daily EMA20 (bullish bias)
+        # 2. Daily RSI between 40 and 60 (neutral momentum, avoids extremes)
+        # 3. Volatility filter
+        if (close[i] > ema_20_1d_aligned[i] and
+            40 <= rsi_14_1d_aligned[i] <= 60 and
             vol_filter):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Price breaks below 12h Donchian(20) low
-        # 2. Price below daily EMA20 (bearish bias)
-        # 3. Daily RSI between 45 and 55 (tight momentum filter)
-        # 4. Volatility filter
-        elif (close[i] < donch_low_20_aligned[i] and
-              close[i] < ema_20_1d_aligned[i] and
-              45 <= rsi_14_1d_aligned[i] <= 55 and
+        # 1. Price below daily EMA20 (bearish bias)
+        # 2. Daily RSI between 40 and 60 (neutral momentum, avoids extremes)
+        # 3. Volatility filter
+        elif (close[i] < ema_20_1d_aligned[i] and
+              40 <= rsi_14_1d_aligned[i] <= 60 and
               vol_filter):
             signals[i] = -0.25
         else:
@@ -93,6 +74,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_EMA20_RSI14_VolFilter_v1"
-timeframe = "12h"
+name = "1d_EMA20_RSI14_VolFilter_v1"
+timeframe = "1d"
 leverage = 1.0
