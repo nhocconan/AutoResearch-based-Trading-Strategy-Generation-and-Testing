@@ -1,14 +1,8 @@
+# TODO: Implement hypothesis: 4h Donchian(20) breakout + volume confirmation + choppiness regime filter
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) + volume confirmation + weekly EMA trend filter
-# Elder Ray measures bull/bear power relative to EMA13. Strong bull power (high-EMA13) with
-# volume confirms uptrend strength; strong bear power (low-EMA13) with volume confirms
-# downtrend. Weekly EMA50 filters for higher-timeframe trend alignment. Works in bull
-# by taking longs with bull power, and in bear by taking shorts with bear power.
-# Target: 50-150 total trades over 4 years (12-37/year) with disciplined entries.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,45 +14,56 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 6h data for Elder Ray calculation
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 50:
+    # Load 4h data (primary timeframe) for price action and trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Load 1d data for volume average
+    # Load 1d data for Choppiness Index calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
-    vol_1d = df_1d['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Load 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    close_1w = df_1w['close'].values
+    # Calculate Donchian channels (20-period) on 4h
+    donch_high_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donch_low_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate EMA13 on 6h for Elder Ray
-    ema13_6h = pd.Series(close_6h).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate EMA50 on 4h for trend filter
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Bull Power (High - EMA13) and Bear Power (Low - EMA13)
-    bull_power = high_6h - ema13_6h
-    bear_power = low_6h - ema13_6h
+    # Calculate Choppiness Index (14-period) on 1d
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate volume average (20-period on 1d)
-    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    # Highest high and lowest low over 14 periods
+    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # Calculate EMA50 on 1w for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Chop = 100 * log10(sum(TR14) / (HH14 - LL14)) / log10(14)
+    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    chop = 100 * np.log10(sum_tr_14 / (hh_14 - ll_14 + 1e-10)) / np.log10(14)
     
-    # Align all indicators to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_6h, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_6h, bear_power)
+    # Volume average (20-period on 1d)
+    vol_avg_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all indicators to 4h timeframe
+    donch_high_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_high_4h)
+    donch_low_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_low_4h)
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     signals = np.zeros(n)
     position = 0
@@ -66,36 +71,39 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
-            np.isnan(vol_avg_aligned[i]) or np.isnan(ema50_1w_aligned[i])):
+        if (np.isnan(donch_high_4h_aligned[i]) or np.isnan(donch_low_4h_aligned[i]) or
+            np.isnan(ema50_4h_aligned[i]) or np.isnan(chop_aligned[i]) or
+            np.isnan(vol_avg_aligned[i])):
             continue
         
-        # Long entry: strong bull power + volume above average + price above weekly EMA50
-        if (bull_power_aligned[i] > 0 and
-            volume[i] > vol_avg_aligned[i] and
-            close[i] > ema50_1w_aligned[i] and
+        # Long entry: price breaks above Donchian high + volume spike + chop < 61.8 (trending) + price above EMA50
+        if (close[i] > donch_high_4h_aligned[i] and
+            volume[i] > 1.5 * vol_avg_aligned[i] and
+            chop_aligned[i] < 61.8 and
+            close[i] > ema50_4h_aligned[i] and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: strong bear power + volume above average + price below weekly EMA50
-        elif (bear_power_aligned[i] < 0 and
-              volume[i] > vol_avg_aligned[i] and
-              close[i] < ema50_1w_aligned[i] and
+        # Short entry: price breaks below Donchian low + volume spike + chop < 61.8 (trending) + price below EMA50
+        elif (close[i] < donch_low_4h_aligned[i] and
+              volume[i] > 1.5 * vol_avg_aligned[i] and
+              chop_aligned[i] < 61.8 and
+              close[i] < ema50_4h_aligned[i] and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: opposite power signal or loss of weekly trend alignment
-        elif position == 1 and (bear_power_aligned[i] < 0 or close[i] < ema50_1w_aligned[i]):
+        # Exit: reverse signal or chop > 61.8 (ranging market)
+        elif position == 1 and (close[i] < donch_low_4h_aligned[i] or chop_aligned[i] > 61.8):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (bull_power_aligned[i] > 0 or close[i] > ema50_1w_aligned[i]):
+        elif position == -1 and (close[i] > donch_high_4h_aligned[i] or chop_aligned[i] > 61.8):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "6h_ElderRay_Volume_WeeklyTrend"
-timeframe = "6h"
+name = "4h_Donchian_Volume_Chop_Filter"
+timeframe = "4h"
 leverage = 1.0
