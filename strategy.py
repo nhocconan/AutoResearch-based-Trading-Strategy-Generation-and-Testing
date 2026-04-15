@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 1d Regime Filter
-# Bull Power = High - EMA13(close), Bear Power = EMA13(close) - Low
-# Long when Bull Power > 0 AND Bear Power < 0 AND 1d ADX < 20 (range regime) → mean reversion
-# Short when Bear Power > 0 AND Bull Power < 0 AND 1d ADX < 20 (range regime) → mean reversion
-# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (15-30/year).
-# Elder Ray measures bull/bear strength relative to EMA. Works in ranging markets by fading extremes when ADX shows no trend.
-# In trending markets (ADX >= 20), we stay flat to avoid whipsaws. Effective in both bull and bear markets as it targets mean reversion in ranges.
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d ADX trend filter and volume confirmation
+# Long when price breaks above 4h Camarilla R1 (from 1d) + 1d ADX > 25 + volume > 1.5x 20-period avg
+# Short when price breaks below 4h Camarilla S1 (from 1d) + 1d ADX > 25 + volume > 1.5x 20-period avg
+# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (20-40/year).
+# Camarilla levels from daily timeframe provide institutional support/resistance. ADX filter ensures we only trade strong trends.
+# Works in bull markets (trend continuation at R1) and bear markets (strong downtrends at S1) by requiring ADX > 25.
 
 def generate_signals(prices):
     n = len(prices)
@@ -30,7 +29,7 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d Indicator: ADX (regime filter) ===
+    # === 1d Indicator: ADX (trend strength filter) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -91,18 +90,33 @@ def generate_signals(prices):
     
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # === 6h Indicator: Elder Ray (Bull Power, Bear Power) ===
-    ema_period = 13
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=ema_period, adjust=False, min_periods=ema_period).mean().values
+    # === 4h Indicator: Camarilla Levels (from 1d) ===
+    # Camarilla levels: based on previous day's range
+    # R1 = close + 1.1*(high-low)/12
+    # S1 = close - 1.1*(high-low)/12
+    # We use the previous day's values, so we need to shift by 1
+    high_1d_shift = np.roll(high_1d, 1)
+    low_1d_shift = np.roll(low_1d, 1)
+    close_1d_shift = np.roll(close_1d, 1)
+    high_1d_shift[0] = high_1d[0]  # first bar uses same day
+    low_1d_shift[0] = low_1d[0]
+    close_1d_shift[0] = close_1d[0]
     
-    bull_power = high - ema13
-    bear_power = ema13 - low
+    camarilla_range = (high_1d_shift - low_1d_shift)
+    camarilla_R1 = close_1d_shift + 1.1 * camarilla_range / 12
+    camarilla_S1 = close_1d_shift - 1.1 * camarilla_range / 12
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
+    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
+    
+    # Volume SMA for confirmation (using 20-period)
+    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(ema_period, 2*period)  # EMA13 + ADX(28)
+    warmup = max(2*period, 20) + 2  # ADX(28) + volume(20) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -110,46 +124,36 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
+        # Volume filter: current volume > 1.5x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
+        
         # Skip if any required data is NaN
-        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(camarilla_R1_aligned[i]) or np.isnan(camarilla_S1_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Range regime: 1d ADX < 20 (no strong trend)
-        if adx_aligned[i] >= 20:
-            signals[i] = 0.0  # flat in trending markets
-            continue
-        
         # === LONG CONDITIONS ===
-        # Bull Power > 0 (strong bulls) AND Bear Power < 0 (weak bears) = bullish extreme in range → mean reversion short?
-        # Actually, we want to fade extremes: when Bull Power > 0 AND Bear Power < 0, it's balanced but bulls slightly stronger
-        # Let's reverse: Long when Bear Power > 0 AND Bull Power < 0 (bears stronger but bulls weak → bullish reversal)
-        # Wait, let's think: Elder Ray interpretation:
-        # - Bull Power > 0: Bulls in control (price above EMA)
-        # - Bear Power > 0: Bears in control (price below EMA)
-        # For mean reversion in range:
-        # Long when Bear Power > 0 AND Bull Power < 0 (price below EMA but bulls weak → oversold?)
-        # Actually standard Elder Ray:
-        # - Bull Power increasing: bulls gaining strength
-        # - Bear Power increasing: bears gaining strength
-        # Let's use divergence: Long when Bull Power > 0 and rising AND Bear Power < 0 and falling
-        # But that's complex. Simpler: Long when Bear Power > 0 (bears in control) AND Bull Power < 0 (bulls weak) AND Bear Power declining?
-        # No, let's look at what works: fade when one power is extreme.
-        # Long when Bear Power > 0 (extreme bearish) AND Bull Power < 0 (bulls weak) → oversold
-        # Short when Bull Power > 0 (extreme bullish) AND Bear Power < 0 (bears weak) → overbought
+        # 1. Price breaks above 4h Camarilla R1 (from 1d)
+        # 2. Trend (1d ADX > 25)
+        # 3. Volume confirmation
+        if (close[i] > camarilla_R1_aligned[i]) and \
+           (adx_aligned[i] > 25) and vol_confirm:
+            signals[i] = 0.25
         
-        # Extreme bearish: Bear Power > 0 AND Bull Power < 0
-        # Extreme bullish: Bull Power > 0 AND Bear Power < 0
-        if (bear_power[i] > 0) and (bull_power[i] < 0):
-            signals[i] = 0.25  # long (fade bearish extreme)
-        elif (bull_power[i] > 0) and (bear_power[i] < 0):
-            signals[i] = -0.25  # short (fade bullish extreme)
+        # === SHORT CONDITIONS ===
+        # 1. Price breaks below 4h Camarilla S1 (from 1d)
+        # 2. Trend (1d ADX > 25)
+        # 3. Volume confirmation
+        elif (close[i] < camarilla_S1_aligned[i]) and \
+             (adx_aligned[i] > 25) and vol_confirm:
+            signals[i] = -0.25
+        
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "6h_ElderRay_1dADX20_RangeFilter_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_1dADX25_Volume_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
