@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Bollinger Band Squeeze Breakout with Volume Spike and 12h EMA Trend Filter
-# Uses Bollinger Bands squeeze (low volatility) as a precursor to explosive moves.
-# Entry on breakout of Bollinger Bands with volume spike confirmation.
-# Trend filter uses 12h EMA50 to ensure we trade in direction of higher timeframe trend.
-# Works in bull markets (breakouts up with trend) and bear markets (breakouts down with trend).
-# Target: 50-150 total trades over 4 years to avoid fee drag.
+# Hypothesis: 1h Mean Reversion with 4h Trend Filter and Volume Confirmation
+# Uses RSI(2) for extreme mean reversion signals on 1h, filtered by 4h EMA trend direction.
+# Only takes long when price > 4h EMA50 and RSI(2) < 10, short when price < 4h EMA50 and RSI(2) > 90.
+# Volume confirmation requires current volume > 1.5x 20-bar median volume.
+# Works in both bull and bear markets by following the 4h trend direction.
+# Target: 60-150 total trades over 4 years = 15-37/year for 1h.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,78 +20,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Bollinger Bands
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
+    close_4h = df_4h['close'].values
     
-    # Load 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    close_12h = df_12h['close'].values
+    # Calculate EMA(50) on 4h close
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Bollinger Bands (20, 2.0) on daily
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean()
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std()
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
-    
-    # Squeeze condition: Bollinger Band Width < 20th percentile of last 50 days
-    bb_width = upper_bb - lower_bb
-    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=50).quantile(0.2)
-    squeeze = bb_width < bb_width_percentile.values
-    
-    # Breakout conditions
-    breakout_up = close_1d > upper_bb
-    breakout_down = close_1d < lower_bb
-    
-    # Align signals to 4h timeframe
-    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze.values.astype(float))
-    breakout_up_aligned = align_htf_to_ltf(prices, df_1d, breakout_up.values.astype(float))
-    breakout_down_aligned = align_htf_to_ltf(prices, df_1d, breakout_down.values.astype(float))
-    
-    # EMA50 on 12h for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate RSI(2) on 1h close
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25  # Position size
+    base_size = 0.20  # Position size
     
-    for i in range(100, n):
+    for i in range(2, n):
         # Skip if any required data is NaN
-        if (np.isnan(squeeze_aligned[i]) or np.isnan(breakout_up_aligned[i]) or 
-            np.isnan(breakout_down_aligned[i]) or np.isnan(ema_50_aligned[i])):
+        if np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi[i]):
             continue
         
-        # Long entry: squeeze breakout up + volume spike + price above 12h EMA50
-        if (squeeze_aligned[i] == 1 and breakout_up_aligned[i] == 1 and
-            volume[i] > 2.0 * np.median(window := volume[max(0, i-20):i+1]) and
-            close[i] > ema_50_aligned[i] and
+        # Volume confirmation: current volume > 1.5x 20-bar median
+        vol_median = np.median(volume[max(0, i-19):i+1])
+        vol_confirmed = volume[i] > 1.5 * vol_median
+        
+        # Long entry: price > 4h EMA50 (uptrend) + RSI(2) < 10 (oversold) + volume
+        if (close[i] > ema_50_4h_aligned[i] and
+            rsi[i] < 10 and
+            vol_confirmed and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: squeeze breakout down + volume spike + price below 12h EMA50
-        elif (squeeze_aligned[i] == 1 and breakout_down_aligned[i] == 1 and
-              volume[i] > 2.0 * np.median(window := volume[max(0, i-20):i+1]) and
-              close[i] < ema_50_aligned[i] and
+        # Short entry: price < 4h EMA50 (downtrend) + RSI(2) > 90 (overbought) + volume
+        elif (close[i] < ema_50_4h_aligned[i] and
+              rsi[i] > 90 and
+              vol_confirmed and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: opposite breakout or volatility expansion (end of squeeze)
-        elif position == 1 and (breakout_down_aligned[i] == 1 or squeeze_aligned[i] == 0):
+        # Exit: RSI returns to neutral zone (40-60) or trend reversal
+        elif position == 1 and (rsi[i] > 40 or close[i] < ema_50_4h_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (breakout_up_aligned[i] == 1 or squeeze_aligned[i] == 0):
+        elif position == -1 and (rsi[i] < 60 or close[i] > ema_50_4h_aligned[i]):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Bollinger_Squeeze_Volume_EMA50"
-timeframe = "4h"
+name = "1h_RSI2_4hEMA50_Volume_MeanReversion"
+timeframe = "1h"
 leverage = 1.0
