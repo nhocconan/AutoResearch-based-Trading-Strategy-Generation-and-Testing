@@ -3,10 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian breakout with 12h volume confirmation and 1d trend filter
-# Uses Donchian(20) on 6h for entry, confirmed by 12h volume spike and 1d EMA trend.
-# Works in bull markets (breakouts above upper band with uptrend) and bear markets
-# (breakouts below lower band with downtrend). Target: 50-150 total trades over 4 years.
+# Hypothesis: 4h Volume-Weighted VWAP Deviation with 1d Trend Filter
+# Trades when price deviates significantly from 4h VWAP (mean reversion) only when
+# the 1d trend is strong (ADX > 25). Uses volume-weighted price to avoid false signals.
+# Works in both bull (buy dips in uptrend) and bear (sell rallies in downtrend).
+# Target: 40-80 total trades to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,81 +19,104 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 6h data for Donchian (self-referential but needed for calculation)
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
-        return np.zeros(n)
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    
-    # Calculate Donchian channels (20-period) on 6h
-    highest_20 = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
-    
-    # Load 12h data for volume confirmation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    volume_12h = df_12h['volume'].values
-    
-    # Calculate 12h volume MA(20) for spike detection
-    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    
-    # Load 1d data for trend filter (EMA 50)
+    # Load 1d data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA(50) for trend
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 4h VWAP (typical price * volume) / cumulative volume
+    typical_price = (high + low + close) / 3.0
+    vwap_numerator = typical_price * volume
+    vwap_denominator = volume
     
-    # Align all indicators to 6h timeframe
-    highest_20_aligned = align_htf_to_ltf(prices, df_6h, highest_20)
-    lowest_20_aligned = align_htf_to_ltf(prices, df_6h, lowest_20)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Cumulative sums for VWAP
+    cum_vwap_num = np.cumsum(vwap_numerator)
+    cum_vwap_den = np.cumsum(vwap_denominator)
+    vwap = np.where(cum_vwap_den > 0, cum_vwap_num / cum_vwap_den, 0)
+    
+    # Calculate standard deviation of price from VWAP (20-period)
+    price_dev = typical_price - vwap
+    # Use pandas rolling for std with min_periods
+    price_dev_series = pd.Series(price_dev)
+    vwap_std = price_dev_series.rolling(window=20, min_periods=20).std().values
+    
+    # Z-score: how many standard deviations price is from VWAP
+    zscore = np.where(vwap_std > 0, price_dev / vwap_std, 0)
+    
+    # Calculate ADX (14-period) on 1d for trend filter
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / (atr_1d + 1e-10)
+    di_minus = 100 * dm_minus_smooth / (atr_1d + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx_1d = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align 1d ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25  # Position size
+    base_size = 0.25  # Position size (25% of capital)
     
-    for i in range(50, n):
-        # Skip if any required data is NaN
-        if (np.isnan(highest_20_aligned[i]) or np.isnan(lowest_20_aligned[i]) or
-            np.isnan(vol_ma_20_aligned[i]) or np.isnan(ema_50_1d_aligned[i])):
+    # Warmup period to ensure indicators are valid
+    start_idx = max(30, 20)  # ADX needs 30, VWAP std needs 20
+    
+    for i in range(start_idx, n):
+        # Skip if any required data is invalid
+        if (np.isnan(vwap[i]) or np.isnan(vwap_std[i]) or 
+            np.isnan(zscore[i]) or np.isnan(adx_aligned[i])):
             continue
         
-        # Volume spike condition: current 12h volume > 1.5x its 20-period MA
-        vol_12h_current = volume_12h[i // 2] if i // 2 < len(volume_12h) else volume_12h[-1]
-        vol_spike = vol_12h_current > 1.5 * vol_ma_20_aligned[i]
-        
-        # Long entry: price breaks above Donchian upper + volume spike + uptrend (price > EMA50)
-        if (close[i] > highest_20_aligned[i] and
-            vol_spike and
-            close[i] > ema_50_1d_aligned[i] and
+        # Long entry: price significantly below VWAP (oversold) in uptrend
+        if (zscore[i] < -1.5 and  # Price is 1.5+ std below VWAP
+            adx_aligned[i] > 25 and  # Strong trend
+            di_plus[i] > di_minus[i] and  # Plus DI > Minus DI (uptrend bias)
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below Donchian lower + volume spike + downtrend (price < EMA50)
-        elif (close[i] < lowest_20_aligned[i] and
-              vol_spike and
-              close[i] < ema_50_1d_aligned[i] and
+        # Short entry: price significantly above VWAP (overbought) in downtrend
+        elif (zscore[i] > 1.5 and  # Price is 1.5+ std above VWAP
+              adx_aligned[i] > 25 and  # Strong trend
+              di_minus[i] > di_plus[i] and  # Minus DI > Plus DI (downtrend bias)
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: opposite Donchian breakout or loss of volume spike
-        elif position == 1 and (close[i] < lowest_20_aligned[i] or not vol_spike):
+        # Exit: price returns to VWAP (mean reversion complete) or trend weakens
+        elif position == 1 and (zscore[i] > -0.5 or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > highest_20_aligned[i] or not vol_spike):
+        elif position == -1 and (zscore[i] < 0.5 or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "6h_Donchian_Volume_Trend"
-timeframe = "6h"
+name = "4h_VWAP_Deviation_1dADX"
+timeframe = "4h"
 leverage = 1.0
