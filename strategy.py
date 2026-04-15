@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1w EMA50 trend + volume confirmation
-# Long when price breaks above 12h Donchian high AND price > 1w EMA50 (bullish trend)
-# Short when price breaks below 12h Donchian low AND price < 1w EMA50 (bearish trend)
-# Volume confirmation: current volume > 1.5x 20-bar median volume
-# Exit: price crosses back through Donchian midpoint
-# Designed to capture trending moves with volume confirmation while avoiding whipsaws.
+# Hypothesis: 4h Williams %R + 1d Bollinger Bands + Volume Filter
+# Williams %R identifies overbought/oversold conditions on 4h timeframe.
+# 1d Bollinger Bands provide trend context: price above upper band = bullish bias, below lower band = bearish bias.
+# Volume confirmation requires > 1.5x 20-bar median volume to filter low-quality signals.
+# Designed to work in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets.
 # Conservative sizing (0.25) to limit trade frequency and avoid fee drag.
 
 def generate_signals(prices):
@@ -21,22 +20,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-week EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # 1-day Bollinger Bands (20, 2)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean()
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std()
+    upper_band = sma_20 + 2 * std_20
+    lower_band = sma_20 - 2 * std_20
+    # Determine bias: 1 = bullish (price above upper band), -1 = bearish (price below lower band), 0 = neutral
+    bias = np.where(close_1d > upper_band.values, 1, np.where(close_1d < lower_band.values, -1, 0))
+    bias_aligned = align_htf_to_ltf(prices, df_1d, bias)
     
-    # 12h Donchian channels (20-period)
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    donch_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2.0
-    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low)
-    donch_mid_aligned = align_htf_to_ltf(prices, df_12h, donch_mid)
+    # 4h Williams %R (14 periods)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
     
     # Volume confirmation: current > 1.5x median of last 20 bars
     vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
@@ -44,29 +42,28 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(20, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or np.isnan(donch_mid_aligned[i]) or 
+        if (np.isnan(williams_r[i]) or np.isnan(bias_aligned[i]) or 
             np.isnan(vol_threshold[i])):
             continue
         
-        # Long: price breaks above Donchian high, price > 1w EMA50, volume spike
-        if (close[i] > donch_high_aligned[i] and 
-            close[i] > ema_1w_aligned[i] and 
+        # Long: Williams %R oversold (< -80) and bullish bias (1d price above upper BB)
+        if (williams_r[i] < -80 and 
+            bias_aligned[i] == 1 and 
             volume[i] > vol_threshold[i]):
             signals[i] = 0.25
         
-        # Short: price breaks below Donchian low, price < 1w EMA50, volume spike
-        elif (close[i] < donch_low_aligned[i] and 
-              close[i] < ema_1w_aligned[i] and 
+        # Short: Williams %R overbought (> -20) and bearish bias (1d price below lower BB)
+        elif (williams_r[i] > -20 and 
+              bias_aligned[i] == -1 and 
               volume[i] > vol_threshold[i]):
             signals[i] = -0.25
         
-        # Exit: price crosses back through Donchian midpoint
+        # Exit: Williams %R returns to neutral range (-50 to -50) or bias changes
         elif (i > 0 and 
-              ((signals[i-1] == 0.25 and close[i] <= donch_mid_aligned[i]) or
-               (signals[i-1] == -0.25 and close[i] >= donch_mid_aligned[i]))):
+              ((signals[i-1] == 0.25 and (williams_r[i] >= -50 or bias_aligned[i] != 1)) or
+               (signals[i-1] == -0.25 and (williams_r[i] <= -50 or bias_aligned[i] != -1)))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -75,6 +72,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_1wEMA50_Volume"
-timeframe = "12h"
+name = "4h_WilliamsR_1dBB_Volume"
+timeframe = "4h"
 leverage = 1.0
