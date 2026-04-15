@@ -3,18 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian breakout with weekly pivot bias and volume confirmation
-# Uses 20-period Donchian channel breakouts for trend following.
-# Weekly pivot direction (from weekly pivot points) provides trend bias: 
-# only take long when weekly bias is bullish, short when bearish.
-# Volume confirmation requires current volume > 1.5x median of past 20 periods.
-# Works in bull markets (breakouts up with bullish bias) and bear markets (breakouts down with bearish bias).
-# Target: 50-150 total trades over 4 years = 12-37/year.
-# Timeframe: 6h, HTF: 1w for pivot calculation.
+# Hypothesis: 12h Camarilla Pivot + Volume Spike + ADX Trend Filter
+# Uses daily Camarilla pivot levels (H3/L3) as support/resistance. Long when price crosses above H3 with
+# volume spike and ADX > 25; short when price crosses below L3 with volume spike and ADX > 25.
+# Works in bull markets (buy breakouts) and bear markets (sell breakdowns). Target: 50-150 total trades.
+# Timeframe: 12h, HTF: 1d
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,77 +19,105 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Load 1d data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points (standard floor trader method)
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Calculate Camarilla levels for each day: H3, L3
+    # Formula: H3 = close + 1.1 * (high - low) / 2, L3 = close - 1.1 * (high - low) / 2
+    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 2
+    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 2
     
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    weekly_range = weekly_high - weekly_low
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s1 = 2 * weekly_pivot - weekly_high
-    weekly_r2 = weekly_pivot + weekly_range
-    weekly_s2 = weekly_pivot - weekly_range
-    weekly_r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
-    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
+    # Shift by 1 to avoid look-ahead (use previous day's levels)
+    prev_h3 = np.roll(camarilla_h3, 1)
+    prev_l3 = np.roll(camarilla_l3, 1)
+    prev_h3[0] = np.nan
+    prev_l3[0] = np.nan
     
-    # Determine weekly bias: bullish if close > pivot, bearish if close < pivot
-    weekly_bias = np.where(weekly_close > weekly_pivot, 1, 
-                          np.where(weekly_close < weekly_pivot, -1, 0))
+    # Align to 12h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, prev_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, prev_l3)
     
-    # Align weekly bias to 6h timeframe
-    weekly_bias_aligned = align_htf_to_ltf(prices, df_1w, weekly_bias)
+    # Load 12h data for ADX trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Donchian channel (20-period) on 6h
-    donchian_period = 20
-    highest_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    lowest_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    # Calculate ADX (14-period) on 12h
+    # True Range
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    
+    # Directional Movement
+    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
+                       np.maximum(high_12h - np.roll(close_12h, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(close_12h, 1)), 
+                        np.maximum(np.roll(close_12h, 1) - low_12h, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
+    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25  # Position size (25% of capital)
+    base_size = 0.25  # Position size
     
-    for i in range(donchian_period, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(weekly_bias_aligned[i])):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(adx_aligned[i])):
             continue
         
-        # Long entry: price breaks above Donchian high + weekly bias bullish + volume confirmation
-        if (close[i] > highest_high[i] and
-            weekly_bias_aligned[i] == 1 and
-            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
+        # Long entry: price crosses above H3 + volume spike + ADX > 25
+        if (close[i] > h3_aligned[i] and
+            volume[i] > 2.0 * np.median(volume[max(0, i-20):i+1]) and
+            adx_aligned[i] > 25 and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below Donchian low + weekly bias bearish + volume confirmation
-        elif (close[i] < lowest_low[i] and
-              weekly_bias_aligned[i] == -1 and
-              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
+        # Short entry: price crosses below L3 + volume spike + ADX > 25
+        elif (close[i] < l3_aligned[i] and
+              volume[i] > 2.0 * np.median(volume[max(0, i-20):i+1]) and
+              adx_aligned[i] > 25 and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: opposite Donchian breakout or weekly bias flip
-        elif position == 1 and (close[i] < lowest_low[i] or weekly_bias_aligned[i] == -1):
+        # Exit: reverse crossover or ADX < 20 (ranging market)
+        elif position == 1 and (close[i] < l3_aligned[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > highest_high[i] or weekly_bias_aligned[i] == 1):
+        elif position == -1 and (close[i] > h3_aligned[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "6h_Donchian_WeeklyPivot_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_Pivot_Volume_ADX"
+timeframe = "12h"
 leverage = 1.0
