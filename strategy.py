@@ -30,11 +30,13 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 12h Donchian(20) channels
-    donchian_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate daily Donchian(20) channels
+    donchian_high_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
+    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
+    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
     
-    # Calculate 12h volume ratio (current vs 20-period average)
+    # Calculate 4h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
@@ -43,7 +45,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any required data is NaN
         if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(donchian_high_20[i]) or np.isnan(donchian_low_20[i]) or 
+            np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or 
             np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
@@ -56,22 +58,22 @@ def generate_signals(prices):
         
         # Long conditions:
         # 1. Price above daily EMA34 (bullish bias)
-        # 2. Price breaks above 12h Donchian(20) high with volume (bullish breakout)
+        # 2. Price breaks above daily Donchian(20) high with volume (bullish breakout)
         # 3. Volume confirmation: volume > 1.8x average
         # 4. Daily volatility regime filter
         if (trend_filter and
-            close[i] > donchian_high_20[i] and
+            close[i] > donchian_high_20_aligned[i] and
             volume_ratio[i] > 1.8 and
             vol_regime):
             signals[i] = 0.25
             
         # Short conditions:
         # 1. Price below daily EMA34 (bearish bias)
-        # 2. Price breaks below 12h Donchian(20) low with volume (bearish breakdown)
+        # 2. Price breaks below daily Donchian(20) low with volume (bearish breakdown)
         # 3. Volume confirmation: volume > 1.8x average
         # 4. Daily volatility regime filter
         elif (not trend_filter and
-              close[i] < donchian_low_20[i] and
+              close[i] < donchian_low_20_aligned[i] and
               volume_ratio[i] > 1.8 and
               vol_regime):
             signals[i] = -0.25
@@ -80,6 +82,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Vol_Regime_Donchian20_1dEMA34_Breakout_v1"
-timeframe = "12h"
+name = "4h_Vol_Regime_Donchian20_1dEMA34_Breakout_v1"
+timeframe = "4h"
 leverage = 1.0
