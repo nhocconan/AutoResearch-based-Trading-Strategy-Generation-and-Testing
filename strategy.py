@@ -3,10 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot R1/S1 breakout with 1d EMA50 trend filter and volume spike confirmation.
-# Uses 1d EMA(50) for trend bias, 12h Camarilla levels for entry, and volume > 2.0x 20-bar SMA for confirmation.
-# Designed for low trade frequency (12-37/year) to minimize fee drag. Works in bull/bear: EMA50 avoids counter-trend trades,
-# Camarilla breakouts capture momentum with institutional relevance. Volume filter ensures breakouts have conviction.
+# Hypothesis: 1d Donchian breakout (20) with 1w Supertrend(ATR=10, mult=3) trend filter and volume confirmation.
+# Uses 1w Supertrend for robust trend bias in both bull/bear markets and Donchian breakouts for momentum entries.
+# Volume filter (current volume > 1.3x 20-bar SMA) ensures breakouts have conviction.
+# Designed for very low trade frequency (~15-25/year) to minimize fee drag. Works in bull/bear: Supertrend avoids counter-trend,
+# Donchian captures breakouts with volume confirmation. Signal size 0.25 balances capture and drawdown control.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,31 +19,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h and 1d HTF data once before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Get 1d and 1w HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_12h) < 50 or len(df_1d) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 50 or len(df_1w) < 50:
         return np.zeros(n)
     
-    # === 12h Indicators: Camarilla Pivot Levels (R1, S1) ===
-    # Calculate from previous 12h bar's OHLC
-    high_12h = pd.Series(df_12h['high'].values)
-    low_12h = pd.Series(df_12h['low'].values)
-    close_12h = pd.Series(df_12h['close'].values)
+    # === 1d Indicators: Donchian Channel (20) ===
+    high_1d = pd.Series(df_1d['high'].values)
+    low_1d = pd.Series(df_1d['low'].values)
+    donchian_high = high_1d.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_1d.rolling(window=20, min_periods=20).min().values
     
-    # Pivot point and Camarilla levels
-    pivot = (high_12h + low_12h + close_12h) / 3
-    range_12h = high_12h - low_12h
-    r1 = pivot + (range_12h * 1.1 / 12)
-    s1 = pivot - (range_12h * 1.1 / 12)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    r1_aligned = align_htf_to_ltf(prices, df_12h, r1.values)
-    s1_aligned = align_htf_to_ltf(prices, df_12h, s1.values)
+    # === 1w Indicators: Supertrend(ATR=10, mult=3) ===
+    # True Range
+    tr1 = pd.Series(df_1w['high'].values) - pd.Series(df_1w['low'].values)
+    tr2 = abs(pd.Series(df_1w['high'].values) - pd.Series(df_1w['close'].values).shift(1))
+    tr3 = abs(pd.Series(df_1w['low'].values) - pd.Series(df_1w['close'].values).shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_10 = tr.rolling(window=10, min_periods=10).mean().values
     
-    # === 1d Indicators: Trend Filter ===
-    # 1d EMA(50) for trend bias
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Basic Upper and Lower Bands
+    hl2 = (pd.Series(df_1w['high'].values) + pd.Series(df_1w['low'].values)) / 2
+    upper_basic = hl2 + (3 * atr_10)
+    lower_basic = hl2 - (3 * atr_10)
+    
+    # Initialize Supertrend
+    supertrend = np.full_like(hl2.values, np.nan, dtype=float)
+    direction = np.full_like(hl2.values, 1, dtype=int)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(1, len(hl2)):
+        if np.isnan(atr_10[i-1]) or np.isnan(upper_basic[i-1]) or np.isnan(lower_basic[i-1]):
+            continue
+        # Upper Band
+        if pd.Series(df_1w['close'].values).iloc[i-1] <= supertrend[i-1]:
+            upper_basic[i] = min(upper_basic[i], upper_basic[i-1])
+        else:
+            upper_basic[i] = upper_basic[i]
+        # Lower Band
+        if pd.Series(df_1w['close'].values).iloc[i-1] >= supertrend[i-1]:
+            lower_basic[i] = max(lower_basic[i], lower_basic[i-1])
+        else:
+            lower_basic[i] = lower_basic[i]
+        # Supertrend
+        if pd.Series(df_1w['close'].values).iloc[i] <= upper_basic[i]:
+            supertrend[i] = upper_basic[i]
+            direction[i] = -1
+        else:
+            supertrend[i] = lower_basic[i]
+            direction[i] = 1
+    
+    # Align Supertrend and direction to 1d timeframe
+    supertrend_aligned = align_htf_to_ltf(prices, df_1w, supertrend)
+    direction_aligned = align_htf_to_ltf(prices, df_1w, direction)
     
     signals = np.zeros(n)
     
@@ -50,31 +82,31 @@ def generate_signals(prices):
     warmup = 100
     
     for i in range(warmup, n):
-        # Volume filter: current volume > 2.0x 20-period volume SMA
+        # Volume filter: current volume > 1.3x 20-period volume SMA
         vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.3)
         
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above Camarilla R1
-        # 2. 1d price above EMA50 (bullish trend bias)
-        # 3. Volume confirmation (>2.0x average)
-        if (close[i] > r1_aligned[i] and
-            close[i] > ema_50_1d_aligned[i] and
+        # 1. Price breaks above Donchian high (20-period breakout)
+        # 2. 1w Supertrend indicates uptrend (direction = 1)
+        # 3. Volume confirmation
+        if (close[i] > donchian_high_aligned[i] and
+            direction_aligned[i] == 1 and
             vol_confirm):
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below Camarilla S1
-        # 2. 1d price below EMA50 (bearish trend bias)
-        # 3. Volume confirmation (>2.0x average)
-        elif (close[i] < s1_aligned[i] and
-              close[i] < ema_50_1d_aligned[i] and
+        # 1. Price breaks below Donchian low (20-period breakdown)
+        # 2. 1w Supertrend indicates downtrend (direction = -1)
+        # 3. Volume confirmation
+        elif (close[i] < donchian_low_aligned[i] and
+              direction_aligned[i] == -1 and
               vol_confirm):
             signals[i] = -0.25
         
@@ -83,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_EMA50_VolumeFilter_v1"
-timeframe = "12h"
+name = "1d_Donchian20_Supertrend10_3_VolFilter_v1"
+timeframe = "1d"
 leverage = 1.0
