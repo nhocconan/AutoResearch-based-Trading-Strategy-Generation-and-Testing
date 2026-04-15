@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud breakout with 1d trend filter and volume confirmation
-# Long when price breaks above Ichimoku cloud (Senkou Span A/B) + 1d EMA50 > EMA200 (bullish trend) + volume > 1.5x 20-period avg
-# Short when price breaks below Ichimoku cloud + 1d EMA50 < EMA200 (bearish trend) + volume > 1.5x 20-period avg
-# Ichimoku provides dynamic support/resistance via cloud. EMA50/200 filter ensures we trade with higher timeframe trend.
-# Works in bull markets (cloud acts as support in uptrends) and bear markets (cloud acts as resistance in downtrends).
-# Designed for low trade frequency (12-30/year) with discrete sizing (0.25) to minimize fee churn.
+# Hypothesis: 12h Camarilla pivot R1/S1 breakout with 1d volume spike and ADX trend filter
+# Long when price breaks above 1d Camarilla R1 + 1d ADX > 20 + volume > 2x 20-period avg
+# Short when price breaks below 1d Camarilla S1 + 1d ADX > 20 + volume > 2x 20-period avg
+# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (12-25/year).
+# Camarilla pivots provide intraday support/resistance levels. ADX filter ensures we only trade strong trends.
+# Volume spike confirms institutional participation. Works in bull/bear by requiring ADX > 20 (lower threshold for 12h).
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,46 +26,78 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d Indicators: EMA50 and EMA200 (trend filter) ===
+    # === 1d Indicator: ADX (trend strength filter) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # EMA50
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # EMA200
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate ADX components: +DM, -DM, TR
+    high_1d_shift = np.roll(high_1d, 1)
+    low_1d_shift = np.roll(low_1d, 1)
+    high_1d_shift[0] = high_1d[0]
+    low_1d_shift[0] = low_1d[0]
     
-    # Align to 6h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    plus_dm = np.where((high_1d - high_1d_shift) > (low_1d_shift - low_1d), 
+                       np.maximum(high_1d - high_1d_shift, 0), 0)
+    minus_dm = np.where((low_1d_shift - low_1d) > (high_1d - high_1d_shift), 
+                        np.maximum(low_1d_shift - low_1d, 0), 0)
     
-    # === 6h Indicator: Ichimoku Cloud ===
-    # Conversion Line (Tenkan-sen): (9-period high + 9-period low) / 2
-    period_9 = 9
-    high_9 = pd.Series(high).rolling(window=period_9, min_periods=period_9).max().values
-    low_9 = pd.Series(low).rolling(window=period_9, min_periods=period_9).min().values
-    tenkan_sen = (high_9 + low_9) / 2
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]
+    tr2[0] = np.abs(high_1d[0] - close_1d[0])
+    tr3[0] = np.abs(low_1d[0] - close_1d[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Base Line (Kijun-sen): (26-period high + 26-period low) / 2
-    period_26 = 26
-    high_26 = pd.Series(high).rolling(window=period_26, min_periods=period_26).max().values
-    low_26 = pd.Series(low).rolling(window=period_26, min_periods=period_26).min().values
-    kijun_sen = (high_26 + low_26) / 2
+    # Wilder's smoothing (alpha = 1/period)
+    period = 14
+    alpha = 1.0 / period
     
-    # Leading Span A (Senkou Span A): (Conversion Line + Base Line) / 2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    atr = np.zeros_like(tr)
+    atr[period-1] = np.mean(tr[:period])
+    for i in range(period, len(tr)):
+        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
     
-    # Leading Span B (Senkou Span B): (52-period high + 52-period low) / 2
-    period_52 = 52
-    high_52 = pd.Series(high).rolling(window=period_52, min_periods=period_52).max().values
-    low_52 = pd.Series(low).rolling(window=period_52, min_periods=period_52).min().values
-    senkou_span_b = (high_52 + low_52) / 2
+    plus_di = np.zeros_like(plus_dm)
+    minus_di = np.zeros_like(minus_dm)
     
-    # The cloud is between Senkou Span A and B
-    # We need to shift them forward by 26 periods (but alignment handles timing)
-    # For breakout, we compare current price to current cloud (unshifted)
+    # Smooth +DM and -DM
+    plus_dm_smooth = np.zeros_like(plus_dm)
+    minus_dm_smooth = np.zeros_like(minus_dm)
+    
+    plus_dm_smooth[period-1] = np.mean(plus_dm[:period])
+    minus_dm_smooth[period-1] = np.mean(minus_dm[:period])
+    
+    for i in range(period, len(plus_dm)):
+        plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
+        minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
+    
+    # Avoid division by zero
+    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
+    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
+    
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    
+    # Wilder's smoothing for ADX
+    adx = np.zeros_like(dx)
+    adx[2*period-1] = np.mean(dx[period-1:2*period])
+    for i in range(2*period, len(dx)):
+        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+    
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # === 1d Indicator: Camarilla Pivot Levels (R1, S1) ===
+    # Camarilla: R1 = close + (high - low) * 1.1/12, S1 = close - (high - low) * 1.1/12
+    camarilla_multiplier = 1.1 / 12
+    camarilla_r1 = close_1d + (high_1d - low_1d) * camarilla_multiplier
+    camarilla_s1 = close_1d - (high_1d - low_1d) * camarilla_multiplier
+    
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -73,7 +105,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(52, 200) + 20  # Ichimoku(52) + EMA200(200) + volume(20)
+    warmup = max(2*period, 20) + 5  # ADX(28) + volume(20) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -81,35 +113,29 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
+        # Volume filter: current volume > 2x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
         
         # Skip if any required data is NaN
-        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or
-            np.isnan(senkou_span_a[i]) or np.isnan(senkou_span_b[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or
-            np.isnan(vol_sma_20[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Determine cloud boundaries (upper and lower band)
-        upper_cloud = np.maximum(senkou_span_a[i], senkou_span_b[i])
-        lower_cloud = np.minimum(senkou_span_a[i], senkou_span_b[i])
-        
         # === LONG CONDITIONS ===
-        # 1. Price breaks above Ichimoku cloud (close > upper cloud)
-        # 2. Bullish 1d trend (EMA50 > EMA200)
+        # 1. Price breaks above 1d Camarilla R1
+        # 2. Trend (1d ADX > 20)
         # 3. Volume confirmation
-        if (close[i] > upper_cloud) and \
-           (ema50_1d_aligned[i] > ema200_1d_aligned[i]) and vol_confirm:
+        if (close[i] > camarilla_r1_aligned[i]) and \
+           (adx_aligned[i] > 20) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below Ichimoku cloud (close < lower cloud)
-        # 2. Bearish 1d trend (EMA50 < EMA200)
+        # 1. Price breaks below 1d Camarilla S1
+        # 2. Trend (1d ADX > 20)
         # 3. Volume confirmation
-        elif (close[i] < lower_cloud) and \
-             (ema50_1d_aligned[i] < ema200_1d_aligned[i]) and vol_confirm:
+        elif (close[i] < camarilla_s1_aligned[i]) and \
+             (adx_aligned[i] > 20) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -117,6 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Cloud_Breakout_1dTrend_Volume_Filter_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_1dADX20_Volume2x_v1"
+timeframe = "12h"
 leverage = 1.0
