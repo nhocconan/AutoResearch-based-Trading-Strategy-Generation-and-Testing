@@ -3,10 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + volume confirmation + 1d ADX trend filter
-# Uses 4h price channel breakouts for trend capture, volume to confirm breakout strength,
-# and 1d ADX to filter for trending markets (ADX > 25). Works in both bull and bear by
-# only taking breakouts when the 1d trend is strong. Target: 50-150 total trades over 4 years.
+# Hypothesis: 6h Ichimoku Cloud + TK Cross with 1d trend filter
+# Uses Ichimoku system (Tenkan/Kijun/Senkou) on 6h for entry signals,
+# filtered by 1d EMA50 trend to avoid counter-trend trades.
+# Works in bull/bear by only taking trades in direction of higher timeframe trend.
+# Target: 50-150 total trades over 4 years (12-37/year) with disciplined entries.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,97 +19,96 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data (primary timeframe) for price action
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load 6h data (primary timeframe) for Ichimoku calculation
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 52:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
     
-    # Load 1d data for ADX calculation
+    # Load 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Donchian channels (20-period) on 4h
-    donch_high_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donch_low_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Calculate Ichimoku components on 6h
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen = (pd.Series(high_6h).rolling(window=9, min_periods=9).max() + 
+                  pd.Series(low_6h).rolling(window=9, min_periods=9).min()) / 2
+    tenkan_sen = tenkan_sen.values
     
-    # Calculate ADX (14-period) on 1d
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen = (pd.Series(high_6h).rolling(window=26, min_periods=26).max() + 
+                 pd.Series(low_6h).rolling(window=26, min_periods=26).min()) / 2
+    kijun_sen = kijun_sen.values
     
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    up_move[0] = 0
-    down_move[0] = 0
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan_sen + kijun_sen) / 2)
     
-    # Smoothed values
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
-    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    senkou_b = ((pd.Series(high_6h).rolling(window=52, min_periods=52).max() + 
+                 pd.Series(low_6h).rolling(window=52, min_periods=52).min()) / 2)
     
-    # Directional Indicators
-    plus_di_14 = 100 * plus_dm_14 / (tr_14 + 1e-10)
-    minus_di_14 = 100 * minus_dm_14 / (tr_14 + 1e-10)
+    # Chikou Span (Lagging Span): Close shifted 22 periods behind
+    chikou_span = pd.Series(close_6h).shift(22).values
     
-    # DX and ADX
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # Calculate EMA50 on 1d for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align all indicators to 4h timeframe
-    donch_high_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_high_4h)
-    donch_low_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_low_4h)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align all indicators to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_6h, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_6h, kijun_sen)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_6h, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_6h, senkou_b)
+    chikou_span_aligned = align_htf_to_ltf(prices, df_6h, chikou_span)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0
     base_size = 0.25  # Position size
     
-    for i in range(100, n):
+    for i in range(52, n):  # Start after Ichimoku warmup
         # Skip if any required data is NaN
-        if (np.isnan(donch_high_4h_aligned[i]) or np.isnan(donch_low_4h_aligned[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or
+            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
+            np.isnan(chikou_span_aligned[i]) or np.isnan(ema50_1d_aligned[i])):
             continue
         
-        # Long entry: price breaks above Donchian high + volume spike + ADX > 25 (trending)
-        if (close[i] > donch_high_4h_aligned[i] and
-            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-            adx_aligned[i] > 25 and
+        # Determine cloud top and bottom
+        cloud_top = max(senkou_a_aligned[i], senkou_b_aligned[i])
+        cloud_bottom = min(senkou_a_aligned[i], senkou_b_aligned[i])
+        
+        # Long entry: TK cross bullish + price above cloud + price above 1d EMA50
+        if (tenkan_sen_aligned[i] > kijun_sen_aligned[i] and  # TK cross bullish
+            close[i] > cloud_top and                          # Price above cloud
+            close[i] > ema50_1d_aligned[i] and                # Price above 1d EMA50
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below Donchian low + volume spike + ADX > 25 (trending)
-        elif (close[i] < donch_low_4h_aligned[i] and
-              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-              adx_aligned[i] > 25 and
+        # Short entry: TK cross bearish + price below cloud + price below 1d EMA50
+        elif (tenkan_sen_aligned[i] < kijun_sen_aligned[i] and  # TK cross bearish
+              close[i] < cloud_bottom and                       # Price below cloud
+              close[i] < ema50_1d_aligned[i] and                # Price below 1d EMA50
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse signal or ADX < 20 (losing trend)
-        elif position == 1 and (close[i] < donch_low_4h_aligned[i] or adx_aligned[i] < 20):
+        # Exit: TK cross in opposite direction or price enters cloud
+        elif position == 1 and (tenkan_sen_aligned[i] < kijun_sen_aligned[i] or 
+                                close[i] < cloud_top):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > donch_high_4h_aligned[i] or adx_aligned[i] < 20):
+        elif position == -1 and (tenkan_sen_aligned[i] > kijun_sen_aligned[i] or 
+                                 close[i] > cloud_bottom):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian_Volume_ADX_Filter"
-timeframe = "4h"
+name = "6h_Ichimoku_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
