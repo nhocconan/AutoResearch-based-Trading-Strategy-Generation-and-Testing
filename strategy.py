@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,35 +13,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w HTF data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 4h HTF data once before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate 1w Williams %R (14-period)
-    highest_high = pd.Series(df_1w['high']).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(df_1w['low']).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1w, williams_r)
+    # Calculate 4h Donchian channels (20-period)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    upper_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    
+    # Align 4h Donchian to 1h
+    upper_20_1h = align_htf_to_ltf(prices, df_4h, upper_20)
+    lower_20_1h = align_htf_to_ltf(prices, df_4h, lower_20)
     
     # Get 1d HTF data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50) for trend filter
+    # Calculate 1d EMA(200) for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Calculate 12h ATR(14) for volatility filter
+    # Calculate 1h ATR(14) for volatility filter
     tr1 = high - low
     tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
     tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 12h volume ratio (current vs 20-period average)
+    # Calculate 1h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
@@ -51,39 +55,40 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    for i in range(200, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(atr_14[i]) or np.isnan(volume_ratio[i]) or not in_session[i]):
+        if (np.isnan(upper_20_1h[i]) or np.isnan(lower_20_1h[i]) or 
+            np.isnan(ema_200_1d_aligned[i]) or np.isnan(atr_14[i]) or 
+            np.isnan(volume_ratio[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
         # Long conditions:
-        # 1. 1w Williams %R oversold (< -80)
-        # 2. 12h price above 1d EMA(50) (bullish bias)
-        # 3. Volume confirmation: volume > 1.3x average
-        # 4. Volatility filter: ATR > 0.4% of price (avoid extremely low volatility)
-        if (williams_r_aligned[i] < -80 and
-            close[i] > ema_50_1d_aligned[i] and
-            volume_ratio[i] > 1.3 and
-            atr_14[i] > 0.004 * close[i]):
+        # 1. 1h price breaks above 4h Donchian upper (20)
+        # 2. 1d EMA(200) trend filter: price above EMA200 (bullish bias)
+        # 3. Volume confirmation: volume > 1.5x average
+        # 4. Volatility filter: ATR > 0.3% of price (avoid low volatility chop)
+        if (close[i] > upper_20_1h[i] and
+            close[i] > ema_200_1d_aligned[i] and
+            volume_ratio[i] > 1.5 and
+            atr_14[i] > 0.003 * close[i]):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. 1w Williams %R overbought (> -20)
-        # 2. 12h price below 1d EMA(50) (bearish bias)
-        # 3. Volume confirmation: volume > 1.3x average
-        # 4. Volatility filter: ATR > 0.4% of price
-        elif (williams_r_aligned[i] > -20 and
-              close[i] < ema_50_1d_aligned[i] and
-              volume_ratio[i] > 1.3 and
-              atr_14[i] > 0.004 * close[i]):
+        # 1. 1h price breaks below 4h Donchian lower (20)
+        # 2. 1d EMA(200) trend filter: price below EMA200 (bearish bias)
+        # 3. Volume confirmation: volume > 1.5x average
+        # 4. Volatility filter: ATR > 0.3% of price
+        elif (close[i] < lower_20_1h[i] and
+              close[i] < ema_200_1d_aligned[i] and
+              volume_ratio[i] > 1.5 and
+              atr_14[i] > 0.003 * close[i]):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "12h_WilliamsR_1w_1d_EMA50_Volume_Filter_v1"
-timeframe = "12h"
+name = "1h_4h_Donchian20_1d_EMA200_Volume_Filter_v3"
+timeframe = "1h"
 leverage = 1.0
