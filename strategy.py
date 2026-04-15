@@ -3,16 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index (Bull/Bear Power) with 1d EMA34 trend filter and volume confirmation
-# Long when Bull Power > 0 (close > EMA13) AND Bear Power < 0 (close < EMA13) flipped? Actually: Elder Ray uses EMA13
-# Bull Power = High - EMA13, Bear Power = Low - EMA13
-# We go long when Bull Power > 0 AND Bear Power < 0 (market above EMA13 with upward momentum)
-# Actually simpler: Long when close > EMA13 AND Bull Power increasing (making higher highs vs EMA)
-# But standard Elder Ray: trend = EMA13, enter long when Bull Power > 0 AND prev Bull Power <= 0 (crossing up)
-# Short when Bear Power < 0 AND prev Bear Power >= 0 (crossing down)
-# Add 1d EMA34 filter: only long if 1d EMA34 sloping up (close > EMA34), short if sloping down
-# Volume confirmation: current volume > 1.5x 20-period average
-# Designed for low trade frequency (15-25/year) with clear trend signals.
+# Hypothesis: 12h Camarilla R1/S1 breakout with 1d volume spike and 1w ADX trend filter
+# Long when price breaks above 1d Camarilla R1 level + 1w ADX > 20 + volume > 2x 20-period avg
+# Short when price breaks below 1d Camarilla S1 level + 1w ADX > 20 + volume > 2x 20-period avg
+# Uses discrete position sizing (0.25) to minimize fee churn. Target: 12-37 trades/year on 12h.
+# Camarilla levels provide precise intraday support/resistance. ADX filter ensures we only trade strong trends.
+# Volume spike confirms institutional participation. Works in bull markets (breakouts) and bear markets (breakdowns).
 
 def generate_signals(prices):
     n = len(prices)
@@ -30,20 +26,88 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d Indicator: EMA34 (trend filter) ===
+    # === 1d Indicator: Camarilla Pivot Levels (R1, S1) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === 6h Indicator: EMA13 for Elder Ray ===
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate pivot point
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    # Camarilla levels
+    r1 = pp + (high_1d - low_1d) * 1.1 / 12
+    s1 = pp - (high_1d - low_1d) * 1.1 / 12
     
-    # Elder Ray components
-    bull_power = high - ema_13  # High - EMA13
-    bear_power = low - ema_13   # Low - EMA13
+    # Align to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # === 1w HTF: ADX (trend strength filter) ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate ADX components: +DM, -DM, TR
+    high_1w_shift = np.roll(high_1w, 1)
+    low_1w_shift = np.roll(low_1w, 1)
+    high_1w_shift[0] = high_1w[0]
+    low_1w_shift[0] = low_1w[0]
+    
+    plus_dm = np.where((high_1w - high_1w_shift) > (low_1w_shift - low_1w), 
+                       np.maximum(high_1w - high_1w_shift, 0), 0)
+    minus_dm = np.where((low_1w_shift - low_1w) > (high_1w - high_1w_shift), 
+                        np.maximum(low_1w_shift - low_1w, 0), 0)
+    
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1[0] = high_1w[0] - low_1w[0]
+    tr2[0] = np.abs(high_1w[0] - close_1w[0])
+    tr3[0] = np.abs(low_1w[0] - close_1w[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Wilder's smoothing (alpha = 1/period)
+    period = 14
+    alpha = 1.0 / period
+    
+    atr = np.zeros_like(tr)
+    atr[period-1] = np.mean(tr[:period])
+    for i in range(period, len(tr)):
+        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+    
+    plus_di = np.zeros_like(plus_dm)
+    minus_di = np.zeros_like(minus_dm)
+    
+    # Smooth +DM and -DM
+    plus_dm_smooth = np.zeros_like(plus_dm)
+    minus_dm_smooth = np.zeros_like(minus_dm)
+    
+    plus_dm_smooth[period-1] = np.mean(plus_dm[:period])
+    minus_dm_smooth[period-1] = np.mean(minus_dm[:period])
+    
+    for i in range(period, len(plus_dm)):
+        plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
+        minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
+    
+    # Avoid division by zero
+    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
+    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
+    
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    
+    # Wilder's smoothing for ADX
+    adx = np.zeros_like(dx)
+    adx[2*period-1] = np.mean(dx[period-1:2*period])
+    for i in range(2*period, len(dx)):
+        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+    
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,7 +115,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(34, 13, 20) + 5  # EMA34(1d) + EMA13 + volume(20)
+    warmup = max(30, 2*period) + 20  # Camarilla needs 1d data + ADX(28) + volume(20)
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -59,35 +123,29 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
+        # Volume filter: current volume > 2x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
         
         # Skip if any required data is NaN
-        if (np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Bull Power > 0 (market above EMA13 with upward momentum)
-        # 2. Previous Bull Power <= 0 (just crossed above zero)
-        # 3. 1d EMA34 trending up (close > EMA34)
-        # 4. Volume confirmation
-        if (bull_power[i] > 0) and \
-           (i == warmup or bull_power[i-1] <= 0) and \
-           (close[i] > ema_34_1d_aligned[i]) and \
-           vol_confirm:
+        # 1. Price breaks above 1d Camarilla R1 level
+        # 2. Trend (1w ADX > 20)
+        # 3. Volume confirmation
+        if (close[i] > r1_aligned[i]) and \
+           (adx_aligned[i] > 20) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Bear Power < 0 (market below EMA13 with downward momentum)
-        # 2. Previous Bear Power >= 0 (just crossed below zero)
-        # 3. 1d EMA34 trending down (close < EMA34)
-        # 4. Volume confirmation
-        elif (bear_power[i] < 0) and \
-             (i == warmup or bear_power[i-1] >= 0) and \
-             (close[i] < ema_34_1d_aligned[i]) and \
-             vol_confirm:
+        # 1. Price breaks below 1d Camarilla S1 level
+        # 2. Trend (1w ADX > 20)
+        # 3. Volume confirmation
+        elif (close[i] < s1_aligned[i]) and \
+             (adx_aligned[i] > 20) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -95,6 +153,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_EMA13_1dEMA34_Volume_Filter_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_1wADX20_Volume_Spike_v1"
+timeframe = "12h"
 leverage = 1.0
