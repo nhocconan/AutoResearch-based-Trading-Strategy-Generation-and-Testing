@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Volume-Weighted RSI with 12h EMA Filter
-# Uses RSI(14) on volume-weighted close to reduce noise, combined with 12h EMA50 trend filter.
-# Long when VW-RSI < 30 and price above 12h EMA50, short when VW-RSI > 70 and price below 12h EMA50.
-# Volume weighting filters out low-conviction moves, improving signal quality in both bull and bear markets.
-# Discrete sizing (0.25) limits overtrading; target 20-40 trades/year.
+# Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and ADX trend filter
+# Uses daily Donchian breakout for trend direction, confirmed by volume spike and ADX>25.
+# Designed to work in both bull and bear markets by requiring strong trend + volume.
+# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,46 +18,69 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume-weighted close: (high + low + close) / 3, weighted by volume
-    typical_price = (high + low + close) / 3.0
-    vw_close = typical_price * volume
+    # 1-day Donchian channels for trend direction
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # 12-hour EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate 20-period Donchian channels
+    high_max = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # VW-RSI calculation
-    delta = pd.Series(vw_close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    vw_rsi = rsi.values
+    # Align to 12h timeframe
+    donchian_high = align_htf_to_ltf(prices, df_1d, high_max)
+    donchian_low = align_htf_to_ltf(prices, df_1d, low_min)
+    
+    # 1-day ADX for trend strength
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    tr = np.maximum(high_1d[1:] - low_1d[1:], np.absolute(high_1d[1:] - close_1d[:-1]), np.absolute(low_1d[1:] - close_1d[:-1]))
+    
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    tr = np.concatenate([[0], tr])
+    
+    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx_1d = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # 1-day volume confirmation
+    vol_1d = df_1d['volume'].values
+    vol_ma = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_threshold = 2.0 * vol_ma
+    vol_aligned = align_htf_to_ltf(prices, df_1d, vol_threshold)
     
     signals = np.zeros(n)
     
-    for i in range(14, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(vw_rsi[i]) or np.isnan(ema_12h_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_aligned[i])):
             continue
         
-        # Long: VW-RSI < 30 (oversold) and price above 12h EMA50
-        if vw_rsi[i] < 30 and close[i] > ema_12h_aligned[i]:
+        # Long: price breaks above Donchian high, ADX > 25, volume spike
+        if (close[i] > donchian_high[i] and 
+            adx_aligned[i] > 25 and 
+            volume[i] > vol_aligned[i]):
             signals[i] = 0.25
         
-        # Short: VW-RSI > 70 (overbought) and price below 12h EMA50
-        elif vw_rsi[i] > 70 and close[i] < ema_12h_aligned[i]:
+        # Short: price breaks below Donchian low, ADX > 25, volume spike
+        elif (close[i] < donchian_low[i] and 
+              adx_aligned[i] > 25 and 
+              volume[i] > vol_aligned[i]):
             signals[i] = -0.25
         
-        # Exit: VW-RSI returns to neutral range (40-60)
-        elif i > 0 and (
-            (signals[i-1] == 0.25 and vw_rsi[i] >= 40) or
-            (signals[i-1] == -0.25 and vw_rsi[i] <= 60)
-        ):
+        # Exit: price returns to middle of channel or ADX weakens
+        elif (i > 0 and 
+              ((signals[i-1] == 0.25 and (close[i] < (donchian_high[i] + donchian_low[i]) / 2 or adx_aligned[i] <= 25)) or
+               (signals[i-1] == -0.25 and (close[i] > (donchian_high[i] + donchian_low[i]) / 2 or adx_aligned[i] <= 25)))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -67,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_VW_RSI_12hEMA_Filter"
-timeframe = "4h"
+name = "12h_Donchian_Breakout_Volume_ADX"
+timeframe = "12h"
 leverage = 1.0
