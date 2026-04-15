@@ -1,14 +1,12 @@
+# 4h_1d_Range_Breakout_Volume_ADX - Optimized
+# Hypothesis: 4-hour breakouts from previous day's high/low with volume confirmation and ADX trend filter
+# Works in both bull (breakouts up) and bear (breakouts down) markets by filtering for trending conditions (ADX>25)
+# Uses tight entry conditions to avoid overtrading (<100 trades/year target)
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 6h Williams %R with daily EMA filter and volume spike
-# Williams %R (14) identifies overbought/oversold conditions.
-# In trending markets (price > daily EMA50), we buy oversold dips (%R < -80).
-# In ranging markets (price near daily EMA50), we sell overbought bounces (%R > -20).
-# Volume spike confirms participation. Designed to work in both bull and bear markets
-# by adapting to the trend via daily EMA filter. Target: 50-150 total trades over 4 years.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,24 +18,62 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for EMA filter
+    # Load 1d data for previous day's high/low
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate daily EMA50
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Load 12h data for ADX trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Williams %R (14) on 6h data
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
+    # Previous day's high and low (shifted by 1 to avoid look-ahead)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_high_1d[0] = np.nan  # First value has no previous day
+    prev_low_1d[0] = np.nan
     
-    # Volume spike: current volume > 2.0 * median of last 20 bars
-    volume_median = pd.Series(volume).rolling(window=20, min_periods=1).median().values
-    volume_spike = volume > (2.0 * volume_median)
+    # Align previous day's high/low to 4h timeframe
+    prev_high_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_high_1d)
+    prev_low_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_low_1d)
+    
+    # Calculate ADX (14-period) on 12h
+    # True Range
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    
+    # Directional Movement
+    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
+                       np.maximum(high_12h - np.roll(close_12h, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)), 
+                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
+    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
     signals = np.zeros(n)
     position = 0
@@ -45,45 +81,40 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(williams_r[i])):
+        if (np.isnan(prev_high_1d_aligned[i]) or np.isnan(prev_low_1d_aligned[i]) or
+            np.isnan(adx_aligned[i])):
             continue
         
-        # Determine market regime based on price vs daily EMA50
-        price_vs_ema = close[i] - ema_50_1d_aligned[i]
-        ema_threshold = 0.01 * ema_50_1d_aligned[i]  # 1% of EMA level
+        # Calculate volume ratio once
+        vol_median = np.median(volume[max(0, i-20):i+1])
+        vol_ratio = volume[i] / vol_median if vol_median > 0 else 0
         
-        # Trending market: significant deviation from EMA
-        if abs(price_vs_ema) > ema_threshold:
-            # In uptrend: buy oversold dips
-            if price_vs_ema > 0 and williams_r[i] < -80 and volume_spike[i] and position <= 0:
-                position = 1
-                signals[i] = base_size
-            # In downtrend: sell overbought bounces
-            elif price_vs_ema < 0 and williams_r[i] > -20 and volume_spike[i] and position >= 0:
-                position = -1
-                signals[i] = -base_size
-        # Ranging market: price near EMA
-        else:
-            # Sell overbought bounces
-            if williams_r[i] > -20 and volume_spike[i] and position >= 0:
-                position = -1
-                signals[i] = -base_size
-            # Buy oversold dips
-            elif williams_r[i] < -80 and volume_spike[i] and position <= 0:
-                position = 1
-                signals[i] = base_size
+        # Long entry: price breaks above previous day's high + volume confirmation + ADX > 25
+        if (close[i] > prev_high_1d_aligned[i] and
+            vol_ratio > 1.5 and
+            adx_aligned[i] > 25 and
+            position <= 0):
+            position = 1
+            signals[i] = base_size
         
-        # Exit: opposite Williams %R level or loss of volume spike
-        if position == 1 and (williams_r[i] > -20 or not volume_spike[i]):
+        # Short entry: price breaks below previous day's low + volume confirmation + ADX > 25
+        elif (close[i] < prev_low_1d_aligned[i] and
+              vol_ratio > 1.5 and
+              adx_aligned[i] > 25 and
+              position >= 0):
+            position = -1
+            signals[i] = -base_size
+        
+        # Exit: reverse breakout or ADX < 20 (ranging market)
+        elif position == 1 and (close[i] < prev_low_1d_aligned[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (williams_r[i] < -80 or not volume_spike[i]):
+        elif position == -1 and (close[i] > prev_high_1d_aligned[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "6h_WilliamsR_EMA50_VolumeSpike"
-timeframe = "6h"
+name = "4h_1d_Range_Breakout_Volume_ADX"
+timeframe = "4h"
 leverage = 1.0
