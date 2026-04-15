@@ -3,11 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian Breakout with 12h Trend Filter + Volume Confirmation
-# Long when price breaks above 4h Donchian high (20) and 12h EMA50 is rising
-# Short when price breaks below 4h Donchian low (20) and 12h EMA50 is falling
-# Volume must exceed 1.5x 20-bar median for confirmation
-# Designed for low trade frequency and strong trend capture in both bull and bear markets
+# Hypothesis: 1h Trend Pullback with 4h Trend Filter and Volume Spike
+# Uses 4h EMA20 for trend direction, enters on 1h pullback to EMA20 with volume confirmation.
+# Long when 4h EMA20 rising, 1h price touches EMA20 from below with volume > 1.5x median.
+# Short when 4h EMA20 falling, 1h price touches EMA20 from above with volume > 1.5x median.
+# Uses 1h EMA20 as dynamic support/resistance. Designed to capture trend continuations
+# in both bull and bear markets by following higher timeframe trend.
+# Conservative sizing (0.20) to limit trade frequency and avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,18 +21,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max()
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min()
-    donchian_high = high_roll.values
-    donchian_low = low_roll.values
+    # 4h EMA20 for trend direction
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    ema_4h_slope = np.diff(ema_4h_aligned, prepend=ema_4h_aligned[0])
     
-    # 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    ema_slope_12h = np.diff(ema_50_12h_aligned, prepend=ema_50_12h_aligned[0])
+    # 1h EMA20 for entry level
+    ema_1h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     # Volume confirmation: current > 1.5x median of last 20 bars
     vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
@@ -38,28 +37,30 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_slope_12h[i]) or np.isnan(vol_threshold[i])):
+        if (np.isnan(ema_4h_slope[i]) or np.isnan(ema_1h[i]) or 
+            np.isnan(vol_threshold[i])):
             continue
         
-        # Long: Price breaks above Donchian high, 12h EMA rising, volume spike
-        if (close[i] > donchian_high[i] and 
-            ema_slope_12h[i] > 0 and 
+        # Long: 4h EMA20 rising, 1h low touches EMA1H from below, volume spike
+        if (ema_4h_slope[i] > 0 and 
+            low[i] <= ema_1h[i] and 
+            high[i] > ema_1h[i] and  # crossed above
             volume[i] > vol_threshold[i]):
-            signals[i] = 0.30
+            signals[i] = 0.20
         
-        # Short: Price breaks below Donchian low, 12h EMA falling, volume spike
-        elif (close[i] < donchian_low[i] and 
-              ema_slope_12h[i] < 0 and 
+        # Short: 4h EMA20 falling, 1h high touches EMA1H from above, volume spike
+        elif (ema_4h_slope[i] < 0 and 
+              high[i] >= ema_1h[i] and 
+              low[i] < ema_1h[i] and  # crossed below
               volume[i] > vol_threshold[i]):
-            signals[i] = -0.30
+            signals[i] = -0.20
         
-        # Exit: Price returns to Donchian mid-point or EMA slope changes
+        # Exit: 4h trend changes or price moves away from EMA1H
         elif (i > 0 and 
-              ((signals[i-1] == 0.30 and (close[i] < (donchian_high[i] + donchian_low[i]) / 2 or ema_slope_12h[i] <= 0)) or
-               (signals[i-1] == -0.30 and (close[i] > (donchian_high[i] + donchian_low[i]) / 2 or ema_slope_12h[i] >= 0)))):
+              ((signals[i-1] == 0.20 and (ema_4h_slope[i] <= 0 or low[i] > ema_1h[i] * 1.005)) or
+               (signals[i-1] == -0.20 and (ema_4h_slope[i] >= 0 or high[i] < ema_1h[i] * 0.995)))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -68,6 +69,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_12hEMA50_Volume"
-timeframe = "4h"
+name = "1h_EMA20_Pullback_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
