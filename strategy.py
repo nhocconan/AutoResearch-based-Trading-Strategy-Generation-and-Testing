@@ -3,10 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation.
-# Uses Camarilla pivot levels (R3/S3) from 1d for entry, 1d EMA50 for trend bias, and volume > 1.3x 20-bar SMA for confirmation.
-# Designed for low trade frequency (12-37/year) to minimize fee drag. Works in bull/bear: EMA50 avoids counter-trend trades,
-# Camarilla levels provide structure in ranging markets and breakouts in trending markets.
+# Hypothesis: 4h Donchian breakout (20) with 12h EMA trend filter and volume confirmation.
+# Uses 12h EMA(34) for trend bias and Donchian(20) for breakout entries.
+# Volume filter requires current volume > 1.3x 20-bar SMA to avoid low-momentum traps.
+# Designed for low trade frequency (~30-50/year) to minimize fee drag.
+# Works in bull/bear: 12h EMA avoids counter-trend trades, Donchian captures momentum breakouts.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,29 +19,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d HTF data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 4h and 12h HTF data once before loop
+    df_4h = get_htf_data(prices, '4h')
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_4h) < 50 or len(df_12h) < 50:
         return np.zeros(n)
     
-    # === 1d Indicators: Camarilla Pivot Levels (R3, S3) and EMA50 ===
-    high_1d = pd.Series(df_1d['high'].values)
-    low_1d = pd.Series(df_1d['low'].values)
-    close_1d = pd.Series(df_1d['close'].values)
+    # === 4h Indicators: Donchian Channel (20) ===
+    high_4h = pd.Series(df_4h['high'].values)
+    low_4h = pd.Series(df_4h['low'].values)
+    donchian_high = high_4h.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_4h.rolling(window=20, min_periods=20).min().values
     
-    # Pivot point
-    pivot = (high_1d + low_1d + close_1d) / 3
-    # Camarilla levels
-    camarilla_r3 = pivot + (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3 = pivot - (high_1d - low_1d) * 1.1 / 4
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
     
-    # Align Camarilla levels
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3.values)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3.values)
-    
-    # 1d EMA50 for trend filter
-    ema_50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # === 12h Indicators: Trend Filter ===
+    # 12h EMA(34) for trend bias
+    ema_34_12h = pd.Series(df_12h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
     signals = np.zeros(n)
     
@@ -53,26 +50,26 @@ def generate_signals(prices):
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.3)
         
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(ema_34_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above Camarilla R3
-        # 2. 1d price above EMA50 (bullish trend bias)
+        # 1. Price breaks above Donchian high (20-period breakout)
+        # 2. 12h price above EMA34 (bullish trend bias)
         # 3. Volume confirmation
-        if (close[i] > camarilla_r3_aligned[i] and
-            close[i] > ema_50_1d_aligned[i] and
+        if (close[i] > donchian_high_aligned[i] and
+            close[i] > ema_34_12h_aligned[i] and
             vol_confirm):
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below Camarilla S3
-        # 2. 1d price below EMA50 (bearish trend bias)
+        # 1. Price breaks below Donchian low (20-period breakdown)
+        # 2. 12h price below EMA34 (bearish trend bias)
         # 3. Volume confirmation
-        elif (close[i] < camarilla_s3_aligned[i] and
-              close[i] < ema_50_1d_aligned[i] and
+        elif (close[i] < donchian_low_aligned[i] and
+              close[i] < ema_34_12h_aligned[i] and
               vol_confirm):
             signals[i] = -0.25
         
@@ -81,6 +78,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_EMA50_VolFilter_v1"
-timeframe = "12h"
+name = "4h_Donchian20_EMA34_VolFilter_v1"
+timeframe = "4h"
 leverage = 1.0
