@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1d EMA200 trend filter and volume confirmation
-# Long when Williams %R(14) crosses above -80 (oversold bounce) + price > 1d EMA200 (bullish regime) + volume > 1.3x 20-period avg
-# Short when Williams %R(14) crosses below -20 (overbought rejection) + price < 1d EMA200 (bearish regime) + volume > 1.3x 20-period avg
-# Williams %R is effective in ranging/ bear markets for mean reversion entries. 1d EMA200 filters for major trend alignment.
-# Volume confirmation ensures breakouts have conviction. Designed for low trade frequency (12-25/year) to minimize fee drag.
+# Hypothesis: 12h Camarilla pivot breakout with volume confirmation and chop regime filter
+# Long when price breaks above 1d Camarilla R3 + volume > 1.3x 20-period avg + CHOP > 61.8 (range)
+# Short when price breaks below 1d Camarilla S3 + volume > 1.3x 20-period avg + CHOP > 61.8 (range)
+# Exit when price returns to 1d Camarilla pivot (mean reversion in ranging markets)
+# Designed for low trade frequency (12-37/year) to minimize fee drag in bear markets (2025+ test)
+# Uses 12h for signal generation, 1d for pivot levels and regime filter
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,70 +20,106 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Precompute session hours (08-20 UTC) for filter - optional but helps avoid low liquidity
+    # Precompute session hours (08-20 UTC) for filter
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d HTF data once before loop for EMA200
+    # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 210:  # need enough for EMA200 warmup
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d Indicator: EMA200 (trend filter) ===
+    # === 1d Indicator: Camarilla Pivot Levels ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # === Primary TF Indicators: Williams %R(14) on 6h ===
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * ((highest_high_14 - close) / (highest_high_14 - lowest_low_14))
-    # Handle division by zero when high == low
-    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
+    # Typical price for pivot calculation
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels
+    pivot_1d = typical_price_1d
+    r3_1d = pivot_1d + (range_1d * 1.1 / 2)
+    s3_1d = pivot_1d - (range_1d * 1.1 / 2)
+    
+    # Align to 12h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    
+    # === 12h Indicator: Choppiness Index (CHOP) for regime filter ===
+    # CHOP > 61.8 = ranging market (good for mean reversion)
+    # CHOP < 38.2 = trending market
+    high_12h = high
+    low_12h = low
+    close_12h = close
+    
+    # True Range
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    
+    # ATR(14)
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Sum of TRUE Range over 14 periods
+    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    
+    # Choppiness Index: CHOP = 100 * log10(sum_tr_14 / (atr_14 * 14)) / log10(14)
+    chop = 100 * np.log10(sum_tr_14 / (atr_14 * 14)) / np.log10(14)
+    # Handle division by zero or invalid values
+    chop = np.where((atr_14 * 14) > 0, chop, 50.0)  # Default to neutral when ATR is zero
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 200  # for EMA200
+    warmup = 50
     
     for i in range(warmup, n):
-        # Skip if outside trading session (08-20 UTC) - comment out if too restrictive
-        # if not in_session[i]:
-        #     signals[i] = 0.0
-        #     continue
+        # Skip if outside trading session (08-20 UTC)
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
         
         # Volume filter: current volume > 1.3x 20-period volume SMA
         vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.3)
         
         # Skip if any required data is NaN
-        if (np.isnan(ema_200_1d_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(vol_sma_20[i]) or np.isnan(highest_high_14[i]) or 
-            np.isnan(lowest_low_14[i])):
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
+            np.isnan(s3_1d_aligned[i]) or np.isnan(chop[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Williams %R crosses above -80 (from below) - oversold bounce
-        # 2. Price above 1d EMA200 (bullish regime)
-        # 3. Volume confirmation
-        if (williams_r[i] > -80) and (williams_r[i-1] <= -80) and \
-           (close[i] > ema_200_1d_aligned[i]) and vol_confirm:
+        # 1. Price breaks above 1d Camarilla R3
+        # 2. Volume confirmation
+        # 3. Chop > 61.8 (ranging market - good for mean reversion plays)
+        if (close[i] > r3_1d_aligned[i]) and vol_confirm and (chop[i] > 61.8):
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Williams %R crosses below -20 (from above) - overbought rejection
-        # 2. Price below 1d EMA200 (bearish regime)
-        # 3. Volume confirmation
-        elif (williams_r[i] < -20) and (williams_r[i-1] >= -20) and \
-             (close[i] < ema_200_1d_aligned[i]) and vol_confirm:
+        # 1. Price breaks below 1d Camarilla S3
+        # 2. Volume confirmation
+        # 3. Chop > 61.8 (ranging market - good for mean reversion plays)
+        elif (close[i] < s3_1d_aligned[i]) and vol_confirm and (chop[i] > 61.8):
             signals[i] = -0.25
         
+        # === EXIT CONDITIONS ===
+        # Exit when price returns to Camarilla pivot (mean reversion target)
+        elif (np.sign(signals[i-1]) == 1 and close[i] <= pivot_1d_aligned[i]) or \
+             (np.sign(signals[i-1]) == -1 and close[i] >= pivot_1d_aligned[i]):
+            signals[i] = 0.0
+        
         else:
-            signals[i] = 0.0  # flat
+            # Hold previous position
+            signals[i] = signals[i-1]
     
     return signals
 
-name = "6h_WilliamsR_1dEMA200_Volume_Filter_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Volume_Chop_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
