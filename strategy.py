@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d ATR regime filter and volume confirmation
-# Long when price breaks above Donchian(20) high + 1d ATR(14) < median (low volatility regime) + volume > 1.5x 20-period avg
-# Short when price breaks below Donchian(20) low + 1d ATR(14) < median (low volatility regime) + volume > 1.5x 20-period avg
+# Hypothesis: 4h Williams %R reversal with 1d EMA50 trend filter and volume spike
+# Long when Williams %R crosses above -80 from below + 1d EMA50 uptrend + volume > 2.0x 20-period avg
+# Short when Williams %R crosses below -20 from above + 1d EMA50 downtrend + volume > 2.0x 20-period avg
 # Uses discrete position sizing (0.25) to control drawdown and minimize fee drag.
-# 1d ATR regime filter identifies low-volatility environments where breakouts are more likely to succeed.
-# Volume confirmation ensures breakouts have participation.
-# Donchian channels provide objective structure-based entries that work in both bull and bear markets.
+# Williams %R (14) identifies overextended reversals; 1d EMA50 provides strong trend filter reducing whipsaws.
+# Volume threshold (2.0x) targets ~20-35 trades/year on 4h timeframe to avoid overtrading.
+# Effective in both bull (buying dips) and bear (selling rallies) markets via mean reversion within trend.
 
 def generate_signals(prices):
     n = len(prices)
@@ -27,31 +27,20 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 1d Indicator: ATR(14) for regime filter ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === 1d Indicator: EMA50 ===
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # first bar
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_median_1d = pd.Series(atr_14_1d).rolling(window=50, min_periods=50).median().values
-    atr_regime = atr_14_1d < atr_median_1d  # True when ATR < median (low volatility)
-    atr_regime_aligned = align_htf_to_ltf(prices, df_1d, atr_regime.astype(float))
-    
-    # === 12h Donchian Channel (20) ===
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === Williams %R (14) ===
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -59,7 +48,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(20, 20, 50) + 5  # Donchian(20) + volume(20) + ATR median(50) + buffer
+    warmup = max(50, 14, 20) + 5  # EMA50 + Williams %R(14) + volume(20) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -68,31 +57,32 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(atr_regime_aligned[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
+        # Volume filter: current volume > 2.0x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
         
-        # Low volatility regime filter
-        low_vol_regime = atr_regime_aligned[i] > 0.5
+        # Williams %R crossover conditions (using prior bar to avoid look-ahead)
+        wr_prev = williams_r[i-1]
+        wr_curr = williams_r[i]
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above Donchian(20) high
-        # 2. Low volatility regime (1d ATR < median)
+        # 1. Williams %R crosses above -80 from below (wr_prev <= -80 and wr_curr > -80)
+        # 2. 1d EMA50 uptrend (close > EMA50)
         # 3. Volume confirmation
-        if (close[i] > donchian_high[i]) and \
-           low_vol_regime and vol_confirm:
+        if (wr_prev <= -80.0) and (wr_curr > -80.0) and \
+           (close[i] > ema_50_1d_aligned[i]) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below Donchian(20) low
-        # 2. Low volatility regime (1d ATR < median)
+        # 1. Williams %R crosses below -20 from above (wr_prev >= -20 and wr_curr < -20)
+        # 2. 1d EMA50 downtrend (close < EMA50)
         # 3. Volume confirmation
-        elif (close[i] < donchian_low[i]) and \
-             low_vol_regime and vol_confirm:
+        elif (wr_prev >= -20.0) and (wr_curr < -20.0) and \
+             (close[i] < ema_50_1d_aligned[i]) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -100,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dATRRegime_Volume_Filter_v1"
-timeframe = "12h"
+name = "4h_WilliamsR_1dEMA50_Volume_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
