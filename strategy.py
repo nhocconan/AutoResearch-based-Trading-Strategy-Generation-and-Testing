@@ -13,53 +13,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly Donchian (20) - trend filter
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    donch_high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donch_low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    donch_high_20_aligned = align_htf_to_ltf(prices, df_1w, donch_high_20)
-    donch_low_20_aligned = align_htf_to_ltf(prices, df_1w, donch_low_20)
-    
-    # Daily pivot direction - bias
+    # 1d ATR for volatility filter (ensure min_periods)
     df_1d = get_htf_data(prices, '1d')
-    pivot = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3
-    r1 = 2 * pivot - df_1d['low'].values
-    s1 = 2 * pivot - df_1d['high'].values
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    tr_1d = np.maximum(df_1d['high'].values - df_1d['low'].values,
+                       np.maximum(np.abs(df_1d['high'].values - np.concatenate([[df_1d['close'][0]], df_1d['close'][:-1]])),
+                                  np.abs(df_1d['low'].values - np.concatenate([[df_1d['close'][0]], df_1d['close'][:-1]]))))
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Volume confirmation: current > 2.0x median of last 50 bars
-    vol_median = pd.Series(volume).rolling(window=50, min_periods=1).median()
-    vol_threshold = 2.0 * vol_median
+    # 4h Donchian Channel (20)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max()
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min()
+    
+    # Volume confirmation: current > 1.5x median of last 20 bars (use min_periods=1 for median)
+    vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
+    vol_threshold = 1.5 * vol_median
+    
+    # ATR-based volatility filter: require ATR > 0.3 * median ATR (with min_periods)
+    atr_median = pd.Series(atr_1d_aligned).rolling(window=50, min_periods=1).median()
+    vol_filter = atr_1d_aligned > 0.3 * atr_median
     
     signals = np.zeros(n)
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(donch_high_20_aligned[i]) or np.isnan(donch_low_20_aligned[i]) or
-            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(vol_threshold[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(vol_threshold[i]) or np.isnan(vol_filter[i])):
             continue
         
-        # Long: price > weekly Donchian high AND price > daily pivot + volume
-        if (close[i] > donch_high_20_aligned[i] and 
-            close[i] > pivot_aligned[i] and 
-            volume[i] > vol_threshold[i]):
+        # Long: close breaks above Donchian high + volume + volatility filter
+        if close[i] > donch_high[i] and volume[i] > vol_threshold[i] and vol_filter[i]:
             signals[i] = 0.25
         
-        # Short: price < weekly Donchian low AND price < daily pivot - volume
-        elif (close[i] < donch_low_20_aligned[i] and 
-              close[i] < pivot_aligned[i] and 
-              volume[i] > vol_threshold[i]):
+        # Short: close breaks below Donchian low + volume + volatility filter
+        elif close[i] < donch_low[i] and volume[i] > vol_threshold[i] and vol_filter[i]:
             signals[i] = -0.25
         
-        # Exit: price crosses back to daily pivot (mean reversion to pivot)
+        # Exit: close crosses back inside Donchian channel (mean reversion)
         elif (i > 0 and 
-              ((signals[i-1] == 0.25 and close[i] < pivot_aligned[i]) or
-               (signals[i-1] == -0.25 and close[i] > pivot_aligned[i]))):
+              ((signals[i-1] == 0.25 and close[i] < donch_high[i]) or
+               (signals[i-1] == -0.25 and close[i] > donch_low[i]))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -68,6 +61,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyDonchian_Pivot_Volume"
-timeframe = "6h"
+name = "4h_Donchian_Breakout_Volume_VolFilter"
+timeframe = "4h"
 leverage = 1.0
