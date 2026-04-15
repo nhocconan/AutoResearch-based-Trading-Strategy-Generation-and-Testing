@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Bollinger Band breakout with 1d ATR regime filter and volume confirmation
-# Long when price breaks above 4h BB upper (20,2) + 1d ATR(14) > 30-period SMA(ATR) + volume > 1.5x 20-period avg
-# Short when price breaks below 4h BB lower (20,2) + 1d ATR(14) > 30-period SMA(ATR) + volume > 1.5x 20-period avg
-# Uses discrete position sizing (0.20) to minimize fee churn. Target: 60-150 total trades over 4 years.
-# Bollinger Bands provide volatility-adjusted breakout levels. ATR regime filter ensures we only trade during
-# elevated volatility periods, avoiding low-volatility chop. Works in bull markets (trend continuation) and
-# bear markets (strong downtrends) by requiring volatility expansion. Session filter (08-20 UTC) reduces noise.
+# Hypothesis: 6h Camarilla pivot breakout with 1d volume confirmation and ATR filter
+# Long when price breaks above Camarilla R4 (1d) + volume > 1.5x 20-period SMA + ATR(14) > 0.5*ATR(50)
+# Short when price breaks below Camarilla S4 (1d) + volume > 1.5x 20-period SMA + ATR(14) > 0.5*ATR(50)
+# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (12-25/year).
+# Camarilla pivots provide mathematically derived support/resistance levels. Volume confirms breakout strength.
+# ATR filter ensures sufficient volatility to avoid whipsaws in low-volume periods.
+# Works in bull markets (breakout continuation) and bear markets (strong downside breaks) by requiring volume and volatility.
 
 def generate_signals(prices):
     n = len(prices)
@@ -27,67 +27,63 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 1d Indicator: ATR Regime Filter ===
+    # === 1d Indicator: Camarilla Pivot Levels (R4, S4) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])
+    # Calculate pivot point (PP)
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    # Calculate Camarilla levels
+    camarilla_r4 = pp + ((high_1d - low_1d) * 1.1 / 2.0)
+    camarilla_s4 = pp - ((high_1d - low_1d) * 1.1 / 2.0)
+    
+    # Align Camarilla levels to 6h timeframe
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    
+    # === 6h Indicators: Volume SMA and ATR ===
+    # Volume SMA (20-period)
+    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR (14-period) and ATR (50-period) for volatility filter
+    high_shift = np.roll(high, 1)
+    low_shift = np.roll(low, 1)
+    close_shift = np.roll(close, 1)
+    high_shift[0] = high[0]
+    low_shift[0] = low[0]
+    close_shift[0] = close[0]
+    
+    tr1 = high - low
+    tr2 = np.abs(high - close_shift)
+    tr3 = np.abs(low - close_shift)
+    tr1[0] = high[0] - low[0]
+    tr2[0] = np.abs(high[0] - close[0])
+    tr3[0] = np.abs(low[0] - close[0])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # ATR(14) using Wilder's smoothing
-    period = 14
-    atr = np.zeros_like(tr)
-    atr[period-1] = np.mean(tr[:period])
-    for i in range(period, len(tr)):
-        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+    # ATR(14)
+    atr_period = 14
+    atr_14 = np.zeros_like(tr)
+    atr_14[atr_period-1] = np.mean(tr[:atr_period])
+    for i in range(atr_period, len(tr)):
+        atr_14[i] = (atr_14[i-1] * (atr_period-1) + tr[i]) / atr_period
     
-    # ATR regime: current ATR > 30-period SMA of ATR
-    atr_sma_30 = pd.Series(atr).rolling(window=30, min_periods=30).mean().values
-    atr_regime = atr > atr_sma_30
-    atr_regime_aligned = align_htf_to_ltf(prices, df_1d, atr_regime.astype(float))
-    
-    # === 4h Indicators: Bollinger Bands (20,2) ===
-    bb_window = 20
-    bb_std = 2
-    
-    # Calculate BB using 4h data
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < bb_window:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    
-    # Middle Band (SMA)
-    bb_middle = pd.Series(close_4h).rolling(window=bb_window, min_periods=bb_window).mean().values
-    # Standard Deviation
-    bb_std_dev = pd.Series(close_4h).rolling(window=bb_window, min_periods=bb_window).std().values
-    # Upper and Lower Bands
-    bb_upper = bb_middle + (bb_std_dev * bb_std)
-    bb_lower = bb_middle - (bb_std_dev * bb_std)
-    
-    # Align BB to 1h timeframe
-    bb_upper_aligned = align_htf_to_ltf(prices, df_4h, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_4h, bb_lower)
-    
-    # Volume SMA for confirmation (using 20-period)
-    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # ATR(50)
+    atr_long_period = 50
+    atr_50 = np.zeros_like(tr)
+    if len(tr) >= atr_long_period:
+        atr_50[atr_long_period-1] = np.mean(tr[:atr_long_period])
+        for i in range(atr_long_period, len(tr)):
+            atr_50[i] = (atr_50[i-1] * (atr_long_period-1) + tr[i]) / atr_long_period
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(bb_window, 30) + 20  # BB(20) + ATR_SMA(30) + volume(20)
+    warmup = max(20, atr_long_period) + 5  # volume(20) + ATR(50) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -98,33 +94,36 @@ def generate_signals(prices):
         # Volume filter: current volume > 1.5x 20-period volume SMA
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
+        # ATR filter: ATR(14) > 0.5 * ATR(50) (ensures sufficient volatility)
+        atr_filter = atr_14[i] > (0.5 * atr_50[i])
+        
         # Skip if any required data is NaN
-        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or
-            np.isnan(atr_regime_aligned[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
+            np.isnan(vol_sma_20[i]) or np.isnan(atr_14[i]) or np.isnan(atr_50[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 4h BB upper (20,2)
-        # 2. Volatility regime (1d ATR > 30-period SMA of ATR)
-        # 3. Volume confirmation
-        if (close[i] > bb_upper_aligned[i]) and \
-           (atr_regime_aligned[i] > 0.5) and vol_confirm:
-            signals[i] = 0.20
+        # 1. Price breaks above 1d Camarilla R4
+        # 2. Volume confirmation
+        # 3. Volatility filter
+        if (close[i] > camarilla_r4_aligned[i]) and \
+           vol_confirm and atr_filter:
+            signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 4h BB lower (20,2)
-        # 2. Volatility regime (1d ATR > 30-period SMA of ATR)
-        # 3. Volume confirmation
-        elif (close[i] < bb_lower_aligned[i]) and \
-             (atr_regime_aligned[i] > 0.5) and vol_confirm:
-            signals[i] = -0.20
+        # 1. Price breaks below 1d Camarilla S4
+        # 2. Volume confirmation
+        # 3. Volatility filter
+        elif (close[i] < camarilla_s4_aligned[i]) and \
+             vol_confirm and atr_filter:
+            signals[i] = -0.25
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "4h_BB20_1dATR_Regime_Volume_Filter_v1"
-timeframe = "1h"
+name = "6h_Camarilla_R4S4_1dVolATR_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
