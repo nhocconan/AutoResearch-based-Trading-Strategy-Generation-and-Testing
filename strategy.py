@@ -21,83 +21,68 @@ def generate_signals(prices):
     daily_close = df_1d['close'].values
     daily_high = df_1d['high'].values
     daily_low = df_1d['low'].values
+    daily_volume = df_1d['volume'].values
     
-    # Calculate daily pivot points (standard floor trader's pivots)
+    # Calculate daily pivot points (Camarilla style for better precision)
+    daily_range = daily_high - daily_low
     pivot = (daily_high + daily_low + daily_close) / 3.0
-    r1 = 2 * pivot - daily_low
-    s1 = 2 * pivot - daily_high
+    r1 = pivot + 1.1 * daily_range / 2.0
+    s1 = pivot - 1.1 * daily_range / 2.0
+    r2 = pivot + 1.1 * daily_range
+    s2 = pivot - 1.1 * daily_range
     
     # Calculate daily ATR(14) for volatility filter
-    tr1 = pd.Series(daily_high - daily_low)
-    tr2 = pd.Series(np.abs(daily_high - np.concatenate([[daily_close[0]], daily_close[:-1]])))
-    tr3 = pd.Series(np.abs(daily_low - np.concatenate([[daily_close[0]], daily_close[:-1]])))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14 = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
+    tr1 = daily_high - daily_low
+    tr2 = np.abs(daily_high - np.concatenate([[daily_close[0]], daily_close[:-1]]))
+    tr3 = np.abs(daily_low - np.concatenate([[daily_close[0]], daily_close[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align HTF indicators to 6h timeframe with proper delay
-    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
-    atr_14_6h = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Align HTF indicators to 12h timeframe with proper delay
+    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    r2_12h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_12h = align_htf_to_ltf(prices, df_1d, s2)
+    atr_14_12h = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Calculate 6h Donchian channels (20-period) for breakout signals
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate 6h volume ratio (current vs 20-period average)
+    # Calculate 12h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
     signals = np.zeros(n)
     
-    # Track position to prevent whipsaw
-    position = 0  # 0: flat, 1: long, -1: short
-    
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or 
-            np.isnan(atr_14_6h[i]) or np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
+        if (np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
+            np.isnan(r2_12h[i]) or np.isnan(s2_12h[i]) or np.isnan(atr_14_12h[i]) or 
             np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions with position filter to prevent whipsaw
-        # Long: price breaks above R1 with volume and volatility confirmation
-        long_condition = (close[i] > r1_6h[i] and 
-                         volume_ratio[i] > 1.3 and 
-                         atr_14_6h[i] > 0.005 * close[i] and
-                         position != 1)  # Not already long
+        # Entry conditions:
+        # Long: 12h price breaks above R1 with volume confirmation and adequate volatility
+        # Short: 12h price breaks below S1 with volume confirmation and adequate volatility
+        # Exit: reverse signal or volatility drops too low
         
-        # Short: price breaks below S1 with volume and volatility confirmation  
-        short_condition = (close[i] < s1_6h[i] and 
-                          volume_ratio[i] > 1.3 and 
-                          atr_14_6h[i] > 0.005 * close[i] and
-                          position != -1)  # Not already short
+        vol_filter = atr_14_12h[i] > 0.008 * close[i]  # Volatility filter: ATR > 0.8% of price
         
-        # Exit conditions: reverse signal or volatility collapse
-        exit_long = (position == 1 and 
-                    (close[i] < pivot_6h[i] or  # Price back to pivot
-                     atr_14_6h[i] < 0.003 * close[i]))  # Low volatility
-        
-        exit_short = (position == -1 and 
-                     (close[i] > pivot_6h[i] or  # Price back to pivot
-                      atr_14_6h[i] < 0.003 * close[i]))  # Low volatility
-        
-        # Generate signals
-        if long_condition:
+        # Long conditions: 12h breakout above R1
+        if (close[i] > r1_12h[i] and            # 12h price above R1 pivot
+            volume_ratio[i] > 1.4 and          # Volume confirmation (slightly higher threshold)
+            vol_filter):                       # Adequate volatility
             signals[i] = 0.25
-            position = 1
-        elif short_condition:
+            
+        # Short conditions: 12h breakdown below S1
+        elif (close[i] < s1_12h[i] and          # 12h price below S1 pivot
+              volume_ratio[i] > 1.4 and        # Volume confirmation
+              vol_filter):                     # Adequate volatility
             signals[i] = -0.25
-            position = -1
-        elif exit_long or exit_short:
-            signals[i] = 0.0
-            position = 0
         else:
-            signals[i] = 0.0  # Hold current position
+            signals[i] = 0.0
     
     return signals
 
-name = "6h_Pivot_R1_S1_Breakout_Volume_ATR_Filter_v2"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_Volume_Filter"
+timeframe = "12h"
 leverage = 1.0
