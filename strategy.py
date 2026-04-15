@@ -3,10 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Bollinger Band Squeeze + Volume + 1d Trend Filter
-# Long when price breaks above upper BB with volume spike and 1d EMA50 uptrend
-# Short when price breaks below lower BB with volume spike and 1d EMA50 downtrend
-# Bollinger squeeze (low volatility) precedes breakouts, effective in both bull and bear
+# Hypothesis: 1d Williams Alligator + Volume Spike + 1w Trend Filter
+# Alligator: Jaw (EMA13, 8-shift), Teeth (EMA8, 5-shift), Lips (EMA5, 3-shift)
+# Long when Lips > Teeth > Jaw (bullish alignment) + volume spike + 1w EMA50 uptrend
+# Short when Lips < Teeth < Jaw (bearish alignment) + volume spike + 1w EMA50 downtrend
+# Alligator signals trend presence and direction; volume confirms strength; 1w filter avoids counter-trend trades
 # Uses discrete sizing (0.25) to limit overtrading and fee drag
 
 def generate_signals(prices):
@@ -19,57 +20,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h Bollinger Bands (20, 2)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    bb_period = 20
-    bb_mid = pd.Series(close_12h).rolling(window=bb_period, min_periods=bb_period).mean()
-    bb_std = pd.Series(close_12h).rolling(window=bb_period, min_periods=bb_period).std()
-    bb_upper = (bb_mid + 2 * bb_std).values
-    bb_lower = (bb_mid - 2 * bb_std).values
-    bb_upper_aligned = align_htf_to_ltf(prices, df_12h, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_12h, bb_lower)
+    # 1-week EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # 1d EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Williams Alligator components
+    # Jaw: EMA13 of median price, shifted 8 bars
+    median_price = (high + low) / 2
+    jaw_raw = pd.Series(median_price).ewm(span=13, adjust=False, min_periods=13).mean().values
+    jaw = np.roll(jaw_raw, 8)
+    jaw[:8] = np.nan  # First 8 values invalid due to shift
     
-    # Bollinger Band width (volatility measure) for squeeze detection
-    bb_width = bb_upper - bb_lower
-    bb_width_aligned = align_htf_to_ltf(prices, df_12h, bb_width)
+    # Teeth: EMA8 of median price, shifted 5 bars
+    teeth_raw = pd.Series(median_price).ewm(span=8, adjust=False, min_periods=8).mean().values
+    teeth = np.roll(teeth_raw, 5)
+    teeth[:5] = np.nan  # First 5 values invalid due to shift
     
-    # Squeeze condition: BB width below 20-period mean (low volatility)
-    bb_width_ma = pd.Series(bb_width_aligned).rolling(window=20, min_periods=1).mean()
-    squeeze = bb_width_aligned < bb_width_ma.values
+    # Lips: EMA5 of median price, shifted 3 bars
+    lips_raw = pd.Series(median_price).ewm(span=5, adjust=False, min_periods=5).mean().values
+    lips = np.roll(lips_raw, 3)
+    lips[:3] = np.nan  # First 3 values invalid due to shift
     
-    # Volume confirmation: current > 2.0x median of last 20 bars
+    # Alligator alignment: Lips > Teeth > Jaw (bullish) or Lips < Teeth < Jaw (bearish)
+    bullish_alignment = (lips > teeth) & (teeth > jaw)
+    bearish_alignment = (lips < teeth) & (teeth < jaw)
+    
+    # Volume confirmation: current > 2x median of last 20 bars
     vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
     vol_threshold = 2.0 * vol_median
     
     signals = np.zeros(n)
     
-    for i in range(20, n):
+    for i in range(13, n):
         # Skip if any required data is NaN
-        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(squeeze[i]) or np.isnan(vol_threshold[i])):
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(lips[i]) or np.isnan(teeth[i]) or 
+            np.isnan(jaw[i]) or np.isnan(vol_threshold[i])):
             continue
         
-        # Long: price breaks above upper BB + squeeze + volume + 1d uptrend
-        if (close[i] > bb_upper_aligned[i] and squeeze[i] and 
-            volume[i] > vol_threshold[i] and close[i] > ema_1d_aligned[i]):
+        # Long: Bullish alignment + volume + 1w uptrend
+        if (bullish_alignment[i] and volume[i] > vol_threshold[i] and 
+            close[i] > ema_1w_aligned[i]):
             signals[i] = 0.25
         
-        # Short: price breaks below lower BB + squeeze + volume + 1d downtrend
-        elif (close[i] < bb_lower_aligned[i] and squeeze[i] and 
-              volume[i] > vol_threshold[i] and close[i] < ema_1d_aligned[i]):
+        # Short: Bearish alignment + volume + 1w downtrend
+        elif (bearish_alignment[i] and volume[i] > vol_threshold[i] and 
+              close[i] < ema_1w_aligned[i]):
             signals[i] = -0.25
         
-        # Exit: price returns to middle band or volatility expands
+        # Exit: alignment breaks or trend fails
         elif (i > 0 and 
-              ((signals[i-1] == 0.25 and (close[i] <= bb_mid.iloc[i] if hasattr(bb_mid, 'iloc') else bb_mid[i])) or
-               (signals[i-1] == -0.25 and (close[i] >= bb_mid.iloc[i] if hasattr(bb_mid, 'iloc') else bb_mid[i])))):
+              ((signals[i-1] == 0.25 and (not bullish_alignment[i] or close[i] <= ema_1w_aligned[i])) or
+               (signals[i-1] == -0.25 and (not bearish_alignment[i] or close[i] >= ema_1w_aligned[i])))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -78,6 +81,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Bollinger_Squeeze_Volume_Trend"
-timeframe = "12h"
+name = "1d_WilliamsAlligator_Volume_Trend"
+timeframe = "1d"
 leverage = 1.0
