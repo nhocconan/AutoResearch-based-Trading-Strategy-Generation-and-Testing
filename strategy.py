@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ADX(14) trend filter and volume confirmation
-# Long when price breaks above 20-period high + 1d ADX > 25 (strong trend) + volume > 1.5x 20-period avg
-# Short when price breaks below 20-period low + 1d ADX > 25 (strong trend) + volume > 1.5x 20-period avg
-# Uses discrete position sizing (0.30) to minimize fee churn. Designed for low trade frequency (20-40/year).
-# Donchian channels provide clear breakout levels. 1d ADX ensures we only trade strong trends.
+# Hypothesis: 6h Ichimoku Cloud breakout with 1d trend filter and volume confirmation
+# Long when price breaks above 6h Ichimoku Cloud (Senkou Span A/B) + 1d close > 1d EMA50 (uptrend) + volume > 1.3x 20-period avg
+# Short when price breaks below 6h Ichimoku Cloud + 1d close < 1d EMA50 (downtrend) + volume > 1.3x 20-period avg
+# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (12-30/year).
+# Ichimoku Cloud provides dynamic support/resistance. 1d EMA50 filter ensures we trade with the higher timeframe trend.
 # Works in bull markets (buying breakouts in uptrend) and bear markets (selling breakdowns in downtrend).
 
 def generate_signals(prices):
@@ -26,40 +26,41 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # === 1d Indicator: ADX(14) (trend strength filter) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === 1d Indicator: EMA50 (trend filter) ===
     close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period TR is just high-low
+    # === 6h Ichimoku Cloud Components ===
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period_tenkan = 9
+    highest_high_tenkan = pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+    lowest_low_tenkan = pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+    tenkan_sen = (highest_high_tenkan + lowest_low_tenkan) / 2
     
-    # Calculate Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period_kijun = 26
+    highest_high_kijun = pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values
+    lowest_low_kijun = pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values
+    kijun_sen = (highest_high_kijun + lowest_low_kijun) / 2
     
-    # Smooth TR and DM (Wilder's smoothing = EMA with alpha=1/period)
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2, plotted 26 periods ahead
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
     
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2, plotted 26 periods ahead
+    period_senkou_b = 52
+    highest_high_senkou_b = pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+    lowest_low_senkou_b = pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+    senkou_span_b = (highest_high_senkou_b + lowest_low_senkou_b) / 2
     
-    # === 4h Indicator: Donchian Channels (20-period) ===
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # The Cloud (Kumo) is between Senkou Span A and Senkou Span B
+    # Upper Cloud = max(Senkou Span A, Senkou Span B)
+    # Lower Cloud = min(Senkou Span A, Senkou Span B)
+    upper_cloud = np.maximum(senkou_span_a, senkou_span_b)
+    lower_cloud = np.minimum(senkou_span_a, senkou_span_b)
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -67,7 +68,8 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(lookback, 14) + 20  # Donchian(20) + ADX(14) + volume(20)
+    # Need max of: tenkan(9), kijun(26), senkou_b(52) + 26 displacement = 78, plus volume(20)
+    warmup = 78 + 20
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -75,36 +77,40 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
+        # Volume filter: current volume > 1.3x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.3)
         
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or
+            np.isnan(upper_cloud[i]) or np.isnan(lower_cloud[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
+        # Get aligned 1d close for trend filter
+        close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)[i]
+        
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 20-period high (Donchian breakout)
-        # 2. 1d ADX > 25 (strong trend)
+        # 1. Price breaks above upper cloud (close > upper_cloud)
+        # 2. 1d close > 1d EMA50 (uptrend)
         # 3. Volume confirmation
-        if (close[i] > highest_high[i]) and \
-           (adx_aligned[i] > 25) and vol_confirm:
-            signals[i] = 0.30
+        if (close[i] > upper_cloud[i]) and \
+           (close_1d_aligned > ema50_1d_aligned[i]) and vol_confirm:
+            signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 20-period low (Donchian breakdown)
-        # 2. 1d ADX > 25 (strong trend)
+        # 1. Price breaks below lower cloud (close < lower_cloud)
+        # 2. 1d close < 1d EMA50 (downtrend)
         # 3. Volume confirmation
-        elif (close[i] < lowest_low[i]) and \
-             (adx_aligned[i] > 25) and vol_confirm:
-            signals[i] = -0.30
+        elif (close[i] < lower_cloud[i]) and \
+             (close_1d_aligned < ema50_1d_aligned[i]) and vol_confirm:
+            signals[i] = -0.25
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "4h_Donchian20_1dADX_Volume_Filter_v1"
-timeframe = "4h"
+name = "6h_IchimokuCloud_1dEMA50_Volume_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
