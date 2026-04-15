@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h EMA crossover (21/55) with 1d ADX regime filter and volume confirmation.
-# Uses 1d ADX(14) > 25 to identify trending markets (avoid chop) and 12h EMA21/EMA55 cross for entries.
-# Volume filter ensures breakouts have sufficient momentum. Designed for low trade frequency
-# (15-30/year) to minimize fee drag. Works in bull/bear: ADX filters non-trending, EMA crossover
-# captures trend direction with confirmation.
+# Hypothesis: 4h Donchian(20) breakout + 1d trend filter (EMA50) + volume confirmation + ATR stoploss.
+# Donchian breakout provides clear structure, 1d EMA50 filters counter-trend trades,
+# volume confirms momentum breakout, ATR stoploss manages risk.
+# Works in bull/bear: trend filter avoids counter-trend trades, breakout captures momentum.
+# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,52 +19,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h and 1d HTF data once before loop
-    df_12h = get_htf_data(prices, '12h')
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_12h) < 60 or len(df_1d) < 60:
+    # Get HTF data once before loop
+    df_4h = get_htf_data(prices, '4h')  # for ATR calculation
+    df_1d = get_htf_data(prices, '1d')  # for trend filter
+    
+    if len(df_4h) < 50 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 12h Indicators: EMA Crossover ===
-    close_12h = pd.Series(df_12h['close'].values)
-    ema_21_12h = close_12h.ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_55_12h = close_12h.ewm(span=55, adjust=False, min_periods=55).mean().values
+    # === 4h Indicators: ATR for stoploss and volatility filter ===
+    high_4h = pd.Series(df_4h['high'].values)
+    low_4h = pd.Series(df_4h['low'].values)
+    close_4h = pd.Series(df_4h['close'].values)
+    tr1 = high_4h - low_4h
+    tr2 = abs(high_4h - close_4h.shift(1))
+    tr3 = abs(low_4h - close_4h.shift(1))
+    tr_4h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_4h = tr_4h.rolling(window=14, min_periods=14).mean().values
+    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
     
-    ema_21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_21_12h)
-    ema_55_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_55_12h)
+    # === 4h Donchian(20) channels ===
+    donch_high_20 = high_4h.rolling(window=20, min_periods=20).max().values
+    donch_low_20 = low_4h.rolling(window=20, min_periods=20).min().values
+    donch_high_20_aligned = align_htf_to_ltf(prices, df_4h, donch_high_20)
+    donch_low_20_aligned = align_htf_to_ltf(prices, df_4h, donch_low_20)
     
-    # === 1d Indicators: ADX Trend Filter ===
-    high_1d = pd.Series(df_1d['high'].values)
-    low_1d = pd.Series(df_1d['low'].values)
-    close_1d = pd.Series(df_1d['close'].values)
+    # === 1d Indicators: Trend Filter ===
+    # 1d EMA(50) for trend bias
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = abs(high_1d - close_1d.shift(1))
-    tr3 = abs(low_1d - close_1d.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
-    # Directional Movement
-    dm_plus = high_1d.diff()
-    dm_minus = low_1d.diff() * -1  # inverted so down movement is positive
-    dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0.0)
-    dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0.0)
-    
-    # Smoothed values
-    tr_14 = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    dm_plus_14 = dm_plus.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    dm_minus_14 = dm_minus.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    
-    # Directional Indicators
-    di_plus = 100 * (dm_plus_14 / tr_14)
-    di_minus = 100 * (dm_minus_14 / tr_14)
-    
-    # DX and ADX
-    dx = (abs(di_plus - di_minus) / (di_plus + di_minus)) * 100
-    adx = dx.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    
-    adx_values = adx.values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
+    # === Volume filter: current 4h volume > 1.5x 20-bar 4h volume SMA ===
+    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_sma_20 * 1.5)
     
     signals = np.zeros(n)
     
@@ -72,39 +58,54 @@ def generate_signals(prices):
     warmup = 100
     
     for i in range(warmup, n):
-        # Volume filter: current 12h volume > 1.3x 20-period 12h volume SMA
-        vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.3)
-        
         # Skip if any required data is NaN
-        if (np.isnan(ema_21_12h_aligned[i]) or np.isnan(ema_55_12h_aligned[i]) or
-            np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(donch_high_20_aligned[i]) or np.isnan(donch_low_20_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. EMA21 > EMA55 (bullish crossover)
-        # 2. 1d ADX > 25 (strong trending market)
+        # 1. Price breaks above Donchian(20) high
+        # 2. 1d price above EMA50 (bullish long-term trend bias)
         # 3. Volume confirmation
-        if (ema_21_12h_aligned[i] > ema_55_12h_aligned[i] and
-            adx_1d_aligned[i] > 25.0 and
-            vol_confirm):
+        if (close[i] > donch_high_20_aligned[i] and
+            close[i] > ema_50_1d_aligned[i] and
+            vol_confirm[i]):
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. EMA21 < EMA55 (bearish crossover)
-        # 2. 1d ADX > 25 (strong trending market)
+        # 1. Price breaks below Donchian(20) low
+        # 2. 1d price below EMA50 (bearish long-term trend bias)
         # 3. Volume confirmation
-        elif (ema_21_12h_aligned[i] < ema_55_12h_aligned[i] and
-              adx_1d_aligned[i] > 25.0 and
-              vol_confirm):
+        elif (close[i] < donch_low_20_aligned[i] and
+              close[i] < ema_50_1d_aligned[i] and
+              vol_confirm[i]):
             signals[i] = -0.25
         
+        # === STOPLOSS: ATR-based trailing stop ===
         else:
-            signals[i] = 0.0  # flat
+            # Track position from previous bar
+            prev_signal = signals[i-1]
+            
+            if prev_signal > 0:  # Long position
+                # Calculate stop level: highest high since entry minus 2*ATR
+                # Simplified: use current high - 2*ATR as trailing stop proxy
+                if close[i] < (high[i] - 2.0 * atr_4h_aligned[i]):
+                    signals[i] = 0.0  # stoploss hit
+                else:
+                    signals[i] = prev_signal  # maintain position
+            elif prev_signal < 0:  # Short position
+                # Calculate stop level: lowest low since entry plus 2*ATR
+                # Simplified: use current low + 2*ATR as trailing stop proxy
+                if close[i] > (low[i] + 2.0 * atr_4h_aligned[i]):
+                    signals[i] = 0.0  # stoploss hit
+                else:
+                    signals[i] = prev_signal  # maintain position
+            else:
+                signals[i] = 0.0  # flat
     
     return signals
 
-name = "12h_EMA21_55_ADX1d_VolFilter_v1"
-timeframe = "12h"
+name = "4h_Donchian20_EMA50_Vol_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
