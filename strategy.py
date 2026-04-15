@@ -3,92 +3,80 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d RSI + Volume Spike + Weekly Trend Filter
-# Uses RSI(14) for overbought/oversold conditions on daily timeframe.
-# Enters long when RSI < 30 and volume > 2x average volume.
-# Enters short when RSI > 70 and volume > 2x average volume.
-# Weekly trend filter: only take longs when price > weekly EMA(50), shorts when price < weekly EMA(50).
-# Works in both bull and bear markets by fading extremes in the direction of the weekly trend.
-# Target: 30-80 total trades over 4 years.
+# Hypothesis: 6h Elder Ray + Weekly Trend Filter
+# Elder Ray calculates Bull Power (High - EMA13) and Bear Power (Low - EMA13).
+# Long when Bull Power > 0 and rising, Bear Power < 0 and falling.
+# Short when Bear Power < 0 and falling, Bull Power < 0 and rising.
+# Weekly trend filter uses 200-period EMA on weekly timeframe: only long when price > weekly EMA200, only short when price < weekly EMA200.
+# Works in bull markets (captures strength) and bear markets (captures weakness). Target: 50-150 total trades.
+# Timeframe: 6h, HTF: 1w
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
-    
-    # Load daily data for RSI calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
-        return np.zeros(n)
-    close_1d = df_1d['close'].values
+    close = prices['close'].values
     
     # Load weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 200:
         return np.zeros(n)
     close_1w = df_1w['close'].values
     
-    # Calculate RSI(14) on daily closes
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate EMA13 for Elder Ray
+    close_series = pd.Series(close)
+    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    # Calculate Bull Power and Bear Power
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate EMA200 on weekly for trend filter
+    close_1w_series = pd.Series(close_1w)
+    ema200_1w = close_1w_series.ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate weekly EMA(50)
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align daily RSI to 1d timeframe (already aligned)
-    # Align weekly EMA(50) to daily timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(close, df_1w, ema_50_1w)
+    # Align weekly EMA200 to 6h timeframe
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25
+    base_size = 0.25  # Position size
     
-    # Start from index where we have sufficient data
-    start_idx = 14  # Need at least 14 days for RSI
-    
-    for i in range(start_idx, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi[i]) or np.isnan(ema_50_1w_aligned[i])):
+        if np.isnan(ema200_1w_aligned[i]):
             continue
         
-        # Long entry: RSI < 30 (oversold) + volume spike + price above weekly EMA(50)
-        if (rsi[i] < 30 and
-            volume[i] > 2.0 * np.median(volume[max(0, i-20):i+1]) and
-            close[i] > ema_50_1w_aligned[i] and
-            position <= 0):
+        # Long conditions: Bull Power positive and rising, price above weekly EMA200
+        bull_rising = bull_power[i] > bull_power[i-1]
+        long_condition = (bull_power[i] > 0 and bull_rising and close[i] > ema200_1w_aligned[i])
+        
+        # Short conditions: Bear Power negative and falling, price below weekly EMA200
+        bear_falling = bear_power[i] < bear_power[i-1]
+        short_condition = (bear_power[i] < 0 and bear_falling and close[i] < ema200_1w_aligned[i])
+        
+        # Exit conditions: power signals reverse or price crosses weekly EMA200
+        exit_long = (bull_power[i] <= 0 or not bull_rising or close[i] < ema200_1w_aligned[i])
+        exit_short = (bear_power[i] >= 0 or not bear_falling or close[i] > ema200_1w_aligned[i])
+        
+        if long_condition and position <= 0:
             position = 1
             signals[i] = base_size
-        
-        # Short entry: RSI > 70 (overbought) + volume spike + price below weekly EMA(50)
-        elif (rsi[i] > 70 and
-              volume[i] > 2.0 * np.median(volume[max(0, i-20):i+1]) and
-              close[i] < ema_50_1w_aligned[i] and
-              position >= 0):
+        elif short_condition and position >= 0:
             position = -1
             signals[i] = -base_size
-        
-        # Exit: RSI returns to neutral zone (40-60) or reverse signal
-        elif position == 1 and (rsi[i] > 50 or rsi[i] < 30):
+        elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (rsi[i] < 50 or rsi[i] > 70):
+        elif position == -1 and exit_short:
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "1d_RSI_Volume_Spike_WeeklyTrend"
-timeframe = "1d"
+name = "6h_ElderRay_WeeklyTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
