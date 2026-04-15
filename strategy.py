@@ -41,8 +41,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x daily average volume
-        # Approximate daily volume from 12h: use 2x current 12h volume as proxy for daily
+        # Volume confirmation: current 6h volume > 0.75x daily average volume
+        # Approximate daily volume from 6h: use 4x current 6h volume as proxy for daily
         vol_confirm = volume[i] > 0.75 * vol_sma_20_aligned[i]  # Conservative threshold
         
         # Long conditions:
@@ -67,6 +67,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_EMA34_VolFilter_v1"
-timeframe = "12h"
+name = "6h_Donchian20_EMA34_VolFilter_v1"
+timeframe = "6h"
 leverage = 1.0
