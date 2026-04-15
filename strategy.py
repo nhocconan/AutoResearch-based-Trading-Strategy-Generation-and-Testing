@@ -1,13 +1,14 @@
+#1/root/candidates/2025-06-20_04-46-49.py
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Bollinger Band Squeeze Breakout with Volume Confirmation and Daily ADX Filter
-# Strategy looks for low volatility periods (Bollinger Band squeeze) followed by breakouts,
-# with volume confirmation and trend strength (ADX > 25) to filter false breakouts.
-# Works in both bull and bear markets by trading breakouts in the direction of the trend.
-# Target: 50-150 total trades over 4 years (12-38/year) to avoid fee drag.
+# Hypothesis: 1d KAMA direction + RSI + chop filter
+# KAMA (Kaufman Adaptive Moving Average) adapts to market noise - slow in ranging markets, fast in trends.
+# Combined with RSI for momentum and Choppiness Index for regime detection.
+# Works in bull markets (trend following) and bear markets (mean reversion in chop).
+# Target: 20-60 total trades over 4 years (5-15/year).
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,101 +20,137 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2) - squeeze detection
-    bb_period = 20
-    bb_std = 2
-    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_band = sma + bb_std * std
-    lower_band = sma - bb_std * std
-    bb_width = (upper_band - lower_band) / sma  # Normalized width
-    
-    # Bollinger Band squeeze: width below 20-period average width
-    avg_bb_width = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    squeeze = bb_width < 0.8 * avg_bb_width  # Squeeze when width is 20% below average
-    
-    # Breakout signals
-    breakout_up = close > upper_band
-    breakout_down = close < lower_band
-    
-    # Volume confirmation
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 1.5 * vol_ma
-    
-    # Load 1d data for ADX trend filter
+    # Load 1d data for KAMA and RSI
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ADX (14-period) on 1d
+    # Load 1w data for Choppiness Index (regime filter)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate KAMA (10-period ER, 2 and 30 SC)
+    # Efficiency Ratio
+    change = np.abs(np.diff(close_1d, n=10))
+    abs_change = np.sum(np.abs(np.diff(close_1d)), axis=0)
+    # Manual calculation for ER
+    er = np.zeros_like(close_1d)
+    for i in range(10, len(close_1d)):
+        if i >= 10:
+            change_val = np.abs(close_1d[i] - close_1d[i-10])
+            abs_change_val = np.sum(np.abs(np.diff(close_1d[i-9:i+1])))
+            if abs_change_val > 0:
+                er[i] = change_val / abs_change_val
+            else:
+                er[i] = 0
+    er[0:10] = 0
+    
+    # Smoothing Constants
+    sc = (er * (0.0645 - 0.0612) + 0.0612) ** 2
+    sc[0:10] = 0.0612 ** 2
+    
+    # KAMA calculation
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    
+    # Calculate RSI (14-period) on 1d
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.zeros_like(close_1d)
+    avg_loss = np.zeros_like(close_1d)
+    
+    # First average
+    avg_gain[14] = np.mean(gain[1:15])
+    avg_loss[14] = np.mean(loss[1:15])
+    
+    # Subsequent averages
+    for i in range(15, len(close_1d)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[0:14] = 50  # Neutral before enough data
+    
+    # Calculate Choppiness Index (14-period) on 1w
     # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Sum of TR over 14 periods
+    tr_sum = np.zeros_like(close_1w)
+    for i in range(14, len(close_1w)):
+        tr_sum[i] = np.sum(tr[i-13:i+1])
     
-    # Smoothed values
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    # Highest high and lowest low over 14 periods
+    max_high = np.zeros_like(close_1w)
+    min_low = np.zeros_like(close_1w)
+    for i in range(14, len(close_1w)):
+        max_high[i] = np.max(high_1w[i-13:i+1])
+        min_low[i] = np.min(low_1w[i-13:i+1])
     
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+    # Chop calculation
+    chop = np.zeros_like(close_1w)
+    for i in range(14, len(close_1w)):
+        if max_high[i] - min_low[i] > 0:
+            chop[i] = 100 * np.log10(tr_sum[i] / (max_high[i] - min_low[i])) / np.log10(14)
+        else:
+            chop[i] = 50
+    chop[0:14] = 50
     
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align indicators to 1d timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    chop_aligned = align_htf_to_ltf(prices, df_1w, chop, additional_delay_bars=0)
     
     signals = np.zeros(n)
     position = 0
     base_size = 0.25  # Position size
     
     for i in range(30, n):
-        # Skip if any required data is NaN
-        if (np.isnan(squeeze[i]) or np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or
-            np.isnan(volume_confirm[i]) or np.isnan(adx_aligned[i])):
+        # Skip if any required data is invalid
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(chop_aligned[i])):
             continue
-        
-        # Long entry: Bollinger Band squeeze breakout up + volume confirmation + ADX > 25
-        if (squeeze[i] and breakout_up[i] and volume_confirm[i] and 
-            adx_aligned[i] > 25 and position <= 0):
+            
+        # Long: Price above KAMA + RSI > 50 + Chop < 61.8 (trending market)
+        if (close[i] > kama_aligned[i] and
+            rsi_aligned[i] > 50 and
+            chop_aligned[i] < 61.8 and
+            position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: Bollinger Band squeeze breakout down + volume confirmation + ADX > 25
-        elif (squeeze[i] and breakout_down[i] and volume_confirm[i] and 
-              adx_aligned[i] > 25 and position >= 0):
+        # Short: Price below KAMA + RSI < 50 + Chop < 61.8 (trending market)
+        elif (close[i] < kama_aligned[i] and
+              rsi_aligned[i] < 50 and
+              chop_aligned[i] < 61.8 and
+              position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: opposite breakout or ADX < 20 (ranging market) or volatility expansion
-        elif position == 1 and (breakout_down[i] or adx_aligned[i] < 20 or 
-                                bb_width[i] > 2 * avg_bb_width[i]):
+        # Exit: Chop > 61.8 (ranging market) or reverse signal
+        elif position == 1 and (chop_aligned[i] > 61.8 or close[i] < kama_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (breakout_up[i] or adx_aligned[i] < 20 or 
-                                 bb_width[i] > 2 * avg_bb_width[i]):
+        elif position == -1 and (chop_aligned[i] > 61.8 or close[i] > kama_aligned[i]):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Bollinger_Squeeze_Breakout_Volume_ADX"
-timeframe = "4h"
+name = "1d_KAMA_RSI_Chop"
+timeframe = "1d"
 leverage = 1.0
