@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Donchian breakout for trend and 4h RSI(14) pullback for entry.
-# In 1d uptrend (price > 1d upper Donchian), wait for 4h RSI < 40 to go long (strong pullback).
-# In 1d downtrend (price < 1d lower Donchian), wait for 4h RSI > 60 to go short (weak bounce).
-# Volume confirmation ensures institutional participation. Discrete sizing 0.25 minimizes fee drag.
-# Designed for low trade frequency (~25/year) to work in both bull (trend continuation) and bear (mean reversion within trend).
+# Hypothesis: 6h strategy using 1d Williams %R for mean reversion and 1w EMA200 for trend filter.
+# In 1w uptrend (close > EMA200), look for 1d Williams %R < -80 (oversold) to go long.
+# In 1w downtrend (close < EMA200), look for 1d Williams %R > -20 (overbought) to go short.
+# Volume confirmation (current > 1.5x 20-period SMA) ensures momentum validity.
+# Designed for low trade frequency (12-30/year) to minimize fee drag while capturing mean reversion in trending markets.
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,35 +23,30 @@ def generate_signals(prices):
     # Pre-compute session hours to avoid datetime operations in loop
     hours = pd.DatetimeIndex(open_time).hour
     
-    # Get 1d and 4h HTF data once before loop
+    # Get 1d and 1w HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_1d) < 30 or len(df_4h) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 30 or len(df_1w) < 30:
         return np.zeros(n)
     
-    # === 1d Indicators: Donchian Channel (20) ===
+    # === 1d Indicators: Williams %R(14) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    donchian_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_1d)
-    donchian_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_1d)
+    close_1d = df_1d['close'].values
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low + 1e-10)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # === 4h Indicators: RSI(14) ===
-    close_4h = df_4h['close'].values
-    delta = pd.Series(close_4h).diff().values
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_4h = 100 - (100 / (1 + rs))
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
+    # === 1w Indicators: EMA200 ===
+    close_1w = df_1w['close'].values
+    ema_200 = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 100
+    warmup = 200
     
     for i in range(warmup, n):
         # Session filter: 08-20 UTC only
@@ -60,28 +55,27 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current volume > 1.3x 20-period volume SMA
+        # Volume filter: current volume > 1.5x 20-period volume SMA
         vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.3)
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_1d_aligned[i]) or np.isnan(donchian_low_1d_aligned[i]) or
-            np.isnan(rsi_4h_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_200_aligned[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. In 1d uptrend (price > 1d upper Donchian)
-        # 2. 4h RSI < 40 (pullback in uptrend)
+        # 1. In 1w uptrend (close > 1w EMA200)
+        # 2. 1d Williams %R < -80 (oversold)
         # 3. Volume confirmation
-        if (close[i] > donchian_high_1d_aligned[i]) and (rsi_4h_aligned[i] < 40) and vol_confirm:
+        if (close[i] > ema_200_aligned[i]) and (williams_r_aligned[i] < -80) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. In 1d downtrend (price < 1d lower Donchian)
-        # 2. 4h RSI > 60 (weak bounce in downtrend)
+        # 1. In 1w downtrend (close < 1w EMA200)
+        # 2. 1d Williams %R > -20 (overbought)
         # 3. Volume confirmation
-        elif (close[i] < donchian_low_1d_aligned[i]) and (rsi_4h_aligned[i] > 60) and vol_confirm:
+        elif (close[i] < ema_200_aligned[i]) and (williams_r_aligned[i] > -20) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -89,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Donchian20_RSI14_VolumeFilter_v1"
-timeframe = "4h"
+name = "6h_WilliamsR14_1wEMA200_VolumeFilter_v1"
+timeframe = "6h"
 leverage = 1.0
