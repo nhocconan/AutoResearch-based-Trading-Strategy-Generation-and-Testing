@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily HTF data once before loop (1d HTF)
+    # Get daily HTF data once before loop (1h primary, 1d HTF)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -22,6 +22,14 @@ def generate_signals(prices):
     daily_high = df_1d['high'].values
     daily_low = df_1d['low'].values
     daily_volume = df_1d['volume'].values
+    
+    # Calculate 1h Donchian channels (20-period) for breakout signals
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 1h volume ratio (current vs 20-period average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ratio = volume / (vol_ma_20 + 1e-10)
     
     # Calculate 1d ATR(14) for volatility filter
     tr1 = pd.Series(daily_high - daily_low)
@@ -33,52 +41,53 @@ def generate_signals(prices):
     # Calculate 1d EMA50 for trend filter
     ema_50 = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align HTF indicators to 4h timeframe with proper delay
-    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50)
-    atr_14_4h = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Align HTF indicators to 1h timeframe with proper delay
+    ema_50_1h = align_htf_to_ltf(prices, df_1d, ema_50)
+    atr_14_1h = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Calculate 4h Donchian channels (20-period) for breakout signals
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate 4h volume ratio (current vs 20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ratio = volume / (vol_ma_20 + 1e-10)
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_4h[i]) or np.isnan(atr_14_4h[i]) or 
+        if (np.isnan(ema_50_1h[i]) or np.isnan(atr_14_1h[i]) or 
             np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or np.isnan(volume_ratio[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Apply session filter
+        hour = hours[i]
+        if hour < 8 or hour > 20:
             signals[i] = 0.0
             continue
         
         # Entry conditions:
         # 1. 1d trend filter: price above/below daily EMA50
-        # 2. 4h Donchian breakout: price breaks 20-period channel
-        # 3. 4h volume confirmation: volume > 2.0x average (strict filter)
-        # 4. 4h volatility filter: ATR > 0.5% of price (avoid low volatility chop)
-        # 5. Discrete position sizing: 0.25
+        # 2. 1h Donchian breakout: price breaks 20-period channel
+        # 3. 1h volume confirmation: volume > 2.0x average (strict filter)
+        # 4. 1d volatility filter: ATR > 0.5% of price (avoid low volatility chop)
+        # 5. Discrete position sizing: 0.20
         
         # Long conditions: break above Donchian high in uptrend
-        if (close[i] > ema_50_4h[i] and          # Daily uptrend filter
-            close[i] > highest_20[i] and          # Donchian breakout
-            volume_ratio[i] > 2.0 and             # Strict volume confirmation
-            atr_14_4h[i] > 0.005 * close[i]):     # Volatility filter (ATR > 0.5% of price)
-            signals[i] = 0.25
+        if (close[i] > ema_50_1h[i] and          # Daily uptrend filter
+            close[i] > highest_20[i] and         # Donchian breakout
+            volume_ratio[i] > 2.0 and            # Strict volume confirmation
+            atr_14_1h[i] > 0.005 * close[i]):    # Volatility filter (ATR > 0.5% of price)
+            signals[i] = 0.20
             
         # Short conditions: break below Donchian low in downtrend
-        elif (close[i] < ema_50_4h[i] and        # Daily downtrend filter
+        elif (close[i] < ema_50_1h[i] and        # Daily downtrend filter
               close[i] < lowest_20[i] and        # Donchian breakdown
               volume_ratio[i] > 2.0 and          # Strict volume confirmation
-              atr_14_4h[i] > 0.005 * close[i]):  # Volatility filter
-            signals[i] = -0.25
+              atr_14_1h[i] > 0.005 * close[i]):  # Volatility filter
+            signals[i] = -0.20
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian_Breakout_EMA50_Volume_ATR_Filter_v2"
-timeframe = "4h"
+name = "1h_Donchian_Breakout_EMA50_Volume_ATR_Session_Filter"
+timeframe = "1h"
 leverage = 1.0
