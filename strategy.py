@@ -3,11 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator with Volume Confirmation and ADX Trend Filter
-# Uses Williams Alligator (Jaw/Teeth/Lips) to identify trend direction and strength.
-# Long when Lips > Teeth > Jaw (bullish alignment), Short when Lips < Teeth < Jaw (bearish alignment).
-# Requires volume confirmation (volume > 1.5x median) and ADX > 25 for trend strength.
-# Works in both bull and bear markets by capturing strong trends. Target: 60-120 total trades.
+# Hypothesis: 12h 1-day Range Breakout with Volume Confirmation and ADX Trend Filter
+# Uses the previous day's high/low as support/resistance levels. Breakouts above previous day's high
+# or below previous day's low are traded only when confirmed by volume and ADX > 25 (trending market).
+# Works in bull markets (breakouts up) and bear markets (breakouts down). Target: 50-150 total trades.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,32 +18,12 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Williams Alligator (13,8,5 SMAs of median price)
+    # Load 1d data for previous day's high/low
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 2:
         return np.zeros(n)
-    median_price = (df_1d['high'].values + df_1d['low'].values) / 2
-    
-    # Williams Alligator lines (Smoothed Moving Average - SMMA)
-    jaw = np.full_like(median_price, np.nan)
-    teeth = np.full_like(median_price, np.nan)
-    lips = np.full_like(median_price, np.nan)
-    
-    # Calculate SMMA (13, 8, 5 periods) with proper smoothing
-    def smma(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values: SMMA = (prev_SMMA * (period-1) + current_price) / period
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    jaw = smma(median_price, 13)
-    teeth = smma(median_price, 8)
-    lips = smma(median_price, 5)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
     # Load 12h data for ADX trend filter
     df_12h = get_htf_data(prices, '12h')
@@ -53,6 +32,16 @@ def generate_signals(prices):
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
+    
+    # Previous day's high and low (shifted by 1 to avoid look-ahead)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_high_1d[0] = np.nan  # First value has no previous day
+    prev_low_1d[0] = np.nan
+    
+    # Align previous day's high/low to 12h timeframe
+    prev_high_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_high_1d)
+    prev_low_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_low_1d)
     
     # Calculate ADX (14-period) on 12h
     # True Range
@@ -83,10 +72,7 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Align Williams Alligator and ADX to 4h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # Align ADX to 12h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
     signals = np.zeros(n)
@@ -95,39 +81,36 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(prev_high_1d_aligned[i]) or np.isnan(prev_low_1d_aligned[i]) or
+            np.isnan(adx_aligned[i])):
             continue
         
-        # Bullish alignment: Lips > Teeth > Jaw
-        bullish = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
-        # Bearish alignment: Lips < Teeth < Jaw
-        bearish = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
-        
-        # Volume confirmation
-        vol_median = np.median(volume[max(0, i-20):i+1])
-        volume_confirm = volume[i] > 1.5 * vol_median
-        
-        # Long entry: bullish alignment + volume confirmation + ADX > 25
-        if bullish and volume_confirm and adx_aligned[i] > 25 and position <= 0:
+        # Long entry: price breaks above previous day's high + volume confirmation + ADX > 25
+        if (close[i] > prev_high_1d_aligned[i] and
+            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
+            adx_aligned[i] > 25 and
+            position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: bearish alignment + volume confirmation + ADX > 25
-        elif bearish and volume_confirm and adx_aligned[i] > 25 and position >= 0:
+        # Short entry: price breaks below previous day's low + volume confirmation + ADX > 25
+        elif (close[i] < prev_low_1d_aligned[i] and
+              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
+              adx_aligned[i] > 25 and
+              position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: opposite alignment or ADX < 20 (ranging market)
-        elif position == 1 and (bearish or adx_aligned[i] < 20):
+        # Exit: reverse breakout or ADX < 20 (ranging market)
+        elif position == 1 and (close[i] < prev_low_1d_aligned[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (bullish or adx_aligned[i] < 20):
+        elif position == -1 and (close[i] > prev_high_1d_aligned[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_WilliamsAlligator_Volume_ADX"
-timeframe = "4h"
+name = "12h_1d_Range_Breakout_Volume_ADX"
+timeframe = "12h"
 leverage = 1.0
