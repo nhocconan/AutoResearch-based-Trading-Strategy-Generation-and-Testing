@@ -1,10 +1,3 @@
-# 1d_WeeklyPivot_R1_S1_Breakout_Volume_RangeFilter_Session_v2
-# Hypothesis: Weekly Pivot R1/S1 breakouts on daily timeframe with volume and range filters
-# work in both bull and bear markets because pivot levels act as institutional reference points.
-# Uses 1d timeframe with weekly pivot levels derived from daily data. Target: 30-100 trades over 4 years.
-# Includes volume confirmation, range avoidance, and session filter (8-20 UTC) to reduce noise.
-# Maximum position size 0.25 to balance risk and return.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -26,7 +19,7 @@ def generate_signals(prices):
     daily_low = daily['low'].values
     daily_close = daily['close'].values
     
-    # Calculate weekly pivot levels from daily data (5-day week)
+    # Calculate weekly pivot levels from daily data (5-day window)
     weekly_high = pd.Series(daily_high).rolling(window=5, min_periods=5).max().values
     weekly_low = pd.Series(daily_low).rolling(window=5, min_periods=5).min().values
     weekly_close = pd.Series(daily_close).rolling(window=5, min_periods=5).last().values
@@ -35,12 +28,12 @@ def generate_signals(prices):
     weekly_r1 = 2 * weekly_pivot - weekly_low
     weekly_s1 = 2 * weekly_pivot - weekly_high
     
-    # Align weekly pivot levels to 1d timeframe
+    # Align weekly pivot levels to 4h timeframe
     weekly_pivot_aligned = align_htf_to_ltf(prices, daily, weekly_pivot)
     weekly_r1_aligned = align_htf_to_ltf(prices, daily, weekly_r1)
     weekly_s1_aligned = align_htf_to_ltf(prices, daily, weekly_s1)
     
-    # Volume filter: current 1d volume > 1.5x 20-period average volume
+    # Volume filter: current 4h volume > 1.5x 20-period average volume
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
@@ -77,6 +70,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyPivot_R1_S1_Breakout_Volume_RangeFilter_Session_v2"
-timeframe = "1d"
+name = "4h_WeeklyPivot_R1_S1_Breakout_Volume_RangeFilter_Session"
+timeframe = "4h"
 leverage = 1.0
