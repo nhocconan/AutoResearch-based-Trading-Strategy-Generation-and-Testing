@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud breakout with 1d trend filter and volume confirmation
-# Long when price breaks above 6h Ichimoku cloud (Tenkan/Kijun from 6h) + 1d price > Senkou Span A/B + volume > 1.5x 20-period avg
-# Short when price breaks below 6h Ichimoku cloud + 1d price < Senkou Span A/B + volume > 1.5x 20-period avg
+# Hypothesis: 12h Camarilla R1/S1 breakout with 1d volume spike and ADX trend filter
+# Long when price breaks above 1d Camarilla R1 + 1d ADX > 20 + volume > 2x 24-period avg
+# Short when price breaks below 1d Camarilla S1 + 1d ADX > 20 + volume > 2x 24-period avg
 # Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (12-30/year).
-# Ichimoku cloud acts as dynamic support/resistance. 1d filter ensures alignment with higher timeframe trend.
-# Works in bull markets (cloud acts as support in uptrends) and bear markets (cloud acts as resistance in downtrends).
+# Camarilla levels provide high-probability reversal/breakout points. ADX filter ensures trending markets.
+# Volume spike confirms institutional participation. Works in bull/bear by requiring ADX > 20.
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,69 +26,97 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d Indicator: Ichimoku Cloud (Senkou Span A/B) ===
+    # === 1d Indicator: ADX (trend strength filter) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period_tenkan = 9
-    high_10 = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    low_10 = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan = (high_10 + low_10) / 2
+    # Calculate ADX components: +DM, -DM, TR
+    high_1d_shift = np.roll(high_1d, 1)
+    low_1d_shift = np.roll(low_1d, 1)
+    high_1d_shift[0] = high_1d[0]
+    low_1d_shift[0] = low_1d[0]
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period_kijun = 26
-    high_20 = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    low_20 = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun = (high_20 + low_20) / 2
+    plus_dm = np.where((high_1d - high_1d_shift) > (low_1d_shift - low_1d), 
+                       np.maximum(high_1d - high_1d_shift, 0), 0)
+    minus_dm = np.where((low_1d_shift - low_1d) > (high_1d - high_1d_shift), 
+                        np.maximum(low_1d_shift - low_1d, 0), 0)
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    # Shift forward 26 periods (we'll align later with align_htf_to_ltf which handles completed bar timing)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]
+    tr2[0] = np.abs(high_1d[0] - close_1d[0])
+    tr3[0] = np.abs(low_1d[0] - close_1d[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period_senkou_b = 52
-    high_40 = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    low_40 = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_b = ((high_40 + low_40) / 2)
+    # Wilder's smoothing (alpha = 1/period)
+    period = 14
+    alpha = 1.0 / period
     
-    # Align 1d Ichimoku components to 6h timeframe (completed bar timing)
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a, additional_delay_bars=26)  # Extra delay for leading span
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b, additional_delay_bars=26)  # Extra delay for leading span
+    atr = np.zeros_like(tr)
+    atr[period-1] = np.mean(tr[:period])
+    for i in range(period, len(tr)):
+        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
     
-    # === 6h Indicator: Ichimoku Cloud (Tenkan/Kijun) ===
-    period_tenkan_6h = 9
-    period_kijun_6h = 26
+    plus_di = np.zeros_like(plus_dm)
+    minus_di = np.zeros_like(minus_dm)
     
-    high_9 = pd.Series(high).rolling(window=period_tenkan_6h, min_periods=period_tenkan_6h).max().values
-    low_9 = pd.Series(low).rolling(window=period_tenkan_6h, min_periods=period_tenkan_6h).min().values
-    tenkan_6h = (high_9 + low_9) / 2
+    # Smooth +DM and -DM
+    plus_dm_smooth = np.zeros_like(plus_dm)
+    minus_dm_smooth = np.zeros_like(minus_dm)
     
-    high_26 = pd.Series(high).rolling(window=period_kijun_6h, min_periods=period_kijun_6h).max().values
-    low_26 = pd.Series(low).rolling(window=period_kijun_6h, min_periods=period_kijun_6h).min().values
-    kijun_6h = (high_26 + low_26) / 2
+    plus_dm_smooth[period-1] = np.mean(plus_dm[:period])
+    minus_dm_smooth[period-1] = np.mean(minus_dm[:period])
     
-    # Senkou Span A (6h): (Tenkan_6h + Kijun_6h)/2 shifted 26 periods ahead
-    senkou_a_6h = ((tenkan_6h + kijun_6h) / 2)
-    # Senkou Span B (6h): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period_senkou_b_6h = 52
-    high_52 = pd.Series(high).rolling(window=period_senkou_b_6h, min_periods=period_senkou_b_6h).max().values
-    low_52 = pd.Series(low).rolling(window=period_senkou_b_6h, min_periods=period_senkou_b_6h).min().values
-    senkou_b_6h = ((high_52 + low_52) / 2)
+    for i in range(period, len(plus_dm)):
+        plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
+        minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
     
-    # Volume SMA for confirmation (using 20-period)
-    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Avoid division by zero
+    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
+    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
+    
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    
+    # Wilder's smoothing for ADX
+    adx = np.zeros_like(dx)
+    adx[2*period-1] = np.mean(dx[period-1:2*period])
+    for i in range(2*period, len(dx)):
+        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+    
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # === 1d Indicator: Camarilla Pivot Levels (R1, S1) ===
+    # Camarilla: based on previous day's range
+    # R1 = close + 1.1 * (high - low) / 12
+    # S1 = close - 1.1 * (high - low) / 12
+    # Using previous day's OHLC (shifted by 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
+    
+    camarilla_range = prev_high - prev_low
+    camarilla_r1 = prev_close + 1.1 * camarilla_range / 12.0
+    camarilla_s1 = prev_close - 1.1 * camarilla_range / 12.0
+    
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # === 12h Indicator: Volume Spike Confirmation ===
+    # Volume > 2x 24-period SMA (24 * 12h = 12 days)
+    vol_sma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(52, 26) + 20  # Ichimoku(52) + volume(20)
+    warmup = max(24, 2*period) + 1  # volume(24) + ADX(28) + Camarilla(1)
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -96,40 +124,29 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
+        # Volume filter: current volume > 2x 24-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_24[i] * 2.0)
         
         # Skip if any required data is NaN
-        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or
-            np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i]) or
-            np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
-            np.isnan(vol_sma_20[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_sma_24[i])):
             signals[i] = 0.0
             continue
         
-        # Calculate 6h cloud boundaries (top and bottom of cloud)
-        cloud_top_6h = np.maximum(senkou_a_6h[i], senkou_b_6h[i])
-        cloud_bottom_6h = np.minimum(senkou_a_6h[i], senkou_b_6h[i])
-        
-        # Calculate 1d cloud boundaries (top and bottom of cloud)
-        cloud_top_1d = np.maximum(senkou_a_aligned[i], senkou_b_aligned[i])
-        cloud_bottom_1d = np.minimum(senkou_a_aligned[i], senkou_b_aligned[i])
-        
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 6h Ichimoku cloud
-        # 2. 1d price above 1d Ichomoku cloud (trend filter)
+        # 1. Price breaks above 1d Camarilla R1
+        # 2. Trend (1d ADX > 20)
         # 3. Volume confirmation
-        if (close[i] > cloud_top_6h) and \
-           (close[i] > cloud_top_1d) and vol_confirm:
+        if (close[i] > camarilla_r1_aligned[i]) and \
+           (adx_aligned[i] > 20) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 6h Ichimoku cloud
-        # 2. 1d price below 1d Ichimoku cloud (trend filter)
+        # 1. Price breaks below 1d Camarilla S1
+        # 2. Trend (1d ADX > 20)
         # 3. Volume confirmation
-        elif (close[i] < cloud_bottom_6h) and \
-             (close[i] < cloud_bottom_1d) and vol_confirm:
+        elif (close[i] < camarilla_s1_aligned[i]) and \
+             (adx_aligned[i] > 20) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -137,6 +154,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Cloud_Breakout_1dTrend_Filter_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_1dADX20_Volume_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
