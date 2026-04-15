@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout + 1d volume spike + ADX trend filter
-# Donchian(20) breakout captures breakouts in trending markets
-# 1d volume spike confirms institutional interest
-# ADX > 25 filters for trending markets only, avoiding whipsaws in ranges
-# Designed for low trade frequency (target 20-40/year) with clear trend following
-# Works in bull markets (breakouts up) and bear markets (breakouts down)
+# Hypothesis: 1d Donchian breakout with 1w trend filter and volume confirmation
+# In bull markets: buy when price breaks above 20-day high + 1w EMA50 up + volume > 1.5x average
+# In bear markets: sell when price breaks below 20-day low + 1w EMA50 down + volume > 1.5x average
+# Uses volatility-adjusted position sizing and ATR-based stoploss
+# Designed for low trade frequency (target 10-25/year) with clear trend following logic
+# Works in both bull (breakout continuation) and bear (breakdown continuation) markets
 
 def generate_signals(prices):
     n = len(prices)
@@ -30,66 +30,78 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # 1d volume spike: volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_1d > (1.5 * vol_ma)
+    # 1d Donchian channels (20-period)
+    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # 4h Donchian channels (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 1w EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 60:
+        return np.zeros(n)
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # 4h ADX(14) for trend strength
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
-                       np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
-                        np.maximum(low[:-1] - low[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
+    # Volume average (20-period)
+    vol_avg = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    tr1 = np.maximum(high[1:], low[:-1]) - np.minimum(high[1:], low[:-1])
-    tr2 = np.abs(high[1:] - low[:-1])
-    tr3 = np.abs(low[1:] - high[:-1])
+    # ATR for volatility and stoploss (14-period)
+    tr1 = np.maximum(high_1d[1:], low_1d[:-1]) - np.minimum(high_1d[1:], low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr + 1e-10)
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr + 1e-10)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align 1d indicators to 4h timeframe
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
+    # Align all indicators to 1d timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size
+    base_size = 0.25  # Base position size
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
-            np.isnan(adx[i]) or np.isnan(volume_spike_aligned[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_avg_aligned[i]) or 
+            np.isnan(atr_aligned[i])):
             continue
         
-        # Only trade in trending markets (ADX > 25)
-        if adx[i] > 25:
-            # Long breakout: price breaks above Donchian high with volume spike
-            if close[i] > high_max[i] and volume_spike_aligned[i] and position <= 0:
-                position = 1
-                signals[i] = position_size
-            # Short breakdown: price breaks below Donchian low with volume spike
-            elif close[i] < low_min[i] and volume_spike_aligned[i] and position >= 0:
-                position = -1
-                signals[i] = -position_size
-            # Exit when price returns to mid-channel
-            elif position == 1 and close[i] < (high_max[i] + low_min[i]) / 2:
-                position = 0
-                signals[i] = 0.0
-            elif position == -1 and close[i] > (high_max[i] + low_min[i]) / 2:
-                position = 0
-                signals[i] = 0.0
+        # Volatility-adjusted position size (inverse vol)
+        vol_factor = np.clip(0.5 * atr_aligned[i] / (close[i] + 1e-10), 0.5, 2.0)
+        position_size = base_size / vol_factor
+        position_size = np.clip(position_size, 0.15, 0.35)
+        
+        # Long entry: price breaks above Donchian high + uptrend + volume spike
+        if (close[i] > donch_high_aligned[i] and 
+            close[i] > ema50_1w_aligned[i] and 
+            volume[i] > 1.5 * vol_avg_aligned[i] and 
+            position <= 0):
+            position = 1
+            signals[i] = position_size
+        
+        # Short entry: price breaks below Donchian low + downtrend + volume spike
+        elif (close[i] < donch_low_aligned[i] and 
+              close[i] < ema50_1w_aligned[i] and 
+              volume[i] > 1.5 * vol_avg_aligned[i] and 
+              position >= 0):
+            position = -1
+            signals[i] = -position_size
+        
+        # Exit: reverse signal or volatility-based stop
+        elif position == 1 and (close[i] < ema50_1w_aligned[i] or 
+                                close[i] < donch_low_aligned[i]):
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and (close[i] > ema50_1w_aligned[i] or 
+                                 close[i] > donch_high_aligned[i]):
+            position = 0
+            signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian_VolumeSpike_ADX"
-timeframe = "4h"
+name = "1d_Donchian_1wEMA_Volume_Breakout"
+timeframe = "1d"
 leverage = 1.0
