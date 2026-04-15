@@ -13,60 +13,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d HTF data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h HTF data once before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate daily ATR(14) for volatility filter
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
-    tr3 = np.abs(df_1d['low'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Calculate 12h Williams %R(14) for momentum extremes
+    highest_high = pd.Series(df_12h['high'].values).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(df_12h['low'].values).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - df_12h['close'].values) / (highest_high - lowest_low + 1e-10)
+    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r, additional_delay_bars=0)
     
-    # Calculate daily EMA(20) for trend filter
-    ema_20_1d = pd.Series(df_1d['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    # Calculate 12h EMA(50) for trend filter
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate daily RSI(14) for momentum filter
-    delta = pd.Series(df_1d['close'].values).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14_1d = 100 - (100 / (1 + rs))
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
+    # Calculate 6h ATR(14) for volatility filter and position sizing
+    tr1 = high - low
+    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_20_1d_aligned[i]) or 
-            np.isnan(rsi_14_1d_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade when daily ATR is elevated (> 0.4% of price)
-        vol_filter = atr_14_1d_aligned[i] > 0.004 * close[i]
+        # Volatility filter: only trade when 6h ATR > 0.5% of price
+        vol_filter = atr_14[i] > 0.005 * close[i]
         
         # Long conditions:
-        # 1. Price above daily EMA20 (bullish bias)
-        # 2. Daily RSI between 40 and 60 (neutral momentum, avoids extremes)
+        # 1. Price above 12h EMA50 (bullish bias)
+        # 2. Williams %R oversold (< -80) - extreme bearish momentum ready to reverse
         # 3. Volatility filter
-        if (close[i] > ema_20_1d_aligned[i] and
-            40 <= rsi_14_1d_aligned[i] <= 60 and
+        if (close[i] > ema_50_12h_aligned[i] and
+            williams_r_aligned[i] < -80 and
             vol_filter):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Price below daily EMA20 (bearish bias)
-        # 2. Daily RSI between 40 and 60 (neutral momentum, avoids extremes)
+        # 1. Price below 12h EMA50 (bearish bias)
+        # 2. Williams %R overbought (> -20) - extreme bullish momentum ready to reverse
         # 3. Volatility filter
-        elif (close[i] < ema_20_1d_aligned[i] and
-              40 <= rsi_14_1d_aligned[i] <= 60 and
+        elif (close[i] < ema_50_12h_aligned[i] and
+              williams_r_aligned[i] > -20 and
               vol_filter):
             signals[i] = -0.25
         else:
@@ -74,6 +69,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA20_RSI14_VolFilter_v1"
-timeframe = "1d"
+name = "6h_WilliamsR_EMA50_VolFilter_v1"
+timeframe = "6h"
 leverage = 1.0
