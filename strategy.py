@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA34 trend filter and volume confirmation
-# Long when price breaks above 1h Camarilla R3 + 4h EMA34 uptrend + volume > 1.5x 20-period avg
-# Short when price breaks below 1h Camarilla S3 + 4h EMA34 downtrend + volume > 1.5x 20-period avg
-# Uses discrete position sizing (0.20) to minimize fee drag and control drawdown.
-# 4h EMA34 provides strong trend filter reducing whipsaws in both bull and bear markets.
-# Volume threshold (1.5x) targets ~15-30 trades/year to minimize fee drag on 1h timeframe.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation
+# Long when price breaks above 12h Camarilla R3 + 1d EMA50 uptrend + volume > 1.3x 20-period avg
+# Short when price breaks below 12h Camarilla S3 + 1d EMA50 downtrend + volume > 1.3x 20-period avg
+# Uses discrete position sizing (0.25) to balance profit potential and drawdown control.
+# 12h timeframe targets ~12-25 trades/year to minimize fee drag.
+# 1d EMA50 provides strong trend filter reducing whipsaws in both bull and bear markets.
+# Volume threshold (1.3x) targets sufficient confirmation while avoiding overtrading.
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,37 +25,27 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 4h HTF data once before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1d HTF data once before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 4h Indicator: EMA34 ===
-    close_4h = df_4h['close'].values
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    # === 1d Indicator: EMA50 ===
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === 1h Camarilla Pivot Levels (based on previous day) ===
+    # === 12h Camarilla Pivot Levels (based on previous day) ===
     # Calculate using previous day's high, low, close
-    # Camarilla levels: R4 = close + ((high - low) * 1.1/2), R3 = close + ((high - low) * 1.1/4), etc.
-    # We need to get the previous day's OHLC for each 1h bar
-    
-    # Create arrays to store previous day's OHLC aligned to 1h bars
+    # Create arrays to store previous day's OHLC aligned to 12h bars
     prev_day_high = np.full(n, np.nan)
     prev_day_low = np.full(n, np.nan)
     prev_day_close = np.full(n, np.nan)
     
-    # Get 1d data for previous day's OHLC
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
-        return np.zeros(n)
-    
-    # For each 1h bar, find the previous day's OHLC
-    # We'll use the 1d data to get the previous completed day's values
+    # For each 12h bar, find the previous day's OHLC
     for i in range(n):
         current_time = prices['open_time'].iloc[i]
         # Find the 1d bar that completed before current_time
-        # Get index of the 1d bar that is strictly before current_time
         mask = df_1d['open_time'] < current_time
         if mask.any():
             idx = mask.sum() - 1  # Get the last completed 1d bar
@@ -79,7 +70,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(34, 20) + 5  # EMA34 + volume(20) + buffer
+    warmup = max(50, 20) + 5  # EMA50 + volume(20) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -89,34 +80,34 @@ def generate_signals(prices):
         
         # Skip if any required data is NaN
         if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or
-            np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_sma_20[i])):
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
+        # Volume filter: current volume > 1.3x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.3)
         
         # === LONG CONDITIONS ===
         # 1. Price breaks above camarilla R3 (close > R3)
-        # 2. 4h EMA34 uptrend (price > EMA34)
+        # 2. 1d EMA50 uptrend (close > EMA50)
         # 3. Volume confirmation
         if (close[i] > camarilla_r3[i]) and \
-           (close[i] > ema_34_4h_aligned[i]) and vol_confirm:
-            signals[i] = 0.20
+           (close[i] > ema_50_1d_aligned[i]) and vol_confirm:
+            signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
         # 1. Price breaks below camarilla S3 (close < S3)
-        # 2. 4h EMA34 downtrend (price < EMA34)
+        # 2. 1d EMA50 downtrend (close < EMA50)
         # 3. Volume confirmation
         elif (close[i] < camarilla_s3[i]) and \
-             (close[i] < ema_34_4h_aligned[i]) and vol_confirm:
-            signals[i] = -0.20
+             (close[i] < ema_50_1d_aligned[i]) and vol_confirm:
+            signals[i] = -0.25
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "1h_Camarilla_R3S3_4hEMA34_Volume_Filter_v1"
-timeframe = "1h"
+name = "12h_Camarilla_R3S3_1dEMA50_Volume_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
