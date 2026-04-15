@@ -3,12 +3,6 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with volume and chop regime filter
-# Uses 1d HTF for pivot calculation, aligned to 12h with proper delay
-# Volume confirmation and choppiness index regime filter to avoid false breakouts
-# Designed for both bull and bear markets by using volatility-based regime filter
-# Target: 50-150 total trades over 4 years (12-37/year)
-
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
@@ -19,49 +13,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily HTF data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h HTF data once before loop (primary timeframe is 4h, HTF is 12h per experiment)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Calculate 12h Donchian channels (20-period) for breakout signals
+    highest_20 = pd.Series(df_12h['high'].values).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(df_12h['low'].values).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla pivot levels for 1d
-    # Camarilla: R4 = close + 1.1*(high-low)*1.1/2, R3 = close + 1.1*(high-low)*1.1/4
-    #           S3 = close - 1.1*(high-low)*1.1/4, S4 = close - 1.1*(high-low)*1.1/2
-    # We'll use R3 and S3 as primary breakout levels
-    daily_range = daily_high - daily_low
-    camarilla_r3 = daily_close + 1.1 * daily_range * 1.1 / 4
-    camarilla_s3 = daily_close - 1.1 * daily_range * 1.1 / 4
-    pivot_point = (daily_high + daily_low + daily_close) / 3.0
+    # Calculate 12h ATR(14) for volatility filter
+    tr1 = pd.Series(df_12h['high'].values - df_12h['low'].values)
+    tr2 = pd.Series(np.abs(df_12h['high'].values - np.concatenate([[df_12h['close'].values[0]], df_12h['close'].values[:-1]])))
+    tr3 = pd.Series(np.abs(df_12h['low'].values - np.concatenate([[df_12h['close'].values[0]], df_12h['close'].values[:-1]])))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14 = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 1d ATR(14) for volatility regime
-    tr1 = daily_high - daily_low
-    tr2 = np.abs(daily_high - np.concatenate([[daily_close[0]], daily_close[:-1]]))
-    tr3 = np.abs(daily_low - np.concatenate([[daily_close[0]], daily_close[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Align HTF indicators to 4h timeframe with proper delay
+    highest_20_4h = align_htf_to_ltf(prices, df_12h, highest_20)
+    lowest_20_4h = align_htf_to_ltf(prices, df_12h, lowest_20)
+    atr_14_4h = align_htf_to_ltf(prices, df_12h, atr_14)
     
-    # Align HTF indicators to 12h timeframe with proper delay
-    camarilla_r3_12h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_12h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot_point)
-    atr_14_12h = align_htf_to_ltf(prices, df_1d, atr_14)
-    
-    # Calculate 12h Choppiness Index (CHOP) for regime filter
-    # CHOP = 100 * log10(sum(ATR14) / (max(high,n) - min(low,n))) / log10(n)
-    # CHOP > 61.8 = ranging market, CHOP < 38.2 = trending market
-    atr_12h = pd.Series(high - low).ewm(span=14, adjust=False, min_periods=14).values
-    atr_sum_14 = pd.Series(atr_12h).rolling(window=14, min_periods=14).sum().values
-    max_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop_denominator = max_high_14 - min_low_14
-    chop_denominator = np.where(chop_denominator == 0, 1e-10, chop_denominator)
-    chop = 100 * np.log10(atr_sum_14 / chop_denominator) / np.log10(14)
-    
-    # Calculate 12h volume ratio (current vs 20-period average)
+    # Calculate 4h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
@@ -69,35 +42,34 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3_12h[i]) or np.isnan(camarilla_s3_12h[i]) or 
-            np.isnan(pivot_12h[i]) or np.isnan(atr_14_12h[i]) or 
-            np.isnan(chop[i]) or np.isnan(volume_ratio[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Regime filter: only trade in trending markets (CHOP < 40)
-        # In ranging markets (CHOP > 60), avoid breakout trades
-        if chop[i] >= 40:
-            signals[i] = 0.0
-            continue
-        
-        # Volume confirmation: volume > 1.5x average
-        if volume_ratio[i] < 1.5:
+        if (np.isnan(highest_20_4h[i]) or np.isnan(lowest_20_4h[i]) or 
+            np.isnan(atr_14_4h[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
         # Entry conditions:
-        # Long: price breaks above Camarilla R3 with volume in trending market
-        # Short: price breaks below Camarilla S3 with volume in trending market
-        if close[i] > camarilla_r3_12h[i]:
-            signals[i] = 0.25  # Long 25% position
-        elif close[i] < camarilla_s3_12h[i]:
-            signals[i] = -0.25  # Short 25% position
+        # 1. 4h price breaks above 12h Donchian upper channel with volume confirmation → long
+        # 2. 4h price breaks below 12h Donchian lower channel with volume confirmation → short
+        # 3. Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
+        # 4. Volume confirmation: volume > 1.5x average (stricter to reduce trades)
+        # 5. Discrete position sizing: 0.25
+        
+        # Long conditions: 4h breakout above 12h Donchian upper
+        if (close[i] > highest_20_4h[i] and            # 4h price above 12h Donchian upper
+            volume_ratio[i] > 1.5 and                  # Volume confirmation (stricter)
+            atr_14_4h[i] > 0.005 * close[i]):          # Volatility filter
+            signals[i] = 0.25
+            
+        # Short conditions: 4h breakdown below 12h Donchian lower
+        elif (close[i] < lowest_20_4h[i] and           # 4h price below 12h Donchian lower
+              volume_ratio[i] > 1.5 and                # Volume confirmation (stricter)
+              atr_14_4h[i] > 0.005 * close[i]):        # Volatility filter
+            signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "12h_Camarilla_R3S3_Breakout_Volume_Chop_Filter"
-timeframe = "12h"
+name = "4h_Donchian20_12h_Breakout_Volume_ATR_Filter"
+timeframe = "4h"
 leverage = 1.0
