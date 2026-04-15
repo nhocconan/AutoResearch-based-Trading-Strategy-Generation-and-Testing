@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams Alligator with 1w trend filter and volume confirmation
-# Long when price > Alligator Jaw (13-period SMMA) + 1w close > 1w EMA34 + volume > 1.5x 20-period avg
-# Short when price < Alligator Jaw (13-period SMMA) + 1w close < 1w EMA34 + volume > 1.5x 20-period avg
-# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (10-25/year).
-# Williams Alligator identifies trend initiation/continuation. Weekly EMA34 filter ensures alignment with higher timeframe trend.
-# Works in bull markets (price above jaw with weekly uptrend) and bear markets (price below jaw with weekly downtrend).
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA trend filter and volume confirmation
+# Long when Bull Power > 0 + price > 1d EMA34 + volume > 1.5x 20-period avg
+# Short when Bear Power < 0 + price < 1d EMA34 + volume > 1.5x 20-period avg
+# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (12-30/year).
+# Elder Ray measures bull/bear power relative to EMA13. 1d EMA34 filter ensures we trade with higher timeframe trend.
+# Works in bull markets (Bull Power > 0 + uptrend) and bear markets (Bear Power < 0 + downtrend).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,19 +24,22 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1w HTF data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 40:
+    # Get 1d HTF data once before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    # === 1w Indicator: EMA34 (trend filter) ===
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # === 1d Indicator: EMA34 (trend filter) ===
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # === 1d Indicator: Williams Alligator (Jaw: 13-period SMMA of median price) ===
-    median_price = (high + low) / 2
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
+    # === 6h Indicator: Elder Ray (Bull/Bear Power) ===
+    # Bull Power = High - EMA13
+    # Bear Power = Low - EMA13
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -44,7 +47,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(13, 34, 20) + 5  # Alligator(13) + EMA34(34) + volume(20)
+    warmup = max(13, 34, 20) + 2  # EMA13 + EMA34 + volume SMA + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -56,25 +59,25 @@ def generate_signals(prices):
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # Skip if any required data is NaN
-        if (np.isnan(jaw[i]) or np.isnan(ema_34_1w_aligned[i]) or
-            np.isnan(vol_sma_20[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price > Alligator Jaw (13-period SMMA)
-        # 2. Weekly trend up (1w close > 1w EMA34)
+        # 1. Bull Power > 0 (bulls in control)
+        # 2. Price > 1d EMA34 (uptrend on higher timeframe)
         # 3. Volume confirmation
-        if (close[i] > jaw[i]) and \
-           (close[i] > ema_34_1w_aligned[i]) and vol_confirm:
+        if (bull_power[i] > 0) and \
+           (close[i] > ema34_1d_aligned[i]) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price < Alligator Jaw (13-period SMMA)
-        # 2. Weekly trend down (1w close < 1w EMA34)
+        # 1. Bear Power < 0 (bears in control)
+        # 2. Price < 1d EMA34 (downtrend on higher timeframe)
         # 3. Volume confirmation
-        elif (close[i] < jaw[i]) and \
-             (close[i] < ema_34_1w_aligned[i]) and vol_confirm:
+        elif (bear_power[i] < 0) and \
+             (close[i] < ema34_1d_aligned[i]) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -82,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WilliamsAlligator_Jaw_1wEMA34_Volume_Filter_v1"
-timeframe = "1d"
+name = "6h_ElderRay_EMA13_1dEMA34_Volume_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
