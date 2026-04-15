@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian Breakout + 1d Volume Spike + ADX Trend Filter
-# Uses Donchian channel breakouts for directional entries, confirmed by 1d volume spikes.
-# ADX filter ensures we only trade in trending regimes (ADX > 25) to avoid whipsaws in ranging markets.
-# Designed to work in both bull and bear markets by capturing strong momentum moves.
+# Hypothesis: 1d KAMA Trend + 1w RSI Mean Reversion + Volume Spike
+# Uses weekly RSI(14) for mean reversion signals, buying oversold (RSI<30) and selling overbought (RSI>70).
+# Daily KAMA(10,2,30) slope confirms the intermediate-term trend direction.
+# Volume confirmation requires > 1.5x 20-day median volume to filter low-conviction moves.
+# Designed to work in bull markets (trend following via KAMA) and bear markets (mean reversion via weekly RSI extremes).
 # Conservative sizing (0.25) to limit trade frequency and avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,56 +20,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day volume for spike detection
-    df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean()
-    vol_spike_1d = volume_1d > (2.0 * vol_ma_1d)  # 2x 20-day average volume
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
+    # 1-week RSI(14) for mean reversion signals
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1w = 100 - (100 / (1 + rs))
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w.values)
     
-    # Donchian channel (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max()
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min()
+    # Kaufman's Adaptive Moving Average (KAMA) on 1d close
+    def kama(close, er_period=10, fast=2, slow=30):
+        change = np.abs(np.diff(close, prepend=close[0]))
+        volatility_rolling = pd.Series(np.abs(np.diff(close, prepend=close[0]))).rolling(window=er_period, min_periods=1).sum()
+        change_rolling = pd.Series(change).rolling(window=er_period, min_periods=1).sum()
+        er = change_rolling / (volatility_rolling + 1e-10)
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        kama_val = np.full_like(close, np.nan)
+        kama_val[0] = close[0]
+        for i in range(1, len(close)):
+            kama_val[i] = kama_val[i-1] + sc[i] * (close[i] - kama_val[i-1])
+        return kama_val
     
-    # ADX for trend strength (14-period)
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    plus_dm = np.insert(plus_dm, 0, 0)
-    minus_dm = np.insert(minus_dm, 0, 0)
+    kama_val = kama(close)
+    kama_slope = np.diff(kama_val, prepend=kama_val[0])
     
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean()
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean() / (atr + 1e-10)
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean() / (atr + 1e-10)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean()
+    # Volume confirmation: current > 1.5x median of last 20 bars
+    vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
+    vol_threshold = 1.5 * vol_median
     
     signals = np.zeros(n)
     
-    for i in range(40, n):  # Start after warmup
-        # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(adx[i]) or np.isnan(vol_spike_1d_aligned[i])):
+    for i in range(20, n):
+        if (np.isnan(kama_slope[i]) or np.isnan(rsi_1w_aligned[i]) or 
+            np.isnan(vol_threshold[i])):
             continue
         
-        # Long: Price breaks above Donchian high, ADX > 25 (trending), volume spike
-        if (close[i] > donchian_high[i-1] and 
-            adx[i] > 25 and 
-            vol_spike_1d_aligned[i]):
+        # Long: KAMA upward slope, weekly RSI oversold (<30), volume spike
+        if (kama_slope[i] > 0 and 
+            rsi_1w_aligned[i] < 30 and 
+            volume[i] > vol_threshold[i]):
             signals[i] = 0.25
         
-        # Short: Price breaks below Donchian low, ADX > 25 (trending), volume spike
-        elif (close[i] < donchian_low[i-1] and 
-              adx[i] > 25 and 
-              vol_spike_1d_aligned[i]):
+        # Short: KAMA downward slope, weekly RSI overbought (>70), volume spike
+        elif (kama_slope[i] < 0 and 
+              rsi_1w_aligned[i] > 70 and 
+              volume[i] > vol_threshold[i]):
             signals[i] = -0.25
         
-        # Exit: Price returns to middle of Donchian channel or ADX weakens
+        # Exit: KAMA slope changes sign or RSI returns to neutral (30-70)
         elif (i > 0 and 
-              ((signals[i-1] == 0.25 and (close[i] < (donchian_high[i-1] + donchian_low[i-1]) / 2 or adx[i] < 20)) or
-               (signals[i-1] == -0.25 and (close[i] > (donchian_high[i-1] + donchian_low[i-1]) / 2 or adx[i] < 20)))):
+              ((signals[i-1] == 0.25 and (kama_slope[i] <= 0 or rsi_1w_aligned[i] >= 30)) or
+               (signals[i-1] == -0.25 and (kama_slope[i] >= 0 or rsi_1w_aligned[i] <= 70)))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -77,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Volume_ADX"
-timeframe = "4h"
+name = "1d_KAMA_RSI1w_Volume"
+timeframe = "1d"
 leverage = 1.0
