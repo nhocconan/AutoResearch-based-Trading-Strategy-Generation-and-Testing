@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 1d ADX regime filter
-# Bull Power = High - EMA13(close), Bear Power = EMA13(close) - Low
-# Long when Bull Power > 0 and Bear Power < 0 (strong bullish momentum) + 1d ADX > 25 (trending market)
-# Short when Bear Power > 0 and Bull Power < 0 (strong bearish momentum) + 1d ADX > 25
-# Uses 1d ADX for regime to avoid whipsaws in ranging markets
-# Designed for moderate trade frequency (12-30/year) with strong directional moves
+# Hypothesis: 12h Donchian(20) breakout with volume confirmation and 1w Supertrend filter
+# Long when price breaks above 20-bar high + volume > 1.5x 20-period avg + Supertrend(1w) bullish
+# Short when price breaks below 20-bar low + volume > 1.5x 20-period avg + Supertrend(1w) bearish
+# Uses volume to confirm institutional interest and Supertrend for trend alignment
+# Designed for low trade frequency (15-25/year) with clear entry/exit rules to minimize fee drag
+# Works in bull markets via breakouts and in bear markets via short breakdowns with trend filter
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,61 +18,63 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d HTF data once before loop
+    # Get 1d and 1w HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 30 or len(df_1w) < 30:
         return np.zeros(n)
     
-    # === 1d Indicators: ADX for Regime Filter ===
+    # === 1d Indicators: Donchian Channel (20-period) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # Donchian calculations (20-period high/low)
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Smoothed values (Wilder's smoothing)
-    def wilders_smoothing(values, period):
-        result = np.full_like(values, np.nan)
-        if len(values) >= period:
-            result[period-1] = np.nansum(values[:period])
-            for i in range(period, len(values)):
-                result[i] = result[i-1] - (result[i-1] / period) + values[i]
-        return result
+    # === 1w Indicators: Supertrend (10, 3.0) ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    period = 14
-    atr_1d = wilders_smoothing(tr, period)
-    dm_plus_smooth = wilders_smoothing(dm_plus, period)
-    dm_minus_smooth = wilders_smoothing(dm_minus, period)
+    # Calculate ATR for Supertrend
+    tr1 = pd.Series(high_1w - low_1w)
+    tr2 = pd.Series(np.abs(high_1w - pd.Series(close_1w).shift(1)))
+    tr3 = pd.Series(np.abs(low_1w - pd.Series(close_1w).shift(1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1w = tr.ewm(alpha=1/10, adjust=False, min_periods=10).mean().values
     
-    # DI+ and DI-
-    di_plus = np.where(atr_1d != 0, (dm_plus_smooth / atr_1d) * 100, 0)
-    di_minus = np.where(atr_1d != 0, (dm_minus_smooth / atr_1d) * 100, 0)
+    # Supertrend calculation
+    hl2 = (high_1w + low_1w) / 2
+    upper_band = hl2 + (3.0 * atr_1w)
+    lower_band = hl2 - (3.0 * atr_1w)
     
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0,
-                  np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
-    adx_1d = wilders_smoothing(dx, period)
+    # Initialize Supertrend arrays
+    supertrend = np.zeros_like(close_1w)
+    direction = np.ones_like(close_1w)  # 1 for uptrend, -1 for downtrend
     
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Set first value
+    supertrend[0] = hl2[0]
+    direction[0] = 1
     
-    # === LTF Indicators: Elder Ray (Bull/Bear Power) ===
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13
-    bear_power = ema_13 - low
+    for i in range(1, len(close_1w)):
+        if close_1w[i] > supertrend[i-1]:
+            direction[i] = 1
+        else:
+            direction[i] = -1
+        
+        if direction[i] == 1:
+            supertrend[i] = max(lower_band[i], supertrend[i-1])
+        else:
+            supertrend[i] = min(upper_band[i], supertrend[i-1])
+    
+    supertrend_aligned = align_htf_to_ltf(prices, df_1w, supertrend)
+    supertrend_direction_aligned = align_htf_to_ltf(prices, df_1w, direction)
     
     signals = np.zeros(n)
     
@@ -80,25 +82,29 @@ def generate_signals(prices):
     warmup = 100
     
     for i in range(warmup, n):
-        # Skip if any required data is NaN
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(ema_13[i])):
-            signals[i] = 0.0
-            continue
+        # Volume filter: current volume > 1.5x 20-period volume SMA
+        vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
-        # Regime filter: only trade in trending markets (ADX > 25)
-        if adx_1d_aligned[i] <= 25:
+        # Skip if any required data is NaN
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(supertrend_aligned[i]) or np.isnan(supertrend_direction_aligned[i]) or
+            np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # Bull Power > 0 (bulls in control) AND Bear Power < 0 (bears weak)
-        if (bull_power[i] > 0) and (bear_power[i] < 0):
+        # 1. Price breaks above 1d Donchian high (20-period)
+        # 2. Volume confirmation
+        # 3. 1w Supertrend is bullish (direction = 1)
+        if (close[i] > donchian_high_aligned[i]) and vol_confirm and (supertrend_direction_aligned[i] == 1):
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # Bear Power > 0 (bears in control) AND Bull Power < 0 (bulls weak)
-        elif (bear_power[i] > 0) and (bull_power[i] < 0):
+        # 1. Price breaks below 1d Donchian low (20-period)
+        # 2. Volume confirmation
+        # 3. 1w Supertrend is bearish (direction = -1)
+        elif (close[i] < donchian_low_aligned[i]) and vol_confirm and (supertrend_direction_aligned[i] == -1):
             signals[i] = -0.25
         
         else:
@@ -106,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_1dADX_RegimeFilter_v1"
-timeframe = "6h"
+name = "12h_Donchian20_Volume_1wSupertrend_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
