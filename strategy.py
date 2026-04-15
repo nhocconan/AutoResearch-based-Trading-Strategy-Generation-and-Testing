@@ -12,70 +12,85 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Get daily HTF data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h HTF data once before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    daily_close = df_1d['close'].values
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
+    # Calculate 12h Donchian channels (10-period)
+    highest_10 = pd.Series(df_12h['high'].values).rolling(window=10, min_periods=10).max().values
+    lowest_10 = pd.Series(df_12h['low'].values).rolling(window=10, min_periods=10).min().values
+    donchian_high_12h = align_htf_to_ltf(prices, df_12h, highest_10, additional_delay_bars=0)
+    donchian_low_12h = align_htf_to_ltf(prices, df_12h, lowest_10, additional_delay_bars=0)
     
-    # Calculate 20-period daily Donchian channels
-    highest_20 = pd.Series(daily_high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(daily_low).rolling(window=20, min_periods=20).min().values
+    # Calculate 12h ATR for volatility filter
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    prev_close = np.concatenate([[close_12h[0]], close_12h[:-1]])
+    tr = np.maximum(high_12h - low_12h,
+                    np.maximum(np.abs(high_12h - prev_close),
+                               np.abs(low_12h - prev_close)))
+    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma_50 = pd.Series(atr_12h).rolling(window=50, min_periods=50).mean().values
+    volatility_ratio_12h = atr_12h / (atr_ma_50 + 1e-10)
+    volatility_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, volatility_ratio_12h, additional_delay_bars=0)
     
-    # Calculate 50-period daily EMA for trend filter
-    ema_50 = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 12h RSI for momentum filter
+    delta = np.diff(close_12h, prepend=close_12h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_12h = 100 - (100 / (1 + rs))
+    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h, additional_delay_bars=0)
     
-    # Align HTF indicators to 6h timeframe
-    ema_50_6h = align_htf_to_ltf(prices, df_1d, ema_50)
-    highest_20_6h = align_htf_to_ltf(prices, df_1d, highest_20)
-    lowest_20_6h = align_htf_to_ltf(prices, df_1d, lowest_20)
+    # Calculate 12h EMA for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h, additional_delay_bars=0)
     
-    # Calculate 6h Donchian channels (20-period)
-    highest_20_6h_local = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20_6h_local = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate 6h volume ratio (current vs 20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ratio = volume / (vol_ma_20 + 1e-10)
+    # Calculate 12h volume ratio
+    vol_ma_20_12h = pd.Series(df_12h['volume'].values).rolling(window=20, min_periods=20).mean().values
+    volume_ratio_12h = df_12h['volume'].values / (vol_ma_20_12h + 1e-10)
+    volume_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_ratio_12h, additional_delay_bars=0)
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_6h[i]) or np.isnan(highest_20_6h[i]) or 
-            np.isnan(lowest_20_6h[i]) or np.isnan(highest_20_6h_local[i]) or 
-            np.isnan(lowest_20_6h_local[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(donchian_high_12h[i]) or np.isnan(donchian_low_12h[i]) or
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(rsi_12h_aligned[i]) or
+            np.isnan(volume_ratio_12h_aligned[i]) or np.isnan(volatility_ratio_12h_aligned[i])):
             signals[i] = 0.0
             continue
-        
-        # Entry conditions:
-        # 1. Daily trend filter: price above/below daily EMA50
-        # 2. 6h Donchian breakout with volume confirmation
-        # 3. Only trade when 6h price breaks beyond daily Donchian levels (strong breakout)
-        # 4. Discrete position sizing: 0.25
+            
+        # Entry conditions for 12h timeframe
+        # Long: Donchian breakout + volume + trend + momentum + volatility filter
+        # Short: Donchian breakdown + volume + trend + momentum + volatility filter
         
         # Long conditions
-        if (close[i] > ema_50_6h[i] and  # Uptrend filter
-            close[i] > highest_20_6h_local[i] and     # 6h Donchian breakout
-            close[i] > highest_20_6h[i] and        # Break above daily resistance (strong breakout)
-            volume_ratio[i] > 1.5):                # Volume confirmation
+        if (close[i] > donchian_high_12h[i] and     # Donchian breakout
+            close[i] > ema_50_12h_aligned[i] and    # Above 12h EMA50 (uptrend)
+            rsi_12h_aligned[i] > 50 and             # Bullish momentum
+            volume_ratio_12h_aligned[i] > 1.3 and   # Volume confirmation
+            volatility_ratio_12h_aligned[i] > 0.7): # Avoid extremely low volatility
             signals[i] = 0.25
             
         # Short conditions
-        elif (close[i] < ema_50_6h[i] and   # Downtrend filter
-              close[i] < lowest_20_6h_local[i] and      # 6h Donchian breakdown
-              close[i] < lowest_20_6h[i] and       # Break below daily support (strong breakdown)
-              volume_ratio[i] > 1.5):              # Volume confirmation
+        elif (close[i] < donchian_low_12h[i] and      # Donchian breakdown
+              close[i] < ema_50_12h_aligned[i] and    # Below 12h EMA50 (downtrend)
+              rsi_12h_aligned[i] < 50 and             # Bearish momentum
+              volume_ratio_12h_aligned[i] > 1.3 and   # Volume confirmation
+              volatility_ratio_12h_aligned[i] > 0.7): # Avoid extremely low volatility
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "6h_DailyEMA_Donchian_Breakout_Strong"
-timeframe = "6h"
+name = "12h_Donchian_Breakout_Volume_Trend_Momentum"
+timeframe = "12h"
 leverage = 1.0
