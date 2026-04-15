@@ -13,76 +13,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d HTF data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 4h HTF data once before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter (needs completed 1d candle, no extra delay)
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 4h EMA(34) for trend direction
+    close_4h = df_4h['close'].values
+    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
-    # Calculate 1d RSI(14) for mean reversion signals in ranging markets
-    delta = pd.Series(df_1d['close'].values).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14_1d = 100 - (100 / (1 + rs))
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
+    # Calculate 4h ATR(14) for volatility filter
+    tr1_4h = df_4h['high'] - df_4h['low']
+    tr2_4h = np.abs(df_4h['high'] - np.concatenate([[close_4h[0]], close_4h[:-1]]))
+    tr3_4h = np.abs(df_4h['low'] - np.concatenate([[close_4h[0]], close_4h[:-1]]))
+    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
+    atr_14_4h = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_14_4h)
     
-    # Calculate 12h ATR(14) for volatility filter and position sizing
-    tr1 = high - low
-    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_12h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Get 1d HTF data for session and higher timeframe context
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Calculate 12h volume ratio (current vs 20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ratio = volume / (vol_ma_20 + 1e-10)
+    # Calculate 1d EMA(50) for long-term trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Pre-compute session hours (08-20 UTC) to reduce noise
+    hours = prices.index.hour  # prices.index is DatetimeIndex
     
     signals = np.zeros(n)
     
     for i in range(100, n):
-        # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(rsi_14_1d_aligned[i]) or 
-            np.isnan(atr_14_12h[i]) or np.isnan(volume_ratio[i])):
+        # Session filter: only trade 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
             signals[i] = 0.0
             continue
         
-        # Regime filter: ranging market when RSI between 40-60 (avoid strong trends)
-        ranging_market = (rsi_14_1d_aligned[i] >= 40) & (rsi_14_1d_aligned[i] <= 60)
+        # Skip if any required data is NaN
+        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(atr_14_4h_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
+            signals[i] = 0.0
+            continue
         
-        # Volatility filter: sufficient volatility for meaningful moves
-        vol_filter = atr_14_12h[i] > 0.003 * close[i]
+        # Volatility filter: avoid extremely low volatility periods
+        vol_filter = atr_14_4h_aligned[i] > 0.003 * close[i]
         
-        # Volume confirmation: above average participation
-        vol_confirm = volume_ratio[i] > 1.2
-        
-        # Long conditions: mean reversion in ranging market
-        # Price below EMA34 (slightly bearish short-term) + oversold RSI + ranging + vol
-        if (close[i] < ema_34_1d_aligned[i] and
-            rsi_14_1d_aligned[i] < 35 and
-            ranging_market and
-            vol_filter and
-            vol_confirm):
-            signals[i] = 0.25
+        # Long conditions:
+        # 1. 4h EMA(34) > 1d EMA(50) (bullish alignment across timeframes)
+        # 2. Price > 4h EMA(34) (bullish momentum)
+        # 3. Volatility filter (avoid chop)
+        if (ema_34_4h_aligned[i] > ema_50_1d_aligned[i] and
+            close[i] > ema_34_4h_aligned[i] and
+            vol_filter):
+            signals[i] = 0.20
             
-        # Short conditions: mean reversion in ranging market
-        # Price above EMA34 (slightly bullish short-term) + overbought RSI + ranging + vol
-        elif (close[i] > ema_34_1d_aligned[i] and
-              rsi_14_1d_aligned[i] > 65 and
-              ranging_market and
-              vol_filter and
-              vol_confirm):
-            signals[i] = -0.25
+        # Short conditions:
+        # 1. 4h EMA(34) < 1d EMA(50) (bearish alignment across timeframes)
+        # 2. Price < 4h EMA(34) (bearish momentum)
+        # 3. Volatility filter (avoid chop)
+        elif (ema_34_4h_aligned[i] < ema_50_1d_aligned[i] and
+              close[i] < ema_34_4h_aligned[i] and
+              vol_filter):
+            signals[i] = -0.20
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "12h_EMA34_RSI_Volume_Regime_Filter_v1"
-timeframe = "12h"
+name = "1h_EMA34_EMA50_Alignment_Vol_Filter_v1"
+timeframe = "1h"
 leverage = 1.0
