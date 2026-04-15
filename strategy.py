@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w Donchian channel (20) for trend direction and 1d RSI(14) for mean reversion timing.
+# Hypothesis: 12h strategy using 1d Donchian channel breakout for trend direction and 1w RSI(14) for mean reversion timing.
 # In 1w uptrend (price > 1w upper Donchian), wait for 1d RSI < 30 to go long (pullback entry).
 # In 1w downtrend (price < 1w lower Donchian), wait for 1d RSI > 70 to go short (bounce entry).
-# Volume confirmation ensures momentum validity. Session filter (08-20 UTC) reduces noise.
-# Designed for low trade frequency (10-25/year) to minimize fee drag while adapting to trend and mean reversion.
+# Volume confirmation ensures momentum validity. Session filter (00-23 UTC) to use all available data.
+# Designed for low trade frequency (12-37/year) to minimize fee drag while adapting to trend and mean reversion.
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,30 +23,30 @@ def generate_signals(prices):
     # Pre-compute session hours to avoid datetime operations in loop
     hours = pd.DatetimeIndex(open_time).hour
     
-    # Get 1w and 1d HTF data once before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d and 1w HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1w) < 30 or len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 30 or len(df_1w) < 30:
         return np.zeros(n)
     
-    # === 1w Indicators: Donchian Channel (20) ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    # === 1d Indicators: Donchian Channel (20) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # === 1d Indicators: RSI(14) ===
-    close_1d = df_1d['close'].values
-    delta = pd.Series(close_1d).diff().values
+    # === 1w Indicators: RSI(14) ===
+    close_1w = df_1w['close'].values
+    delta = pd.Series(close_1w).diff().values
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    rsi_1w = 100 - (100 / (1 + rs))
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
     signals = np.zeros(n)
     
@@ -54,9 +54,9 @@ def generate_signals(prices):
     warmup = 100
     
     for i in range(warmup, n):
-        # Session filter: 08-20 UTC only
+        # Session filter: 00-23 UTC (all hours) - no restriction for 12h timeframe
         hour = hours[i]
-        if hour < 8 or hour > 20:
+        if hour < 0 or hour > 23:
             signals[i] = 0.0
             continue
             
@@ -66,7 +66,7 @@ def generate_signals(prices):
         
         # Skip if any required data is NaN
         if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(rsi_1d_aligned[i])):
+            np.isnan(rsi_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -74,14 +74,14 @@ def generate_signals(prices):
         # 1. In 1w uptrend (price > 1w upper Donchian)
         # 2. 1d RSI < 30 (oversold pullback)
         # 3. Volume confirmation
-        if (close[i] > donchian_high_aligned[i]) and (rsi_1d_aligned[i] < 30) and vol_confirm:
+        if (close[i] > donchian_high_aligned[i]) and (rsi_1w_aligned[i] < 30) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
         # 1. In 1w downtrend (price < 1w lower Donchian)
         # 2. 1d RSI > 70 (overbought bounce)
         # 3. Volume confirmation
-        elif (close[i] < donchian_low_aligned[i]) and (rsi_1d_aligned[i] > 70) and vol_confirm:
+        elif (close[i] < donchian_low_aligned[i]) and (rsi_1w_aligned[i] > 70) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -89,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_RSI14_VolumeFilter_v1"
-timeframe = "1d"
+name = "12h_Donchian20_1wRSI14_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
