@@ -26,21 +26,19 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate daily Camarilla pivot levels (using prior day's OHLC)
+    # Calculate daily Donchian(20) channels (using prior day's OHLC)
     prior_high = df_1d['high'].shift(1).values
     prior_low = df_1d['low'].shift(1).values
     prior_close = df_1d['close'].shift(1).values
     
-    camarilla_pivot = (prior_high + prior_low + prior_close) / 3.0
-    camarilla_r3 = camarilla_pivot + 1.1 * (prior_high - prior_low)
-    camarilla_s3 = camarilla_pivot - 1.1 * (prior_high - prior_low)
+    donchian_upper = pd.Series(prior_high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(prior_low).rolling(window=20, min_periods=20).min().values
     
-    # Align Camarilla levels to 12h
-    camarilla_pivot_12h = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    camarilla_r3_12h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_12h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align Donchian levels to 4h
+    donchian_upper_4h = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    donchian_lower_4h = align_htf_to_ltf(prices, df_1d, donchian_lower)
     
-    # Calculate 12h volume ratio (current vs 20-period average)
+    # Calculate 4h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
@@ -48,34 +46,28 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(camarilla_pivot_12h[i]) or 
-            np.isnan(camarilla_r3_12h[i]) or np.isnan(camarilla_s3_12h[i]) or 
-            np.isnan(volume_ratio[i])):
+        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(donchian_upper_4h[i]) or 
+            np.isnan(donchian_lower_4h[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
         # Volatility regime filter: only trade when daily ATR is elevated (> 0.6% of price)
-        # This avoids low-volatility chop and focuses on momentum/trend days
         vol_regime = atr_14_1d_aligned[i] > 0.006 * close[i]
         
         # Long conditions:
-        # 1. Price above Camarilla pivot (bullish bias)
-        # 2. Price breaks above Camarilla R3 with volume (bullish continuation)
-        # 3. Volume confirmation: volume > 1.5x average
-        # 4. Daily volatility regime filter (avoid chop)
-        if (close[i] > camarilla_pivot_12h[i] and
-            close[i] > camarilla_r3_12h[i] and
+        # 1. Price breaks above prior day Donchian upper with volume
+        # 2. Volume confirmation: volume > 1.5x average
+        # 3. Daily volatility regime filter
+        if (close[i] > donchian_upper_4h[i] and
             volume_ratio[i] > 1.5 and
             vol_regime):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Price below Camarilla pivot (bearish bias)
-        # 2. Price breaks below Camarilla S3 with volume (bearish continuation)
-        # 3. Volume confirmation: volume > 1.5x average
-        # 4. Daily volatility regime filter
-        elif (close[i] < camarilla_pivot_12h[i] and
-              close[i] < camarilla_s3_12h[i] and
+        # 1. Price breaks below prior day Donchian lower with volume
+        # 2. Volume confirmation: volume > 1.5x average
+        # 3. Daily volatility regime filter
+        elif (close[i] < donchian_lower_4h[i] and
               volume_ratio[i] > 1.5 and
               vol_regime):
             signals[i] = -0.25
@@ -84,6 +76,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Vol_Regime_Camarilla_Pivot_R3S3_Breakout_v3"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_Volume_Regime_v4"
+timeframe = "4h"
 leverage = 1.0
