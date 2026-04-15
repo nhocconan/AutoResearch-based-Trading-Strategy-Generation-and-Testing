@@ -15,14 +15,12 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily Donchian(20) channels
-    donchian_high_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
-    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
-    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
+    # Calculate daily EMA(21) for trend filter
+    ema_21_1d = pd.Series(df_1d['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
     
     # Calculate daily ATR(14) for volatility filter
     tr1 = df_1d['high'] - df_1d['low']
@@ -32,34 +30,56 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
+    # Calculate daily Donchian(20) channels for structure
+    donchian_high_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
+    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
+    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
+    
+    # Calculate daily volume SMA(20) for volume confirmation
+    vol_sma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_sma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_20)
+    
     signals = np.zeros(n)
     
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or 
-            np.isnan(atr_14_1d_aligned[i])):
+        if (np.isnan(ema_21_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
+            np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or
+            np.isnan(vol_sma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when daily ATR is elevated (> 0.3% of price)
-        vol_filter = atr_14_1d_aligned[i] > 0.003 * close[i]
+        # Volatility filter: only trade when daily ATR is elevated (> 0.4% of price)
+        vol_filter = atr_14_1d_aligned[i] > 0.004 * close[i]
+        
+        # Volume confirmation: current 4h volume > 1.5x daily average volume scaled to 4h
+        # Approximate: daily volume / 6 (since 6x 4h bars in a day) 
+        vol_4h_avg = vol_sma_20_aligned[i] / 6.0
+        volume_confirm = volume[i] > 1.5 * vol_4h_avg
         
         # Long conditions:
-        # 1. Price breaks above daily Donchian(20) high
-        # 2. Volatility filter
-        if (close[i] > donchian_high_20_aligned[i] and vol_filter):
+        # 1. Price above daily EMA21 (bullish bias)
+        # 2. Price breaks above daily Donchian(20) high
+        # 3. Volatility filter AND volume confirmation
+        if (close[i] > ema_21_1d_aligned[i] and
+            close[i] > donchian_high_20_aligned[i] and
+            vol_filter and volume_confirm):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Price breaks below daily Donchian(20) low
-        # 2. Volatility filter
-        elif (close[i] < donchian_low_20_aligned[i] and vol_filter):
+        # 1. Price below daily EMA21 (bearish bias)
+        # 2. Price breaks below daily Donchian(20) low
+        # 3. Volatility filter AND volume confirmation
+        elif (close[i] < ema_21_1d_aligned[i] and
+              close[i] < donchian_low_20_aligned[i] and
+              vol_filter and volume_confirm):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "12h_Donchian20_VolFilter_v2"
-timeframe = "12h"
+name = "4h_EMA21_Donchian20_VolATR_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
