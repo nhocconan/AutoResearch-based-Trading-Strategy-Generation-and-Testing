@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Bollinger Band squeeze breakout with volume confirmation and 1d ADX trend filter
-# Bollinger Band squeeze (low volatility) precedes explosive moves. We trade breakouts
-# from the squeeze only when volume confirms and higher timeframe trend (1d ADX) supports.
-# Works in bull markets (breakouts up) and bear markets (breakouts down).
-# Target: 50-150 total trades over 4 years.
-# Timeframe: 4h, HTF: 1d
+# Hypothesis: 6h Williams %R with Volume Spike and 12h Trend Filter
+# Williams %R identifies overbought/oversold conditions. We enter on reversals from extreme levels
+# (%R < -80 for long, %R > -20 for short) only when confirmed by volume spike and aligned with
+# 12h trend (EMA50 direction). Works in ranging markets (mean reversion) and can catch trend
+# continuations when aligned with higher timeframe. Target: 50-150 total trades.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,96 +19,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2) on 4h
-    bb_length = 20
-    bb_mult = 2.0
-    sma = pd.Series(close).rolling(window=bb_length, min_periods=bb_length).mean()
-    std = pd.Series(close).rolling(window=bb_length, min_periods=bb_length).std()
-    upper = sma + bb_mult * std
-    lower = sma - bb_mult * std
+    # Calculate Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
     
-    # Bollinger Band Width for squeeze detection
-    bb_width = (upper - lower) / sma
-    # Squeeze: BB width below 20-period mean of BB width (low volatility)
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean()
-    squeeze = bb_width < bb_width_ma.values
-    
-    # Load 1d data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load 12h data for trend filter (EMA50)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate ADX (14-period) on 1d
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    # Calculate EMA50 on 12h
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(close_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(close_1d, 1)), 
-                        np.maximum(np.roll(close_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / (atr_1d + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr_1d + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx_1d = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Align Williams %R and EMA50 to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low, 'close': close}), williams_r)
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     position = 0
     base_size = 0.25  # Position size
     
-    for i in range(50, n):  # Start after warmup period
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(squeeze[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50_aligned[i])):
             continue
         
-        # Long entry: price breaks above upper BB + was in squeeze + volume confirmation + ADX > 25
-        if (close[i] > upper[i] and squeeze[i] and
-            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-            adx_aligned[i] > 25 and
+        # Volume spike: current volume > 2x median of last 20 periods
+        vol_median = np.median(volume[max(0, i-20):i+1])
+        volume_spike = volume[i] > 2.0 * vol_median
+        
+        # Long: Williams %R oversold (< -80) + volume spike + price above 12h EMA50 (uptrend)
+        if (williams_r_aligned[i] < -80 and
+            volume_spike and
+            close[i] > ema_50_aligned[i] and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below lower BB + was in squeeze + volume confirmation + ADX > 25
-        elif (close[i] < lower[i] and squeeze[i] and
-              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-              adx_aligned[i] > 25 and
+        # Short: Williams %R overbought (> -20) + volume spike + price below 12h EMA50 (downtrend)
+        elif (williams_r_aligned[i] > -20 and
+              volume_spike and
+              close[i] < ema_50_aligned[i] and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse BB breakout or ADX < 20 (ranging market) or volatility expansion (end of squeeze)
-        elif position == 1 and (close[i] < lower[i] or adx_aligned[i] < 20 or not squeeze[i]):
+        # Exit: Williams %R crosses back through -50 (mean reversion) or opposite extreme
+        elif position == 1 and williams_r_aligned[i] > -50:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > upper[i] or adx_aligned[i] < 20 or not squeeze[i]):
+        elif position == -1 and williams_r_aligned[i] < -50:
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_BB_Squeeze_Breakout_Volume_ADX"
-timeframe = "4h"
+name = "6h_WilliamsR_Volume_Spike_12hEMA50"
+timeframe = "6h"
 leverage = 1.0
