@@ -13,61 +13,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot levels
+    # Get weekly data for trend filter
+    weekly = get_htf_data(prices, '1w')
+    weekly_high = weekly['high'].values
+    weekly_low = weekly['low'].values
+    weekly_close = weekly['close'].values
+    
+    # Calculate weekly Donchian channels (20-period)
+    def donchian_channels(high_arr, low_arr, window):
+        upper = pd.Series(high_arr).rolling(window=window, min_periods=window).max().values
+        lower = pd.Series(low_arr).rolling(window=window, min_periods=window).min().values
+        return upper, lower
+    
+    weekly_dc_upper, weekly_dc_lower = donchian_channels(weekly_high, weekly_low, 20)
+    
+    # Align weekly Donchian channels to 6h timeframe
+    weekly_dc_upper_aligned = align_htf_to_ltf(prices, weekly, weekly_dc_upper)
+    weekly_dc_lower_aligned = align_htf_to_ltf(prices, weekly, weekly_dc_lower)
+    
+    # Get daily data for volume confirmation
     daily = get_htf_data(prices, '1d')
-    daily_high = daily['high'].values
-    daily_low = daily['low'].values
-    daily_close = daily['close'].values
+    daily_volume = daily['volume'].values
     
-    # Calculate daily pivot levels (classic floor trader pivots)
-    pivot = (daily_high + daily_low + daily_close) / 3.0
-    r1 = 2 * pivot - daily_low
-    s1 = 2 * pivot - daily_high
-    r2 = pivot + (daily_high - daily_low)
-    s2 = pivot - (daily_high - daily_low)
+    # Calculate daily volume average (20-period)
+    daily_vol_ma = pd.Series(daily_volume).rolling(window=20, min_periods=20).mean().values
+    daily_vol_ma_aligned = align_htf_to_ltf(prices, daily, daily_vol_ma)
     
-    # Align pivot levels to 1h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, daily, pivot)
-    r1_aligned = align_htf_to_ltf(prices, daily, r1)
-    s1_aligned = align_htf_to_ltf(prices, daily, s1)
-    r2_aligned = align_htf_to_ltf(prices, daily, r2)
-    s2_aligned = align_htf_to_ltf(prices, daily, s2)
-    
-    # Volume filter: current volume > 2.0x 30-period average volume
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_filter = volume > (2.0 * vol_ma)
-    
-    # Range filter: avoid trading when price is within 0.8% of pivot
-    price_to_pivot = np.abs(close - pivot_aligned) / pivot_aligned
-    range_filter = price_to_pivot > 0.008
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Volume filter: current 6h volume > 1.5x daily average volume
+    volume_filter = volume > (1.5 * daily_vol_ma_aligned)
     
     signals = np.zeros(n)
     
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(weekly_dc_upper_aligned[i]) or np.isnan(weekly_dc_lower_aligned[i]) or 
+            np.isnan(daily_vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade when all filters pass
-        if volume_filter[i] and range_filter[i] and session_filter[i]:
-            # Long conditions: price breaks above R1 with volume
-            if close[i] > r1_aligned[i]:
-                signals[i] = 0.20
-            # Long conditions: price bounces from S1 with volume (above S1, below S2)
-            elif close[i] > s1_aligned[i] and close[i] < s2_aligned[i]:
-                signals[i] = 0.20
-            # Short conditions: price breaks below S1 with volume
-            elif close[i] < s1_aligned[i]:
-                signals[i] = -0.20
-            # Short conditions: price rejected at R1 with volume (below R1, above R2)
-            elif close[i] < r1_aligned[i] and close[i] > r2_aligned[i]:
-                signals[i] = -0.20
+        # Only trade when volume filter passes
+        if volume_filter[i]:
+            # Long conditions: price breaks above weekly Donchian upper with volume
+            if close[i] > weekly_dc_upper_aligned[i]:
+                signals[i] = 0.25
+            # Short conditions: price breaks below weekly Donchian lower with volume
+            elif close[i] < weekly_dc_lower_aligned[i]:
+                signals[i] = -0.25
             else:
                 signals[i] = signals[i-1]
         else:
@@ -75,6 +66,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_Pivot_R1_S1_Breakout_Volume_RangeFilter_Session"
-timeframe = "1h"
+name = "6h_WeeklyDonchianBreakout_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
