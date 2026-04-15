@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R1/S1 breakout with 4h trend filter and session (08-20 UTC)
-# Uses 4h EMA200 for trend direction, 1h for precise entry timing on Camarilla levels
-# Volume confirmation reduces false breakouts. Discrete sizing (0.20) controls drawdown.
-# Designed to work in both bull (trend follow) and bear (mean revert at extremes) via regime.
+# Hypothesis: 6h Camarilla pivot R3/S3 fade with 1d trend filter and volume confirmation
+# In ranging markets (common in 2025 BTC/ETH), price tends to revert from extreme Camarilla levels (R3/S3)
+# In trending markets, we align with 1d EMA50 to avoid fading strong moves
+# Volume confirmation reduces false signals
+# Target: 12-35 trades/year, discrete sizing 0.25, works in both bull/bear via regime filter
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,101 +19,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session hours (08-20 UTC) once before loop
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h HTF data once before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 200:
-        return np.zeros(n)
-    
-    # Calculate 4h EMA200 for trend filter
-    ema_200_4h = pd.Series(df_4h['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_200_4h)
-    
-    # Get 1d HTF data for Camarilla pivot calculation
+    # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels (R1, S1, R2, S2, R3, S3)
-    # Using previous day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate daily EMA(50) for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Pivot point (PP) = (H + L + C) / 3
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    # Range = H - L
-    range_1d = high_1d - low_1d
+    # Calculate 1d ATR(14) for volatility filter
+    df_1d = df_1d.copy()
+    df_1d['tr'] = np.maximum(
+        df_1d['high'] - df_1d['low'],
+        np.maximum(
+            np.abs(df_1d['high'] - df_1d['close'].shift(1)),
+            np.abs(df_1d['low'] - df_1d['close'].shift(1))
+        )
+    )
+    tr_1d = df_1d['tr'].values
+    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Camarilla levels
-    r1 = pp + (range_1d * 1.1 / 12)
-    s1 = pp - (range_1d * 1.1 / 12)
-    r2 = pp + (range_1d * 1.1 / 6)
-    s2 = pp - (range_1d * 1.1 / 6)
-    r3 = pp + (range_1d * 1.1 / 4)
-    s3 = pp - (range_1d * 1.1 / 4)
+    # Calculate weekly Camarilla pivot levels (R3, S3)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
+        return np.zeros(n)
     
-    # Align Camarilla levels to 1h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Weekly high, low, close for Camarilla calculation
+    wh = df_1w['high'].values
+    wl = df_1w['low'].values
+    wc = df_1w['close'].values
     
-    # Calculate 1h volume average (20-period) for volume confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    pivot = (wh + wl + wc) / 3.0
+    range_ = wh - wl
+    r3 = pivot + range_ * 1.1
+    s3 = pivot - range_ * 1.1
+    
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
     
     signals = np.zeros(n)
     
-    for i in range(50, n):  # Start after warmup for EMA200
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_200_4h_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade during 08-20 UTC
-        if not in_session[i]:
+        # Volatility filter: only trade when weekly ATR is elevated (> 0.5% of price)
+        vol_filter = atr_14_1d_aligned[i] > 0.005 * close[i]
+        
+        # Fade at R3/S3 with trend filter
+        # Long: price near S3 AND above 1d EMA50 (bullish bias)
+        # Short: price near R3 AND below 1d EMA50 (bearish bias)
+        near_s3 = close[i] <= s3_aligned[i] * 1.002  # within 0.2% of S3
+        near_r3 = close[i] >= r3_aligned[i] * 0.998  # within 0.2% of R3
+        
+        if near_s3 and close[i] > ema_50_1d_aligned[i] and vol_filter:
+            signals[i] = 0.25  # long 25%
+        elif near_r3 and close[i] < ema_50_1d_aligned[i] and vol_filter:
+            signals[i] = -0.25  # short 25%
+        else:
             signals[i] = 0.0
-            continue
-        
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume[i] > 1.5 * vol_ma_20[i]
-        
-        # Determine trend bias from 4h EMA200
-        bullish_bias = close[i] > ema_200_4h_aligned[i]
-        bearish_bias = close[i] < ema_200_4h_aligned[i]
-        
-        # Initialize signal
-        signal_val = 0.0
-        
-        # Long conditions: price breaks above Camarilla resistance with volume
-        if bullish_bias and vol_confirm:
-            if close[i] > r1_aligned[i]:
-                signal_val = 0.20  # Long 20%
-            elif close[i] > r2_aligned[i]:
-                signal_val = 0.20  # Long 20% (same size for simplicity)
-            elif close[i] > r3_aligned[i]:
-                signal_val = 0.20  # Long 20%
-        
-        # Short conditions: price breaks below Camarilla support with volume
-        elif bearish_bias and vol_confirm:
-            if close[i] < s1_aligned[i]:
-                signal_val = -0.20  # Short 20%
-            elif close[i] < s2_aligned[i]:
-                signal_val = -0.20  # Short 20%
-            elif close[i] < s3_aligned[i]:
-                signal_val = -0.20  # Short 20%
-        
-        signals[i] = signal_val
     
     return signals
 
-name = "1h_Camarilla_R1S1_Breakout_4hEMA200_Vol_Session_v1"
-timeframe = "1h"
+name = "6h_Camarilla_R3S3_Fade_TrendFilter_Vol_v1"
+timeframe = "6h"
 leverage = 1.0
