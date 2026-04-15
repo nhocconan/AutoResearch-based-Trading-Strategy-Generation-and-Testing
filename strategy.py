@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h HMA21 trend filter and volume confirmation
-# Long when price breaks above 4h Donchian upper band + 12h close > 12h HMA21 (uptrend) + volume > 2.0x 20-period avg
-# Short when price breaks below 4h Donchian lower band + 12h close < 12h HMA21 (downtrend) + volume > 2.0x 20-period avg
-# Uses discrete position sizing (0.25) for balance between return and drawdown control.
-# 12h HMA21 provides strong trend filter reducing whipsaws in both bull and bear markets.
-# Higher volume threshold (2.0x) ensures only significant breakouts are traded, targeting ~20-30 trades/year.
+# Hypothesis: 4h Donchian(20) breakout with 12h Supertrend(ATR=10, mult=3) trend filter and volume confirmation
+# Long when price breaks above 4h Donchian upper band + 12h Supertrend = uptrend + volume > 1.5x 20-period avg
+# Short when price breaks below 4h Donchian lower band + 12h Supertrend = downtrend + volume > 1.5x 20-period avg
+# Uses discrete position sizing (0.25) to balance return and drawdown control.
+# 12h Supertrend provides strong trend filter reducing whipsaws in both bull and bear markets.
+# Volume threshold (1.5x) targets ~20-30 trades/year to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,23 +26,60 @@ def generate_signals(prices):
     
     # Get 12h HTF data once before loop
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 55:
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # === 12h Indicator: HMA21 (trend filter) ===
-    def calculate_hma(series, period):
-        """Calculate Hull Moving Average"""
-        half_period = period // 2
-        sqrt_period = int(np.sqrt(period))
-        wma_half = pd.Series(series).ewm(span=half_period, adjust=False).mean()
-        wma_full = pd.Series(series).ewm(span=period, adjust=False).mean()
-        raw_hma = 2 * wma_half - wma_full
-        hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean()
-        return hma.values
+    # === 12h Indicator: Supertrend(ATR=10, mult=3) ===
+    def calculate_atr(high, low, close, period):
+        """Calculate Average True Range"""
+        high_low = high - low
+        high_close = np.abs(high - np.roll(close, 1))
+        low_close = np.abs(low - np.roll(close, 1))
+        ranges = np.vstack([high_low, high_close, low_close])
+        tr = np.max(ranges, axis=0)
+        tr[0] = 0  # First period has no prior close
+        atr = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean()
+        return atr.values
     
+    def calculate_supertrend(high, low, close, atr_period=10, multiplier=3):
+        """Calculate Supertrend indicator"""
+        atr = calculate_atr(high, low, close, atr_period)
+        hl2 = (high + low) / 2
+        upperband = hl2 + (multiplier * atr)
+        lowerband = hl2 - (multiplier * atr)
+        
+        supertrend = np.zeros_like(close)
+        direction = np.ones_like(close)  # 1 for uptrend, -1 for downtrend
+        
+        supertrend[0] = 0
+        direction[0] = 1
+        
+        for i in range(1, len(close)):
+            if close[i] > upperband[i-1]:
+                direction[i] = 1
+            elif close[i] < lowerband[i-1]:
+                direction[i] = -1
+            else:
+                direction[i] = direction[i-1]
+                if direction[i] == 1 and lowerband[i] < lowerband[i-1]:
+                    lowerband[i] = lowerband[i-1]
+                if direction[i] == -1 and upperband[i] > upperband[i-1]:
+                    upperband[i] = upperband[i-1]
+            
+            if direction[i] == 1:
+                supertrend[i] = lowerband[i]
+            else:
+                supertrend[i] = upperband[i]
+        
+        return supertrend, direction
+    
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
-    hma21_12h = calculate_hma(close_12h, 21)
-    hma21_12h_aligned = align_htf_to_ltf(prices, df_12h, hma21_12h)
+    
+    supertrend_12h, direction_12h = calculate_supertrend(high_12h, low_12h, close_12h, 10, 3)
+    supertrend_12h_aligned = align_htf_to_ltf(prices, df_12h, supertrend_12h)
+    direction_12h_aligned = align_htf_to_ltf(prices, df_12h, direction_12h)
     
     # === 4h Donchian Channel (20-period) ===
     period = 20
@@ -57,7 +94,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(period, 20) + 21  # Donchian(20) + volume(20) + HMA21(12h)
+    warmup = max(period, 20) + 30  # Donchian(20) + volume(20) + Supertrend buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -65,12 +102,13 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2.0x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
+        # Volume filter: current volume > 1.5x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # Skip if any required data is NaN
         if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
-            np.isnan(hma21_12h_aligned[i]) or np.isnan(vol_sma_20[i])):
+            np.isnan(supertrend_12h_aligned[i]) or np.isnan(direction_12h_aligned[i]) or
+            np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -79,18 +117,18 @@ def generate_signals(prices):
         
         # === LONG CONDITIONS ===
         # 1. Price breaks above upper band (close > upper_band)
-        # 2. 12h close > 12h HMA21 (uptrend)
+        # 2. 12h Supertrend uptrend (direction = 1)
         # 3. Volume confirmation
         if (close[i] > upper_band[i]) and \
-           (close_12h_aligned > hma21_12h_aligned[i]) and vol_confirm:
+           (direction_12h_aligned[i] == 1) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
         # 1. Price breaks below lower band (close < lower_band)
-        # 2. 12h close < 12h HMA21 (downtrend)
+        # 2. 12h Supertrend downtrend (direction = -1)
         # 3. Volume confirmation
         elif (close[i] < lower_band[i]) and \
-             (close_12h_aligned < hma21_12h_aligned[i]) and vol_confirm:
+             (direction_12h_aligned[i] == -1) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -98,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_12hHMA21_Volume_Filter_v1"
+name = "4h_Donchian20_12hSupertrend_Volume_Filter_v1"
 timeframe = "4h"
 leverage = 1.0
