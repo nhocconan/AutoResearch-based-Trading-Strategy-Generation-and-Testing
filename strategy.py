@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # Calculate daily ATR(14) for volatility regime filter
@@ -36,13 +36,13 @@ def generate_signals(prices):
     donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
     donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
     
-    # Calculate 4h volume ratio (current vs 20-period average) - use primary timeframe volume
+    # Calculate 1d volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
     signals = np.zeros(n)
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
         if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or 
@@ -82,6 +82,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Vol_Regime_Donchian20_1dEMA34_Breakout_v6"
-timeframe = "4h"
+name = "1d_Vol_Regime_Donchian20_1dEMA34_Breakout_v2"
+timeframe = "1d"
 leverage = 1.0
