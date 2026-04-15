@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,81 +13,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for weekly pivot calculation
+    # 12h price channel (Donchian 20-period)
+    high_12h = pd.Series(high).rolling(window=20, min_periods=20).max()
+    low_12h = pd.Series(low).rolling(window=20, min_periods=20).min()
+    
+    # Weekly trend filter: 20-period EMA
+    df_1w = get_htf_data(prices, '1w')
+    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean()
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Daily volume spike: current > 2.0x median of last 50 periods
     df_1d = get_htf_data(prices, '1d')
-    
-    # Weekly pivot calculation using daily data
-    # We'll use the previous week's data to calculate pivot for current week
-    weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().values
-    weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().values
-    weekly_close = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).last().values
-    
-    # Pivot point calculation (standard formula)
-    pivot_point = (weekly_high + weekly_low + weekly_close) / 3.0
-    r1 = 2 * pivot_point - weekly_low
-    s1 = 2 * pivot_point - weekly_high
-    r2 = pivot_point + (weekly_high - weekly_low)
-    s2 = pivot_point - (weekly_high - weekly_low)
-    r3 = weekly_high + 2 * (pivot_point - weekly_low)
-    s3 = weekly_low - 2 * (weekly_high - pivot_point)
-    
-    # Align weekly pivot levels to 6h timeframe
-    pivot_point_6h = align_htf_to_ltf(prices, df_1d, pivot_point)
-    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
-    r2_6h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_6h = align_htf_to_ltf(prices, df_1d, s2)
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # 60-period EMA for trend filter (6h timeframe)
-    ema_60 = pd.Series(close).ewm(span=60, adjust=False, min_periods=60).mean().values
-    
-    # Volume confirmation: current > 1.5x median of last 30 periods
-    vol_median = pd.Series(volume).rolling(window=30, min_periods=1).median()
-    vol_threshold = 1.5 * vol_median
+    vol_median_1d = pd.Series(df_1d['volume'].values).rolling(window=50, min_periods=50).median()
+    vol_median_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_median_1d)
     
     signals = np.zeros(n)
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_point_6h[i]) or np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or
-            np.isnan(ema_60[i]) or np.isnan(vol_threshold[i])):
+        if (np.isnan(high_12h[i]) or np.isnan(low_12h[i]) or 
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_median_1d_aligned[i])):
             continue
         
-        # Long conditions:
-        # 1. Price above 60-period EMA (uptrend filter)
-        # 2. Price breaks above R3 level with volume confirmation
-        # 3. Strong bullish momentum
-        if (close[i] > ema_60[i] and 
-            close[i] > r3_6h[i] and 
-            volume[i] > vol_threshold[i]):
+        # Long: price breaks above 12h high + above weekly EMA + volume spike
+        if (close[i] > high_12h[i] and 
+            close[i] > ema_20_1w_aligned[i] and 
+            volume[i] > 2.0 * vol_median_1d_aligned[i]):
             signals[i] = 0.25
         
-        # Short conditions:
-        # 1. Price below 60-period EMA (downtrend filter)
-        # 2. Price breaks below S3 level with volume confirmation
-        # 3. Strong bearish momentum
-        elif (close[i] < ema_60[i] and 
-              close[i] < s3_6h[i] and 
-              volume[i] > vol_threshold[i]):
+        # Short: price breaks below 12h low + below weekly EMA + volume spike
+        elif (close[i] < low_12h[i] and 
+              close[i] < ema_20_1w_aligned[i] and 
+              volume[i] > 2.0 * vol_median_1d_aligned[i]):
             signals[i] = -0.25
         
-        # Exit conditions:
-        # Long exit: price falls back below pivot point
-        # Short exit: price rises back above pivot point
-        elif i > 0:
-            if signals[i-1] == 0.25 and close[i] < pivot_point_6h[i]:
-                signals[i] = 0.0
-            elif signals[i-1] == -0.25 and close[i] > pivot_point_6h[i]:
-                signals[i] = 0.0
-            else:
-                signals[i] = signals[i-1]
-        else:
+        # Exit: price returns to midline of 12h channel
+        elif (i > 0 and 
+              ((signals[i-1] == 0.25 and close[i] < (high_12h[i] + low_12h[i]) / 2) or
+               (signals[i-1] == -0.25 and close[i] > (high_12h[i] + low_12h[i]) / 2))):
             signals[i] = 0.0
+        
+        # Otherwise, hold previous position
+        else:
+            signals[i] = signals[i-1]
     
     return signals
 
-name = "6h_WeeklyPivot_R3S3_Breakout"
-timeframe = "6h"
+name = "12h_Donchian_WeeklyTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
