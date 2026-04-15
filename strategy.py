@@ -3,14 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h momentum with 4h trend filter and volume spike
-# Uses 4h EMA for trend direction, 1h RSI for momentum, and volume spike for confirmation.
-# Only trades during active session (08-20 UTC). Works in bull/bear via trend following.
-# Target: 60-150 total trades over 4 years = 15-37/year.
+# Hypothesis: 6h Weekly Pivot + Volume Spike + 1d EMA Trend Filter
+# Uses weekly pivot points (R1/S1) for mean reversion in ranging markets.
+# Long when price touches S1 with volume spike and 1d EMA > 1d EMA(50).
+# Short when price touches R1 with volume spike and 1d EMA < 1d EMA(50).
+# Weekly pivot provides strong support/resistance that works in both bull and bear markets.
+# Volume spike confirms genuine interest at pivot levels.
+# 1d EMA filter ensures we trade with higher timeframe trend.
+# Target: 50-150 total trades over 4 years (12-37/year).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,69 +22,78 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data for trend filter (EMA21)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:
+    # Load weekly data for pivot points
+    df_week = get_htf_data(prices, '1w')
+    if len(df_week) < 1:
         return np.zeros(n)
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    week_high = df_week['high'].values
+    week_low = df_week['low'].values
+    week_close = df_week['close'].values
     
-    # 1h RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
+    week_pivot = (week_high + week_low + week_close) / 3.0
+    week_r1 = 2 * week_pivot - week_low
+    week_s1 = 2 * week_pivot - week_high
     
-    # Volume spike: volume > 2.0 * median of last 20 bars
+    # Align weekly pivot to 6h timeframe (weekly pivot is fixed for the week)
+    week_pivot_aligned = align_htf_to_ltf(prices, df_week, week_pivot)
+    week_r1_aligned = align_htf_to_ltf(prices, df_week, week_r1)
+    week_s1_aligned = align_htf_to_ltf(prices, df_week, week_s1)
+    
+    # Load daily data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    close_1d = df_1d['close'].values
+    
+    # Calculate 1d EMA(20) and EMA(50) for trend filter
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 1d EMA to 6h timeframe
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume spike detection: volume > 2x 20-period median
     vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median().values
-    vol_spike = volume > (2.0 * vol_median)
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    volume_spike = volume > (2.0 * vol_median)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.20  # Position size
+    base_size = 0.25  # Position size
     
-    for i in range(20, n):
-        if not in_session[i]:
+    for i in range(100, n):
+        # Skip if any required data is NaN
+        if (np.isnan(week_r1_aligned[i]) or np.isnan(week_s1_aligned[i]) or
+            np.isnan(ema_20_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i])):
             continue
         
-        # Skip if EMA not ready
-        if np.isnan(ema_4h_aligned[i]):
-            continue
-        
-        # Long: uptrend (price > EMA) + RSI > 50 + volume spike
-        if (close[i] > ema_4h_aligned[i] and
-            rsi[i] > 50 and
-            vol_spike[i] and
+        # Long entry: price touches S1 with volume spike and bullish trend (EMA20 > EMA50)
+        if (low[i] <= week_s1_aligned[i] and
+            volume_spike[i] and
+            ema_20_1d_aligned[i] > ema_50_1d_aligned[i] and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short: downtrend (price < EMA) + RSI < 50 + volume spike
-        elif (close[i] < ema_4h_aligned[i] and
-              rsi[i] < 50 and
-              vol_spike[i] and
+        # Short entry: price touches R1 with volume spike and bearish trend (EMA20 < EMA50)
+        elif (high[i] >= week_r1_aligned[i] and
+              volume_spike[i] and
+              ema_20_1d_aligned[i] < ema_50_1d_aligned[i] and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: trend reversal or RSI extreme
-        elif position == 1 and (close[i] < ema_4h_aligned[i] or rsi[i] < 30):
+        # Exit: opposite pivot touch or trend reversal
+        elif position == 1 and (high[i] >= week_r1_aligned[i] or ema_20_1d_aligned[i] < ema_50_1d_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > ema_4h_aligned[i] or rsi[i] > 70):
+        elif position == -1 and (low[i] <= week_s1_aligned[i] or ema_20_1d_aligned[i] > ema_50_1d_aligned[i]):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "1h_EMA_RSI_Volume_Spike"
-timeframe = "1h"
+name = "6h_WeeklyPivot_Volume_EMATrend"
+timeframe = "6h"
 leverage = 1.0
