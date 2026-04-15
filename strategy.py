@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 12h ADX Trend Filter
-# Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low
-# Long when Bull Power > 0 and 12h ADX > 25 (trending up)
-# Short when Bear Power > 0 and 12h ADX > 25 (trending down)
-# Exit when power reverses or ADX < 20 (ranging)
-# Works in bull markets (captures uptrends) and bear markets (captures downtrends).
-# Target: 50-150 total trades over 4 years.
+# Hypothesis: 4h Williams Alligator + Volume Spike + ADX Trend Filter
+# Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trend direction and strength.
+# Long when Lips > Teeth > Jaw (bullish alignment), Short when Lips < Teeth < Jaw (bearish alignment).
+# Entry requires volume > 2x median volume (20-bar) and ADX > 25 (trending market).
+# Exit when Alligator lines cross (trend weakness) or ADX < 20 (ranging market).
+# Designed to capture trends in both bull and bear markets with low trade frequency.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,22 +18,34 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate EMA13 for Elder Ray
-    close_series = pd.Series(close)
-    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray components
-    bull_power = high - ema13
-    bear_power = ema13 - low
+    # Load 1d data for Williams Alligator calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 13:
+        return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # Load 12h data for ADX trend filter
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    if len(df_12h) < 50:
         return np.zeros(n)
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
+    
+    # Calculate Williams Alligator on 1d
+    # Jaw (13-period SMMA of median price)
+    median_price_1d = (high_1d + low_1d) / 2
+    jaw = pd.Series(median_price_1d).rolling(window=13, min_periods=13).mean().values
+    
+    # Teeth (8-period SMMA of median price)
+    teeth = pd.Series(median_price_1d).rolling(window=8, min_periods=8).mean().values
+    
+    # Lips (5-period SMMA of median price)
+    lips = pd.Series(median_price_1d).rolling(window=5, min_periods=5).mean().values
     
     # Calculate ADX (14-period) on 12h
     # True Range
@@ -65,43 +76,50 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Align ADX to 6h timeframe
+    # Align Williams Alligator lines to 4h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    
+    # Align ADX to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
     signals = np.zeros(n)
     position = 0
     base_size = 0.25  # Position size
     
-    for i in range(13, n):  # Start after EMA13 warmup
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(adx_aligned[i])):
             continue
         
-        # Long entry: Bull Power > 0 and ADX > 25 (strong uptrend)
-        if (bull_power[i] > 0 and
+        # Long entry: Bullish Alligator alignment + volume spike + ADX > 25
+        if (lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i] and
+            volume[i] > 2.0 * np.median(volume[max(0, i-20):i+1]) and
             adx_aligned[i] > 25 and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: Bear Power > 0 and ADX > 25 (strong downtrend)
-        elif (bear_power[i] > 0 and
+        # Short entry: Bearish Alligator alignment + volume spike + ADX > 25
+        elif (lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i] and
+              volume[i] > 2.0 * np.median(volume[max(0, i-20):i+1]) and
               adx_aligned[i] > 25 and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: power reverses or ADX < 20 (ranging market)
-        elif position == 1 and (bull_power[i] <= 0 or adx_aligned[i] < 20):
+        # Exit: Alligator lines cross (trend weakness) or ADX < 20 (ranging market)
+        elif position == 1 and (lips_aligned[i] <= teeth_aligned[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (bear_power[i] <= 0 or adx_aligned[i] < 20):
+        elif position == -1 and (lips_aligned[i] >= teeth_aligned[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "6h_ElderRay_ADX_Trend"
-timeframe = "6h"
+name = "4h_WilliamsAlligator_Volume_ADX"
+timeframe = "4h"
 leverage = 1.0
