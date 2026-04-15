@@ -13,34 +13,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily HTF data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h HTF data once before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    daily_close = df_1d['close'].values
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_volume = df_1d['volume'].values
+    h12_close = df_12h['close'].values
+    h12_high = df_12h['high'].values
+    h12_low = df_12h['low'].values
+    h12_volume = df_12h['volume'].values
     
-    # Calculate daily ATR(14) for volatility regime filter
-    tr1 = daily_high - daily_low
-    tr2 = np.abs(daily_high - np.concatenate([[daily_close[0]], daily_close[:-1]]))
-    tr3 = np.abs(daily_low - np.concatenate([[daily_close[0]], daily_close[:-1]]))
-    daily_tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    daily_atr_14 = pd.Series(daily_tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate 12h Donchian channels (20-period)
+    highest_20 = pd.Series(h12_high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(h12_low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_20 + lowest_20) / 2
     
-    # Align daily ATR to 12h timeframe
-    daily_atr_14_12h = align_htf_to_ltf(prices, df_1d, daily_atr_14)
+    # Align HTF Donchian channels to 4h timeframe
+    highest_20_4h = align_htf_to_ltf(prices, df_12h, highest_20)
+    lowest_20_4h = align_htf_to_ltf(prices, df_12h, lowest_20)
+    donchian_mid_4h = align_htf_to_ltf(prices, df_12h, donchian_mid)
     
-    # Calculate 12h ATR(14) for stoploss reference
-    tr1_12h = high - low
-    tr2_12h = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3_12h = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
-    atr_14_12h = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate 4h ATR(14) for volatility filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 12h volume ratio (current vs 20-period average)
+    # Calculate 4h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
@@ -48,31 +48,37 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(daily_atr_14_12h[i]) or np.isnan(atr_14_12h[i]) or 
-            np.isnan(volume_ratio[i])):
+        if (np.isnan(highest_20_4h[i]) or np.isnan(lowest_20_4h[i]) or 
+            np.isnan(donchian_mid_4h[i]) or np.isnan(atr_14[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: Daily ATR > 1.5% of price (avoid low volatility chop)
-        volatility_regime = daily_atr_14_12h[i] > 0.015 * close[i]
+        # Entry conditions:
+        # 1. 4h price breaks above 12h Donchian upper with volume confirmation → long (strong continuation)
+        # 2. 4h price breaks below 12h Donchian lower with volume confirmation → short (strong continuation)
+        # 3. Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
+        # 4. Volume confirmation: volume > 1.3x average
+        # 5. Discrete position sizing: 0.25
+        # 6. Trend filter: price above/below Donchian midpoint for directional bias
         
-        # Entry conditions with discrete sizing (0.25)
-        # Long: 12h close above daily high + volume confirmation + volatility regime
-        if (close[i] > daily_high[i] and            # 12h price above daily high (breakout)
-            volume_ratio[i] > 1.4 and               # Volume confirmation
-            volatility_regime):                     # Volatility regime filter
+        # Long conditions: 4h breakout above 12h Donchian upper with trend confirmation
+        if (close[i] > highest_20_4h[i] and            # 4h price above 12h Donchian upper
+            close[i] > donchian_mid_4h[i] and          # Price above midpoint (uptrend bias)
+            volume_ratio[i] > 1.3 and                  # Volume confirmation
+            atr_14[i] > 0.005 * close[i]):             # Volatility filter
             signals[i] = 0.25
             
-        # Short: 12h close below daily low + volume confirmation + volatility regime
-        elif (close[i] < daily_low[i] and           # 12h price below daily low (breakdown)
-              volume_ratio[i] > 1.4 and             # Volume confirmation
-              volatility_regime):                   # Volatility regime filter
+        # Short conditions: 4h breakdown below 12h Donchian lower with trend confirmation
+        elif (close[i] < lowest_20_4h[i] and           # 4h price below 12h Donchian lower
+              close[i] < donchian_mid_4h[i] and        # Price below midpoint (downtrend bias)
+              volume_ratio[i] > 1.3 and                # Volume confirmation
+              atr_14[i] > 0.005 * close[i]):           # Volatility filter
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "12h_Daily_High_Low_Breakout_Volume_Volatility_Regime"
-timeframe = "12h"
+name = "4h_12h_Donchian20_Breakout_Volume_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
