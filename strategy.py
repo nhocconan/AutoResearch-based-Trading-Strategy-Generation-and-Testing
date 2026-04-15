@@ -13,19 +13,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d close for Donchian channels
+    # Weekly SMA(34) for long-term trend
+    weekly = get_htf_data(prices, '1w')
+    close_w = weekly['close'].values
+    sma_34w = pd.Series(close_w).rolling(window=34, min_periods=34).mean().values
+    sma_34w_aligned = align_htf_to_ltf(prices, weekly, sma_34w)
+    
+    # Daily ATR(14) for volatility
     daily = get_htf_data(prices, '1d')
-    close_d = daily['close'].values
-    high_d = daily['high'].values
-    low_d = daily['low'].values
-    
-    # 1d Donchian(20) channels
-    donch_high = pd.Series(high_d).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_d).rolling(window=20, min_periods=20).min().values
-    donch_high_aligned = align_htf_to_ltf(prices, daily, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, daily, donch_low)
-    
-    # 1d ATR(14) for volatility filter
     high_d = daily['high'].values
     low_d = daily['low'].values
     close_d = daily['close'].values
@@ -35,49 +30,39 @@ def generate_signals(prices):
     atr_14d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14d_aligned = align_htf_to_ltf(prices, daily, atr_14d)
     
-    # Volume threshold: 1.5x median of last 30 bars
-    vol_median = pd.Series(volume).rolling(window=30, min_periods=30).median()
-    vol_threshold = 1.5 * vol_median
-    
-    # ATR median for volatility regime filter
-    atr_median = pd.Series(atr_14d_aligned).rolling(window=50, min_periods=50).median()
+    # Daily ATR mean for regime filter
+    atr_mean = pd.Series(atr_14d_aligned).rolling(window=30, min_periods=30).mean()
     
     signals = np.zeros(n)
     
-    for i in range(50, n):
-        # Skip if any required data is NaN
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or
-            np.isnan(atr_14d_aligned[i]) or np.isnan(vol_threshold[i]) or
-            np.isnan(atr_median[i])):
+    for i in range(34, n):
+        if (np.isnan(sma_34w_aligned[i]) or np.isnan(atr_14d_aligned[i]) or 
+            np.isnan(atr_mean[i])):
             continue
         
-        # Volatility filter: avoid extremes (0.5x to 3.0x of median ATR)
-        vol_filter = (atr_14d_aligned[i] > 0.5 * atr_median[i]) and (atr_14d_aligned[i] < 3.0 * atr_median[i])
+        # Trend filter: price above/below weekly SMA34
+        above_trend = close[i] > sma_34w_aligned[i]
+        below_trend = close[i] < sma_34w_aligned[i]
         
-        # Long: Price breaks above 1d Donchian high + volume spike + volatility filter
-        if (close[i] > donch_high_aligned[i] and 
-            volume[i] > vol_threshold[i] and 
-            vol_filter):
-            signals[i] = 0.25
+        # Volatility filter: avoid low volatility (choppy) markets
+        vol_filter = atr_14d_aligned[i] > 0.8 * atr_mean[i]
         
-        # Short: Price breaks below 1d Donchian low + volume spike + volatility filter
-        elif (close[i] < donch_low_aligned[i] and 
-              volume[i] > vol_threshold[i] and 
-              vol_filter):
-            signals[i] = -0.25
-        
-        # Exit: price crosses back into Donchian channel
-        elif (i > 0 and 
-              ((signals[i-1] == 0.25 and close[i] < donch_high_aligned[i]) or
-               (signals[i-1] == -0.25 and close[i] > donch_low_aligned[i]))):
-            signals[i] = 0.0
-        
-        # Otherwise, hold previous position
+        # Entry conditions with volume confirmation
+        if above_trend and vol_filter and volume[i] > 1.2 * pd.Series(volume).rolling(20, min_periods=20).mean()[i]:
+            signals[i] = 0.30
+        elif below_trend and vol_filter and volume[i] > 1.2 * pd.Series(volume).rolling(20, min_periods=20).mean()[i]:
+            signals[i] = -0.30
         else:
-            signals[i] = signals[i-1]
+            # Exit when price crosses weekly SMA34 or volatility drops
+            if i > 0 and ((signals[i-1] > 0 and close[i] < sma_34w_aligned[i]) or
+                         (signals[i-1] < 0 and close[i] > sma_34w_aligned[i]) or
+                         atr_14d_aligned[i] < 0.5 * atr_mean[i]):
+                signals[i] = 0.0
+            else:
+                signals[i] = signals[i-1]
     
     return signals
 
-name = "4h_1d_Donchian20_Vol1.5x_ATR14dFilter_v3"
-timeframe = "4h"
+name = "1d_WeeklySMA34_VolumeFilter_ATRRegime"
+timeframe = "1d"
 leverage = 1.0
