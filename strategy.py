@@ -25,7 +25,8 @@ def generate_signals(prices):
     tr1 = high_12h[1:] - low_12h[1:]
     tr2 = np.abs(high_12h[1:] - close_12h[:-1])
     tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.concatenate([[np.max([high_12h[0] - low_12h[0], np.abs(high_12h[0] - close_12h[0]), np.abs(low_12h[0] - close_12h[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    tr_init = np.array([max(high_12h[0] - low_12h[0], abs(high_12h[0] - close_12h[0]), abs(low_12h[0] - close_12h[0]))])
+    tr = np.concatenate([tr_init, np.maximum(tr1, np.maximum(tr2, tr3))])
     atr_12h = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
     
     # 12h EMA(50) for trend
