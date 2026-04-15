@@ -1,13 +1,14 @@
-# 4h_1d_Range_Breakout_Volume_ADX
-# 4h 1-day Range Breakout with Volume Confirmation and ADX Trend Filter
-# Uses the previous day's high/low as support/resistance levels. Breakouts above previous day's high
-# or below previous day's low are traded only when confirmed by volume and ADX > 25 (trending market).
-# Works in bull markets (breakouts up) and bear markets (breakouts down). Target: 50-150 total trades.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 12h Choppiness Index regime filter + 1d RSI mean reversion
+# Uses Choppiness Index (14) on 12h to identify ranging (CHOP > 61.8) vs trending (CHOP < 38.2) markets.
+# In ranging markets: RSI(14) on 1d for mean reversion (long RSI<30, short RSI>70).
+# In trending markets: 1d EMA(50) trend filter (long price>EMA, short price<EMA).
+# Volume confirmation: current volume > 1.5x 20-period median volume.
+# Designed for low trade frequency (<30/year) to avoid fee drag on 12h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,32 +20,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for previous day's high/low
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Load 12h data for ADX trend filter
+    # Load 12h data for Choppiness Index
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    if len(df_12h) < 30:
         return np.zeros(n)
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     
-    # Previous day's high and low (shifted by 1 to avoid look-ahead)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_high_1d[0] = np.nan  # First value has no previous day
-    prev_low_1d[0] = np.nan
+    # Load 1d data for RSI and EMA
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align previous day's high/low to 4h timeframe
-    prev_high_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_high_1d)
-    prev_low_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_low_1d)
-    
-    # Calculate ADX (14-period) on 12h
+    # Calculate Choppiness Index (14) on 12h
     # True Range
     tr1 = high_12h - low_12h
     tr2 = np.abs(high_12h - np.roll(close_12h, 1))
@@ -52,66 +44,99 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First value
     
-    # Directional Movement
-    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
-                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)), 
-                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Sum of True Range over 14 periods
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
     
-    # Smoothed values
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    # Highest high and lowest low over 14 periods
+    hh = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
     
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+    # Choppiness Index
+    chop = 100 * np.log10(tr_sum / (hh - ll)) / np.log10(14)
+    chop = np.where((hh - ll) == 0, 50, chop)  # Avoid division by zero
     
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # Align Choppiness Index to 12h timeframe (no extra delay needed)
+    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
     
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    # Calculate RSI (14) on 1d
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Align RSI to 12h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    
+    # Calculate EMA(50) on 1d
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25  # Position size
+    base_size = 0.25  # Position size (25% of capital)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(prev_high_1d_aligned[i]) or np.isnan(prev_low_1d_aligned[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(chop_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(ema_50_aligned[i])):
             continue
         
-        # Long entry: price breaks above previous day's high + volume confirmation + ADX > 25
-        if (close[i] > prev_high_1d_aligned[i] and
-            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-            adx_aligned[i] > 25 and
-            position <= 0):
+        chop_val = chop_aligned[i]
+        rsi_val = rsi_aligned[i]
+        close_price = close[i]
+        ema_price = ema_50_aligned[i]
+        
+        # Volume confirmation: current volume > 1.5x median of last 20 periods
+        vol_median = np.median(volume[max(0, i-20):i+1])
+        vol_confirmed = volume[i] > 1.5 * vol_median
+        
+        # Determine market regime
+        is_ranging = chop_val > 61.8
+        is_trending = chop_val < 38.2
+        
+        # Long entry conditions
+        long_entry = False
+        if is_ranging and rsi_val < 30 and vol_confirmed:
+            long_entry = True  # Mean reversion in ranging market
+        elif is_trending and close_price > ema_price and vol_confirmed:
+            long_entry = True  # Trend following in trending market
+        
+        # Short entry conditions
+        short_entry = False
+        if is_ranging and rsi_val > 70 and vol_confirmed:
+            short_entry = True  # Mean reversion in ranging market
+        elif is_trending and close_price < ema_price and vol_confirmed:
+            short_entry = True  # Trend following in trending market
+        
+        # Exit conditions: reverse signal or regime change to extreme chop
+        exit_long = position == 1 and (
+            (is_ranging and rsi_val > 70) or  # Opposite RSI in ranging
+            (is_trending and close_price < ema_price) or  # Trend reversal
+            chop_val > 80  # Extreme chop (avoid whipsaw)
+        )
+        
+        exit_short = position == -1 and (
+            (is_ranging and rsi_val < 30) or  # Opposite RSI in ranging
+            (is_trending and close_price > ema_price) or  # Trend reversal
+            chop_val > 80  # Extreme chop
+        )
+        
+        # Generate signals
+        if long_entry and position <= 0:
             position = 1
             signals[i] = base_size
-        
-        # Short entry: price breaks below previous day's low + volume confirmation + ADX > 25
-        elif (close[i] < prev_low_1d_aligned[i] and
-              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-              adx_aligned[i] > 25 and
-              position >= 0):
+        elif short_entry and position >= 0:
             position = -1
             signals[i] = -base_size
-        
-        # Exit: reverse breakout or ADX < 20 (ranging market)
-        elif position == 1 and (close[i] < prev_low_1d_aligned[i] or adx_aligned[i] < 20):
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and (close[i] > prev_high_1d_aligned[i] or adx_aligned[i] < 20):
+        elif exit_long or exit_short:
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_1d_Range_Breakout_Volume_ADX"
-timeframe = "4h"
+name = "12h_Chop_RSI_EMA_Regime"
+timeframe = "12h"
 leverage = 1.0
