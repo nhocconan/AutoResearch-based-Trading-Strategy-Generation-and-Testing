@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h 1-day Range Breakout with Volume Confirmation and ADX Trend Filter
+# Hypothesis: 12h 1-day Range Breakout with Volume Confirmation and ADX Trend Filter
 # Uses the previous day's high/low as support/resistance levels. Breakouts above previous day's high
 # or below previous day's low are traded only when confirmed by volume and ADX > 25 (trending market).
 # Works in bull markets (breakouts up) and bear markets (breakouts down). Target: 50-150 total trades.
@@ -39,7 +39,7 @@ def generate_signals(prices):
     prev_high_1d[0] = np.nan  # First value has no previous day
     prev_low_1d[0] = np.nan
     
-    # Align previous day's high/low to 4h timeframe
+    # Align previous day's high/low to 12h timeframe
     prev_high_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_high_1d)
     prev_low_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_low_1d)
     
@@ -72,7 +72,7 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Align ADX to 4h timeframe
+    # Align ADX to 12h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
     signals = np.zeros(n)
@@ -111,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Range_Breakout_Volume_ADX"
-timeframe = "4h"
+name = "12h_1d_Range_Breakout_Volume_ADX"
+timeframe = "12h"
 leverage = 1.0
