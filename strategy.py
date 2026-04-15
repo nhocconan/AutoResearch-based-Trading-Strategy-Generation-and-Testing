@@ -13,9 +13,8 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for 1d/1w HTF context
+    # Get daily data for 1d HTF context (as per instructions)
     daily = get_htf_data(prices, '1d')
-    weekly = get_htf_data(prices, '1w')
     
     # Calculate ATR on daily for volatility filter
     tr1 = daily['high'].values[1:] - daily['low'].values[1:]
@@ -56,18 +55,18 @@ def generate_signals(prices):
         if not vol_filter[i]:
             signals[i] = 0.0
             continue
-            
+        
         # Long: Price above both EMA20 and EMA50 + volume spike
         if (close[i] > daily_ema_20_aligned[i] and 
             close[i] > daily_ema_50_aligned[i] and 
             vol_spike[i]):
-            signals[i] = 0.25
+            signals[i] = 0.30
         
         # Short: Price below both EMA20 and EMA50 + volume spike
         elif (close[i] < daily_ema_20_aligned[i] and 
               close[i] < daily_ema_50_aligned[i] and 
               vol_spike[i]):
-            signals[i] = -0.25
+            signals[i] = -0.30
         
         # Exit: reverse signal on opposite direction
         elif (close[i] < daily_ema_20_aligned[i] and signals[i-1] > 0) or \
@@ -80,6 +79,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA20_50_Volume_Spike_Filter"
-timeframe = "4h"
+name = "12h_EMA20_50_Volume_Spike_Filter"
+timeframe = "12h"
 leverage = 1.0
