@@ -18,6 +18,10 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
+    # Calculate daily EMA(34) for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
     # Calculate daily ATR(14) for volatility filter
     tr1 = df_1d['high'] - df_1d['low']
     tr2 = np.abs(df_1d['high'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
@@ -25,10 +29,6 @@ def generate_signals(prices):
     tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    
-    # Calculate daily EMA(34) for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     
@@ -57,6 +57,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA34_VolFilter_v1"
-timeframe = "4h"
+name = "12h_EMA34_VolFilter_v1"
+timeframe = "12h"
 leverage = 1.0
