@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Camarilla pivot breakout with volume confirmation and session filter.
-# Uses 4h Camarilla R1/S1 levels for entry timing, filtered by 1d EMA50 trend and volume spike.
-# Session filter (08-20 UTC) reduces noise trades. Designed for low trade frequency (15-35/year)
-# to minimize fee drag. Works in bull/bear: 1d EMA50 avoids counter-trend trades, Camarilla
-# breakouts capture institutional level reactions with momentum confirmation.
+# Hypothesis: 6h Donchian(20) breakout + weekly pivot direction + volume confirmation.
+# Uses weekly P1 (monthly pivot) for trend bias, Donchian breakouts for entry,
+# and volume spike for confirmation. Designed for very low trade frequency (10-25/year)
+# to minimize fee drag. Works in bull/bear: weekly pivot avoids counter-trend trades,
+# Donchian breakouts capture strong momentum with volume confirmation.
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,27 +23,27 @@ def generate_signals(prices):
     # Pre-compute session hours to avoid datetime operations in loop
     hours = pd.DatetimeIndex(open_time).hour
     
-    # Get 4h and 1d HTF data once before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1w and 1d HTF data once before loop
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 50 or len(df_1d) < 50:
+    if len(df_1w) < 20 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 4h Indicators: Camarilla Pivots (R1, S1) ===
-    # Camarilla formula: Close +- (High-Low) * 1.1/12
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    camarilla_high = close_4h + (high_4h - low_4h) * 1.1 / 12  # R1 level
-    camarilla_low = close_4h - (high_4h - low_4h) * 1.1 / 12   # S1 level
+    # === 1w Indicators: Weekly Pivot (P1 = monthly pivot approximation) ===
+    # Weekly pivot: (High + Low + Close) / 3 (using weekly OHLC)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    weekly_pivot = (high_1w + low_1w + close_1w) / 3.0
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
     
-    camarilla_high_aligned = align_htf_to_ltf(prices, df_4h, camarilla_high)
-    camarilla_low_aligned = align_htf_to_ltf(prices, df_4h, camarilla_low)
-    
-    # === 1d Indicators: Trend Filter ===
-    # 1d EMA(50) for trend bias
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # === 1d Indicators: Donchian Channel (20) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
     signals = np.zeros(n)
     
@@ -51,45 +51,45 @@ def generate_signals(prices):
     warmup = 100
     
     for i in range(warmup, n):
-        # Session filter: 08-20 UTC only
+        # Session filter: 08-20 UTC only (reduce noise)
         hour = hours[i]
         if hour < 8 or hour > 20:
             signals[i] = 0.0
             continue
             
-        # Volume filter: current volume > 2.0x 20-period volume SMA
+        # Volume filter: current volume > 2.5x 20-period volume SMA
         vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
+        vol_confirm = volume[i] > (vol_sma_20[i] * 2.5)
         
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(donchian_high_aligned[i]) or
+            np.isnan(donchian_low_aligned[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above Camarilla R1 (4h resistance)
-        # 2. 1d price above EMA50 (bullish trend bias)
+        # 1. Price breaks above Donchian(20) high (breakout)
+        # 2. Price above weekly pivot (bullish bias)
         # 3. Volume confirmation
-        if (close[i] > camarilla_high_aligned[i] and
-            close[i] > ema_50_1d_aligned[i] and
+        if (close[i] > donchian_high_aligned[i] and
+            close[i] > weekly_pivot_aligned[i] and
             vol_confirm):
-            signals[i] = 0.20
+            signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below Camarilla S1 (4h support)
-        # 2. 1d price below EMA50 (bearish trend bias)
+        # 1. Price breaks below Donchian(20) low (breakdown)
+        # 2. Price below weekly pivot (bearish bias)
         # 3. Volume confirmation
-        elif (close[i] < camarilla_low_aligned[i] and
-              close[i] < ema_50_1d_aligned[i] and
+        elif (close[i] < donchian_low_aligned[i] and
+              close[i] < weekly_pivot_aligned[i] and
               vol_confirm):
-            signals[i] = -0.20
+            signals[i] = -0.25
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "1h_Camarilla_R1S1_EMA50_VolFilter_v1"
-timeframe = "1h"
+name = "6h_Donchian20_WeeklyPivot_VolumeFilter_v1"
+timeframe = "6h"
 leverage = 1.0
