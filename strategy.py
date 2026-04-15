@@ -1,4 +1,3 @@
-#1
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -78,6 +77,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_EMA15_RSI_Volume_v1"
-timeframe = "4h"
+name = "1d_Donchian20_EMA15_RSI_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
