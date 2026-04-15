@@ -3,92 +3,105 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ADX filter and volume confirmation
-# Uses standard Donchian period for balanced trade frequency.
-# 1d ADX > 20 filters for trending markets only (avoids chop).
-# Volume > 1.5x median ensures participation.
-# Designed to work in both bull and bear markets by only trading when trend is present.
+# Hypothesis: 6h Ichimoku Cloud with TK cross and 1d trend filter
+# Uses Kumo (cloud) from 1d timeframe as trend filter: price above cloud = bullish bias, below = bearish bias
+# TK cross (Tenkan/Kijun) on 6h for entry timing with confirmation from cloud color
+# Designed to capture trends in both bull and bear markets with controlled trade frequency
+# Ichimoku components: Tenkan (9-period), Kijun (26-period), Senkou Span A/B (26/52-period)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Donchian(20) channels
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max()
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min()
+    # Calculate Ichimoku components on 6h
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max()
+    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min()
+    tenkan = (high_9 + low_9) / 2
     
-    # 1d ADX(14) for trend filter
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max()
+    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min()
+    kijun = (high_26 + low_26) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max()
+    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min()
+    senkou_b = ((high_52 + low_52) / 2)
+    
+    # Get 1d data for trend filter (cloud from daily timeframe)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr2 = np.maximum(np.abs(low_1d[1:] - close_1d[:-1]), tr1)
-    tr = np.concatenate([[np.nan], tr2])
+    # Calculate 1d Ichimoku cloud components
+    high_9_1d = pd.Series(high_1d).rolling(window=9, min_periods=9).max()
+    low_9_1d = pd.Series(low_1d).rolling(window=9, min_periods=9).min()
+    tenkan_1d = (high_9_1d + low_9_1d) / 2
     
-    # +DM and -DM
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
+    high_26_1d = pd.Series(high_1d).rolling(window=26, min_periods=26).max()
+    low_26_1d = pd.Series(low_1d).rolling(window=26, min_periods=26).min()
+    kijun_1d = (high_26_1d + low_26_1d) / 2
     
-    # Smoothed TR, +DM, -DM
-    tr_smooth = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values
+    # Senkou Span A and B for 1d cloud
+    senkou_a_1d = ((tenkan_1d + kijun_1d) / 2)
+    high_52_1d = pd.Series(high_1d).rolling(window=52, min_periods=52).max()
+    low_52_1d = pd.Series(low_1d).rolling(window=52, min_periods=52).min()
+    senkou_b_1d = ((high_52_1d + low_52_1d) / 2)
     
-    # DI+ and DI-
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
-    
-    # DX and ADX
-    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    adx_14 = adx  # Already smoothed
-    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
-    
-    # Volume confirmation: current > 1.5x median of last 50 bars
-    vol_median = pd.Series(volume).rolling(window=50, min_periods=1).median()
-    vol_threshold = 1.5 * vol_median
+    # Align 1d cloud to 6h timeframe (no additional delay needed for Ichimoku)
+    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
+    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
     
     signals = np.zeros(n)
     
-    for i in range(20, n):
+    for i in range(52, n):  # Start after warmup for Ichimoku calculations
         # Skip if any required data is NaN
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or
-            np.isnan(adx_14_aligned[i]) or np.isnan(vol_threshold[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
+            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or
+            np.isnan(senkou_a_1d_aligned[i]) or np.isnan(senkou_b_1d_aligned[i])):
             continue
         
-        # Trend filter: ADX > 20 indicates trending market
-        trend_filter = adx_14_aligned[i] > 20
+        # Determine cloud boundaries and color from 1d data
+        cloud_top = max(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
+        cloud_bottom = min(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
+        cloud_green = senkou_a_1d_aligned[i] > senkou_b_1d_aligned[i]  # bullish cloud
         
-        # Long: Donchian breakout up + volume + trend
-        if (close[i] > high_20[i] and 
-            volume[i] > vol_threshold[i] and 
-            trend_filter):
+        # Price relative to cloud
+        price_above_cloud = close[i] > cloud_top
+        price_below_cloud = close[i] < cloud_bottom
+        
+        # TK cross signals
+        tk_cross_up = tenkan[i] > kijun[i] and (i == 0 or tenkan[i-1] <= kijun[i-1])
+        tk_cross_down = tenkan[i] < kijun[i] and (i == 0 or tenkan[i-1] >= kijun[i-1])
+        
+        # Long: Price above cloud + bullish cloud + TK cross up
+        if price_above_cloud and cloud_green and tk_cross_up:
             signals[i] = 0.25
         
-        # Short: Donchian breakout down + volume + trend
-        elif (close[i] < low_20[i] and 
-              volume[i] > vol_threshold[i] and 
-              trend_filter):
+        # Short: Price below cloud + bearish cloud + TK cross down
+        elif price_below_cloud and not cloud_green and tk_cross_down:
             signals[i] = -0.25
         
-        # Exit: price re-enters Donchian channel
-        elif (i > 0 and 
-              ((signals[i-1] == 0.25 and close[i] < high_20[i]) or
-               (signals[i-1] == -0.25 and close[i] > low_20[i]))):
-            signals[i] = 0.0
+        # Exit: TK cross in opposite direction or price enters cloud
+        elif i > 0:
+            exit_condition = (
+                (signals[i-1] == 0.25 and (tk_cross_down or not price_above_cloud)) or
+                (signals[i-1] == -0.25 and (tk_cross_up or not price_below_cloud)) or
+                (signals[i-1] == 0.25 and close[i] <= cloud_top) or
+                (signals[i-1] == -0.25 and close[i] >= cloud_bottom)
+            )
+            if exit_condition:
+                signals[i] = 0.0
         
         # Otherwise, hold previous position
         else:
@@ -96,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DonchianBreakout20_ADX20_Volume1.5x"
-timeframe = "4h"
+name = "6h_IchimokuCloud_TKCross_1dFilter"
+timeframe = "6h"
 leverage = 1.0
