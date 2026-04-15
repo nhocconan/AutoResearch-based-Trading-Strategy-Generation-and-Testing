@@ -3,6 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 1h Donchian breakout with 4h/1d trend filter and volume confirmation.
+# Uses higher timeframes for signal direction (4h EMA50, 1d EMA100) and 1h for entry timing.
+# Designed to work in both bull and bear markets by requiring alignment across timeframes
+# and filtering extremes with 1d RSI. Session filter (08-20 UTC) reduces noise.
+# Target: 15-37 trades/year to avoid fee drag.
+
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
