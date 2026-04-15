@@ -13,45 +13,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily HTF data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    # Calculate daily EMA(34) for trend filter
-    daily_close = df_1d['close'].values
-    ema_34_daily = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align HTF EMA to 6h timeframe
-    ema_34_6h = align_htf_to_ltf(prices, df_1d, ema_34_daily)
-    
-    # Get weekly HTF data for pivot points
+    # Get weekly HTF data once before loop
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
+    weekly_close = df_1w['close'].values
     weekly_high = df_1w['high'].values
     weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
     
-    # Calculate weekly pivot points (standard: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H)
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s1 = 2 * weekly_pivot - weekly_high
-    
-    # Align HTF weekly pivots to 6h timeframe
-    weekly_pivot_6h = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    weekly_r1_6h = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    weekly_s1_6h = align_htf_to_ltf(prices, df_1w, weekly_s1)
-    
-    # Calculate 6h ATR(14) for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    # Calculate weekly ATR(14) for volatility regime filter
+    tr1 = weekly_high - weekly_low
+    tr2 = np.abs(weekly_high - np.concatenate([[weekly_close[0]], weekly_close[:-1]]))
+    tr3 = np.abs(weekly_low - np.concatenate([[weekly_close[0]], weekly_close[:-1]]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14_w = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 6h volume ratio (current vs 20-period average)
+    # Calculate weekly Donchian channels (20-period) based on previous week
+    donchian_high_20 = pd.Series(weekly_high).rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_low_20 = pd.Series(weekly_low).rolling(window=20, min_periods=20).min().shift(1).values
+    
+    # Align HTF Donchian levels to daily timeframe
+    donchian_high_20_d = align_htf_to_ltf(prices, df_1w, donchian_high_20)
+    donchian_low_20_d = align_htf_to_ltf(prices, df_1w, donchian_low_20)
+    
+    # Calculate daily ATR(14) for stoploss and volatility filter
+    tr1_d = high - low
+    tr2_d = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    tr3_d = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr_d = np.maximum(tr1_d, np.maximum(tr2_d, tr3_d))
+    atr_14_d = pd.Series(tr_d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate daily volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
@@ -59,37 +52,30 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_6h[i]) or np.isnan(weekly_pivot_6h[i]) or 
-            np.isnan(weekly_r1_6h[i]) or np.isnan(weekly_s1_6h[i]) or 
-            np.isnan(atr_14[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(donchian_high_20_d[i]) or np.isnan(donchian_low_20_d[i]) or 
+            np.isnan(atr_14_d[i]) or np.isnan(volume_ratio[i]) or np.isnan(atr_14_w[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions:
-        # Long: Price > daily EMA34 (uptrend) AND breaks above weekly R1 with volume confirmation
-        # Short: Price < daily EMA34 (downtrend) AND breaks below weekly S1 with volume confirmation
-        # Volatility filter: ATR > 0.5% of price
-        # Volume confirmation: volume > 1.3x average
-        # Discrete position sizing: 0.25
+        # Regime filter: only trade when weekly ATR > 1.5% of price (avoid low volatility sideways)
+        volatility_regime = atr_14_w[i] > 0.015 * close[i]
         
-        # Long conditions
-        if (close[i] > ema_34_6h[i] and           # Price above daily EMA34 (uptrend)
-            close[i] > weekly_r1_6h[i] and        # 6h price breaks above weekly R1
-            volume_ratio[i] > 1.3 and             # Volume confirmation
-            atr_14[i] > 0.005 * close[i]):        # Volatility filter
+        # Long conditions: daily breakout above weekly Donchian high with volume confirmation
+        if (close[i] > donchian_high_20_d[i] and 
+            volume_ratio[i] > 1.4 and 
+            volatility_regime):
             signals[i] = 0.25
             
-        # Short conditions
-        elif (close[i] < ema_34_6h[i] and         # Price below daily EMA34 (downtrend)
-              close[i] < weekly_s1_6h[i] and      # 6h price breaks below weekly S1
-              volume_ratio[i] > 1.3 and           # Volume confirmation
-              atr_14[i] > 0.005 * close[i]):      # Volatility filter
+        # Short conditions: daily breakdown below weekly Donchian low with volume confirmation
+        elif (close[i] < donchian_low_20_d[i] and 
+              volume_ratio[i] > 1.4 and 
+              volatility_regime):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "6h_EMA34_WeeklyPivot_R1S1_Breakout_Volume_ATR_Filter"
-timeframe = "6h"
+name = "1d_WeeklyDonchian20_Breakout_Volume_ATR_Regime_Filter"
+timeframe = "1d"
 leverage = 1.0
