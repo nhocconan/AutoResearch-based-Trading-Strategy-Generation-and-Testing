@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,12 +21,11 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # 12-hour Donchian channels (20 periods)
-    close_series = pd.Series(close)
+    # 4-hour Donchian Channel (20)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    upper_12h = high_series.rolling(window=20, min_periods=20).max()
-    lower_12h = low_series.rolling(window=20, min_periods=20).min()
+    upper_donchian = high_series.rolling(window=20, min_periods=20).max()
+    lower_donchian = low_series.rolling(window=20, min_periods=20).min()
     
     # Volume confirmation: current > 1.5x median of last 20 bars
     vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
@@ -40,22 +39,22 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_12h[i]) or np.isnan(lower_12h[i]) or 
+        if (np.isnan(upper_donchian[i]) or np.isnan(lower_donchian[i]) or 
             np.isnan(vol_threshold[i]) or np.isnan(vol_filter[i])):
             continue
         
-        # Long: close breaks above upper band + volume + volatility filter
-        if close[i] > upper_12h[i] and volume[i] > vol_threshold[i] and vol_filter[i]:
+        # Long: close breaks above upper Donchian + volume + volatility filter
+        if close[i] > upper_donchian[i] and volume[i] > vol_threshold[i] and vol_filter[i]:
             signals[i] = 0.25
         
-        # Short: close breaks below lower band + volume + volatility filter
-        elif close[i] < lower_12h[i] and volume[i] > vol_threshold[i] and vol_filter[i]:
+        # Short: close breaks below lower Donchian + volume + volatility filter
+        elif close[i] < lower_donchian[i] and volume[i] > vol_threshold[i] and vol_filter[i]:
             signals[i] = -0.25
         
-        # Exit: close crosses back inside bands (mean reversion)
+        # Exit: close crosses back inside Donchian (mean reversion)
         elif (i > 0 and 
-              ((signals[i-1] == 0.25 and close[i] < upper_12h[i]) or
-               (signals[i-1] == -0.25 and close[i] > lower_12h[i]))):
+              ((signals[i-1] == 0.25 and close[i] < upper_donchian[i]) or
+               (signals[i-1] == -0.25 and close[i] > lower_donchian[i]))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -64,6 +63,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_Volume_VolFilter"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_Volume_VolFilter"
+timeframe = "4h"
 leverage = 1.0
