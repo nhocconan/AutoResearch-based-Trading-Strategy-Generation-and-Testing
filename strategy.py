@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R (14) with 1d EMA34 trend filter and volume confirmation
-# Long when Williams %R crosses above -80 from below + price > 1d EMA34 + volume > 1.5x 20-period avg
-# Short when Williams %R crosses below -20 from above + price < 1d EMA34 + volume > 1.5x 20-period avg
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above 12h Donchian upper + 1d EMA34 uptrend + volume > 1.5x 20-period avg
+# Short when price breaks below 12h Donchian lower + 1d EMA34 downtrend + volume > 1.5x 20-period avg
 # Uses discrete position sizing (0.25) to minimize fee drag and control drawdown.
-# Williams %R identifies overbought/oversold conditions; EMA34 filters for trend alignment.
-# Volume confirmation (1.5x) targets ~50-100 trades/year to balance opportunity and cost on 6h timeframe.
-# Works in both bull and bear markets by fading extremes in ranging conditions and
-# following momentum in trending regimes when aligned with higher timeframe trend.
+# 1d EMA34 provides medium-term trend filter reducing whipsaws in both bull and bear markets.
+# Volume threshold (1.5x) targets ~25-35 trades/year to minimize fee drag on 12h timeframe.
+# Donchian channels calculated from 12h high/low over 20 periods.
 
 def generate_signals(prices):
     n = len(prices)
@@ -36,13 +35,12 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === Williams %R (14-period) ===
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = ((highest_high - close) / (highest_high - lowest_low)) * -100
-    # Replace division by zero with -50 (neutral)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # === 12h Donchian Channels (20-period) ===
+    # Upper = max(high, 20), Lower = min(low, 20)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -50,7 +48,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(34, 14, 20) + 5  # EMA34 + Williams %R(14) + volume(20) + buffer
+    warmup = max(34, 20) + 5  # EMA34 + Donchian(20) + volume(20) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -59,8 +57,8 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i]) or
-            np.isnan(vol_sma_20[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -68,18 +66,18 @@ def generate_signals(prices):
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # === LONG CONDITIONS ===
-        # 1. Williams %R crosses above -80 from below (oversold bounce)
-        # 2. Price > 1d EMA34 (uptrend alignment)
+        # 1. Price breaks above Donchian upper (close > upper)
+        # 2. 1d EMA34 uptrend (close > EMA34)
         # 3. Volume confirmation
-        if (williams_r[i] > -80) and (williams_r[i-1] <= -80) and \
+        if (close[i] > donchian_upper[i]) and \
            (close[i] > ema_34_1d_aligned[i]) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Williams %R crosses below -20 from above (overbought rejection)
-        # 2. Price < 1d EMA34 (downtrend alignment)
+        # 1. Price breaks below Donchian lower (close < lower)
+        # 2. 1d EMA34 downtrend (close < EMA34)
         # 3. Volume confirmation
-        elif (williams_r[i] < -20) and (williams_r[i-1] >= -20) and \
+        elif (close[i] < donchian_lower[i]) and \
              (close[i] < ema_34_1d_aligned[i]) and vol_confirm:
             signals[i] = -0.25
         
@@ -88,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR14_1dEMA34_Volume_Filter_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA34_Volume_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
