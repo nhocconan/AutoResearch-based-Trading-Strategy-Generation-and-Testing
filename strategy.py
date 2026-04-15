@@ -3,10 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Bollinger Squeeze Breakout with Volume Confirmation and ADX Trend Filter
-# Uses Bollinger Band width to detect low volatility (squeeze) and breaks out when volatility expands.
-# Works in bull markets (breakouts up) and bear markets (breakouts down). Target: 50-150 total trades.
-# Timeframe: 12h, HTF: 1d
+# Hypothesis: 6h Ichimoku Cloud + Kijun/Tenkan Cross with 1d Trend Filter
+# Uses Ichimoku on 6h for entry signals (TK cross + price above/below cloud)
+# Filters by 1d EMA50 trend (price above/below EMA50) to avoid counter-trend trades
+# Works in bull markets (long when price above cloud + uptrend) and bear markets (short when price below cloud + downtrend)
+# Target: 50-150 total trades over 4 years = 12-37/year. HARD MAX: 300 total.
+# Timeframe: 6h, HTF: 1d
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,114 +20,89 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Bollinger Bands
+    # Ichimoku parameters (standard)
+    tenkan_period = 9
+    kijun_period = 26
+    senkou_span_b_period = 52
+    
+    # Calculate Tenkan-sen (Conversion Line): (highest high + lowest low)/2 for past 9 periods
+    highest_high_9 = pd.Series(high).rolling(window=tenkan_period, min_periods=tenkan_period).max()
+    lowest_low_9 = pd.Series(low).rolling(window=tenkan_period, min_periods=tenkan_period).min()
+    tenkan_sen = (highest_high_9 + lowest_low_9) / 2
+    
+    # Calculate Kijun-sen (Base Line): (highest high + lowest low)/2 for past 26 periods
+    highest_high_26 = pd.Series(high).rolling(window=kijun_period, min_periods=kijun_period).max()
+    lowest_low_26 = pd.Series(low).rolling(window=kijun_period, min_periods=kijun_period).min()
+    kijun_sen = (highest_high_26 + lowest_low_26) / 2
+    
+    # Calculate Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted forward 26 periods
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
+    
+    # Calculate Senkou Span B (Leading Span B): (highest high + lowest low)/2 for past 52 periods shifted forward 26 periods
+    highest_high_52 = pd.Series(high).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).max()
+    lowest_low_52 = pd.Series(low).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).min()
+    senkou_span_b = ((highest_high_52 + lowest_low_52) / 2)
+    
+    # Calculate Chikou Span (Lagging Span): close shifted back 26 periods
+    chikou_span = pd.Series(close).shift(-kijun_period)
+    
+    # Load 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     close_1d = df_1d['close'].values
     
-    # Load 12h data for ADX trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate EMA50 on 1d
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Bollinger Bands (20, 2) on daily
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
-    bb_width = (upper_bb - lower_bb) / sma_20  # Normalized width
-    
-    # Squeeze condition: BB width below 20-period average
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    squeeze = bb_width < bb_width_ma
-    
-    # Calculate Bollinger Band breakout levels
-    upper_breakout = upper_bb
-    lower_breakout = lower_bb
-    
-    # Align Bollinger levels and squeeze to 12h
-    upper_breakout_aligned = align_htf_to_ltf(prices, df_1d, upper_breakout)
-    lower_breakout_aligned = align_htf_to_ltf(prices, df_1d, lower_breakout)
-    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze.astype(float))
-    
-    # Calculate ADX (14-period) on 12h
-    # True Range
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    
-    # Directional Movement
-    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
-                       np.maximum(high_12h - np.roll(close_12h, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(close_12h, 1)), 
-                        np.maximum(np.roll(close_12h, 1) - low_12h, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    # Align Ichimoku components and 1d EMA50 to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low}), tenkan_sen.values)
+    kijun_sen_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low}), kijun_sen.values)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low}), senkou_span_a.values)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low}), senkou_span_b.values)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25  # Position size
+    base_size = 0.25  # Position size (25% of capital)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_breakout_aligned[i]) or np.isnan(lower_breakout_aligned[i]) or
-            np.isnan(squeeze_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i])):
             continue
         
-        # Long entry: price breaks above upper BB + volatility expansion (squeeze released) + ADX > 25
-        if (close[i] > upper_breakout_aligned[i] and
-            squeeze_aligned[i] < 1.0 and  # Squeeze is releasing (width expanding)
-            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-            adx_aligned[i] > 25 and
+        # Determine cloud top and bottom
+        cloud_top = max(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        cloud_bottom = min(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        
+        # Long entry: TK cross bullish + price above cloud + price above 1d EMA50 (uptrend)
+        if (tenkan_sen_aligned[i] > kijun_sen_aligned[i] and  # TK cross bullish
+            close[i] > cloud_top and                           # Price above cloud
+            close[i] > ema_50_1d_aligned[i] and               # Price above 1d EMA50 (uptrend filter)
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below lower BB + volatility expansion + ADX > 25
-        elif (close[i] < lower_breakout_aligned[i] and
-              squeeze_aligned[i] < 1.0 and  # Squeeze is releasing
-              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-              adx_aligned[i] > 25 and
+        # Short entry: TK cross bearish + price below cloud + price below 1d EMA50 (downtrend)
+        elif (tenkan_sen_aligned[i] < kijun_sen_aligned[i] and  # TK cross bearish
+              close[i] < cloud_bottom and                       # Price below cloud
+              close[i] < ema_50_1d_aligned[i] and              # Price below 1d EMA50 (downtrend filter)
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse breakout or ADX < 20 (ranging market) or squeeze re-formed
-        elif position == 1 and (close[i] < lower_breakout_aligned[i] or 
-                                adx_aligned[i] < 20 or
-                                squeeze_aligned[i] > 1.0):
+        # Exit: TK cross reverses or price crosses Kijun-sen
+        elif position == 1 and (tenkan_sen_aligned[i] < kijun_sen_aligned[i] or close[i] < kijun_sen_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > upper_breakout_aligned[i] or 
-                                 adx_aligned[i] < 20 or
-                                 squeeze_aligned[i] > 1.0):
+        elif position == -1 and (tenkan_sen_aligned[i] > kijun_sen_aligned[i] or close[i] > kijun_sen_aligned[i]):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "12h_Bollinger_Squeeze_Breakout_Volume_ADX"
-timeframe = "12h"
+name = "6h_Ichimoku_TK_Cross_1dEMA50_Filter"
+timeframe = "6h"
 leverage = 1.0
