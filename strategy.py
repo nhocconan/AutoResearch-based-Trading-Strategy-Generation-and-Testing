@@ -13,79 +13,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w HTF data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Calculate weekly Williams %R (14-period)
-    highest_high_14 = pd.Series(df_1w['high'].values).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(df_1w['low'].values).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - df_1w['close'].values) / (highest_high_14 - lowest_low_14 + 1e-10)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1w, williams_r, additional_delay_bars=0)
-    
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily ADX (14-period)
-    plus_dm = np.where((df_1d['high'].values - np.roll(df_1d['high'].values, 1)) > 
-                       (np.roll(df_1d['low'].values, 1) - df_1d['low'].values), 
-                       np.maximum(df_1d['high'].values - np.roll(df_1d['high'].values, 1), 0), 0)
-    minus_dm = np.where((np.roll(df_1d['low'].values, 1) - df_1d['low'].values) > 
-                        (df_1d['high'].values - np.roll(df_1d['high'].values, 1)), 
-                        np.maximum(np.roll(df_1d['low'].values, 1) - df_1d['low'].values, 0), 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
+    # Calculate 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
-    tr3 = np.abs(df_1d['low'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate 1d RSI(14) for mean reversion signals
+    delta = pd.Series(df_1d['close'].values).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_14_1d = (100 - (100 / (1 + rs))).values
+    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
     
-    plus_di_14 = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr_14_1d + 1e-10)
-    minus_di_14 = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr_14_1d + 1e-10)
-    dx_14 = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
-    adx_14_1d = pd.Series(dx_14).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_14_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_14_1d)
+    # Calculate 1d Bollinger Bands (20,2) for volatility regime
+    sma_20_1d = pd.Series(df_1d['close'].values).rolling(window=20, min_periods=20).mean().values
+    std_20_1d = pd.Series(df_1d['close'].values).rolling(window=20, min_periods=20).std().values
+    bb_upper_20_1d = sma_20_1d + 2 * std_20_1d
+    bb_lower_20_1d = sma_20_1d - 2 * std_20_1d
+    bb_upper_20_1d_aligned = align_htf_to_ltf(prices, df_1d, bb_upper_20_1d)
+    bb_lower_20_1d_aligned = align_htf_to_ltf(prices, df_1d, bb_lower_20_1d)
     
-    # Calculate 6h Donchian(20) channels
-    donchian_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 12h Donchian(10) for entry timing
+    donchian_high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
+    donchian_low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(adx_14_1d_aligned[i]) or 
-            np.isnan(donchian_high_20[i]) or np.isnan(donchian_low_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi_14_1d_aligned[i]) or 
+            np.isnan(bb_upper_20_1d_aligned[i]) or np.isnan(bb_lower_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Regime filter: Only trade when price is outside Bollinger Bands (high volatility expansion)
+        price_bb_position = (close[i] - bb_lower_20_1d_aligned[i]) / (bb_upper_20_1d_aligned[i] - bb_lower_20_1d_aligned[i] + 1e-10)
+        high_vol_regime = (price_bb_position < 0) or (price_bb_position > 1)
+        
         # Long conditions:
-        # 1. Weekly Williams %R oversold (< -80) - potential reversal up
-        # 2. Daily ADX > 25 - trending market
-        # 3. Price breaks above 6h Donchian(20) high - breakout confirmation
-        if (williams_r_aligned[i] < -80 and
-            adx_14_1d_aligned[i] > 25 and
-            close[i] > donchian_high_20[i]):
+        # 1. 1d EMA50 uptrend (price above EMA50)
+        # 2. 1d RSI oversold (< 30) - mean reversion long
+        # 3. High volatility regime (BB breakout)
+        # 4. 12h price breaks above Donchian(10) high for entry
+        if (close[i] > ema_50_1d_aligned[i] and
+            rsi_14_1d_aligned[i] < 30 and
+            high_vol_regime and
+            close[i] > donchian_high_10[i]):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Weekly Williams %R overbought (> -20) - potential reversal down
-        # 2. Daily ADX > 25 - trending market
-        # 3. Price breaks below 6h Donchian(20) low - breakdown confirmation
-        elif (williams_r_aligned[i] > -20 and
-              adx_14_1d_aligned[i] > 25 and
-              close[i] < donchian_low_20[i]):
+        # 1. 1d EMA50 downtrend (price below EMA50)
+        # 2. 1d RSI overbought (> 70) - mean reversion short
+        # 3. High volatility regime (BB breakout)
+        # 4. 12h price breaks below Donchian(10) low for entry
+        elif (close[i] < ema_50_1d_aligned[i] and
+              rsi_14_1d_aligned[i] > 70 and
+              high_vol_regime and
+              close[i] < donchian_low_10[i]):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "6h_WilliamsR_ADX_Donchian20_Breakout_v1"
-timeframe = "6h"
+name = "12h_EMA50_RSI_BB_Donchian10_MeanRev_v1"
+timeframe = "12h"
 leverage = 1.0
