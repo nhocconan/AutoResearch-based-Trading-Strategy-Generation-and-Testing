@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and ATR filter
-# Uses Donchian(20) channels for breakout direction, volume > 1.5x 20-bar median for confirmation,
-# and ATR-based stoploss to limit downside. Works in both bull and bear markets by
-# capturing breakouts in trending regimes while avoiding false signals in ranging markets.
-# Target: 20-40 trades/year per symbol to minimize fee drag.
+# Hypothesis: 4h Volume-Weighted RSI with 12h EMA Filter
+# Uses RSI(14) on volume-weighted close to reduce noise, combined with 12h EMA50 trend filter.
+# Long when VW-RSI < 30 and price above 12h EMA50, short when VW-RSI > 70 and price below 12h EMA50.
+# Volume weighting filters out low-conviction moves, improving signal quality in both bull and bear markets.
+# Discrete sizing (0.25) limits overtrading; target 20-40 trades/year.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,54 +19,47 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Volume-weighted close: (high + low + close) / 3, weighted by volume
+    typical_price = (high + low + close) / 3.0
+    vw_close = typical_price * volume
     
-    # ATR for volatility filtering and stop
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[0], tr])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # 12-hour EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Volume confirmation: current > 1.5x median of last 20 bars
-    vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
-    vol_threshold = 1.5 * vol_median
+    # VW-RSI calculation
+    delta = pd.Series(vw_close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    vw_rsi = rsi.values
     
     signals = np.zeros(n)
     
-    for i in range(20, n):
+    for i in range(14, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_threshold[i])):
+        if (np.isnan(vw_rsi[i]) or np.isnan(ema_12h_aligned[i])):
             continue
         
-        # Long: price breaks above upper Donchian band + volume confirmation
-        if (close[i] > highest_high[i] and volume[i] > vol_threshold[i]):
+        # Long: VW-RSI < 30 (oversold) and price above 12h EMA50
+        if vw_rsi[i] < 30 and close[i] > ema_12h_aligned[i]:
             signals[i] = 0.25
         
-        # Short: price breaks below lower Donchian band + volume confirmation
-        elif (close[i] < lowest_low[i] and volume[i] > vol_threshold[i]):
+        # Short: VW-RSI > 70 (overbought) and price below 12h EMA50
+        elif vw_rsi[i] > 70 and close[i] < ema_12h_aligned[i]:
             signals[i] = -0.25
         
-        # Exit: ATR-based stoploss or opposite breakout
-        elif i > 0 and signals[i-1] != 0:
-            if signals[i-1] == 0.25:  # Long position
-                # Stop if price drops below entry - 2*ATR or opposite breakout
-                if (close[i] < highest_high[i-1] - 2.0 * atr[i] or 
-                    close[i] < lowest_low[i]):
-                    signals[i] = 0.0
-                else:
-                    signals[i] = signals[i-1]
-            else:  # Short position
-                # Stop if price rises above entry + 2*ATR or opposite breakout
-                if (close[i] > lowest_low[i-1] + 2.0 * atr[i] or 
-                    close[i] > highest_high[i]):
-                    signals[i] = 0.0
-                else:
-                    signals[i] = signals[i-1]
+        # Exit: VW-RSI returns to neutral range (40-60)
+        elif i > 0 and (
+            (signals[i-1] == 0.25 and vw_rsi[i] >= 40) or
+            (signals[i-1] == -0.25 and vw_rsi[i] <= 60)
+        ):
+            signals[i] = 0.0
         
         # Otherwise, hold previous position
         else:
@@ -74,6 +67,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_ATR"
+name = "4h_VW_RSI_12hEMA_Filter"
 timeframe = "4h"
 leverage = 1.0
