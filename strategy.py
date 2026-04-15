@@ -13,101 +13,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h HTF data once before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get weekly HTF data once before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 4h Supertrend(10,3) for trend direction
-    hl2 = (df_4h['high'] + df_4h['low']) / 2
-    tr1 = df_4h['high'] - df_4h['low']
-    tr2 = np.abs(df_4h['high'] - np.concatenate([[hl2[0]], hl2[:-1]]))
-    tr3 = np.abs(df_4h['low'] - np.concatenate([[hl2[0]], hl2[:-1]]))
-    tr_4h = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_10_4h = pd.Series(tr_4h).ewm(span=10, adjust=False, min_periods=10).mean().values
-    upper_band = hl2 + 3 * atr_10_4h
-    lower_band = hl2 - 3 * atr_10_4h
-    
-    supertrend = np.zeros_like(hl2)
-    direction = np.ones_like(hl2)  # 1 for uptrend, -1 for downtrend
-    
-    for i in range(1, len(hl2)):
-        if hl2[i] > upper_band[i-1]:
-            direction[i] = 1
-        elif hl2[i] < lower_band[i-1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
-            if direction[i] == 1 and lower_band[i] < lower_band[i-1]:
-                lower_band[i] = lower_band[i-1]
-            if direction[i] == -1 and upper_band[i] > upper_band[i-1]:
-                upper_band[i] = upper_band[i-1]
-        if direction[i] == 1:
-            supertrend[i] = lower_band[i]
-        else:
-            supertrend[i] = upper_band[i]
-    
-    supertrend_aligned = align_htf_to_ltf(prices, df_4h, supertrend)
-    direction_aligned = align_htf_to_ltf(prices, df_4h, direction)
-    
-    # Get 1d HTF data once before loop
+    # Get daily HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily RSI(14) for momentum filter
-    delta = pd.Series(df_1d['close'].values).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14_1d = 100 - (100 / (1 + rs))
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
+    # Calculate weekly ATR(10) for volatility regime
+    tr1w = df_1w['high'] - df_1w['low']
+    tr2w = np.abs(df_1w['high'] - np.concatenate([[df_1w['close'].iloc[0]], df_1w['close'].iloc[:-1]]))
+    tr3w = np.abs(df_1w['low'] - np.concatenate([[df_1w['close'].iloc[0]], df_1w['close'].iloc[:-1]]))
+    tr_1w = np.maximum(tr1w, np.maximum(tr2w, tr3w))
+    atr_10_1w = pd.Series(tr_1w).ewm(span=10, adjust=False, min_periods=10).mean().values
+    atr_10_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_10_1w)
     
-    # Calculate 1h Bollinger Bands for entry timing
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
+    # Calculate weekly EMA(20) for trend direction
+    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Calculate daily Donchian(20) channels
+    highest_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
+    highest_20_aligned = align_htf_to_ltf(prices, df_1d, highest_20)
+    lowest_20_aligned = align_htf_to_ltf(prices, df_1d, lowest_20)
+    
+    # Calculate daily volume SMA(20) for volume filter
+    volume_sma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20)
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i]) or 
-            np.isnan(rsi_14_1d_aligned[i]) or np.isnan(sma_20[i]) or np.isnan(std_20[i])):
+        if (np.isnan(atr_10_1w_aligned[i]) or np.isnan(ema_20_1w_aligned[i]) or 
+            np.isnan(highest_20_aligned[i]) or np.isnan(lowest_20_aligned[i]) or
+            np.isnan(volume_sma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: 08-20 UTC
-        hour = prices.index[i].hour
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
+        # Volatility regime filter: only trade when weekly ATR is elevated
+        vol_regime = atr_10_1w_aligned[i] > 0.008 * close[i]
+        
+        # Volume confirmation: current 6h volume > 1.5x daily average volume per 6h bar
+        # Approximate: daily volume / 4 (since 4x 6h bars per day) * 1.5
+        vol_threshold = volume_sma_20_aligned[i] / 4.0 * 1.5
+        volume_confirm = volume[i] > vol_threshold
         
         # Long conditions:
-        # 1. 4h Supertrend uptrend (direction = 1)
-        # 2. Daily RSI between 30 and 70 (not extreme)
-        # 3. Price touches or crosses below lower Bollinger Band (mean reversion entry)
-        if (direction_aligned[i] == 1 and
-            30 <= rsi_14_1d_aligned[i] <= 70 and
-            close[i] <= lower_bb[i]):
-            signals[i] = 0.20
+        # 1. Price above weekly EMA20 (bullish bias)
+        # 2. Price breaks above daily Donchian(20) high (breakout)
+        # 3. Volatility regime filter
+        # 4. Volume confirmation
+        if (close[i] > ema_20_1w_aligned[i] and
+            close[i] > highest_20_aligned[i] and
+            vol_regime and
+            volume_confirm):
+            signals[i] = 0.25
             
         # Short conditions:
-        # 1. 4h Supertrend downtrend (direction = -1)
-        # 2. Daily RSI between 30 and 70 (not extreme)
-        # 3. Price touches or crosses above upper Bollinger Band (mean reversion entry)
-        elif (direction_aligned[i] == -1 and
-              30 <= rsi_14_1d_aligned[i] <= 70 and
-              close[i] >= upper_bb[i]):
-            signals[i] = -0.20
+        # 1. Price below weekly EMA20 (bearish bias)
+        # 2. Price breaks below daily Donchian(20) low (breakdown)
+        # 3. Volatility regime filter
+        # 4. Volume confirmation
+        elif (close[i] < ema_20_1w_aligned[i] and
+              close[i] < lowest_20_aligned[i] and
+              vol_regime and
+              volume_confirm):
+            signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1h_Supertrend4h_RSI1d_BB_v1"
-timeframe = "1h"
+name = "6h_WeeklyEMA20_DailyDonchian20_VolumeFilter_v1"
+timeframe = "6h"
 leverage = 1.0
