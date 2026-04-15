@@ -3,84 +3,99 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean-reversion with 1d volume filter
-# Williams %R identifies overbought/oversold conditions (below -80 = oversold, above -20 = overbought)
-# Mean reversion works well in ranging markets; trend filter avoids whipsaws
-# Uses 1d average volume to confirm institutional participation
-# Designed for low trade frequency (target 20-30/year) with clear entry/exit rules
-# Works in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets
+# Hypothesis: Weekly Bollinger Band Squeeze with Daily Breakout and Volume Confirmation
+# Bollinger Band Width < 20th percentile indicates low volatility squeeze
+# Breakout above upper BB with volume > 1.5x 20-day average signals new trend
+# Works in bull markets (breakouts continue) and bear markets (false breakdowns fade)
+# Weekly timeframe for squeeze detection reduces false signals
+# Daily timeframe for execution balances responsiveness and trade frequency
+# Target: 15-25 trades/year to minimize fee drag
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data once
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load weekly data once for Bollinger Bands
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    weekly_close = df_weekly['close'].values
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
     
-    # Williams %R(14) on 1d
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    wr = -100 * (highest_high - close_1d) / (highest_high - lowest_low + 1e-10)
+    # Weekly Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(weekly_close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std = pd.Series(weekly_close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_bb = sma + (bb_std * std)
+    lower_bb = sma - (bb_std * std)
+    bb_width = upper_bb - lower_bb
     
-    # 1d average volume (20-period) for confirmation
-    avg_volume = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Weekly Bollinger Band Width percentile (20-day lookback)
+    bb_width_percentile = pd.Series(bb_width).rolling(window=20, min_periods=10).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
     
-    # Align indicators to 4h timeframe
-    wr_aligned = align_htf_to_ltf(prices, df_1d, wr)
-    avg_volume_aligned = align_htf_to_ltf(prices, df_1d, avg_volume)
+    # Squeeze condition: BB Width < 20th percentile
+    squeeze = bb_width_percentile < 20
+    
+    # Align squeeze signal to daily
+    squeeze_aligned = align_htf_to_ltf(prices, df_weekly, squeeze.astype(float))
+    
+    # Daily Bollinger Bands for breakout
+    daily_sma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    daily_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    daily_upper = daily_sma + (2 * daily_std)
+    daily_lower = daily_sma - (2 * daily_std)
+    
+    # Volume confirmation: current volume > 1.5x 20-day average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size
+    position_size = 0.25  # 25% position
     
-    for i in range(30, n):
+    for i in range(40, n):
         # Skip if any required data is NaN
-        if (np.isnan(wr_aligned[i]) or np.isnan(avg_volume_aligned[i]) or 
-            np.isnan(volume[i])):
+        if (np.isnan(squeeze_aligned[i]) or np.isnan(daily_upper[i]) or 
+            np.isnan(daily_lower[i]) or np.isnan(volume_confirm[i])):
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x 1d average volume
-        vol_confirmed = volume[i] > 1.5 * avg_volume_aligned[i]
+        # Long entry: squeeze + breakout above upper BB + volume
+        if (squeeze_aligned[i] > 0.5 and  # squeezed state
+            close[i] > daily_upper[i] and 
+            volume_confirm[i] and 
+            position <= 0):
+            position = 1
+            signals[i] = position_size
         
-        # Mean reversion signals from Williams %R
-        oversold = wr_aligned[i] < -80
-        overbought = wr_aligned[i] > -20
+        # Short entry: squeeze + breakdown below lower BB + volume
+        elif (squeeze_aligned[i] > 0.5 and  # squeezed state
+              close[i] < daily_lower[i] and 
+              volume_confirm[i] and 
+              position >= 0):
+            position = -1
+            signals[i] = -position_size
         
-        # Exit when WR returns to neutral zone (-50 to -50)
-        neutral_exit = (-50 <= wr_aligned[i] <= -50)
-        
-        if vol_confirmed:
-            # Long when oversold and exiting oversold
-            if oversold and wr_aligned[i] > wr_aligned[i-1] and position <= 0:
-                position = 1
-                signals[i] = position_size
-            # Short when overbought and exiting overbought
-            elif overbought and wr_aligned[i] < wr_aligned[i-1] and position >= 0:
-                position = -1
-                signals[i] = -position_size
-            # Exit when WR returns to neutral
-            elif position == 1 and wr_aligned[i] >= -50:
-                position = 0
-                signals[i] = 0.0
-            elif position == -1 and wr_aligned[i] <= -50:
-                position = 0
-                signals[i] = 0.0
+        # Exit: price returns to middle of Bollinger Bands
+        elif position == 1 and close[i] < daily_sma[i]:
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and close[i] > daily_sma[i]:
+            position = 0
+            signals[i] = 0.0
     
     return signals
 
-name = "4h_1d_WilliamsR_Volume_MeanReversion"
-timeframe = "4h"
+name = "1d_WeeklyBB_Squeeze_Breakout_Volume"
+timeframe = "1d"
 leverage = 1.0
