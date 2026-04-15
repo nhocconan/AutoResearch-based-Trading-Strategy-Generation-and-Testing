@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams %R mean reversion with 1w trend filter and volume confirmation
-# Long when Williams %R(14) < -80 (oversold) + 1w close > 1w EMA34 (uptrend) + volume > 1.5x 20-period avg
-# Short when Williams %R(14) > -20 (overbought) + 1w close < 1w EMA34 (downtrend) + volume > 1.5x 20-period avg
-# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (7-25/year).
-# Williams %R captures short-term extremes. 1w EMA34 filter ensures we trade with the higher timeframe trend.
-# Works in bull markets (buying dips in uptrend) and bear markets (selling rallies in downtrend).
+# Hypothesis: 6h Elder Ray + 12h ADX regime filter
+# Long when Bull Power > 0 (close > EMA13) AND Bear Power < 0 (low < EMA13) AND 12h ADX > 25 (strong trend)
+# Short when Bull Power < 0 AND Bear Power > 0 AND 12h ADX > 25
+# Uses discrete sizing (0.25) for low turnover. Works in trending markets (bull/bear) by filtering with 12h ADX.
+# Avoids ranging markets where Elder Ray whipsaws. Targets 12-30 trades/year.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,66 +19,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Precompute session hours (08-20 UTC) for filter
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Get 1w HTF data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 40:
+    # Get 12h HTF data once before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 40:
         return np.zeros(n)
     
-    # === 1w Indicator: EMA34 (trend filter) ===
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # === 12h Indicator: ADX (14-period) for regime filter ===
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # === 1d Indicator: Williams %R (14-period) ===
-    lookback = 14
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # True Range
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align with index 0
     
-    # Avoid division by zero
-    denominator = highest_high - lowest_low
-    williams_r = np.where(denominator != 0, -100 * (highest_high - close) / denominator, -50)
+    # Directional Movement
+    dm_plus = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
+                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
+    dm_minus = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
+                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Volume SMA for confirmation (using 20-period)
-    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Smoothed TR, DM+, DM- (Wilder's smoothing = EMA with alpha=1/period)
+    def wilders_smooth(x, period):
+        x = np.asarray(x)
+        ema = np.full_like(x, np.nan, dtype=float)
+        if len(x) >= period:
+            # first value: simple average
+            ema[period-1] = np.nanmean(x[:period])
+            # rest: EMA with alpha=1/period
+            alpha = 1.0 / period
+            for i in range(period, len(x)):
+                if not np.isnan(x[i]) and not np.isnan(ema[i-1]):
+                    ema[i] = alpha * x[i] + (1 - alpha) * ema[i-1]
+        return ema
+    
+    atr = wilders_smooth(tr, 14)
+    dm_plus_smooth = wilders_smooth(dm_plus, 14)
+    dm_minus_smooth = wilders_smooth(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilders_smooth(dx, 14)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    
+    # === 6h Indicators: Elder Ray (Bull Power, Bear Power) ===
+    # EMA13 of close
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    bull_power = close - ema13
+    bear_power = low - ema13
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(lookback, 34) + 20  # Williams %R(14) + EMA34(34) + volume(20)
+    warmup = max(13, 14 + 14 + 14)  # EMA13 + ADX smoothing periods
     
     for i in range(warmup, n):
-        # Skip if outside trading session (08-20 UTC)
-        if not in_session[i]:
+        # Skip if any required data is NaN
+        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(adx_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
-        
-        # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_sma_20[i])):
+        # Regime filter: only trade when 12h ADX > 25 (strong trend)
+        if adx_12h_aligned[i] <= 25:
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Williams %R < -80 (oversold)
-        # 2. 1w close > 1w EMA34 (uptrend)
-        # 3. Volume confirmation
-        if (williams_r[i] < -80) and \
-           (close_1w_aligned := align_htf_to_ltf(prices, df_1w, close_1w)[i]) > ema34_1w_aligned[i] and vol_confirm:
+        # Bull Power > 0 (close > EMA13) AND Bear Power < 0 (low < EMA13)
+        if (bull_power[i] > 0) and (bear_power[i] < 0):
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Williams %R > -20 (overbought)
-        # 2. 1w close < 1w EMA34 (downtrend)
-        # 3. Volume confirmation
-        elif (williams_r[i] > -20) and \
-             (close_1w_aligned := align_htf_to_ltf(prices, df_1w, close_1w)[i]) < ema34_1w_aligned[i] and vol_confirm:
+        # Bull Power < 0 (close < EMA13) AND Bear Power > 0 (low > EMA13)
+        elif (bull_power[i] < 0) and (bear_power[i] > 0):
             signals[i] = -0.25
         
         else:
@@ -87,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WilliamsR14_1wEMA34_Volume_Filter_v1"
-timeframe = "1d"
+name = "6h_ElderRay_12hADX25_Regime_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
