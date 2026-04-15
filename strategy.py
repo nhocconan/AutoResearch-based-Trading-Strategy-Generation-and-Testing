@@ -3,11 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h TRIX + volume spike + 1d Choppiness regime filter
-# Uses TRIX (triple-smoothed EMA) for momentum with reduced whipsaw, volume to confirm momentum strength,
-# and 1d Choppiness Index to avoid ranging markets. Works in both bull and bear by
-# only taking signals when TRIX crosses zero in the direction of the 1d EMA50 trend.
-# Target: 50-150 total trades over 4 years (12-37/year) with disciplined entries.
+# Hypothesis: 6h Williams Fractal Breakout + 1d ADX Trend Filter + Volume Confirmation
+# Uses 6h Williams fractal breakouts (bullish/bearish) as entry signals, filtered by 1d ADX > 25 (trending market)
+# and volume > 1.5x average to avoid false breakouts. Works in bull/bear by only taking breakouts
+# in the direction of the 1d ADX trend. Target: 50-150 total trades over 4 years (12-37/year).
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,56 +18,92 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data (primary timeframe) for TRIX and price action
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load 6h data for Williams fractal calculation
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 10:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
     
-    # Load 1d data for Choppiness Index and trend filter
+    # Load 1d data for ADX and volume average
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate TRIX (15-period triple-smoothed EMA) on 4h
-    ema1 = pd.Series(close_4h).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
-    trix[0] = 0  # First value
+    # Calculate Williams Fractals on 6h
+    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n] > high[n+1] and high[n+1] > high[n+2]
+    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n] < low[n+1] and low[n+1] < low[n+2]
+    n_6h = len(high_6h)
+    bearish_fractal = np.zeros(n_6h, dtype=bool)
+    bullish_fractal = np.zeros(n_6h, dtype=bool)
     
-    # Calculate EMA50 on 1d for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    for i in range(2, n_6h - 2):
+        if (high_6h[i-2] < high_6h[i-1] and 
+            high_6h[i-1] > high_6h[i] and 
+            high_6h[i] > high_6h[i+1] and 
+            high_6h[i+1] > high_6h[i+2]):
+            bearish_fractal[i] = True
+        if (low_6h[i-2] > low_6h[i-1] and 
+            low_6h[i-1] < low_6h[i] and 
+            low_6h[i] < low_6h[i+1] and 
+            low_6h[i+1] < low_6h[i+2]):
+            bullish_fractal[i] = True
     
-    # Calculate Choppiness Index (14-period) on 1d
+    # Convert to arrays: 1 at fractal point, 0 otherwise
+    bearish_fractal_val = bearish_fractal.astype(float)
+    bullish_fractal_val = bullish_fractal.astype(float)
+    
+    # Calculate ADX (14-period) on 1d
     # True Range
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    tr[0] = tr1[0]
     
-    # Highest high and lowest low over 14 periods
-    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Directional Movement
+    plus_dm = np.zeros_like(high_1d)
+    minus_dm = np.zeros_like(high_1d)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
+    for i in range(1, len(high_1d)):
+        up_move = high_1d[i] - high_1d[i-1]
+        down_move = low_1d[i-1] - low_1d[i]
+        if up_move > down_move and up_move > 0:
+            plus_dm[i] = up_move
+        else:
+            plus_dm[i] = 0
+        if down_move > up_move and down_move > 0:
+            minus_dm[i] = down_move
+        else:
+            minus_dm[i] = 0
     
-    # Chop = 100 * log10(sum(TR14) / (HH14 - LL14)) / log10(14)
-    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(sum_tr_14 / (hh_14 - ll_14 + 1e-10)) / np.log10(14)
+    # Smoothed values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    
+    # DI values
+    plus_di = 100 * plus_dm_smooth / (atr + 1e-10)
+    minus_di = 100 * minus_dm_smooth / (atr + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
     # Volume average (20-period on 1d)
     vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all indicators to 4h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_4h, trix)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Align all indicators to 6h timeframe
+    # Williams fractals need 2 extra bars for confirmation (wait for 2 subsequent 6b candles)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_6h, bullish_fractal_val, additional_delay_bars=2)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_6h, bearish_fractal_val, additional_delay_bars=2)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
@@ -77,38 +112,36 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(trix_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or
-            np.isnan(chop_aligned[i]) or np.isnan(vol_avg_aligned[i])):
+        if (np.isnan(bullish_fractal_aligned[i]) or np.isnan(bearish_fractal_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_avg_aligned[i])):
             continue
         
-        # Long entry: TRIX crosses above zero + volume spike + chop < 61.8 (trending) + price above EMA50_1d
-        if (trix_aligned[i] > 0 and trix_aligned[i-1] <= 0 and
+        # Long entry: bullish fractal breakout + ADX > 25 (trending) + volume spike
+        if (bullish_fractal_aligned[i] > 0 and
+            adx_aligned[i] > 25 and
             volume[i] > 1.5 * vol_avg_aligned[i] and
-            chop_aligned[i] < 61.8 and
-            close[i] > ema50_1d_aligned[i] and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: TRIX crosses below zero + volume spike + chop < 61.8 (trending) + price below EMA50_1d
-        elif (trix_aligned[i] < 0 and trix_aligned[i-1] >= 0 and
+        # Short entry: bearish fractal breakout + ADX > 25 (trending) + volume spike
+        elif (bearish_fractal_aligned[i] > 0 and
+              adx_aligned[i] > 25 and
               volume[i] > 1.5 * vol_avg_aligned[i] and
-              chop_aligned[i] < 61.8 and
-              close[i] < ema50_1d_aligned[i] and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse TRIX signal or chop > 61.8 (ranging market)
-        elif position == 1 and (trix_aligned[i] < 0 or chop_aligned[i] > 61.8):
+        # Exit: opposite fractal signal or ADX < 20 (ranging market)
+        elif position == 1 and (bearish_fractal_aligned[i] > 0 or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (trix_aligned[i] > 0 or chop_aligned[i] > 61.8):
+        elif position == -1 and (bullish_fractal_aligned[i] > 0 or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_TRIX_Volume_Chop_Filter"
-timeframe = "4h"
+name = "6h_WilliamsFractal_ADX_Volume"
+timeframe = "6h"
 leverage = 1.0
