@@ -13,60 +13,102 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot levels
-    daily = get_htf_data(prices, '1d')
-    daily_high = daily['high'].values
-    daily_low = daily['low'].values
-    daily_close = daily['close'].values
+    # Get weekly data for higher timeframe trend
+    weekly = get_htf_data(prices, '1w')
+    weekly_high = weekly['high'].values
+    weekly_low = weekly['low'].values
+    weekly_close = weekly['close'].values
     
-    # Calculate daily pivot levels (classic floor trader pivots)
-    pivot = (daily_high + daily_low + daily_close) / 3.0
-    r1 = 2 * pivot - daily_low
-    s1 = 2 * pivot - daily_high
+    # Calculate weekly Supertrend for trend filter
+    atr_period = 10
+    multiplier = 3.0
     
-    # Align pivot levels to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, daily, pivot)
-    r1_aligned = align_htf_to_ltf(prices, daily, r1)
-    s1_aligned = align_htf_to_ltf(prices, daily, s1)
+    # Calculate True Range
+    tr1 = weekly_high - weekly_low
+    tr2 = np.abs(weekly_high - np.roll(weekly_close, 1))
+    tr3 = np.abs(weekly_low - np.roll(weekly_close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Volume filter: current 4h volume > 1.5x 20-period average volume
+    # Calculate ATR
+    atr = np.zeros_like(weekly_close)
+    atr[atr_period-1] = np.mean(tr[:atr_period])
+    for i in range(atr_period, len(weekly_close)):
+        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    
+    # Calculate basic upper and lower bands
+    hl2 = (weekly_high + weekly_low) / 2
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
+    
+    # Initialize Supertrend
+    supertrend = np.zeros_like(weekly_close)
+    direction = np.ones_like(weekly_close)  # 1 for uptrend, -1 for downtrend
+    
+    # First valid value
+    supertrend[atr_period-1] = upper_band[atr_period-1]
+    direction[atr_period-1] = 1
+    
+    for i in range(atr_period, len(weekly_close)):
+        if close[i] <= supertrend[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = 1
+            
+        if direction[i] == 1:
+            supertrend[i] = max(lower_band[i], supertrend[i-1])
+        else:
+            supertrend[i] = min(upper_band[i], supertrend[i-1])
+    
+    # Align Supertrend to daily timeframe
+    supertrend_aligned = align_htf_to_ltf(prices, weekly, supertrend)
+    direction_aligned = align_htf_to_ltf(prices, weekly, direction)
+    
+    # Calculate daily ATR for volatility filter and position sizing
+    # True Range for daily
+    tr1_d = high - low
+    tr2_d = np.abs(high - np.roll(close, 1))
+    tr3_d = np.abs(low - np.roll(close, 1))
+    tr_d = np.maximum(tr1_d, np.maximum(tr2_d, tr3_d))
+    tr_d[0] = tr1_d[0]
+    
+    atr_d = np.zeros_like(close)
+    atr_d[14] = np.mean(tr_d[:15])  # 14-period ATR
+    for i in range(15, len(close)):
+        atr_d[i] = (atr_d[i-1] * 14 + tr_d[i]) / 15
+    
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
     
-    # Range filter: avoid trading when price is within 0.3% of pivot (choppy)
-    price_to_pivot = np.abs(close - pivot_aligned) / pivot_aligned
-    range_filter = price_to_pivot > 0.003
+    # Volatility filter: avoid low volatility periods
+    vol_ratio = atr_d / pd.Series(atr_d).rolling(window=50, min_periods=50).mean().values
+    volatility_filter = vol_ratio > 0.8
     
     signals = np.zeros(n)
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade when volume filter and range filter both pass
-        if volume_filter[i] and range_filter[i]:
-            # Long conditions: price breaks above R1 with volume
-            if close[i] > r1_aligned[i]:
+        # Only trade when volume and volatility filters pass
+        if volume_filter[i] and volatility_filter[i]:
+            # Long conditions: weekly uptrend and price above Supertrend
+            if direction_aligned[i] == 1 and close[i] > supertrend_aligned[i]:
                 signals[i] = 0.25
-            # Long conditions: price bounces from S1 with volume (above S1)
-            elif close[i] > s1_aligned[i]:
-                signals[i] = 0.25
-            # Short conditions: price breaks below S1 with volume
-            elif close[i] < s1_aligned[i]:
-                signals[i] = -0.25
-            # Short conditions: price rejected at R1 with volume (below R1)
-            elif close[i] < r1_aligned[i]:
+            # Short conditions: weekly downtrend and price below Supertrend
+            elif direction_aligned[i] == -1 and close[i] < supertrend_aligned[i]:
                 signals[i] = -0.25
             else:
-                signals[i] = signals[i-1]
+                signals[i] = 0.0
         else:
-            signals[i] = signals[i-1]
+            signals[i] = 0.0
     
     return signals
 
-name = "4h_Pivot_R1_S1_Breakout_Volume_RangeFilter"
-timeframe = "4h"
+name = "1d_WeeklySupertrend_Volume_VolatilityFilter"
+timeframe = "1d"
 leverage = 1.0
