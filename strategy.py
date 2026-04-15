@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot R1/S1 breakout with 1d EMA34 trend filter and volume spike
-# Long when price breaks above Camarilla R1 + 1d EMA34 uptrend + volume > 1.8x 20-period avg
-# Short when price breaks below Camarilla S1 + 1d EMA34 downtrend + volume > 1.8x 20-period avg
+# Hypothesis: 4h Williams %R reversal with 1d EMA50 trend filter and volume confirmation
+# Long when Williams %R crosses above -80 from oversold + price above 1d EMA50 + volume > 1.5x 20-period avg
+# Short when Williams %R crosses below -20 from overbought + price below 1d EMA50 + volume > 1.5x 20-period avg
 # Uses discrete position sizing (0.25) to control drawdown and minimize fee drag.
-# 1d EMA34 provides strong trend filter reducing whipsaws in both bull and bear markets.
-# Volume threshold (1.8x) targets ~20-40 trades/year on 12h timeframe to avoid overtrading.
-# Camarilla pivots calculated from prior 12h bar's high/low/close for structure-based entries.
+# Williams %R captures mean reversion in both bull and bear markets, while 1d EMA50 filters counter-trend trades.
+# Volume confirmation ensures institutional participation. Target: 20-40 trades/year on 4h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -27,29 +26,27 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 1d Indicator: EMA34 ===
+    # === 1d Indicator: EMA50 ===
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === 12h Camarilla Pivot Levels (based on prior bar) ===
-    # Pivot = (H + L + C) / 3
-    # R1 = Pivot + (H - L) * 1.1 / 12
-    # S1 = Pivot - (H - L) * 1.1 / 12
-    # Using prior bar's OHLC to avoid look-ahead
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # === 4h Williams %R (14-period) ===
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = ((highest_high - close) / (highest_high - lowest_low)) * -100
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid div by zero
     
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    camarilla_r1 = pivot + (prev_high - prev_low) * 1.1 / 12.0
-    camarilla_s1 = pivot - (prev_high - prev_low) * 1.1 / 12.0
+    # Williams %R signals: crossing above -80 (long), crossing below -20 (short)
+    williams_r_long_signal = (williams_r > -80) & (np.roll(williams_r, 1) <= -80)
+    williams_r_short_signal = (williams_r < -20) & (np.roll(williams_r, 1) >= -20)
+    # Handle first element
+    williams_r_long_signal[0] = False
+    williams_r_short_signal[0] = False
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -57,7 +54,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(34, 20) + 5  # EMA34 + Donchian(20) + volume(20) + buffer
+    warmup = max(50, 14, 20) + 5  # EMA50 + Williams %R(14) + volume(20) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -66,28 +63,28 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(williams_r[i]) or
+            np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.8x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.8)
+        # Volume filter: current volume > 1.5x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above Camarilla R1 (close > R1)
-        # 2. 1d EMA34 uptrend (close > EMA34)
+        # 1. Williams %R crosses above -80 (bullish reversal from oversold)
+        # 2. Price above 1d EMA50 (uptrend filter)
         # 3. Volume confirmation
-        if (close[i] > camarilla_r1[i]) and \
-           (close[i] > ema_34_1d_aligned[i]) and vol_confirm:
+        if williams_r_long_signal[i] and \
+           (close[i] > ema_50_1d_aligned[i]) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below Camarilla S1 (close < S1)
-        # 2. 1d EMA34 downtrend (close < EMA34)
+        # 1. Williams %R crosses below -20 (bearish reversal from overbought)
+        # 2. Price below 1d EMA50 (downtrend filter)
         # 3. Volume confirmation
-        elif (close[i] < camarilla_s1[i]) and \
-             (close[i] < ema_34_1d_aligned[i]) and vol_confirm:
+        elif williams_r_short_signal[i] and \
+             (close[i] < ema_50_1d_aligned[i]) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -95,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_1dEMA34_Volume_Filter_v1"
-timeframe = "12h"
+name = "4h_WilliamsR_1dEMA50_Volume_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
