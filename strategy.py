@@ -13,79 +13,103 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d HTF data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 1w HTF data once before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d RSI(14) for momentum filter
-    close_1d = pd.Series(df_1d['close'].values)
-    delta = close_1d.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_14 = 100 - (100 / (1 + rs))
-    rsi_14_values = rsi_14.fillna(50).values
-    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_values)
-    
-    # Calculate 1d ATR(14) for volatility filter
-    high_1d = pd.Series(df_1d['high'].values)
-    low_1d = pd.Series(df_1d['low'].values)
-    close_1d_shift = close_1d.shift(1)
-    tr1 = high_1d - low_1d
-    tr2 = abs(high_1d - close_1d_shift)
-    tr3 = abs(low_1d - close_1d_shift)
+    # Calculate weekly Supertrend(ATR=10, mult=3) for trend filter
+    # ATR calculation
+    tr1 = pd.Series(df_1w['high']).rolling(2).apply(lambda x: x[1] - x[0], raw=True)
+    tr2 = abs(pd.Series(df_1w['high']) - pd.Series(df_1w['close']).shift(1))
+    tr3 = abs(pd.Series(df_1w['low']) - pd.Series(df_1w['close']).shift(1))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14 = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    atr_14_values = atr_14.fillna(0).values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14_values)
+    atr_10 = tr.rolling(window=10, min_periods=10).mean()
     
-    # Calculate 6h ATR(14) for position sizing normalization
-    tr_6h = pd.Series(np.maximum(
-        high - low,
-        np.maximum(
-            np.abs(high - np.concatenate([[np.nan], close[:-1]])),
-            np.abs(low - np.concatenate([[np.nan], close[:-1]]))
-        )
-    ))
-    atr_6h = tr_6h.ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Supertrend calculation
+    hl2 = (df_1w['high'] + df_1w['low']) / 2
+    upper_band = hl2 + (3 * atr_10)
+    lower_band = hl2 - (3 * atr_10)
+    
+    # Initialize Supertrend
+    supertrend = np.full(len(df_1w), np.nan)
+    direction = np.full(len(df_1w), np.nan)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(10, len(df_1w)):
+        if i == 10:
+            supertrend[i] = lower_band.iloc[i]
+            direction[i] = 1
+        else:
+            if close.iloc[i-1] > supertrend[i-1]:
+                direction[i] = 1
+            else:
+                direction[i] = -1
+            
+            if direction[i] == 1:
+                supertrend[i] = max(lower_band.iloc[i], supertrend[i-1])
+            else:
+                supertrend[i] = min(upper_band.iloc[i], supertrend[i-1])
+            
+            # Reversal conditions
+            if direction[i] == 1 and close.iloc[i] < supertrend[i]:
+                direction[i] = -1
+                supertrend[i] = upper_band.iloc[i]
+            elif direction[i] == -1 and close.iloc[i] > supertrend[i]:
+                direction[i] = 1
+                supertrend[i] = lower_band.iloc[i]
+    
+    supertrend_aligned = align_htf_to_ltf(prices, df_1w, supertrend)
+    
+    # Calculate weekly EMA(50) for additional trend confirmation
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate 12h Donchian channel (20-period) for breakout signals
+    donchian_high_20 = pd.Series(close).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(close).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 12h volume SMA(20) for volume confirmation
+    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
-    for i in range(100, n):
+    for i in range(50, n):  # Start after warmup period
         # Skip if any required data is NaN
-        if (np.isnan(rsi_14_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
-            np.isnan(atr_6h[i]) or atr_6h[i] == 0):
+        if (np.isnan(supertrend_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(donchian_high_20[i]) or np.isnan(donchian_low_20[i]) or 
+            np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Normalize 6h ATR by 1d ATR for volatility regime filter
-        atr_ratio = atr_6h[i] / atr_14_aligned[i]
+        # Volume confirmation: current 12h volume > 1.5x 12h average volume
+        vol_confirm = volume[i] > 1.5 * vol_sma_20[i]
         
         # Long conditions:
-        # 1. 1d RSI < 30 (oversold on higher timeframe)
-        # 2. Current 6h volatility is low relative to daily (mean reversion setup)
-        # 3. Price below 6h VWAP (mean reentry opportunity)
-        if (rsi_14_aligned[i] < 30 and 
-            atr_ratio < 0.8 and 
-            close[i] < np.mean([high[i], low[i], close[i]]) * (volume[i] > 0)):  # Simplified VWAP proxy
+        # 1. Price breaks above 12h Donchian high (breakout)
+        # 2. Price above weekly Supertrend (bullish bias)
+        # 3. Price above weekly EMA50 (additional bullish confirmation)
+        # 4. Volume confirmation
+        if (close[i] > donchian_high_20[i] and 
+            close[i] > supertrend_aligned[i] and 
+            close[i] > ema_50_1w_aligned[i] and 
+            vol_confirm):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. 1d RSI > 70 (overbought on higher timeframe)
-        # 2. Current 6h volatility is low relative to daily (mean reversion setup)
-        # 3. Price above 6h VWAP (mean reentry opportunity)
-        elif (rsi_14_aligned[i] > 70 and 
-              atr_ratio < 0.8 and 
-              close[i] > np.mean([high[i], low[i], close[i]]) * (volume[i] > 0)):
+        # 1. Price breaks below 12h Donchian low (breakdown)
+        # 2. Price below weekly Supertrend (bearish bias)
+        # 3. Price below weekly EMA50 (additional bearish confirmation)
+        # 4. Volume confirmation
+        elif (close[i] < donchian_low_20[i] and 
+              close[i] < supertrend_aligned[i] and 
+              close[i] < ema_50_1w_aligned[i] and 
+              vol_confirm):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "6h_RSI14_MeanReversion_VolFilter_v1"
-timeframe = "6h"
+name = "12h_Supertrend50_EMA50_Donchian20_VolFilter_v1"
+timeframe = "12h"
 leverage = 1.0
