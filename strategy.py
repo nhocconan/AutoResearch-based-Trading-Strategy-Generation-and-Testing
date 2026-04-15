@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ADX(14) trend filter and volume confirmation
-# Long when price breaks above 4h Donchian upper band + 1d ADX > 25 + volume > 1.5x 20-period avg
-# Short when price breaks below 4h Donchian lower band + 1d ADX > 25 + volume > 1.5x 20-period avg
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA(34) trend filter and volume confirmation
+# Long when price breaks above 1d Donchian upper band + 1w EMA34 uptrend + volume > 1.5x 20-period avg
+# Short when price breaks below 1d Donchian lower band + 1w EMA34 downtrend + volume > 1.5x 20-period avg
 # Uses discrete position sizing (0.25) to balance return and drawdown control.
-# 1d ADX provides strong trend filter reducing whipsaws in both bull and bear markets.
-# Volume threshold (1.5x) targets ~20-30 trades/year to minimize fee drag.
+# 1w EMA34 provides strong trend filter reducing whipsaws in both bull and bear markets.
+# Volume threshold (1.5x) targets ~15-25 trades/year to minimize fee drag on 1d timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,50 +24,17 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d HTF data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 1w HTF data once before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 40:
         return np.zeros(n)
     
-    # === 1d Indicator: ADX(14) ===
-    def calculate_atr(high, low, close, period):
-        """Calculate Average True Range"""
-        high_low = high - low
-        high_close = np.abs(high - np.roll(close, 1))
-        low_close = np.abs(low - np.roll(close, 1))
-        ranges = np.vstack([high_low, high_close, low_close])
-        tr = np.max(ranges, axis=0)
-        tr[0] = 0  # First period has no prior close
-        atr = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean()
-        return atr.values
+    # === 1w Indicator: EMA(34) ===
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    def calculate_dmi(high, low, close, period=14):
-        """Calculate Directional Movement Indicators"""
-        up_move = high - np.roll(high, 1)
-        down_move = np.roll(low, 1) - low
-        
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-        
-        atr = calculate_atr(high, low, close, period)
-        
-        # Avoid division by zero
-        plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False).mean() / (atr + 1e-10)
-        minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False).mean() / (atr + 1e-10)
-        
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-        adx = pd.Series(dx).ewm(alpha=1/period, adjust=False).mean()
-        
-        return plus_di.values, minus_di.values, adx.values
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    plus_di_1d, minus_di_1d, adx_1d = calculate_dmi(high_1d, low_1d, close_1d, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # === 4h Donchian Channel (20-period) ===
+    # === 1d Donchian Channel (20-period) ===
     period = 20
     highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
@@ -80,7 +47,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(period, 20) + 30  # Donchian(20) + volume(20) + ADX buffer
+    warmup = max(period, 20, 34) + 5  # Donchian(20) + volume(20) + EMA(34) buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -93,24 +60,24 @@ def generate_signals(prices):
         
         # Skip if any required data is NaN
         if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
-            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
         # 1. Price breaks above upper band (close > upper_band)
-        # 2. 1d ADX > 25 (strong trend)
+        # 2. 1w EMA34 uptrend (price > EMA)
         # 3. Volume confirmation
         if (close[i] > upper_band[i]) and \
-           (adx_1d_aligned[i] > 25) and vol_confirm:
+           (close[i] > ema_34_1w_aligned[i]) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
         # 1. Price breaks below lower band (close < lower_band)
-        # 2. 1d ADX > 25 (strong trend)
+        # 2. 1w EMA34 downtrend (price < EMA)
         # 3. Volume confirmation
         elif (close[i] < lower_band[i]) and \
-             (adx_1d_aligned[i] > 25) and vol_confirm:
+             (close[i] < ema_34_1w_aligned[i]) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -118,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dADX_Volume_Filter_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA34_Volume_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
