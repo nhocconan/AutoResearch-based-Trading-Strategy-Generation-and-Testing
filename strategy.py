@@ -4,11 +4,11 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above 4h Donchian upper + 1d EMA34 uptrend + volume > 1.8x 20-period avg
-# Short when price breaks below 4h Donchian lower + 1d EMA34 downtrend + volume > 1.8x 20-period avg
+# Long when price breaks above 4h Donchian upper + 1d EMA34 uptrend + volume > 1.5x 20-period avg
+# Short when price breaks below 4h Donchian lower + 1d EMA34 downtrend + volume > 1.5x 20-period avg
 # Uses discrete position sizing (0.25) to minimize fee drag and control drawdown.
 # 1d EMA34 provides strong trend filter reducing whipsaws in both bull and bear markets.
-# Volume threshold (1.8x) targets ~25-40 trades/year to minimize fee drag on 4h timeframe.
+# Volume threshold (1.5x) targets ~20-40 trades/year to minimize fee drag on 4h timeframe.
 # Donchian channels calculated from 4h high/low over 20 periods.
 
 def generate_signals(prices):
@@ -62,8 +62,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.8x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.8)
+        # Volume filter: current volume > 1.5x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # === LONG CONDITIONS ===
         # 1. Price breaks above Donchian upper (close > upper)
