@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d Williams Alligator (Jaw/Teeth/Lips) for trend direction and 6h Elder Ray (Bull/Bear Power) for entry timing.
-# In 1d uptrend (Lips > Teeth > Jaw), wait for 6h Bull Power > 0 to go long (buy the dip in uptrend).
-# In 1d downtrend (Lips < Teeth < Jaw), wait for 6h Bear Power < 0 to go short (sell the rally in downtrend).
-# Volume confirmation ensures momentum validity. Designed for low trade frequency (12-30/year) to minimize fee drag.
-# Alligator uses SMAs with specific periods; Elder Ray uses EMA13 and high/low minus EMA13.
+# Hypothesis: 12h strategy using 1w Williams Alligator (13,8,5) for trend direction and 1d RSI(14) for mean reversion timing.
+# In 1w uptrend (Alligator jaws < teeth < lips, price > lips), wait for 1d RSI < 30 to go long (pullback entry).
+# In 1w downtrend (Alligator jaws > teeth > lips, price < lips), wait for 1d RSI > 70 to go short (bounce entry).
+# Volume confirmation ensures momentum validity. Session filter (00-23 UTC) always active for 12h.
+# Designed for low trade frequency (12-37/year) to minimize fee drag while adapting to trend and mean reversion.
+# Williams Alligator uses SMAs with specific offsets: jaws=13-period SMA shifted 8 bars, teeth=8-period SMA shifted 5 bars, lips=5-period SMA shifted 3 bars.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,35 +19,41 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Get 1d HTF data once before loop
+    # Pre-compute session hours to avoid datetime operations in loop
+    hours = pd.DatetimeIndex(open_time).hour
+    
+    # Get 1w and 1d HTF data once before loop
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1w) < 30 or len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d Indicators: Williams Alligator ===
-    # Jaw: Blue line, 13-period SMMA smoothed by 8 bars
-    # Teeth: Red line, 8-period SMMA smoothed by 5 bars
-    # Lips: Green line, 5-period SMMA smoothed by 3 bars
+    # === 1w Indicators: Williams Alligator (13,8,5) ===
+    close_1w = df_1w['close'].values
+    # Jaws: 13-period SMA shifted by 8 bars
+    jaws_1w = pd.Series(close_1w).rolling(window=13, min_periods=13).mean().shift(8).values
+    # Teeth: 8-period SMA shifted by 5 bars
+    teeth_1w = pd.Series(close_1w).rolling(window=8, min_periods=8).mean().shift(5).values
+    # Lips: 5-period SMA shifted by 3 bars
+    lips_1w = pd.Series(close_1w).rolling(window=5, min_periods=5).mean().shift(3).values
+    
+    # Align Alligator components to LTF
+    jaws_1w_aligned = align_htf_to_ltf(prices, df_1w, jaws_1w)
+    teeth_1w_aligned = align_htf_to_ltf(prices, df_1w, teeth_1w)
+    lips_1w_aligned = align_htf_to_ltf(prices, df_1w, lips_1w)
+    
+    # === 1d Indicators: RSI(14) ===
     close_1d = df_1d['close'].values
-    # SMMA (Smoothed Moving Average) = EMA with alpha=1/period
-    jaw = pd.Series(close_1d).ewm(alpha=1/13, adjust=False, min_periods=13).mean().values
-    jaw = pd.Series(jaw).ewm(alpha=1/8, adjust=False, min_periods=8).mean().values  # additional smoothing
-    teeth = pd.Series(close_1d).ewm(alpha=1/8, adjust=False, min_periods=8).mean().values
-    teeth = pd.Series(teeth).ewm(alpha=1/5, adjust=False, min_periods=5).mean().values  # additional smoothing
-    lips = pd.Series(close_1d).ewm(alpha=1/5, adjust=False, min_periods=5).mean().values
-    lips = pd.Series(lips).ewm(alpha=1/3, adjust=False, min_periods=3).mean().values  # additional smoothing
-    
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    
-    # === 6h Indicators: Elder Ray (Bull Power / Bear Power) ===
-    # Bull Power = High - EMA13(close)
-    # Bear Power = Low - EMA13(close)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    delta = pd.Series(close_1d).diff().values
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     signals = np.zeros(n)
     
@@ -54,28 +61,40 @@ def generate_signals(prices):
     warmup = 100
     
     for i in range(warmup, n):
-        # Skip if any required data is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        # Williams Alligator conditions
+        # Uptrend: jaws < teeth < lips and price > lips
+        # Downtrend: jaws > teeth > lips and price < lips
+        jaws = jaws_1w_aligned[i]
+        teeth = teeth_1w_aligned[i]
+        lips = lips_1w_aligned[i]
+        price = close[i]
+        
+        # Check for valid Alligator values (not NaN)
+        if np.isnan(jaws) or np.isnan(teeth) or np.isnan(lips):
             signals[i] = 0.0
             continue
         
-        # Determine 1d Alligator trend
-        # Uptrend: Lips > Teeth > Jaw
-        # Downtrend: Lips < Teeth < Jaw
-        is_uptrend = (lips_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > jaw_aligned[i])
-        is_downtrend = (lips_aligned[i] < teeth_aligned[i]) and (teeth_aligned[i] < jaw_aligned[i])
+        # Volume filter: current volume > 1.5x 20-period volume SMA
+        vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
+        
+        # Skip if RSI is NaN
+        if np.isnan(rsi_1d_aligned[i]):
+            signals[i] = 0.0
+            continue
         
         # === LONG CONDITIONS ===
-        # 1. In 1d uptrend (Alligator aligned up)
-        # 2. 6h Bull Power > 0 (bullish momentum)
-        if is_uptrend and (bull_power[i] > 0):
+        # 1. In 1w uptrend (jaws < teeth < lips and price > lips)
+        # 2. 1d RSI < 30 (oversold pullback)
+        # 3. Volume confirmation
+        if (jaws < teeth < lips) and (price > lips) and (rsi_1d_aligned[i] < 30) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. In 1d downtrend (Alligator aligned down)
-        # 2. 6h Bear Power < 0 (bearish momentum)
-        elif is_downtrend and (bear_power[i] < 0):
+        # 1. In 1w downtrend (jaws > teeth > lips and price < lips)
+        # 2. 1d RSI > 70 (overbought bounce)
+        # 3. Volume confirmation
+        elif (jaws > teeth > lips) and (price < lips) and (rsi_1d_aligned[i] > 70) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -83,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Alligator_ElderRay_v1"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_RSI14_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
