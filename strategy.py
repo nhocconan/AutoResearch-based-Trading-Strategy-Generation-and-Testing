@@ -3,11 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) Breakout + 1d Volume Spike + 1d Choppiness Filter
-# Uses 12h Donchian breakout for directional bias, confirmed by 1d volume spike (>1.5x 20-day median)
-# and filtered by 1d Choppiness Index (CHOP > 61.8 = range, avoid breakouts in chop).
-# Designed to capture strong trending moves while avoiding false breakouts in sideways markets.
-# Conservative sizing (0.25) to limit trade frequency and avoid fee drag on 12h timeframe.
+# Hypothesis: 4h Williams Alligator + 12h EMA50 + Volume Spike
+# Williams Alligator identifies trend direction via three SMAs (Jaw, Teeth, Lips).
+# Lips (5 SMA) above Teeth (8 SMA) above Jaw (13 SMA) = bullish trend.
+# Teeth above Jaw and Lips below Teeth = bearish trend.
+# 12h EMA50 confirms multi-timeframe trend alignment.
+# Volume spike (>1.5x 20-bar median) filters for institutional participation.
+# Designed to catch strong trends while avoiding chop.
+# Conservative sizing (0.25) to limit trade frequency and avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,63 +22,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day data for volume and choppiness
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    # Williams Alligator on 4h: Jaw(13), Teeth(8), Lips(5) SMAs
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean()
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean()
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean()
     
-    # 1-day Volume Spike: > 1.5x 20-day median volume
-    vol_median_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).median()
-    vol_threshold_1d = 1.5 * vol_median_1d
-    vol_spike_1d = align_htf_to_ltf(prices, df_1d, volume_1d > vol_threshold_1d)
+    # 12h EMA50 for multi-timeframe trend confirmation
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # 1-day Choppiness Index (CHOP) - avoids breakouts in ranging markets
-    # CHOP = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(period)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum()
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min()
-    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low + 1e-10)) / np.log10(14)
-    chop_filter = align_htf_to_ltf(prices, df_1d, chop < 61.8)  # Only allow breakouts when NOT choppy (trending)
-    
-    # 12-hour Donchian Channel (20-period)
-    # Since we're on 12h timeframe, we need 20*12h = 10 days of data
-    # But we'll use the 12h data directly from prices
-    highest_high_12h = pd.Series(high).rolling(window=20, min_periods=20).max()
-    lowest_low_12h = pd.Series(low).rolling(window=20, min_periods=20).min()
-    
-    # Breakout signals
-    breakout_up = close > highest_high_12h.shift(1)
-    breakout_down = low < lowest_low_12h.shift(1)
+    # Volume confirmation: current > 1.5x median of last 20 bars
+    vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
+    vol_threshold = 1.5 * vol_median
     
     signals = np.zeros(n)
     
-    for i in range(20, n):  # Start after warmup for Donchian
+    for i in range(50, n):  # Start after warmup for all indicators
         # Skip if any required data is NaN
-        if (np.isnan(highest_high_12h[i]) or np.isnan(lowest_low_12h[i]) or
-            np.isnan(vol_spike_1d[i]) or np.isnan(chop_filter[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_threshold[i])):
             continue
         
-        # Long: 12h breakout up + volume spike + not choppy
-        if breakout_up[i] and vol_spike_1d[i] and chop_filter[i]:
+        # Bullish Alligator: Lips > Teeth > Jaw
+        bullish = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        # Bearish Alligator: Jaw > Teeth > Lips
+        bearish = jaw[i] > teeth[i] and teeth[i] > lips[i]
+        
+        # Long: Bullish Alligator + price above 12h EMA50 + volume spike
+        if (bullish and 
+            close[i] > ema_50_12h_aligned[i] and 
+            volume[i] > vol_threshold[i]):
             signals[i] = 0.25
         
-        # Short: 12h breakout down + volume spike + not choppy
-        elif breakout_down[i] and vol_spike_1d[i] and chop_filter[i]:
+        # Short: Bearish Alligator + price below 12h EMA50 + volume spike
+        elif (bearish and 
+              close[i] < ema_50_12h_aligned[i] and 
+              volume[i] > vol_threshold[i]):
             signals[i] = -0.25
         
-        # Exit: opposite breakout or loss of volume spike or choppy conditions
+        # Exit: Alligator reverses or price crosses 12h EMA50 in opposite direction
         elif (i > 0 and 
-              ((signals[i-1] == 0.25 and (breakout_down[i] or not vol_spike_1d[i] or not chop_filter[i])) or
-               (signals[i-1] == -0.25 and (breakout_up[i] or not vol_spike_1d[i] or not chop_filter[i])))):
+              ((signals[i-1] == 0.25 and (not bullish or close[i] < ema_50_12h_aligned[i])) or
+               (signals[i-1] == -0.25 and (not bearish or close[i] > ema_50_12h_aligned[i])))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -84,6 +74,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_VolumeSpike_ChopFilter"
-timeframe = "12h"
+name = "4h_WilliamsAlligator_12hEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
