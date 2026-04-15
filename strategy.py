@@ -13,41 +13,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h EMA50 for trend filter (primary trend)
-    df_12h = get_htf_data(prices, '12h')
-    ema_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean()
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h.values)
+    # 1d ATR for volatility filter
+    df_1d = get_htf_data(prices, '1d')
+    tr_1d = np.maximum(df_1d['high'].values - df_1d['low'].values,
+                       np.maximum(np.abs(df_1d['high'].values - np.concatenate([[df_1d['close'][0]], df_1d['close'][:-1]])),
+                                  np.abs(df_1d['low'].values - np.concatenate([[df_1d['close'][0]], df_1d['close'][:-1]]))))
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # 4h Donchian channel (20-period breakout)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max()
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min()
+    # 4h Bollinger Bands (20, 2)
+    sma_4h = pd.Series(close).rolling(window=20, min_periods=20).mean()
+    std_4h = pd.Series(close).rolling(window=20, min_periods=20).std()
+    upper_4h = sma_4h + 2 * std_4h
+    lower_4h = sma_4h - 2 * std_4h
     
-    # Volume confirmation: current > 1.5x median of last 20 bars
+    # Volume confirmation: current > 1.8x median of last 20 bars
     vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
-    vol_threshold = 1.5 * vol_median
+    vol_threshold = 1.8 * vol_median
+    
+    # ATR-based volatility filter: require ATR > 0.5 * median ATR
+    atr_median = pd.Series(atr_1d_aligned).rolling(window=50, min_periods=1).median()
+    vol_filter = atr_1d_aligned > 0.5 * atr_median
     
     signals = np.zeros(n)
     
     for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_threshold[i])):
+        if (np.isnan(upper_4h[i]) or np.isnan(lower_4h[i]) or 
+            np.isnan(vol_threshold[i]) or np.isnan(vol_filter[i])):
             continue
         
-        # Long: price breaks above Donchian upper + above 12h EMA50 + volume
-        if (close[i] > high_20[i] and close[i] > ema_12h_aligned[i] and 
-            volume[i] > vol_threshold[i]):
-            signals[i] = 0.25
+        # Long: close breaks above upper band + volume + volatility filter
+        if close[i] > upper_4h[i] and volume[i] > vol_threshold[i] and vol_filter[i]:
+            signals[i] = 0.20
         
-        # Short: price breaks below Donchian lower + below 12h EMA50 + volume
-        elif (close[i] < low_20[i] and close[i] < ema_12h_aligned[i] and 
-              volume[i] > vol_threshold[i]):
-            signals[i] = -0.25
+        # Short: close breaks below lower band + volume + volatility filter
+        elif close[i] < lower_4h[i] and volume[i] > vol_threshold[i] and vol_filter[i]:
+            signals[i] = -0.20
         
-        # Exit: price crosses back inside Donchian channel
+        # Exit: close crosses back inside bands (mean reversion)
         elif (i > 0 and 
-              ((signals[i-1] == 0.25 and close[i] < high_20[i]) or
-               (signals[i-1] == -0.25 and close[i] > low_20[i]))):
+              ((signals[i-1] == 0.20 and close[i] < upper_4h[i]) or
+               (signals[i-1] == -0.20 and close[i] > lower_4h[i]))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -56,6 +63,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_EMA50_Donchian_Volume"
-timeframe = "4h"
+name = "1h_Bollinger_Breakout_Volume_VolFilter"
+timeframe = "1h"
 leverage = 1.0
