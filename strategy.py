@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d volume spike and choppiness regime filter
-# Long when price breaks above 1d Camarilla R3 level + volume > 2x 24-period avg + choppiness > 61.8 (range)
-# Short when price breaks below 1d Camarilla S3 level + volume > 2x 24-period avg + choppiness > 61.8 (range)
-# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (12-30/year).
-# Camarilla levels provide intraday support/resistance. Volume spike confirms breakout strength.
-# Choppiness filter ensures we only trade in ranging markets where mean reversion at extremes works.
+# Hypothesis: 4h Donchian(20) breakout with 12h RSI trend filter and volume confirmation
+# Long when price breaks above 4h Donchian upper (20-period) + 12h RSI > 50 + volume > 1.5x 20-period avg
+# Short when price breaks below 4h Donchian lower (20-period) + 12h RSI < 50 + volume > 1.5x 20-period avg
+# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (20-40/year).
+# Donchian channels provide objective breakout levels. RSI filter ensures we only trade with momentum,
+# avoiding chop and false breakouts. Works in bull markets (RSI > 50) and bear markets (RSI < 50).
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,69 +24,46 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d HTF data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h HTF data once before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # === 1d Indicator: Camarilla Pivot Levels (R3, S3) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 12h Indicator: RSI (14-period) ===
+    close_12h = df_12h['close'].values
+    delta = np.diff(close_12h, prepend=close_12h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate pivot point
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Wilder's smoothing for RSI
+    period = 14
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[period] = np.mean(gain[1:period+1])
+    avg_loss[period] = np.mean(loss[1:period+1])
     
-    # Camarilla levels
-    r3 = pivot + (range_1d * 1.1 / 4)
-    s3 = pivot - (range_1d * 1.1 / 4)
+    for i in range(period+1, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
     
-    # Align to lower timeframe (12h)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[0:period+1] = 50.0  # neutral before warmup
     
-    # === 12h Indicator: Choppiness Index (14-period) ===
-    chop_window = 14
-    atr_12h = np.zeros(n)
-    tr = np.zeros(n)
+    rsi_aligned = align_htf_to_ltf(prices, df_12h, rsi)
     
-    # True Range
-    high_shift = np.roll(high, 1)
-    low_shift = np.roll(low, 1)
-    close_shift = np.roll(close, 1)
+    # === 4h Indicator: Donchian Channel (20-period) ===
+    donchian_window = 20
+    donchian_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    donchian_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
-    high_shift[0] = high[0]
-    low_shift[0] = low[0]
-    close_shift[0] = close[0]
-    
-    tr1 = high - low
-    tr2 = np.abs(high - close_shift)
-    tr3 = np.abs(low - close_shift)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # ATR (Wilder's smoothing)
-    atr_12h[chop_window-1] = np.mean(tr[:chop_window])
-    for i in range(chop_window, n):
-        atr_12h[i] = (atr_12h[i-1] * (chop_window-1) + tr[i]) / chop_window
-    
-    # Highest high and lowest low over chop_window
-    hh = pd.Series(high).rolling(window=chop_window, min_periods=chop_window).max().values
-    ll = pd.Series(low).rolling(window=chop_window, min_periods=chop_window).min().values
-    
-    # Choppiness Index
-    chop = np.zeros(n)
-    sum_atr = pd.Series(atr_12h).rolling(window=chop_window, min_periods=chop_window).sum().values
-    chop = 100 * np.log10(sum_atr / np.log10(chop_window) / (hh - ll))
-    chop = np.where((hh - ll) != 0, chop, 50.0)  # avoid division by zero
-    
-    # Volume SMA for confirmation (using 24-period = 2 days of 12h bars)
-    vol_sma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume SMA for confirmation (using 20-period)
+    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(chop_window, 24) + 5  # Choppiness(14) + volume(24) + buffer
+    warmup = max(donchian_window, period+1) + 20  # Donchian(20) + RSI(14) + volume(20)
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -94,29 +71,29 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2x 24-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_24[i] * 2.0)
+        # Volume filter: current volume > 1.5x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(chop[i]) or np.isnan(vol_sma_24[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(rsi_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 1d Camarilla R3 level
-        # 2. Volume confirmation
-        # 3. Choppiness > 61.8 (ranging market)
-        if (close[i] > r3_aligned[i]) and \
-           vol_confirm and (chop[i] > 61.8):
+        # 1. Price breaks above 4h Donchian upper (20-period)
+        # 2. Momentum (12h RSI > 50)
+        # 3. Volume confirmation
+        if (close[i] > donchian_high[i]) and \
+           (rsi_aligned[i] > 50) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 1d Camarilla S3 level
-        # 2. Volume confirmation
-        # 3. Choppiness > 61.8 (ranging market)
-        elif (close[i] < s3_aligned[i]) and \
-             vol_confirm and (chop[i] > 61.8):
+        # 1. Price breaks below 4h Donchian lower (20-period)
+        # 2. Momentum (12h RSI < 50)
+        # 3. Volume confirmation
+        elif (close[i] < donchian_low[i]) and \
+             (rsi_aligned[i] < 50) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -124,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_1dVolSpike_Chop_Filter_v1"
-timeframe = "12h"
+name = "4h_Donchian20_12hRSI50_Volume_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
