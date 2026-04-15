@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla pivot breakout with volume confirmation and 1w ADX trend filter
-# Long when price breaks above 1d Camarilla R3 level + volume > 2.0x 20-period avg + 1w ADX > 25 (strong trend)
-# Short when price breaks below 1d Camarilla S3 level + volume > 2.0x 20-period avg + 1w ADX > 25 (strong trend)
-# Uses discrete position sizing (0.30) to balance risk and return. Designed for low trade frequency (7-25/year).
-# Camarilla levels derived from 1d OHLC provide institutional support/resistance. 1w ADX filter ensures we only trade strong trends, avoiding chop and false breakouts.
-# Works in bull markets (trend continuation) and bear markets (strong downtrends) by requiring 1w ADX > 25.
+# Hypothesis: 12h TRIX momentum with 1d volume spike and ADX trend filter
+# Long when TRIX crosses above zero + volume > 2.0x 20-period avg + 1d ADX > 25 (strong trend)
+# Short when TRIX crosses below zero + volume > 2.0x 20-period avg + 1d ADX > 25 (strong trend)
+# Uses discrete position sizing (0.25) to minimize fee churn. Target: 15-30 trades/year.
+# TRIX filters noise and identifies momentum shifts. Volume spike confirms participation.
+# ADX > 25 ensures we only trade strong trends, avoiding chop and sideways markets.
+# Works in bull markets (bullish momentum) and bear markets (strong bearish momentum).
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,58 +27,53 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Get 1w HTF data once before loop for ADX filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
+    # === 12h Indicator: TRIX (15,9,9) ===
+    # TRIX = EMA(EMA(EMA(close, 15), 9), 9) - 1 period ago, then percent change
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema3 = pd.Series(ema2).ewm(span=9, adjust=False, min_periods=9).mean().values
+    trix_raw = np.diff(ema3, prepend=ema3[0]) / ema3 * 100
+    trix = pd.Series(trix_raw).ewm(span=9, adjust=False, min_periods=9).mean().values
+    trix_prev = np.roll(trix, 1)
+    trix_prev[0] = trix[0]
+    trix_cross_above = (trix_prev <= 0) & (trix > 0)
+    trix_cross_below = (trix_prev >= 0) & (trix < 0)
     
-    # === 1d Indicator: Camarilla Pivot Levels (R3, S3) ===
+    # === 1d Indicator: ADX (trend strength filter) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels: R3 = close + (high - low) * 1.1/4, S3 = close - (high - low) * 1.1/4
-    camarilla_r3_1d = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3_1d = close_1d - (high_1d - low_1d) * 1.1 / 4
-    
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
-    
-    # === 1w Indicator: ADX (strong trend filter) ===
     # Calculate ADX components: +DM, -DM, TR
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d_shift = np.roll(high_1d, 1)
+    low_1d_shift = np.roll(low_1d, 1)
+    high_1d_shift[0] = high_1d[0]
+    low_1d_shift[0] = low_1d[0]
     
-    high_1w_shift = np.roll(high_1w, 1)
-    low_1w_shift = np.roll(low_1w, 1)
-    high_1w_shift[0] = high_1w[0]
-    low_1w_shift[0] = low_1w[0]
+    plus_dm = np.where((high_1d - high_1d_shift) > (low_1d_shift - low_1d), 
+                       np.maximum(high_1d - high_1d_shift, 0), 0)
+    minus_dm = np.where((low_1d_shift - low_1d) > (high_1d - high_1d_shift), 
+                        np.maximum(low_1d_shift - low_1d, 0), 0)
     
-    plus_dm = np.where((high_1w - high_1w_shift) > (low_1w_shift - low_1w), 
-                       np.maximum(high_1w - high_1w_shift, 0), 0)
-    minus_dm = np.where((low_1w_shift - low_1w) > (high_1w - high_1w_shift), 
-                        np.maximum(low_1w_shift - low_1w, 0), 0)
-    
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1[0] = high_1w[0] - low_1w[0]
-    tr2[0] = np.abs(high_1w[0] - close_1w[0])
-    tr3[0] = np.abs(low_1w[0] - close_1w[0])
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]
+    tr2[0] = np.abs(high_1d[0] - close_1d[0])
+    tr3[0] = np.abs(low_1d[0] - close_1d[0])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
     # Wilder's smoothing (alpha = 1/period)
     period = 14
     alpha = 1.0 / period
     
-    atr_1w = np.zeros_like(tr)
-    atr_1w[period-1] = np.mean(tr[:period])
+    atr = np.zeros_like(tr)
+    atr[period-1] = np.mean(tr[:period])
     for i in range(period, len(tr)):
-        atr_1w[i] = (atr_1w[i-1] * (period-1) + tr[i]) / period
+        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
     
     plus_dm_smooth = np.zeros_like(plus_dm)
     minus_dm_smooth = np.zeros_like(minus_dm)
@@ -90,18 +86,18 @@ def generate_signals(prices):
         minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
     
     # Avoid division by zero
-    plus_di_1w = np.where(atr_1w != 0, 100 * plus_dm_smooth / atr_1w, 0)
-    minus_di_1w = np.where(atr_1w != 0, 100 * minus_dm_smooth / atr_1w, 0)
+    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
+    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
     
-    dx_1w = np.where((plus_di_1w + minus_di_1w) != 0, 100 * np.abs(plus_di_1w - minus_di_1w) / (plus_di_1w + minus_di_1w), 0)
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
     
     # Wilder's smoothing for ADX
-    adx_1w = np.zeros_like(dx_1w)
-    adx_1w[2*period-1] = np.mean(dx_1w[period-1:2*period])
-    for i in range(2*period, len(dx_1w)):
-        adx_1w[i] = (adx_1w[i-1] * (period-1) + dx_1w[i]) / period
+    adx = np.zeros_like(dx)
+    adx[2*period-1] = np.mean(dx[period-1:2*period])
+    for i in range(2*period, len(dx)):
+        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
     
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -109,7 +105,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 100
+    warmup = 50
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -121,32 +117,29 @@ def generate_signals(prices):
         vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
         
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(adx_1w_aligned[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(trix[i]) or np.isnan(adx_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 1d Camarilla R3 level
-        # 2. Strong trend (1w ADX > 25)
+        # 1. TRIX crosses above zero (bullish momentum)
+        # 2. Strong trend (ADX > 25)
         # 3. Volume confirmation
-        if (close[i] > camarilla_r3_aligned[i]) and \
-           (adx_1w_aligned[i] > 25) and vol_confirm:
-            signals[i] = 0.30
+        if trix_cross_above[i] and (adx_aligned[i] > 25) and vol_confirm:
+            signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 1d Camarilla S3 level
-        # 2. Strong trend (1w ADX > 25)
+        # 1. TRIX crosses below zero (bearish momentum)
+        # 2. Strong trend (ADX > 25)
         # 3. Volume confirmation
-        elif (close[i] < camarilla_s3_aligned[i]) and \
-             (adx_1w_aligned[i] > 25) and vol_confirm:
-            signals[i] = -0.30
+        elif trix_cross_below[i] and (adx_aligned[i] > 25) and vol_confirm:
+            signals[i] = -0.25
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "1d_CamarillaR3S3_Volume_1wADX25_Filter_v1"
-timeframe = "1d"
+name = "12h_TRIX_Volume_ADX25_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
