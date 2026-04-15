@@ -20,14 +20,10 @@ def generate_signals(prices):
     daily_close = daily['close'].values
     
     # Calculate weekly pivot levels from daily data
-    # Weekly high = max of last 5 daily highs
-    # Weekly low = min of last 5 daily lows
-    # Weekly close = last daily close
     weekly_high = pd.Series(daily_high).rolling(window=5, min_periods=5).max().values
     weekly_low = pd.Series(daily_low).rolling(window=5, min_periods=5).min().values
     weekly_close = pd.Series(daily_close).rolling(window=5, min_periods=5).last().values
     
-    # Calculate weekly pivot levels
     weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
     weekly_r1 = 2 * weekly_pivot - weekly_low
     weekly_s1 = 2 * weekly_pivot - weekly_high
