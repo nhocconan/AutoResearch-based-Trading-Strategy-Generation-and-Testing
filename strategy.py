@@ -3,11 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout + weekly pivot direction + volume confirmation.
-# Uses weekly P1 (monthly pivot) for trend bias, Donchian breakouts for entry,
-# and volume spike for confirmation. Designed for very low trade frequency (10-25/year)
-# to minimize fee drag. Works in bull/bear: weekly pivot avoids counter-trend trades,
-# Donchian breakouts capture strong momentum with volume confirmation.
+# Hypothesis: 12h strategy using 1d Williams %R mean reversion with volume spike and chop regime filter.
+# Williams %R < -80 = oversold (long), > -20 = overbought (short) on 1d timeframe.
+# Volume confirmation: current volume > 1.5x 24-period volume SMA.
+# Chop regime: only trade when market is ranging (CHOP > 61.8) to avoid whipsaws in strong trends.
+# Designed for low trade frequency (15-25/year) to minimize fee drag. Works in bull/bear markets:
+# - In bull: mean reversion during pullbacks in uptrend
+# - In bear: mean reversion during bounces in downtrend
+# - In range: classic mean reversion at extremes
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,27 +26,41 @@ def generate_signals(prices):
     # Pre-compute session hours to avoid datetime operations in loop
     hours = pd.DatetimeIndex(open_time).hour
     
-    # Get 1w and 1d HTF data once before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1w) < 20 or len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === 1w Indicators: Weekly Pivot (P1 = monthly pivot approximation) ===
-    # Weekly pivot: (High + Low + Close) / 3 (using weekly OHLC)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    weekly_pivot = (high_1w + low_1w + close_1w) / 3.0
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    # === 1d Indicators: Williams %R (14-period) ===
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_1d = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
+    lowest_low_1d = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
+    denominator = highest_high_1d - lowest_low_1d
+    williams_r_1d = np.where(denominator != 0, 
+                            ((highest_high_1d - df_1d['close'].values) / denominator) * -100, 
+                            -50.0)  # neutral when no range
     
-    # === 1d Indicators: Donchian Channel (20) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    williams_r_1d_aligned = align_htf_to_ltf(prices, df_1d, williams_r_1d)
+    
+    # === 1d Indicators: Chopiness Index (14-period) ===
+    # Chop = 100 * log10(sum(ATR) / (log10(highest high - lowest low) * sqrt(period)))
+    atr_1d = np.maximum(np.maximum(
+        df_1d['high'].values - df_1d['low'].values,
+        np.abs(df_1d['high'].values - np.roll(df_1d['close'].values, 1)),
+        np.abs(df_1d['low'].values - np.roll(df_1d['close'].values, 1))
+    ))
+    atr_1d[0] = df_1d['high'].values[0] - df_1d['low'].values[0]  # first period
+    
+    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+    highest_high_14 = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
+    max_min_range = highest_high_14 - lowest_low_14
+    
+    chop_1d = np.where(max_min_range != 0,
+                      100 * np.log10(sum_atr_14 / (np.log10(14) * max_min_range)),
+                      50.0)  # neutral when no range
+    
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     signals = np.zeros(n)
     
@@ -51,37 +68,39 @@ def generate_signals(prices):
     warmup = 100
     
     for i in range(warmup, n):
-        # Session filter: 08-20 UTC only (reduce noise)
+        # Session filter: 08-20 UTC only
         hour = hours[i]
         if hour < 8 or hour > 20:
             signals[i] = 0.0
             continue
             
-        # Volume filter: current volume > 2.5x 20-period volume SMA
-        vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_confirm = volume[i] > (vol_sma_20[i] * 2.5)
+        # Volume filter: current volume > 1.5x 24-period volume SMA
+        vol_sma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+        vol_confirm = volume[i] > (vol_sma_24[i] * 1.5)
         
         # Skip if any required data is NaN
-        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(donchian_high_aligned[i]) or
-            np.isnan(donchian_low_aligned[i])):
+        if (np.isnan(williams_r_1d_aligned[i]) or 
+            np.isnan(chop_1d_aligned[i]) or
+            np.isnan(vol_sma_24[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Chop regime filter: only trade in ranging markets (CHOP > 61.8)
+        if chop_1d_aligned[i] <= 61.8:
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above Donchian(20) high (breakout)
-        # 2. Price above weekly pivot (bullish bias)
-        # 3. Volume confirmation
-        if (close[i] > donchian_high_aligned[i] and
-            close[i] > weekly_pivot_aligned[i] and
+        # 1. Williams %R below -80 (oversold)
+        # 2. Volume confirmation
+        if (williams_r_1d_aligned[i] < -80.0 and
             vol_confirm):
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below Donchian(20) low (breakdown)
-        # 2. Price below weekly pivot (bearish bias)
-        # 3. Volume confirmation
-        elif (close[i] < donchian_low_aligned[i] and
-              close[i] < weekly_pivot_aligned[i] and
+        # 1. Williams %R above -20 (overbought)
+        # 2. Volume confirmation
+        elif (williams_r_1d_aligned[i] > -20.0 and
               vol_confirm):
             signals[i] = -0.25
         
@@ -90,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_WeeklyPivot_VolumeFilter_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_MeanRev_VolumeSpike_ChopFilter_v1"
+timeframe = "12h"
 leverage = 1.0
