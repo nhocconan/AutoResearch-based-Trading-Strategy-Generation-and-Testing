@@ -18,7 +18,7 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d Donchian channels (20-period)
+    # Calculate 1d Donchian channels (20-period) - primary trend filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     upper_20_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
@@ -29,12 +29,19 @@ def generate_signals(prices):
     lower_20_4h = align_htf_to_ltf(prices, df_1d, lower_20_1d)
     
     # Calculate 1d ATR(14) for volatility filter
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
-    tr3 = np.abs(df_1d['low'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]]))
+    tr3 = np.abs(low_1d - np.concatenate([[low_1d[0]], low_1d[:-1]]))
     tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14_4h = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    
+    # Calculate 4h ATR(14) for stoploss
+    tr1_4h = high - low
+    tr2_4h = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    tr3_4h = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
+    atr_14_4h_direct = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     # Calculate 4h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -45,7 +52,8 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any required data is NaN
         if (np.isnan(upper_20_4h[i]) or np.isnan(lower_20_4h[i]) or 
-            np.isnan(atr_14_4h[i]) or np.isnan(volume_ratio[i])):
+            np.isnan(atr_14_4h[i]) or np.isnan(atr_14_4h_direct[i]) or 
+            np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -55,7 +63,7 @@ def generate_signals(prices):
         # 3. Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
         if (close[i] > upper_20_4h[i] and
             volume_ratio[i] > 1.5 and
-            atr_14_4h[i] > 0.005 * close[i]):
+            atr_14_4h_direct[i] > 0.005 * close[i]):
             signals[i] = 0.25
             
         # Short conditions:
@@ -64,13 +72,13 @@ def generate_signals(prices):
         # 3. Volatility filter: ATR > 0.5% of price
         elif (close[i] < lower_20_4h[i] and
               volume_ratio[i] > 1.5 and
-              atr_14_4h[i] > 0.005 * close[i]):
+              atr_14_4h_direct[i] > 0.005 * close[i]):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "4h_1d_Donchian20_Volume_ATR_Filter_v2"
+name = "4h_1d_Donchian20_Volume_ATR_Filter_v3"
 timeframe = "4h"
 leverage = 1.0
