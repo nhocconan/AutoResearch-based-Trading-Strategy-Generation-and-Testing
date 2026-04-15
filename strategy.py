@@ -13,76 +13,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d HTF data once before loop (as per experiment instructions)
+    # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Donchian channels (20-period) - primary trend filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    upper_20_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_20_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d EMA(200) for trend filter
+    ema_200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_6h = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Align 1d Donchian to 4h
-    upper_20_4h = align_htf_to_ltf(prices, df_1d, upper_20_1d)
-    lower_20_4h = align_htf_to_ltf(prices, df_1d, lower_20_1d)
+    # Calculate 1d weekly pivot points (prior week)
+    weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().shift(5).values
+    weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().shift(5).values
+    weekly_close = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).last().shift(5).values
     
-    # Calculate 1d ATR(14) for volatility regime filter
-    tr1 = pd.Series(df_1d['high']).values - pd.Series(df_1d['low']).values
-    tr2 = np.abs(pd.Series(df_1d['high']).values - np.concatenate([[pd.Series(df_1d['close']).values[0]], pd.Series(df_1d['close']).values[:-1]]))
-    tr3 = np.abs(pd.Series(df_1d['low']).values - np.concatenate([[pd.Series(df_1d['close']).values[0]], pd.Series(df_1d['close']).values[:-1]]))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_4h = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
     
-    # Calculate 4h ATR(14) for position sizing and stoploss
-    tr1_4h = high - low
-    tr2_4h = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3_4h = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
-    atr_14_4h_local = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    weekly_pivot_6h = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    weekly_r1_6h = align_htf_to_ltf(prices, df_1d, weekly_r1)
+    weekly_s1_6h = align_htf_to_ltf(prices, df_1d, weekly_s1)
     
-    # Calculate 4h volume ratio (current vs 20-period average)
+    # Calculate 6h ATR(14) for volatility filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate 6h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
     signals = np.zeros(n)
     
-    # Session filter: avoid low-volume periods (22-06 UTC)
+    # Precompute session filter (00-24 UTC for 6h - less restrictive)
     hours = prices.index.hour
-    in_session = (hours >= 6) & (hours <= 22)  # 6 AM to 10 PM UTC
+    in_session = (hours >= 0) & (hours <= 23)  # Always true for 6h, kept for structure
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_20_4h[i]) or np.isnan(lower_20_4h[i]) or 
-            np.isnan(atr_14_4h[i]) or np.isnan(atr_14_4h_local[i]) or 
-            np.isnan(volume_ratio[i]) or not in_session[i]):
+        if (np.isnan(ema_200_6h[i]) or np.isnan(weekly_pivot_6h[i]) or 
+            np.isnan(weekly_r1_6h[i]) or np.isnan(weekly_s1_6h[i]) or 
+            np.isnan(atr_14[i]) or np.isnan(volume_ratio[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
         # Long conditions:
-        # 1. 4h price breaks above 1d Donchian upper (20) - bullish breakout
-        # 2. Volume confirmation: volume > 1.5x average
-        # 3. Volatility regime: 1d ATR > 0.5% of price (avoid low volatility chop)
-        if (close[i] > upper_20_4h[i] and
+        # 1. 6h price above 1d EMA(200) - bullish trend filter
+        # 2. 6h price breaks above weekly R1 (prior week resistance) - breakout
+        # 3. Volume confirmation: volume > 1.5x average
+        # 4. Volatility filter: ATR > 0.3% of price (avoid low volatility chop)
+        if (close[i] > ema_200_6h[i] and
+            close[i] > weekly_r1_6h[i] and
             volume_ratio[i] > 1.5 and
-            atr_14_4h[i] > 0.005 * close[i]):
+            atr_14[i] > 0.003 * close[i]):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. 4h price breaks below 1d Donchian lower (20) - bearish breakdown
-        # 2. Volume confirmation: volume > 1.5x average
-        # 3. Volatility regime: 1d ATR > 0.5% of price
-        elif (close[i] < lower_20_4h[i] and
+        # 1. 6h price below 1d EMA(200) - bearish trend filter
+        # 2. 6h price breaks below weekly S1 (prior week support) - breakdown
+        # 3. Volume confirmation: volume > 1.5x average
+        # 4. Volatility filter: ATR > 0.3% of price
+        elif (close[i] < ema_200_6h[i] and
+              close[i] < weekly_s1_6h[i] and
               volume_ratio[i] > 1.5 and
-              atr_14_4h[i] > 0.005 * close[i]):
+              atr_14[i] > 0.003 * close[i]):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "4h_1d_Donchian20_Volume_Volatility_Filter_v1"
-timeframe = "4h"
+name = "6h_1d_EMA200_WeeklyPivot_R1S1_Breakout_Volume_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
