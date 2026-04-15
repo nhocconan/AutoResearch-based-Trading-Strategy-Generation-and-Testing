@@ -13,78 +13,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily HTF data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 4h HTF data once before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    daily_close = df_1d['close'].values
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_volume = df_1d['volume'].values
+    # Calculate 4h Donchian channels (20-period) for breakout signals
+    highest_20 = pd.Series(df_4h['high']).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(df_4h['low']).rolling(window=20, min_periods=20).min().values
+    mid_20 = (highest_20 + lowest_20) / 2.0
     
-    # Calculate daily pivot points (standard floor trader's pivots)
-    # P = (H + L + C) / 3
-    # R1 = 2*P - L
-    # S1 = 2*P - H
-    pivot = (daily_high + daily_low + daily_close) / 3.0
-    r1 = 2 * pivot - daily_low
-    s1 = 2 * pivot - daily_high
-    
-    # Calculate daily ATR(14) for volatility filter
-    tr1 = pd.Series(daily_high - daily_low)
-    tr2 = pd.Series(np.abs(daily_high - np.concatenate([[daily_close[0]], daily_close[:-1]])))
-    tr3 = pd.Series(np.abs(daily_low - np.concatenate([[daily_close[0]], daily_close[:-1]])))
+    # Calculate 4h ATR(14) for volatility filter
+    tr1 = pd.Series(df_4h['high'] - df_4h['low'])
+    tr2 = pd.Series(np.abs(df_4h['high'] - np.concatenate([[df_4h['close'].iloc[0]], df_4h['close'].iloc[:-1]])))
+    tr3 = pd.Series(np.abs(df_4h['low'] - np.concatenate([[df_4h['close'].iloc[0]], df_4h['close'].iloc[:-1]])))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr_14 = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align HTF indicators to 4h timeframe with proper delay
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    atr_14_4h = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Align HTF indicators to 1h timeframe with proper delay
+    highest_20_1h = align_htf_to_ltf(prices, df_4h, highest_20)
+    lowest_20_1h = align_htf_to_ltf(prices, df_4h, lowest_20)
+    mid_20_1h = align_htf_to_ltf(prices, df_4h, mid_20)
+    atr_14_1h = align_htf_to_ltf(prices, df_4h, atr_14)
     
-    # Calculate 4h Donchian channels (20-period) for breakout signals
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate 4h volume ratio (current vs 20-period average)
+    # Calculate 1h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
+    
+    # Pre-compute session filter (08-20 UTC)
+    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
-            np.isnan(atr_14_4h[i]) or 
-            np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(highest_20_1h[i]) or np.isnan(lowest_20_1h[i]) or 
+            np.isnan(mid_20_1h[i]) or np.isnan(atr_14_1h[i]) or np.isnan(volume_ratio[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Session filter: 08-20 UTC
+        hour = hours[i]
+        if not (8 <= hour <= 20):
             signals[i] = 0.0
             continue
         
         # Entry conditions:
-        # 1. 4h price breaks above R1 with volume confirmation → long
-        # 2. 4h price breaks below S1 with volume confirmation → short
-        # 3. Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
-        # 4. Volume confirmation: volume > 1.3x average
-        # 5. Discrete position sizing: 0.25
+        # Long: price breaks above 4h Donchian upper band with volume confirmation
+        # Short: price breaks below 4h Donchian lower band with volume confirmation
+        # Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
+        # Volume confirmation: volume > 1.5x average
+        # Discrete position sizing: 0.20
         
-        # Long conditions: 4h breakout above R1
-        if (close[i] > r1_4h[i] and            # 4h price above R1 pivot
-            volume_ratio[i] > 1.3 and          # Volume confirmation
-            atr_14_4h[i] > 0.005 * close[i]):  # Volatility filter
-            signals[i] = 0.25
+        # Long conditions: breakout above 4h Donchian upper band
+        if (close[i] > highest_20_1h[i] and            # price above 4h upper band
+            volume_ratio[i] > 1.5 and                  # volume confirmation
+            atr_14_1h[i] > 0.005 * close[i]):          # volatility filter
+            signals[i] = 0.20
             
-        # Short conditions: 4h breakdown below S1
-        elif (close[i] < s1_4h[i] and          # 4h price below S1 pivot
-              volume_ratio[i] > 1.3 and        # Volume confirmation
-              atr_14_4h[i] > 0.005 * close[i]): # Volatility filter
-            signals[i] = -0.25
+        # Short conditions: breakdown below 4h Donchian lower band
+        elif (close[i] < lowest_20_1h[i] and           # price below 4h lower band
+              volume_ratio[i] > 1.5 and                # volume confirmation
+              atr_14_1h[i] > 0.005 * close[i]):        # volatility filter
+            signals[i] = -0.20
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Pivot_R1_S1_Breakout_Volume_ATR_Filter"
-timeframe = "4h"
+name = "1h_Donchian_Breakout_Volume_ATR_Filter_Session"
+timeframe = "1h"
 leverage = 1.0
