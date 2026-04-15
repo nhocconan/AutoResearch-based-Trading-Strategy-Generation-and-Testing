@@ -13,102 +13,97 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily HTF data once before loop
+    # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Donchian channels (20-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    upper_20_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_20_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Align 1d Donchian to daily (no shift needed as we're on 1d timeframe)
-    upper_20_daily = upper_20_1d  # Already aligned since timeframe is 1d
-    lower_20_daily = lower_20_1d
-    
-    # Get weekly HTF data for regime filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    # Calculate weekly ADX(14) for trend strength
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
+    # Calculate 1d ADX(14) for trend strength
     # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.concatenate([[close_1w[0]], close_1w[:-1]]))
-    tr3 = np.abs(low_1w - np.concatenate([[close_1w[0]], close_1w[:-1]]))
-    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
     # Directional Movement
-    dm_plus = np.where((high_1w - np.concatenate([[high_1w[0]], high_1w[:-1]])) > 
-                       (np.concatenate([[low_1w[0]], low_1w[:-1]]) - low_1w), 
-                       np.maximum(high_1w - np.concatenate([[high_1w[0]], high_1w[:-1]]), 0), 0)
-    dm_minus = np.where((np.concatenate([[low_1w[0]], low_1w[:-1]]) - low_1w) > 
-                        (high_1w - np.concatenate([[high_1w[0]], high_1w[:-1]])), 
-                        np.maximum(np.concatenate([[low_1w[0]], low_1w[:-1]]) - low_1w, 0), 0)
+    up_move = df_1d['high'] - df_1d['high'].shift(1)
+    down_move = df_1d['low'].shift(1) - df_1d['low']
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
     # Smoothed values
-    tr_14 = pd.Series(tr_1w).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    tr_14 = pd.Series(tr_1d.values).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_dm_14 = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    minus_dm_14 = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # DI and DX
-    di_plus = 100 * dm_plus_14 / (tr_14 + 1e-10)
-    di_minus = 100 * dm_minus_14 / (tr_14 + 1e-10)
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx_14 = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Directional Indicators
+    plus_di = 100 * plus_dm_14 / (tr_14 + 1e-10)
+    minus_di = 100 * minus_dm_14 / (tr_14 + 1e-10)
     
-    # Align weekly ADX to daily
-    adx_14_daily = align_htf_to_ltf(prices, df_1w, adx_14)
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx_1d = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 1d ATR(14) for volatility
-    tr1_d = high - low
-    tr2_d = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3_d = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr_d = np.maximum(tr1_d, np.maximum(tr2_d, tr3_d))
-    atr_14 = pd.Series(tr_d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Align 1d ADX to 6h
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate 1d volume ratio (current vs 20-period average)
+    # Calculate 6h Donchian channels (20-period)
+    upper_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 6h ATR(14) for volatility filter
+    tr1_6h = high - low
+    tr2_6h = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    tr3_6h = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr_6h = np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))
+    atr_14_6h = pd.Series(tr_6h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate 6h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
     signals = np.zeros(n)
     
+    # Session filter: focus on active UTC sessions (8:00-20:00) for better liquidity
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_20_daily[i]) or np.isnan(lower_20_daily[i]) or 
-            np.isnan(adx_14_daily[i]) or np.isnan(atr_14[i]) or 
-            np.isnan(volume_ratio[i])):
+        if (np.isnan(upper_20[i]) or np.isnan(lower_20[i]) or 
+            np.isnan(adx_1d_aligned[i]) or np.isnan(atr_14_6h[i]) or 
+            np.isnan(volume_ratio[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
         # Long conditions:
-        # 1. Daily price breaks above 1d Donchian upper (20) - bullish breakout
-        # 2. Weekly ADX > 25 (strong trend)
+        # 1. Strong 1d uptrend: ADX > 25 and +DI > -DI
+        # 2. 6h price breaks above 20-period Donchian upper
         # 3. Volume confirmation: volume > 1.5x average
-        if (close[i] > upper_20_daily[i] and
-            adx_14_daily[i] > 25 and
-            volume_ratio[i] > 1.5):
+        # 4. Volatility filter: ATR > 0.3% of price (avoid low volatility chop)
+        if (adx_1d_aligned[i] > 25 and
+            plus_di[i] > minus_di[i] and
+            close[i] > upper_20[i] and
+            volume_ratio[i] > 1.5 and
+            atr_14_6h[i] > 0.003 * close[i]):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Daily price breaks below 1d Donchian lower (20) - bearish breakdown
-        # 2. Weekly ADX > 25 (strong trend)
+        # 1. Strong 1d downtrend: ADX > 25 and -DI > +DI
+        # 2. 6h price breaks below 20-period Donchian lower
         # 3. Volume confirmation: volume > 1.5x average
-        elif (close[i] < lower_20_daily[i] and
-              adx_14_daily[i] > 25 and
-              volume_ratio[i] > 1.5):
+        # 4. Volatility filter: ATR > 0.3% of price
+        elif (adx_1d_aligned[i] > 25 and
+              minus_di[i] > plus_di[i] and
+              close[i] < lower_20[i] and
+              volume_ratio[i] > 1.5 and
+              atr_14_6h[i] > 0.003 * close[i]):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1d_Donchian20_1w_ADX25_Volume_Filter_v1"
-timeframe = "1d"
+name = "6h_ADX25_DI_Donchian20_Volume_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
