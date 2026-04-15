@@ -1,7 +1,3 @@
-# Based on successful patterns: 12h timeframe with daily EMA trend filter, volume confirmation, and volatility regime filter
-# Focus on mean reversion in ranging markets and trend following in trending markets using price action relative to daily EMA
-# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -9,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -32,40 +28,40 @@ def generate_signals(prices):
     atr_14d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14d_aligned = align_htf_to_ltf(prices, daily, atr_14d)
     
-    # Volume threshold: 1.5x median of last 30 bars
+    # Volume threshold: 2.0x median of last 30 bars (more selective)
     vol_median = pd.Series(volume).rolling(window=30, min_periods=30).median()
-    vol_threshold = 1.5 * vol_median
+    vol_threshold = 2.0 * vol_median
     
-    # ATR median for volatility regime filter
-    atr_median = pd.Series(atr_14d_aligned).rolling(window=50, min_periods=50).median()
+    # ATR median for volatility regime filter (longer window for stability)
+    atr_median = pd.Series(atr_14d_aligned).rolling(window=100, min_periods=100).median()
     
     signals = np.zeros(n)
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_20d_aligned[i]) or np.isnan(atr_14d_aligned[i]) or
             np.isnan(vol_threshold[i]) or np.isnan(atr_median[i])):
             continue
         
-        # Volatility filter: avoid extremes (0.5x to 3.0x of median ATR)
-        vol_filter = (atr_14d_aligned[i] > 0.5 * atr_median[i]) and (atr_14d_aligned[i] < 3.0 * atr_median[i])
+        # Volatility filter: avoid extremes (0.7x to 2.5x of median ATR)
+        vol_filter = (atr_14d_aligned[i] > 0.7 * atr_median[i]) and (atr_14d_aligned[i] < 2.5 * atr_median[i])
         
         # Long: Price above daily EMA20 + volume spike + volatility filter
         if (close[i] > ema_20d_aligned[i] and 
             volume[i] > vol_threshold[i] and 
             vol_filter):
-            signals[i] = 0.25
+            signals[i] = 0.30
         
         # Short: Price below daily EMA20 + volume spike + volatility filter
         elif (close[i] < ema_20d_aligned[i] and 
               volume[i] > vol_threshold[i] and 
               vol_filter):
-            signals[i] = -0.25
+            signals[i] = -0.30
         
         # Exit: price crosses back below/above daily EMA20
         elif (i > 0 and 
-              ((signals[i-1] == 0.25 and close[i] < ema_20d_aligned[i]) or
-               (signals[i-1] == -0.25 and close[i] > ema_20d_aligned[i]))):
+              ((signals[i-1] == 0.30 and close[i] < ema_20d_aligned[i]) or
+               (signals[i-1] == -0.30 and close[i] > ema_20d_aligned[i]))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -74,6 +70,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_DailyEMA20_Vol1.5x_ATR14dFilter_v1"
-timeframe = "12h"
+name = "4h_DailyEMA20_Vol2.0x_ATR14dFilter_v3"
+timeframe = "4h"
 leverage = 1.0
