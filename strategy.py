@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mff_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -44,7 +44,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
         if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or 
             np.isnan(weekly_s1_aligned[i]) or np.isnan(vol_ma[i])):
@@ -66,6 +66,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyPivot_R1_S1_Breakout_Volume_RangeFilter"
-timeframe = "1d"
+name = "12h_WeeklyPivot_R1_S1_Breakout_Volume_RangeFilter"
+timeframe = "12h"
 leverage = 1.0
