@@ -3,6 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 1d strategy using 1w EMA trend filter + RSI mean reversion + volume spike
+# In bull markets: 1w EMA up + RSI < 30 + volume spike = long
+# In bear markets: 1w EMA down + RSI > 70 + volume spike = short
+# Volume spike filters for conviction, reducing false signals
+# Low trade frequency expected (<25/year) to minimize fee drag
+# Works in both regimes by adapting to 1w trend
+
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
@@ -13,32 +20,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d HTF data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 1w HTF data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ATR(14) for volatility regime filter
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
-    tr3 = np.abs(df_1d['low'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Calculate 1w EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate daily Donchian(20) channels (using prior day's OHLC)
-    prior_high = df_1d['high'].shift(1).values
-    prior_low = df_1d['low'].shift(1).values
-    prior_close = df_1d['close'].shift(1).values
+    # Calculate 1d RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    donchian_upper = pd.Series(prior_high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(prior_low).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to 4h
-    donchian_upper_4h = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_4h = align_htf_to_ltf(prices, df_1d, donchian_lower)
-    
-    # Calculate 4h volume ratio (current vs 20-period average)
+    # Calculate 1d volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
@@ -46,36 +48,27 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(donchian_upper_4h[i]) or 
-            np.isnan(donchian_lower_4h[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(rsi_values[i]) or 
+            np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility regime filter: only trade when daily ATR is elevated (> 0.6% of price)
-        vol_regime = atr_14_1d_aligned[i] > 0.006 * close[i]
-        
-        # Long conditions:
-        # 1. Price breaks above prior day Donchian upper with volume
-        # 2. Volume confirmation: volume > 1.5x average
-        # 3. Daily volatility regime filter
-        if (close[i] > donchian_upper_4h[i] and
-            volume_ratio[i] > 1.5 and
-            vol_regime):
+        # Long conditions: 1w uptrend + RSI oversold + volume spike
+        if (close[i] > ema_50_1w_aligned[i] and  # 1w EMA trend filter (bullish)
+            rsi_values[i] < 30 and               # RSI oversold
+            volume_ratio[i] > 2.0):              # Volume spike (conviction)
             signals[i] = 0.25
             
-        # Short conditions:
-        # 1. Price breaks below prior day Donchian lower with volume
-        # 2. Volume confirmation: volume > 1.5x average
-        # 3. Daily volatility regime filter
-        elif (close[i] < donchian_lower_4h[i] and
-              volume_ratio[i] > 1.5 and
-              vol_regime):
+        # Short conditions: 1w downtrend + RSI overbought + volume spike
+        elif (close[i] < ema_50_1w_aligned[i] and  # 1w EMA trend filter (bearish)
+              rsi_values[i] > 70 and               # RSI overbought
+              volume_ratio[i] > 2.0):              # Volume spike (conviction)
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian20_Breakout_Volume_Regime_v4"
-timeframe = "4h"
+name = "1d_EMA50_RSI_Volume_Spike_v1"
+timeframe = "1d"
 leverage = 1.0
