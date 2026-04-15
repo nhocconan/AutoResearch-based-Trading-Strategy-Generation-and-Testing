@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R1/S1 breakout with 1d volume spike and ADX regime filter
-# Long when price breaks above 1d Camarilla R1 (resistance 1) + 1d ADX > 20 + volume > 2x 24-period avg
-# Short when price breaks below 1d Camarilla S1 (support 1) + 1d ADX > 20 + volume > 2x 24-period avg
-# Uses discrete position sizing (0.25) to minimize fee churn. Target: 50-150 total trades over 4 years.
-# Camarilla pivots provide mathematically derived support/resistance levels that work intraday.
-# ADX filter ensures we only trade when there is sufficient trend strength to avoid chop losses.
-# Volume confirmation ensures breakouts have participation. Works in bull/bear by requiring ADX > 20.
+# Hypothesis: 4h TRIX(9) signal line crossover with 1d volume spike and choppiness regime filter
+# Long when TRIX crosses above its signal line + 1d volume > 2x 20-period average + CHOP > 61.8 (range)
+# Short when TRIX crosses below its signal line + 1d volume > 2x 20-period average + CHOP > 61.8 (range)
+# Uses discrete position sizing (0.25) to minimize fee churn. Target: 20-40 trades/year.
+# TRIX is a momentum oscillator that filters noise; signal line crossovers catch reversals.
+# Volume spike confirms participation; chop filter ensures we only trade in ranging markets where mean reversion works.
+# Works in bull markets (buy dips in range) and bear markets (sell rallies in range) by requiring range regime.
 
 def generate_signals(prices):
     n = len(prices)
@@ -27,25 +27,31 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 1d Indicator: ADX (trend strength filter) ===
+    # === 1d Indicators: TRIX, Signal Line, Volume SMA, Choppiness Index ===
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate ADX components: +DM, -DM, TR
-    high_1d_shift = np.roll(high_1d, 1)
-    low_1d_shift = np.roll(low_1d, 1)
-    high_1d_shift[0] = high_1d[0]
-    low_1d_shift[0] = low_1d[0]
+    # TRIX: triple EMA of ROC, period=9
+    roc = np.diff(np.log(close_1d), prepend=np.log(close_1d[0]))  # approx ROC
+    ema1 = pd.Series(roc).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema2 = pd.Series(ema1).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema3 = pd.Series(ema2).ewm(span=9, adjust=False, min_periods=9).mean().values
+    trix = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)  # % change
+    trix[0] = 0
     
-    plus_dm = np.where((high_1d - high_1d_shift) > (low_1d_shift - low_1d), 
-                       np.maximum(high_1d - high_1d_shift, 0), 0)
-    minus_dm = np.where((low_1d_shift - low_1d) > (high_1d - high_1d_shift), 
-                        np.maximum(low_1d_shift - low_1d, 0), 0)
+    # Signal line: EMA of TRIX, period=9
+    signal_line = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
     
+    # Volume SMA (20-period)
+    vol_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Choppiness Index (CHOP), period=14
+    # CHOP = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(period)
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -54,67 +60,26 @@ def generate_signals(prices):
     tr3[0] = np.abs(low_1d[0] - close_1d[0])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Wilder's smoothing (alpha = 1/period)
-    period = 14
-    alpha = 1.0 / period
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (max_high - min_low + 1e-10)) / np.log10(14)
+    chop = np.where((max_high - min_low) > 0, chop, 50)  # avoid division by zero
     
-    atr = np.zeros_like(tr)
-    atr[period-1] = np.mean(tr[:period])
-    for i in range(period, len(tr)):
-        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+    # Align all 1d indicators to 4h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
+    signal_line_aligned = align_htf_to_ltf(prices, df_1d, signal_line)
+    vol_sma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_20_1d)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    plus_di = np.zeros_like(plus_dm)
-    minus_di = np.zeros_like(minus_dm)
-    
-    # Smooth +DM and -DM
-    plus_dm_smooth = np.zeros_like(plus_dm)
-    minus_dm_smooth = np.zeros_like(minus_dm)
-    
-    plus_dm_smooth[period-1] = np.mean(plus_dm[:period])
-    minus_dm_smooth[period-1] = np.mean(minus_dm[:period])
-    
-    for i in range(period, len(plus_dm)):
-        plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
-        minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
-    
-    # Avoid division by zero
-    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
-    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
-    
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    
-    # Wilder's smoothing for ADX
-    adx = np.zeros_like(dx)
-    adx[2*period-1] = np.mean(dx[period-1:2*period])
-    for i in range(2*period, len(dx)):
-        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-    
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # === 1d Indicator: Camarilla Pivot Levels (R1, S1) ===
-    # Based on previous day's OHLC
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close[0] = close_1d[0]
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    
-    # Camarilla calculations
-    range_1d = prev_high - prev_low
-    camarilla_r1 = prev_close + (range_1d * 1.1 / 12)
-    camarilla_s1 = prev_close - (range_1d * 1.1 / 12)
-    
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Volume SMA for confirmation (using 24-period for 12h timeframe)
-    vol_sma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # === 4h Indicators: None needed beyond price and volume ===
+    # Volume SMA (20-period) for 4h volume confirmation
+    vol_sma_20_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(24, 2*period) + 1  # volume(24) + ADX(28) + 1 for pivot
+    warmup = max(30, 20)  # TRIX needs ~30 bars, volume SMA needs 20
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -122,29 +87,32 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2x 24-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_24[i] * 2.0)
+        # Volume filter: current 4h volume > 2x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20_4h[i] * 2.0)
         
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(vol_sma_24[i])):
+        if (np.isnan(trix_aligned[i]) or np.isnan(signal_line_aligned[i]) or
+            np.isnan(vol_sma_20_aligned[i]) or np.isnan(chop_aligned[i]) or
+            np.isnan(vol_sma_20_4h[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 1d Camarilla R1
-        # 2. Trend (1d ADX > 20)
-        # 3. Volume confirmation
-        if (close[i] > camarilla_r1_aligned[i]) and \
-           (adx_aligned[i] > 20) and vol_confirm:
+        # 1. TRIX crosses above signal line
+        # 2. 1d volume > 2x 20-period average (confirmation)
+        # 3. Choppiness Index > 61.8 (range regime)
+        if (trix_aligned[i] > signal_line_aligned[i]) and \
+           (trix_aligned[i-1] <= signal_line_aligned[i-1]) and \
+           vol_confirm and (chop_aligned[i] > 61.8):
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 1d Camarilla S1
-        # 2. Trend (1d ADX > 20)
-        # 3. Volume confirmation
-        elif (close[i] < camarilla_s1_aligned[i]) and \
-             (adx_aligned[i] > 20) and vol_confirm:
+        # 1. TRIX crosses below signal line
+        # 2. 1d volume > 2x 20-period average (confirmation)
+        # 3. Choppiness Index > 61.8 (range regime)
+        elif (trix_aligned[i] < signal_line_aligned[i]) and \
+             (trix_aligned[i-1] >= signal_line_aligned[i-1]) and \
+             vol_confirm and (chop_aligned[i] > 61.8):
             signals[i] = -0.25
         
         else:
@@ -152,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_1dADX20_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_TRIX9_VolumeSpike_CHOP_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
