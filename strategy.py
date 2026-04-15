@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R4/S4 breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above 4h Camarilla R4 + 1d EMA34 uptrend + volume > 2.0x 20-period avg
-# Short when price breaks below 4h Camarilla S4 + 1d EMA34 downtrend + volume > 2.0x 20-period avg
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above 4h Donchian upper(20) + 1d EMA34 uptrend + volume > 2.0x 20-period avg
+# Short when price breaks below 4h Donchian lower(20) + 1d EMA34 downtrend + volume > 2.0x 20-period avg
 # Uses discrete position sizing (0.25) to minimize fee drag and control drawdown.
-# Camarilla R4/S4 levels (close ± ((high-low)*1.1/2)) provide stronger breakout signals than R3/S3.
 # 1d EMA34 provides medium-term trend filter reducing whipsaws in both bull and bear markets.
 # Volume threshold (2.0x) targets ~20-40 trades/year to minimize fee drag on 4h timeframe.
-# Previous day's OHLC used for Camarilla calculation ensures no look-ahead bias.
+# Donchian channels calculated from 4h HTF data for proper structure.
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,48 +25,30 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d HTF data once before loop
+    # Get 4h HTF data once before loop (primary timeframe is 4h, so we use it for structure)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
+    
+    # Get 1d HTF data once before loop for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
+    
+    # === 4h Indicator: Donchian Channel (20) ===
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    # Calculate Donchian upper/lower on 4h data
+    donchian_upper_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_lower_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Align to 15m timeframe (since we're calculating on 4h but need values for each bar)
+    donchian_upper_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper_4h)
+    donchian_lower_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower_4h)
     
     # === 1d Indicator: EMA34 ===
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # === 4h Camarilla Pivot Levels (based on previous day) ===
-    # Calculate using previous day's high, low, close
-    # Camarilla levels: R4 = close + ((high - low) * 1.1/2), S4 = close - ((high - low) * 1.1/2)
-    
-    # Create arrays to store previous day's OHLC aligned to 4h bars
-    prev_day_high = np.full(n, np.nan)
-    prev_day_low = np.full(n, np.nan)
-    prev_day_close = np.full(n, np.nan)
-    
-    # For each 4h bar, find the previous day's OHLC
-    # We'll use the 1d data to get the previous completed day's values
-    for i in range(n):
-        current_time = prices['open_time'].iloc[i]
-        # Find the 1d bar that completed before current_time
-        # Get index of the 1d bar that is strictly before current_time
-        mask = df_1d['open_time'] < current_time
-        if mask.any():
-            idx = mask.sum() - 1  # Get the last completed 1d bar
-            if idx >= 0:
-                prev_day_high[i] = df_1d['high'].iloc[idx]
-                prev_day_low[i] = df_1d['low'].iloc[idx]
-                prev_day_close[i] = df_1d['close'].iloc[idx]
-    
-    # Calculate Camarilla R4/S4 levels
-    camarilla_r4 = np.full(n, np.nan)
-    camarilla_s4 = np.full(n, np.nan)
-    
-    for i in range(n):
-        if not (np.isnan(prev_day_high[i]) or np.isnan(prev_day_low[i]) or np.isnan(prev_day_close[i])):
-            high_low_diff = prev_day_high[i] - prev_day_low[i]
-            camarilla_r4[i] = prev_day_close[i] + (high_low_diff * 1.1 / 2)
-            camarilla_s4[i] = prev_day_close[i] - (high_low_diff * 1.1 / 2)
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -75,7 +56,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(34, 20) + 5  # EMA34 + volume(20) + buffer
+    warmup = max(34, 20) + 5  # EMA34 + Donchian(20) + volume(20) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -84,7 +65,7 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r4[i]) or np.isnan(camarilla_s4[i]) or
+        if (np.isnan(donchian_upper_4h_aligned[i]) or np.isnan(donchian_lower_4h_aligned[i]) or
             np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
@@ -93,18 +74,18 @@ def generate_signals(prices):
         vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above camarilla R4 (close > R4)
+        # 1. Price breaks above 4h Donchian upper (close > upper)
         # 2. 1d EMA34 uptrend (close > EMA34)
         # 3. Volume confirmation
-        if (close[i] > camarilla_r4[i]) and \
+        if (close[i] > donchian_upper_4h_aligned[i]) and \
            (close[i] > ema_34_1d_aligned[i]) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below camarilla S4 (close < S4)
+        # 1. Price breaks below 4h Donchian lower (close < lower)
         # 2. 1d EMA34 downtrend (close < EMA34)
         # 3. Volume confirmation
-        elif (close[i] < camarilla_s4[i]) and \
+        elif (close[i] < donchian_lower_4h_aligned[i]) and \
              (close[i] < ema_34_1d_aligned[i]) and vol_confirm:
             signals[i] = -0.25
         
@@ -113,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R4S4_1dEMA34_Volume_Filter_v1"
+name = "4h_Donchian20_1dEMA34_Volume_Filter_v2"
 timeframe = "4h"
 leverage = 1.0
