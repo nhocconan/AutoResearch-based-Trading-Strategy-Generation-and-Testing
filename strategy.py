@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,56 +13,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly high/low for Donchian channel (20 weeks)
-    df_1w = get_htf_data(prices, '1w')
-    high_20w = pd.Series(df_1w['high'].values).rolling(window=20, min_periods=20).max()
-    low_20w = pd.Series(df_1w['low'].values).rolling(window=20, min_periods=20).min()
-    high_20w_aligned = align_htf_to_ltf(prices, df_1w, high_20w)
-    low_20w_aligned = align_htf_to_ltf(prices, df_1w, low_20w)
-    
-    # Daily pivot points for trend direction
+    # 1-day ATR for volatility filter
     df_1d = get_htf_data(prices, '1d')
-    pivot = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3
-    r1 = 2 * pivot - df_1d['low'].values
-    s1 = 2 * pivot - df_1d['high'].values
-    r2 = pivot + (df_1d['high'].values - df_1d['low'].values)
-    s2 = pivot - (df_1d['high'].values - df_1d['low'].values)
-    r3 = r1 + (df_1d['high'].values - df_1d['low'].values)
-    s3 = s1 - (df_1d['high'].values - df_1d['low'].values)
+    tr_1d = np.maximum(df_1d['high'].values - df_1d['low'].values,
+                       np.maximum(np.abs(df_1d['high'].values - np.concatenate([[df_1d['close'][0]], df_1d['close'][:-1]])),
+                                  np.abs(df_1d['low'].values - np.concatenate([[df_1d['close'][0]], df_1d['close'][:-1]]))))
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # 12-hour Donchian channels (20 periods)
+    close_series = pd.Series(close)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper_12h = high_series.rolling(window=20, min_periods=20).max()
+    lower_12h = low_series.rolling(window=20, min_periods=20).min()
     
     # Volume confirmation: current > 1.5x median of last 20 bars
     vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
     vol_threshold = 1.5 * vol_median
     
+    # ATR-based volatility filter: require ATR > 0.3 * median ATR
+    atr_median = pd.Series(atr_1d_aligned).rolling(window=50, min_periods=1).median()
+    vol_filter = atr_1d_aligned > 0.3 * atr_median
+    
     signals = np.zeros(n)
     
     for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_20w_aligned[i]) or np.isnan(low_20w_aligned[i]) or
-            np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(vol_threshold[i])):
+        if (np.isnan(upper_12h[i]) or np.isnan(lower_12h[i]) or 
+            np.isnan(vol_threshold[i]) or np.isnan(vol_filter[i])):
             continue
         
-        # Long: price breaks above weekly Donchian high AND above daily R3 (strong bullish)
-        if close[i] > high_20w_aligned[i] and close[i] > r3_aligned[i] and volume[i] > vol_threshold[i]:
+        # Long: close breaks above upper band + volume + volatility filter
+        if close[i] > upper_12h[i] and volume[i] > vol_threshold[i] and vol_filter[i]:
             signals[i] = 0.25
         
-        # Short: price breaks below weekly Donchian low AND below daily S3 (strong bearish)
-        elif close[i] < low_20w_aligned[i] and close[i] < s3_aligned[i] and volume[i] > vol_threshold[i]:
+        # Short: close breaks below lower band + volume + volatility filter
+        elif close[i] < lower_12h[i] and volume[i] > vol_threshold[i] and vol_filter[i]:
             signals[i] = -0.25
         
-        # Exit: price returns to daily pivot area (mean reversion to fair value)
+        # Exit: close crosses back inside bands (mean reversion)
         elif (i > 0 and 
-              ((signals[i-1] == 0.25 and close[i] < pivot_aligned[i]) or
-               (signals[i-1] == -0.25 and close[i] > pivot_aligned[i]))):
+              ((signals[i-1] == 0.25 and close[i] < upper_12h[i]) or
+               (signals[i-1] == -0.25 and close[i] > lower_12h[i]))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -71,6 +64,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyDonchian_DailyPivot_Volume"
-timeframe = "6h"
+name = "12h_Donchian_Breakout_Volume_VolFilter"
+timeframe = "12h"
 leverage = 1.0
