@@ -3,11 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout + weekly pivot direction + volume confirmation
-# Uses the previous 20-bar high/low as support/resistance. Breakouts are traded only when
-# confirmed by volume (1.5x median) and weekly pivot bias (price above/below weekly pivot).
-# Works in bull markets (breakouts up with bullish weekly bias) and bear markets
-# (breakouts down with bearish weekly bias). Target: 50-150 total trades over 4 years.
+# Hypothesis: 12h 1-week Donchian Channel Breakout with Volume Confirmation and 1-day ATR Filter
+# Uses weekly Donchian channels (20-period high/low) as support/resistance. 
+# Breakouts are traded only when confirmed by above-average volume and 1-day ATR < 20-day ATR (low volatility environment).
+# Works in bull markets (breakouts up) and bear markets (breakouts down). Target: 50-150 total trades over 4 years.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,73 +18,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for weekly pivot calculation
+    # Load 1w data for Donchian channels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # Load 1d data for ATR filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 20:
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot (using last 5 daily candles approx 1 week)
-    # Weekly high = max of last 5 daily highs
-    # Weekly low = min of last 5 daily lows
-    # Weekly close = last daily close
-    weekly_high = np.full(len(close_1d), np.nan)
-    weekly_low = np.full(len(close_1d), np.nan)
-    weekly_close = np.full(len(close_1d), np.nan)
+    # Calculate 20-period Donchian channels on 1w
+    high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    for i in range(4, len(close_1d)):
-        weekly_high[i] = np.max(high_1d[i-4:i+1])
-        weekly_low[i] = np.min(low_1d[i-4:i+1])
-        weekly_close[i] = close_1d[i]
+    # Align Donchian channels to 12h timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1w, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1w, low_20)
     
-    # Weekly pivot = (weekly high + weekly low + weekly close) / 3
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    # Calculate 14-period ATR on 1d
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align weekly pivot to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    # Calculate 20-period ATR on 1d
+    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Donchian channels (20-period) on 6h
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align ATRs to 12h timeframe
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    atr_20_aligned = align_htf_to_ltf(prices, df_1d, atr_20)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25  # Position size
+    base_size = 0.25  # Position size (25% of capital)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(weekly_pivot_aligned[i])):
+        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or
+            np.isnan(atr_14_aligned[i]) or np.isnan(atr_20_aligned[i])):
             continue
         
-        # Long entry: price breaks above Donchian high + volume confirmation + price > weekly pivot
-        if (close[i] > highest_high[i] and
+        # Long entry: price breaks above weekly Donchian high + volume confirmation + low volatility (ATR14 < ATR20)
+        if (close[i] > high_20_aligned[i] and
             volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-            close[i] > weekly_pivot_aligned[i] and
+            atr_14_aligned[i] < atr_20_aligned[i] and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below Donchian low + volume confirmation + price < weekly pivot
-        elif (close[i] < lowest_low[i] and
+        # Short entry: price breaks below weekly Donchian low + volume confirmation + low volatility
+        elif (close[i] < low_20_aligned[i] and
               volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-              close[i] < weekly_pivot_aligned[i] and
+              atr_14_aligned[i] < atr_20_aligned[i] and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse Donchian breakout
-        elif position == 1 and close[i] < lowest_low[i]:
+        # Exit: reverse breakout or high volatility (ATR14 >= ATR20)
+        elif position == 1 and (close[i] < low_20_aligned[i] or atr_14_aligned[i] >= atr_20_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > highest_high[i]:
+        elif position == -1 and (close[i] > high_20_aligned[i] or atr_14_aligned[i] >= atr_20_aligned[i]):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "6h_Donchian_WeeklyPivot_Volume"
-timeframe = "6h"
+name = "12h_1w_Donchian_Breakout_Volume_ATR"
+timeframe = "12h"
 leverage = 1.0
