@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams %R mean reversion with 1w EMA34 trend filter and volume confirmation
-# Long when Williams %R < -80 (oversold) + 1w EMA34 uptrend (price > EMA34) + volume > 1.5x 20-period avg
-# Short when Williams %R > -20 (overbought) + 1w EMA34 downtrend (price < EMA34) + volume > 1.5x 20-period avg
+# Hypothesis: 12h Volume-Weighted Average Price (VWAP) deviation with 1d EMA200 trend filter
+# Long when price > 12h VWAP + 1d EMA200 uptrend + volume > 1.5x 20-period avg
+# Short when price < 12h VWAP + 1d EMA200 downtrend + volume > 1.5x 20-period avg
 # Uses discrete position sizing (0.25) to minimize fee drag and control drawdown.
-# 1w EMA34 provides strong trend filter reducing whipsaws in both bull and bear markets.
-# Williams %R (14) identifies extreme reversals; volume confirmation ensures participation.
-# Designed for low trade frequency (target: 20-50/year) to overcome fee drag in ranging/bear markets.
+# 1d EMA200 provides strong long-term trend filter reducing whipsaws in both bull and bear markets.
+# Volume threshold targets ~20-40 trades/year to minimize fee drag on 12h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,25 +24,24 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1w HTF data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 1d HTF data once before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # === 1w Indicator: EMA34 ===
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # === 1d Indicator: EMA200 ===
+    close_1d = df_1d['close'].values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # === Williams %R (14) ===
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where(
-        (highest_high - lowest_low) != 0,
-        ((highest_high - close) / (highest_high - lowest_low)) * -100,
-        -50  # neutral when range is zero
-    )
+    # === 12h VWAP (Volume Weighted Average Price) ===
+    # Typical price = (high + low + close) / 3
+    typical_price = (high + low + close) / 3.0
+    # VWAP = cumulative(typical_price * volume) / cumulative(volume)
+    cum_vol_price = np.cumsum(typical_price * volume)
+    cum_vol = np.cumsum(volume)
+    # Avoid division by zero
+    vwap = np.divide(cum_vol_price, cum_vol, out=np.full_like(cum_vol_price, np.nan), where=cum_vol!=0)
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,7 +49,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(34, 14, 20) + 5  # EMA34 + Williams %R(14) + volume(20) + buffer
+    warmup = max(200, 20) + 5  # EMA200 + volume(20) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -60,9 +58,7 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(williams_r[i]) or 
-            np.isnan(vol_sma_20[i])):
+        if (np.isnan(vwap[i]) or np.isnan(ema_200_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -70,19 +66,19 @@ def generate_signals(prices):
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # === LONG CONDITIONS ===
-        # 1. Williams %R < -80 (oversold)
-        # 2. 1w EMA34 uptrend (close > EMA34)
+        # 1. Price above VWAP
+        # 2. 1d EMA200 uptrend (price > EMA200)
         # 3. Volume confirmation
-        if (williams_r[i] < -80) and \
-           (close[i] > ema_34_1w_aligned[i]) and vol_confirm:
+        if (close[i] > vwap[i]) and \
+           (close[i] > ema_200_1d_aligned[i]) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Williams %R > -20 (overbought)
-        # 2. 1w EMA34 downtrend (close < EMA34)
+        # 1. Price below VWAP
+        # 2. 1d EMA200 downtrend (price < EMA200)
         # 3. Volume confirmation
-        elif (williams_r[i] > -20) and \
-             (close[i] < ema_34_1w_aligned[i]) and vol_confirm:
+        elif (close[i] < vwap[i]) and \
+             (close[i] < ema_200_1d_aligned[i]) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -90,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WilliamsR_1wEMA34_Volume_Filter_v1"
-timeframe = "1d"
+name = "12h_VWAP_1dEMA200_Volume_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
