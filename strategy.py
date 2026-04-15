@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using weekly Donchian channel breakouts with volume confirmation
-# and ATR-based position sizing. Weekly structure provides strong trend filter for BTC/ETH
-# in both bull and bear markets, while daily timeframe allows timely entries. Low trade
-# frequency (<25/year) minimizes fee drag. Uses discrete position sizes (0.0, ±0.25) to
-# reduce churn. ATR stoploss manages risk during volatile periods.
+# Hypothesis: 6h Donchian(20) breakout with 1d trend filter (EMA50) and volume confirmation.
+# Works in bull/bear: breakouts capture momentum, EMA50 filter avoids counter-trend trades.
+# Target: 50-150 trades over 4 years (12-37/year). Size: 0.25.
+
+name = "6h_Donchian20_EMA50_VolumeFilter_v1"
+timeframe = "6h"
+leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,55 +21,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly HTF data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 1d HTF data once before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly Donchian channels (20-period)
-    highest_high_20 = pd.Series(df_1w['high'].values).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(df_1w['low'].values).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, highest_high_20)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, lowest_low_20)
-    
-    # Calculate weekly ATR(14) for volatility filter and position sizing
-    tr1 = df_1w['high'] - df_1w['low']
-    tr2 = np.abs(df_1w['high'] - np.concatenate([[df_1w['close'].iloc[0]], df_1w['close'].iloc[:-1]]))
-    tr3 = np.abs(df_1w['low'] - np.concatenate([[df_1w['close'].iloc[0]], df_1w['close'].iloc[:-1]]))
-    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1w = pd.Series(tr_1w).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_14_1w)
-    
-    # Calculate daily volume average (20-period) for volume confirmation
-    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate daily EMA(50) for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     
-    for i in range(100, n):
-        # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(atr_14_1w_aligned[i]) or np.isnan(volume_ma_20[i])):
+    # Warmup: need 20 bars for Donchian + 50 for EMA
+    for i in range(50, n):
+        # Skip if EMA data is NaN
+        if np.isnan(ema_50_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-day average
-        vol_confirm = volume[i] > 1.5 * volume_ma_20[i]
+        # Calculate 6h Donchian channels (20-period)
+        lookback_start = max(0, i - 19)
+        highest_high = np.max(high[lookback_start:i+1])
+        lowest_low = np.min(low[lookback_start:i+1])
         
-        # Volatility filter: only trade when weekly ATR is reasonable (< 8% of price)
-        vol_filter = atr_14_1w_aligned[i] < 0.08 * close[i]
+        # Volume filter: current volume > 1.5x 20-period average
+        if i >= 19:
+            vol_ma = np.mean(volume[i-19:i+1])
+            vol_filter = volume[i] > 1.5 * vol_ma
+        else:
+            vol_filter = False
         
-        # Long breakout: price breaks above weekly Donchian high
-        if (close[i] > donchian_high_aligned[i] and vol_confirm and vol_filter):
+        # Long: breakout above Donchian high + above daily EMA50 + volume
+        if (close[i] > highest_high and 
+            close[i] > ema_50_1d_aligned[i] and 
+            vol_filter):
             signals[i] = 0.25
             
-        # Short breakout: price breaks below weekly Donchian low
-        elif (close[i] < donchian_low_aligned[i] and vol_confirm and vol_filter):
+        # Short: breakout below Donchian low + below daily EMA50 + volume
+        elif (close[i] < lowest_low and 
+              close[i] < ema_50_1d_aligned[i] and 
+              vol_filter):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
-
-name = "1d_WeeklyDonchian20_Volume_Breakout_v1"
-timeframe = "1d"
-leverage = 1.0
