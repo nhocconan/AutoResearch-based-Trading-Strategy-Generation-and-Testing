@@ -3,11 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Choppiness Index regime filter with 1w RSI mean reversion
-# In high choppiness (range) markets, fade extreme RSI on weekly timeframe
-# In low choppiness (trending) markets, follow weekly RSI momentum
-# Designed for low trade frequency (10-25/year) with clear regime adaptation
-# Works in bull markets (trend following) and bear markets (mean reversion in ranges)
+# Hypothesis: 4h Donchian breakout with volume confirmation and 1d trend filter
+# Designed for low trade frequency (target 20-40/year) with clear trend following logic
+# Works in both bull (breakout continuation) and bear (breakdown continuation) markets
+# Uses volume spike and EMA trend filter to avoid false breakouts
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,102 +16,95 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Load 1d data (primary timeframe) for Choppiness Index
+    # Load 4h data (primary timeframe) for Donchian calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
+    
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
+    
+    # 4h Donchian channels (20-period)
+    donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    
+    # Load 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
+    volume_1d = df_1d['volume'].values
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Load 1d data for trend filter (EMA50)
     close_1d = df_1d['close'].values
     
-    # Load 1w data for RSI
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    close_1w = df_1w['close'].values
+    # Volume average (20-period on 1d)
+    vol_avg = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d Choppiness Index (14-period)
-    # True Range
-    tr1 = high_1d[1:] - low_1d[:-1]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    # EMA50 on 1d for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # ATR for volatility and stoploss (14-period on 4h)
+    tr1 = np.maximum(high_4h[1:], low_4h[:-1]) - np.minimum(high_4h[1:], low_4h[:-1])
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Sum of true ranges over 14 periods
-    atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index: 100 * log10(atr_sum / (hh - ll)) / log10(14)
-    # Avoid division by zero
-    range_hl = hh - ll
-    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
-    chop = 100 * np.log10(atr_sum / range_hl) / np.log10(14)
-    
-    # Calculate 1w RSI (14-period)
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Align indicators to 1d timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    rsi_aligned = align_htf_to_ltf(prices, df_1w, rsi)
+    # Align all indicators to 4h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_4h, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_4h, donch_low)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    atr_aligned = align_htf_to_ltf(prices, df_4h, atr)
     
     signals = np.zeros(n)
     position = 0
     base_size = 0.25  # Base position size
     
-    for i in range(30, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if np.isnan(chop_aligned[i]) or np.isnan(rsi_aligned[i]):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(vol_avg_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(atr_aligned[i])):
             continue
         
-        chop_val = chop_aligned[i]
-        rsi_val = rsi_aligned[i]
+        # Volatility-adjusted position size (inverse vol)
+        vol_factor = np.clip(0.5 * atr_aligned[i] / (close[i] + 1e-10), 0.5, 2.0)
+        position_size = base_size / vol_factor
+        position_size = np.clip(position_size, 0.15, 0.35)
         
-        # Regime-based logic
-        if chop_val > 61.8:  # High chop = range market -> mean reversion
-            # Sell when RSI overbought, buy when RSI oversold
-            if rsi_val > 70 and position >= 0:  # Overbought -> short
-                position = -1
-                signals[i] = -base_size
-            elif rsi_val < 30 and position <= 0:  # Oversold -> long
-                position = 1
-                signals[i] = base_size
-            # Exit when RSI returns to neutral zone
-            elif position == 1 and rsi_val >= 50:
-                position = 0
-                signals[i] = 0.0
-            elif position == -1 and rsi_val <= 50:
-                position = 0
-                signals[i] = 0.0
-        else:  # Low chop = trending market -> follow momentum
-            # Buy when RSI > 50, sell when RSI < 50
-            if rsi_val > 50 and position <= 0:
-                position = 1
-                signals[i] = base_size
-            elif rsi_val < 50 and position >= 0:
-                position = -1
-                signals[i] = -base_size
-            # Exit on reverse signal
-            elif position == 1 and rsi_val < 50:
-                position = 0
-                signals[i] = 0.0
-            elif position == -1 and rsi_val > 50:
-                position = 0
-                signals[i] = 0.0
+        # Long entry: price breaks above Donchian high + uptrend + volume spike
+        if (close[i] > donch_high_aligned[i] and 
+            close[i] > ema50_1d_aligned[i] and 
+            volume[i] > 1.8 * vol_avg_aligned[i] and 
+            position <= 0):
+            position = 1
+            signals[i] = position_size
+        
+        # Short entry: price breaks below Donchian low + downtrend + volume spike
+        elif (close[i] < donch_low_aligned[i] and 
+              close[i] < ema50_1d_aligned[i] and 
+              volume[i] > 1.8 * vol_avg_aligned[i] and 
+              position >= 0):
+            position = -1
+            signals[i] = -position_size
+        
+        # Exit: reverse signal or volatility-based stop
+        elif position == 1 and (close[i] < ema50_1d_aligned[i] or 
+                                close[i] < donch_low_aligned[i]):
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and (close[i] > ema50_1d_aligned[i] or 
+                                 close[i] > donch_high_aligned[i]):
+            position = 0
+            signals[i] = 0.0
     
     return signals
 
-name = "1d_ChopRSI_Regime_MeanRev"
-timeframe = "1d"
+name = "4h_Donchian_1dVolume_1dEMA_Breakout"
+timeframe = "4h"
 leverage = 1.0
