@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla Pivot Breakout with Volume Spike and Daily Choppiness Filter
-# Uses previous day's Camarilla levels (H3/L3) as key support/resistance.
-# Long: Break above H3 with volume spike in choppy market (CHOP > 61.8).
-# Short: Break below L3 with volume spike in choppy market.
-# Works in bull/bear by fading extremes in ranging markets.
-# Target: 50-150 total trades over 4 years.
+# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 12h ADX trend filter
+# Long when price breaks above 20-period high + volume surge + ADX>25
+# Short when price breaks below 20-period low + volume surge + ADX>25
+# Exit on opposite breakout or ADX<20 (ranging market)
+# Works in bull markets (breakouts up) and bear markets (breakouts down)
+# Target: 50-150 total trades over 4 years
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,85 +20,97 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Camarilla levels and choppiness
+    # Load 1d data for volume confirmation (using 1d average volume)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
+    vol_1d = df_1d['volume'].values
+    vol_1d_ma = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_1d_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_1d_ma)
     
-    # Previous day's Camarilla levels (H3, L3)
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Load 12h data for ADX calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Camarilla levels for previous day
-    # H3 = C + (H-L)*1.1/4, L3 = C - (H-L)*1.1/4
-    camarilla_h3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_l3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    # Calculate Donchian channels (20-period) on 4h
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Shift by 1 to avoid look-ahead (use previous day's levels)
-    prev_h3 = np.roll(camarilla_h3, 1)
-    prev_l3 = np.roll(camarilla_l3, 1)
-    prev_h3[0] = np.nan
-    prev_l3[0] = np.nan
-    
-    # Choppiness Index (14-period) on 1d
-    # CHOP = 100 * log10(sum(TR)/ (ATR * n)) / log10(n)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # Calculate ADX (14-period) on 12h
+    # True Range
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # First value
     
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(sum_tr / (atr_1d * 14 + 1e-10)) / np.log10(14)
-    chop[np.isnan(chop)] = 50  # Default to middle when not enough data
+    # Directional Movement
+    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
+                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)), 
+                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Align to 12h timeframe
-    prev_h3_aligned = align_htf_to_ltf(prices, df_1d, prev_h3)
-    prev_l3_aligned = align_htf_to_ltf(prices, df_1d, prev_l3)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Smoothed values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
+    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
     signals = np.zeros(n)
     position = 0
     base_size = 0.25  # Position size
     
-    for i in range(100, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(prev_h3_aligned[i]) or np.isnan(prev_l3_aligned[i]) or
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or
+            np.isnan(vol_1d_ma_aligned[i]) or np.isnan(adx_aligned[i])):
             continue
         
-        # Volume spike: current volume > 2x median of last 20 periods
-        vol_median = np.median(volume[max(0, i-20):i+1])
-        volume_spike = volume[i] > 2.0 * vol_median
+        # Volume confirmation: current volume > 1.5x 1d average volume
+        volume_confirm = volume[i] > 1.5 * vol_1d_ma_aligned[i]
         
-        # Long: price breaks above H3 + volume spike + choppy market (CHOP > 61.8)
-        if (close[i] > prev_h3_aligned[i] and
-            volume_spike and
-            chop_aligned[i] > 61.8 and
+        # Long entry: price breaks above 20-period high + volume confirmation + ADX > 25
+        if (close[i] > high_max[i] and
+            volume_confirm and
+            adx_aligned[i] > 25 and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short: price breaks below L3 + volume spike + choppy market (CHOP > 61.8)
-        elif (close[i] < prev_l3_aligned[i] and
-              volume_spike and
-              chop_aligned[i] > 61.8 and
+        # Short entry: price breaks below 20-period low + volume confirmation + ADX > 25
+        elif (close[i] < low_min[i] and
+              volume_confirm and
+              adx_aligned[i] > 25 and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse breakout or market becomes trending (CHOP < 38.2)
-        elif position == 1 and (close[i] < prev_l3_aligned[i] or chop_aligned[i] < 38.2):
+        # Exit: opposite breakout or ADX < 20 (ranging market)
+        elif position == 1 and (close[i] < low_min[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > prev_h3_aligned[i] or chop_aligned[i] < 38.2):
+        elif position == -1 and (close[i] > high_max[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "12h_Camarilla_Pivot_Breakout_Volume_CHOP"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_Volume_ADX"
+timeframe = "4h"
 leverage = 1.0
