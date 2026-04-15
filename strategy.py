@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian Breakout with 1d Volatility Filter and Volume Confirmation
-# Long when price breaks above Donchian(20) high with volatility expansion and volume spike
-# Short when price breaks below Donchian(20) low with volatility expansion and volume spike
-# Volatility filter: ATR(10) > 1.5x ATR(30) to ensure breakouts occur during high volatility
-# Volume confirmation: current volume > 2.0x median of last 20 bars
-# This structure reduces false breakouts and focuses on high-probability moves
-# Conservative sizing (0.25) to limit trade frequency and avoid fee drag
+# Hypothesis: 6h EMA Trend + 1d RSI Mean Reversion + Volume Spike
+# Uses EMA(50) on 6h to identify trend direction (bullish when close > EMA50, bearish when close < EMA50).
+# Uses RSI(14) on 1d for mean reversion signals: long when RSI < 30 (oversold), short when RSI > 70 (overbought).
+# Volume confirmation requires > 1.5x 20-bar median volume.
+# Designed to work in bull markets (trend following) and bear markets (mean reversion via RSI extremes).
+# Conservative sizing (0.25) to limit trade frequency and avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,65 +20,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels on 4h
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max()
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min()
-    
-    # ATR calculation
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean()
-    atr_30 = pd.Series(tr).rolling(window=30, min_periods=30).mean()
-    
-    # 1-day volatility filter using ATR ratio
+    # 1-day RSI(14) for mean reversion signals
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d.values)
     
-    tr1d = high_1d - low_1d
-    tr2d = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr2d[0] = tr1d[0]
-    tr3d[0] = tr1d[0]
-    tr_d = np.maximum(tr1d, np.maximum(tr2d, tr3d))
-    atr_10_1d = pd.Series(tr_d).rolling(window=10, min_periods=10).mean()
-    atr_30_1d = pd.Series(tr_d).rolling(window=30, min_periods=30).mean()
-    atr_ratio_1d = atr_10_1d / (atr_30_1d + 1e-10)
-    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d.values)
+    # 6h EMA(50) for trend direction
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume confirmation: current > 2.0x median of last 20 bars
+    # Volume confirmation: current > 1.5x median of last 20 bars
     vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
-    vol_threshold = 2.0 * vol_median
+    vol_threshold = 1.5 * vol_median
     
     signals = np.zeros(n)
     
-    for i in range(30, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(atr_ratio_1d_aligned[i]) or np.isnan(vol_threshold[i])):
+        if (np.isnan(ema_50[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(vol_threshold[i])):
             continue
         
-        # Long: break above Donchian high, volatility expansion, volume spike
-        if (close[i] > high_20[i] and 
-            atr_ratio_1d_aligned[i] > 1.5 and 
+        # Long: Close above EMA50 (bullish trend), RSI oversold (<30), volume spike
+        if (close[i] > ema_50[i] and 
+            rsi_1d_aligned[i] < 30 and 
             volume[i] > vol_threshold[i]):
             signals[i] = 0.25
         
-        # Short: break below Donchian low, volatility expansion, volume spike
-        elif (close[i] < low_20[i] and 
-              atr_ratio_1d_aligned[i] > 1.5 and 
+        # Short: Close below EMA50 (bearish trend), RSI overbought (>70), volume spike
+        elif (close[i] < ema_50[i] and 
+              rsi_1d_aligned[i] > 70 and 
               volume[i] > vol_threshold[i]):
             signals[i] = -0.25
         
-        # Exit: price returns to middle of Donchian channel or volatility contracts
+        # Exit: Trend reversal or RSI returns to neutral (30-70)
         elif (i > 0 and 
-              ((signals[i-1] == 0.25 and (close[i] < (high_20[i] + low_20[i]) / 2 or atr_ratio_1d_aligned[i] <= 1.2)) or
-               (signals[i-1] == -0.25 and (close[i] > (high_20[i] + low_20[i]) / 2 or atr_ratio_1d_aligned[i] <= 1.2)))):
+              ((signals[i-1] == 0.25 and (close[i] <= ema_50[i] or rsi_1d_aligned[i] >= 30)) or
+               (signals[i-1] == -0.25 and (close[i] >= ema_50[i] or rsi_1d_aligned[i] <= 70)))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -88,6 +71,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_VolATR_1dFilter"
-timeframe = "4h"
+name = "6h_EMA_RSI1d_Volume"
+timeframe = "6h"
 leverage = 1.0
