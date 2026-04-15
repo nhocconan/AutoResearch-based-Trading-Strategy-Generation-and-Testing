@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h TRIX momentum with 1d volume spike and ADX trend filter
-# Long when TRIX crosses above zero + volume > 2.0x 20-period avg + 1d ADX > 25 (strong trend)
-# Short when TRIX crosses below zero + volume > 2.0x 20-period avg + 1d ADX > 25 (strong trend)
-# Uses discrete position sizing (0.25) to minimize fee churn. Target: 15-30 trades/year.
-# TRIX filters noise and identifies momentum shifts. Volume spike confirms participation.
-# ADX > 25 ensures we only trade strong trends, avoiding chop and sideways markets.
-# Works in bull markets (bullish momentum) and bear markets (strong bearish momentum).
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d ADX trend filter
+# Long when price breaks above 4h Donchian upper band (20-period high) + volume > 1.5x 20-period avg + 1d ADX > 25 (strong trend)
+# Short when price breaks below 4h Donchian lower band (20-period low) + volume > 1.5x 20-period avg + 1d ADX > 25 (strong trend)
+# Uses discrete position sizing (0.30) to balance return and drawdown. Designed for low trade frequency (20-40/year).
+# Donchian channels provide clear breakout levels. ADX filter ensures we only trade strong trends, avoiding chop and reversals.
+# Works in bull markets (trend continuation) and bear markets (strong downtrends) by requiring ADX > 25.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,20 +26,8 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
-    
-    # === 12h Indicator: TRIX (15,9,9) ===
-    # TRIX = EMA(EMA(EMA(close, 15), 9), 9) - 1 period ago, then percent change
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema3 = pd.Series(ema2).ewm(span=9, adjust=False, min_periods=9).mean().values
-    trix_raw = np.diff(ema3, prepend=ema3[0]) / ema3 * 100
-    trix = pd.Series(trix_raw).ewm(span=9, adjust=False, min_periods=9).mean().values
-    trix_prev = np.roll(trix, 1)
-    trix_prev[0] = trix[0]
-    trix_cross_above = (trix_prev <= 0) & (trix > 0)
-    trix_cross_below = (trix_prev >= 0) & (trix < 0)
     
     # === 1d Indicator: ADX (trend strength filter) ===
     high_1d = df_1d['high'].values
@@ -75,6 +62,10 @@ def generate_signals(prices):
     for i in range(period, len(tr)):
         atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
     
+    plus_di = np.zeros_like(plus_dm)
+    minus_di = np.zeros_like(minus_dm)
+    
+    # Smooth +DM and -DM
     plus_dm_smooth = np.zeros_like(plus_dm)
     minus_dm_smooth = np.zeros_like(minus_dm)
     
@@ -99,6 +90,11 @@ def generate_signals(prices):
     
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
+    # === 4h Indicator: Donchian Channels (20-period) ===
+    # Upper band = 20-period high, Lower band = 20-period low
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
@@ -113,33 +109,36 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2.0x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
+        # Volume filter: current volume > 1.5x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # Skip if any required data is NaN
-        if (np.isnan(trix[i]) or np.isnan(adx_aligned[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. TRIX crosses above zero (bullish momentum)
+        # 1. Price breaks above 4h Donchian upper band
         # 2. Strong trend (ADX > 25)
         # 3. Volume confirmation
-        if trix_cross_above[i] and (adx_aligned[i] > 25) and vol_confirm:
-            signals[i] = 0.25
+        if (close[i] > donchian_upper[i]) and \
+           (adx_aligned[i] > 25) and vol_confirm:
+            signals[i] = 0.30
         
         # === SHORT CONDITIONS ===
-        # 1. TRIX crosses below zero (bearish momentum)
+        # 1. Price breaks below 4h Donchian lower band
         # 2. Strong trend (ADX > 25)
         # 3. Volume confirmation
-        elif trix_cross_below[i] and (adx_aligned[i] > 25) and vol_confirm:
-            signals[i] = -0.25
+        elif (close[i] < donchian_lower[i]) and \
+             (adx_aligned[i] > 25) and vol_confirm:
+            signals[i] = -0.30
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "12h_TRIX_Volume_ADX25_Filter_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Volume_ADX25_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
