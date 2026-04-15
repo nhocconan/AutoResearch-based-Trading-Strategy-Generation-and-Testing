@@ -3,114 +3,107 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h 1-day Range Breakout with Volume Confirmation and ADX Trend Filter
-# Uses the previous day's high/low as support/resistance levels. Breakouts above previous day's high
-# or below previous day's low are traded only when confirmed by volume and ADX > 25 (trending market).
-# Works in bull markets (breakouts up) and bear markets (breakouts down). Target: 50-150 total trades.
+# Hypothesis: 1d Candlestick Reversal with Weekly Trend Filter and Volume Spike
+# Uses bullish/bearish engulfing patterns on daily timeframe as entry signals.
+# Filters by weekly trend (price above/below weekly EMA20) to trade with the higher timeframe trend.
+# Requires volume spike (2x 20-day average) for confirmation.
+# Designed to work in both bull and bear markets by following weekly trend direction.
+# Target: 20-60 total trades over 4 years (5-15/year) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for previous day's high/low
+    # Load daily data for engulfing patterns
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
+    open_1d = df_1d['open'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Load 12h data for ADX trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    close_1w = df_1w['close'].values
     
-    # Previous day's high and low (shifted by 1 to avoid look-ahead)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_high_1d[0] = np.nan  # First value has no previous day
-    prev_low_1d[0] = np.nan
+    # Calculate weekly EMA20 for trend filter
+    close_1w_series = pd.Series(close_1w)
+    ema_20_1w = close_1w_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align previous day's high/low to 12h timeframe
-    prev_high_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_high_1d)
-    prev_low_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_low_1d)
+    # Align weekly EMA20 to daily timeframe
+    ema_20_1w_aligned = align_htf_to_ltf(df_1d, df_1w, ema_20_1w)
     
-    # Calculate ADX (14-period) on 12h
-    # True Range
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    # Calculate bullish and bearish engulfing patterns on daily data
+    # Bullish engulfing: current candle engulfs previous bearish candle
+    bullish_engulf = (close_1d > open_1d) & (open_1d < close_1d) & \
+                     (close_1d > open_1d) & (open_1d > close_1d) & \
+                     (close_1d > open_1d.shift(1)) & (open_1d < close_1d.shift(1))
+    # Actually: current bullish candle body completely engulfs previous bearish candle body
+    bullish_engulf = (close_1d > open_1d) & (open_1d < close_1d) & \
+                     (close_1d > open_1d.shift(1)) & (open_1d < close_1d.shift(1)) & \
+                     (close_1d - open_1d) > (open_1d.shift(1) - close_1d.shift(1))
     
-    # Directional Movement
-    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
-                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)), 
-                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Bearish engulfing: current candle engulfs previous bullish candle
+    bearish_engulf = (close_1d < open_1d) & (open_1d > close_1d) & \
+                     (close_1d < open_1d.shift(1)) & (open_1d > close_1d.shift(1)) & \
+                     (open_1d - close_1d) > (close_1d.shift(1) - open_1d.shift(1))
     
-    # Smoothed values
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    # Align engulfing signals to 1d timeframe (no additional delay needed as engulfing is confirmed at daily close)
+    bullish_engulf_aligned = align_htf_to_ltf(prices, df_1d, bullish_engulf.astype(float))
+    bearish_engulf_aligned = align_htf_to_ltf(prices, df_1d, bearish_engulf.astype(float))
     
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    # Calculate volume spike: current volume > 2x 20-day average
+    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2 * volume_ma_20)
     
     signals = np.zeros(n)
     position = 0
     base_size = 0.25  # Position size
     
-    for i in range(100, n):
+    # Start from index 20 to ensure volume MA is valid
+    start_idx = 20
+    for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(prev_high_1d_aligned[i]) or np.isnan(prev_low_1d_aligned[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(bullish_engulf_aligned[i]) or np.isnan(bearish_engulf_aligned[i]) or
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(volume_ma_20[i])):
             continue
         
-        # Long entry: price breaks above previous day's high + volume confirmation + ADX > 25
-        if (close[i] > prev_high_1d_aligned[i] and
-            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-            adx_aligned[i] > 25 and
+        # Long entry: bullish engulfing + price above weekly EMA20 + volume spike
+        if (bullish_engulf_aligned[i] > 0.5 and
+            close[i] > ema_20_1w_aligned[i] and
+            volume_spike[i] and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below previous day's low + volume confirmation + ADX > 25
-        elif (close[i] < prev_low_1d_aligned[i] and
-              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-              adx_aligned[i] > 25 and
+        # Short entry: bearish engulfing + price below weekly EMA20 + volume spike
+        elif (bearish_engulf_aligned[i] > 0.5 and
+              close[i] < ema_20_1w_aligned[i] and
+              volume_spike[i] and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse breakout or ADX < 20 (ranging market)
-        elif position == 1 and (close[i] < prev_low_1d_aligned[i] or adx_aligned[i] < 20):
+        # Exit: opposite engulfing signal or price crosses weekly EMA20 in opposite direction
+        elif position == 1 and (bearish_engulf_aligned[i] > 0.5 or close[i] < ema_20_1w_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > prev_high_1d_aligned[i] or adx_aligned[i] < 20):
+        elif position == -1 and (bullish_engulf_aligned[i] > 0.5 or close[i] > ema_20_1w_aligned[i]):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "12h_1d_Range_Breakout_Volume_ADX"
-timeframe = "12h"
+name = "1d_Engulfing_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
