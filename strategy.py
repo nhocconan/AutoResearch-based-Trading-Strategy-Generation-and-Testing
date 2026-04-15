@@ -3,17 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike filter for 1h entries
-# Long when price breaks above 4h Camarilla R3 level + 1d volume > 2x 20-period avg
-# Short when price breaks below 4h Camarilla S3 level + 1d volume > 2x 20-period avg
-# Uses discrete position sizing (0.20) to minimize fee churn. Session filter (08-20 UTC) reduces noise.
-# Designed for low trade frequency (15-35/year). Camarilla levels provide adaptive support/resistance
-# based on prior day's range, effective in both ranging and trending markets. Volume filter ensures
-# breakouts have conviction, reducing false signals in chop.
+# Hypothesis: 6h Elder Ray Index (Bull/Bear Power) with 1d EMA34 trend filter and volume confirmation
+# Long when Bull Power > 0 (close > EMA13) AND Bear Power < 0 (close < EMA13) flipped? Actually: Elder Ray uses EMA13
+# Bull Power = High - EMA13, Bear Power = Low - EMA13
+# We go long when Bull Power > 0 AND Bear Power < 0 (market above EMA13 with upward momentum)
+# Actually simpler: Long when close > EMA13 AND Bull Power increasing (making higher highs vs EMA)
+# But standard Elder Ray: trend = EMA13, enter long when Bull Power > 0 AND prev Bull Power <= 0 (crossing up)
+# Short when Bear Power < 0 AND prev Bear Power >= 0 (crossing down)
+# Add 1d EMA34 filter: only long if 1d EMA34 sloping up (close > EMA34), short if sloping down
+# Volume confirmation: current volume > 1.5x 20-period average
+# Designed for low trade frequency (15-25/year) with clear trend signals.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,49 +28,30 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 4h HTF data once before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
-        return np.zeros(n)
-    
-    # === 4h Indicator: Camarilla Pivots (based on prior 4h bar) ===
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Calculate Camarilla levels for each 4h bar
-    camarilla_r3 = np.full_like(close_4h, np.nan)
-    camarilla_s3 = np.full_like(close_4h, np.nan)
-    
-    for i in range(1, len(df_4h)):
-        # Prior 4h bar's range
-        range_4h = high_4h[i-1] - low_4h[i-1]
-        if range_4h <= 0:
-            camarilla_r3[i] = camarilla_s3[i] = close_4h[i-1]
-        else:
-            camarilla_r3[i] = close_4h[i-1] + range_4h * 1.1 / 4
-            camarilla_s3[i] = close_4h[i-1] - range_4h * 1.1 / 4
-    
-    # Align Camarilla levels to 1h timeframe (already delayed by 1 bar in calculation)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
-    
-    # === 1d Indicator: Volume Spike Filter ===
+    # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    volume_1d = df_1d['volume'].values
-    # 20-period volume SMA on daily
-    vol_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    # Volume spike: current daily volume > 2x 20-period average
-    vol_spike_1d = volume_1d > (vol_sma_20_1d * 2.0)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
+    # === 1d Indicator: EMA34 (trend filter) ===
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # === 6h Indicator: EMA13 for Elder Ray ===
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray components
+    bull_power = high - ema_13  # High - EMA13
+    bear_power = low - ema_13   # Low - EMA13
+    
+    # Volume SMA for confirmation (using 20-period)
+    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 21  # Need at least 2 prior 4h bars for Camarilla + 20 for 1d vol SMA
+    warmup = max(34, 13, 20) + 5  # EMA34(1d) + EMA13 + volume(20)
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -75,32 +59,42 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(vol_spike_1d_aligned[i])):
-            signals[i] = 0.0
-            continue
+        # Volume filter: current volume > 1.5x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
-        # Volume must be spiking on 1d timeframe
-        if vol_spike_1d_aligned[i] < 0.5:  # Not a spike
+        # Skip if any required data is NaN
+        if (np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # Price breaks above 4h Camarilla R3 level + 1d volume spike
-        if close[i] > camarilla_r3_aligned[i]:
-            signals[i] = 0.20
+        # 1. Bull Power > 0 (market above EMA13 with upward momentum)
+        # 2. Previous Bull Power <= 0 (just crossed above zero)
+        # 3. 1d EMA34 trending up (close > EMA34)
+        # 4. Volume confirmation
+        if (bull_power[i] > 0) and \
+           (i == warmup or bull_power[i-1] <= 0) and \
+           (close[i] > ema_34_1d_aligned[i]) and \
+           vol_confirm:
+            signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # Price breaks below 4h Camarilla S3 level + 1d volume spike
-        elif close[i] < camarilla_s3_aligned[i]:
-            signals[i] = -0.20
+        # 1. Bear Power < 0 (market below EMA13 with downward momentum)
+        # 2. Previous Bear Power >= 0 (just crossed below zero)
+        # 3. 1d EMA34 trending down (close < EMA34)
+        # 4. Volume confirmation
+        elif (bear_power[i] < 0) and \
+             (i == warmup or bear_power[i-1] >= 0) and \
+             (close[i] < ema_34_1d_aligned[i]) and \
+             vol_confirm:
+            signals[i] = -0.25
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "4h_Camarilla_R3S3_1dVolumeSpike_v1"
-timeframe = "1h"
+name = "6h_ElderRay_EMA13_1dEMA34_Volume_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
