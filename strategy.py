@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,16 +13,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily HTF data once before loop
+    # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily Williams %R (14)
-    highest_high_14 = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
-    williams_r_14 = -100 * (highest_high_14 - df_1d['close'].values) / (highest_high_14 - lowest_low_14 + 1e-10)
-    williams_r_14_aligned = align_htf_to_ltf(prices, df_1d, williams_r_14)
+    # Calculate daily Donchian(20) channels
+    donchian_high_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
+    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
+    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
     
     # Calculate daily EMA(50) for trend filter
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
@@ -38,10 +38,10 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_14_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(atr_14_1d_aligned[i])):
+        if (np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -50,19 +50,19 @@ def generate_signals(prices):
         
         # Long conditions:
         # 1. Price above daily EMA50 (bullish bias)
-        # 2. Daily Williams %R oversold (< -80) - mean reversion opportunity
+        # 2. Price breaks above daily Donchian(20) high
         # 3. Volatility filter
         if (close[i] > ema_50_1d_aligned[i] and
-            williams_r_14_aligned[i] < -80 and
+            close[i] > donchian_high_20_aligned[i] and
             vol_filter):
             signals[i] = 0.25
             
         # Short conditions:
         # 1. Price below daily EMA50 (bearish bias)
-        # 2. Daily Williams %R overbought (> -20) - mean reversion opportunity
+        # 2. Price breaks below daily Donchian(20) low
         # 3. Volatility filter
         elif (close[i] < ema_50_1d_aligned[i] and
-              williams_r_14_aligned[i] > -20 and
+              close[i] < donchian_low_20_aligned[i] and
               vol_filter):
             signals[i] = -0.25
         else:
@@ -70,6 +70,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_DailyWilliamsR_EMA50_VolFilter_v1"
-timeframe = "6h"
+name = "12h_EMA50_Donchian20_VolFilter_v1"
+timeframe = "12h"
 leverage = 1.0
