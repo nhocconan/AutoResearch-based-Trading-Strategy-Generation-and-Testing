@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + volume confirmation + 1d ADX trend filter
-# Uses 12h Donchian channel breakouts for momentum, volume to confirm breakout strength,
+# Hypothesis: 4h Donchian(20) breakout + volume confirmation + 1d ADX trend filter
+# Uses Donchian channel breakouts for momentum, volume to confirm breakout strength,
 # and 1d ADX to ensure trending markets (ADX > 25). Works in bull (breakouts up) and bear (breakouts down).
-# Target: 50-150 total trades over 4 years (12-37/year) with disciplined entries.
+# Target: 75-200 total trades over 4 years (19-50/year) with disciplined entries.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,14 +18,14 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data (primary timeframe) for Donchian and price action
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 4h data (primary timeframe) for Donchian and price action
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
     # Load 1d data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -35,9 +35,9 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Donchian Channel (20-period) on 12h
-    dc_high_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    dc_low_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian Channel (20-period) on 4h
+    dc_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    dc_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
     # Calculate ADX (14-period) on 1d
     # True Range
@@ -68,9 +68,9 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Align all indicators to 12h timeframe
-    dc_high_aligned = align_htf_to_ltf(prices, df_12h, dc_high_20)
-    dc_low_aligned = align_htf_to_ltf(prices, df_12h, dc_low_20)
+    # Align all indicators to 4h timeframe
+    dc_high_aligned = align_htf_to_ltf(prices, df_4h, dc_high_20)
+    dc_low_aligned = align_htf_to_ltf(prices, df_4h, dc_low_20)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
@@ -109,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Volume_ADX_Trend"
-timeframe = "12h"
+name = "4h_Donchian_Volume_ADX_Trend"
+timeframe = "4h"
 leverage = 1.0
