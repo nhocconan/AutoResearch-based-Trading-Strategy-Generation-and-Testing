@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian(20) breakout with weekly EMA50 trend filter and volume confirmation
-# Long when price breaks above 20-day Donchian high + price > weekly EMA50 + volume > 1.5x 20-day avg volume
-# Short when price breaks below 20-day Donchian low + price < weekly EMA50 + volume > 1.5x 20-day avg volume
-# Uses daily price structure for breakout detection and weekly EMA for trend alignment
-# Designed for low trade frequency (7-25/year) to minimize fee drag on 1d timeframe
-# Works in both bull and bear markets by requiring volume confirmation and weekly trend filter
+# Hypothesis: 6h Williams %R with 1d EMA200 trend filter and volume spike confirmation
+# Long when Williams %R(14) crosses above -80 from below (oversold bounce) + volume > 2.0x 20-period avg + price > 1d EMA200
+# Short when Williams %R(14) crosses below -20 from above (overbought rejection) + volume > 2.0x 20-period avg + price < 1d EMA200
+# Williams %R identifies exhaustion points in both bull and bear markets, while 1d EMA200 ensures alignment with higher timeframe trend
+# Volume spike confirms institutional participation at turning points. Designed for low frequency (15-25/year) to minimize fee drag.
+# Works in bull markets by buying oversold dips in uptrends, and in bear markets by selling overbought rallies in downtrends.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,38 +20,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d HTF data once before loop (primary timeframe)
+    # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Get 1w HTF data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    # === 1d Indicators: Donchian Channel (20) and 20-period Volume SMA ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === 1d Indicators: EMA200 ===
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Calculate 20-day Donchian high and low
-    donchian_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # === Primary 6h Indicators: Williams %R(14) ===
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
     
-    # Calculate 20-day volume SMA
-    vol_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Williams %R signals: cross above -80 (long), cross below -20 (short)
+    williams_long_signal = (williams_r > -80) & (np.roll(williams_r, 1) <= -80)
+    williams_short_signal = (williams_r < -20) & (np.roll(williams_r, 1) >= -20)
     
-    # === 1w Indicator: EMA50 ===
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align all HTF indicators to 1d timeframe
-    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
-    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
-    vol_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_20_1d)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Volume filter: current volume > 2.0x 20-period volume SMA
+    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_sma_20 * 2.0)
     
     signals = np.zeros(n)
     
@@ -60,28 +50,24 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or
-            np.isnan(vol_sma_20_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(ema_200_1d_aligned[i]) or np.isnan(williams_r[i]) or
+            np.isnan(vol_sma_20[i]) or np.isnan(williams_long_signal[i]) or
+            np.isnan(williams_short_signal[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20_1d_aligned[i] * 1.5)
-        
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 20-day Donchian high
-        # 2. Volume confirmation
-        # 3. Price above weekly EMA50 (uptrend)
-        if (close[i] > donchian_high_20_aligned[i]) and vol_confirm and \
-           (close[i] > ema_50_1w_aligned[i]):
+        # 1. Williams %R crosses above -80 (oversold bounce)
+        # 2. Volume confirmation (institutional participation)
+        # 3. Price above 1d EMA200 (uptrend alignment)
+        if williams_long_signal[i] and vol_confirm[i] and (close[i] > ema_200_1d_aligned[i]):
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 20-day Donchian low
-        # 2. Volume confirmation
-        # 3. Price below weekly EMA50 (downtrend)
-        elif (close[i] < donchian_low_20_aligned[i]) and vol_confirm and \
-             (close[i] < ema_50_1w_aligned[i]):
+        # 1. Williams %R crosses below -20 (overbought rejection)
+        # 2. Volume confirmation (institutional participation)
+        # 3. Price below 1d EMA200 (downtrend alignment)
+        elif williams_short_signal[i] and vol_confirm[i] and (close[i] < ema_200_1d_aligned[i]):
             signals[i] = -0.25
         
         else:
@@ -89,6 +75,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_Volume_1wEMA50_Filter_v1"
-timeframe = "1d"
+name = "6h_WilliamsR_1dEMA200_Volume_Spike_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
