@@ -1,11 +1,3 @@
-# 6h_200EMA_Trend_Pullback_With_Volume_Spike
-# Strategy: Buy pullbacks to 200EMA in uptrend, sell rallies to 200EMA in downtrend
-# Uptrend: price above 200EMA + weekly higher high; Downtrend: price below 200EMA + weekly lower low
-# Entry: Price touches 200EMA ± 0.5% with volume spike (2x 20-period avg)
-# Exit: Opposite signal or trend reversal
-# Works in bull/bear by following higher timeframe trend; avoids whipsaws with volume confirmation
-# Target: 20-40 trades/year on 6f timeframe
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,60 +13,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 200 EMA on 6h timeframe
-    close_series = pd.Series(close)
-    ema_200 = close_series.ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Weekly trend filter: higher high/low for uptrend, lower high/low for downtrend
+    # Get daily data for context (weekly pivot uses weekly high/low/close)
     weekly = get_htf_data(prices, '1w')
     weekly_high = weekly['high'].values
     weekly_low = weekly['low'].values
     weekly_close = weekly['close'].values
     
-    # Calculate weekly swing points
-    weekly_hh = np.maximum.accumulate(weekly_high)  # Higher highs
-    weekly_hl = np.maximum.accumulate(weekly_low)   # Higher lows
-    weekly_lh = np.minimum.accumulate(weekly_high)  # Lower highs
-    weekly_ll = np.minimum.accumulate(weekly_low)   # Lower lows
+    # Calculate weekly pivot points
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
+    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
     
-    # Align weekly trend to 6h
-    weekly_hh_6h = align_htf_to_ltf(prices, weekly, weekly_hh)
-    weekly_hl_6h = align_htf_to_ltf(prices, weekly, weekly_hl)
-    weekly_lh_6h = align_htf_to_ltf(prices, weekly, weekly_lh)
-    weekly_ll_6h = align_htf_to_ltf(prices, weekly, weekly_ll)
+    # Align weekly levels to 12h timeframe (wait for weekly close)
+    weekly_pivot_12h = align_htf_to_ltf(prices, weekly, weekly_pivot)
+    weekly_r1_12h = align_htf_to_ltf(prices, weekly, weekly_r1)
+    weekly_s1_12h = align_htf_to_ltf(prices, weekly, weekly_s1)
+    weekly_r2_12h = align_htf_to_ltf(prices, weekly, weekly_r2)
+    weekly_s2_12h = align_htf_to_ltf(prices, weekly, weekly_s2)
     
-    # Volume filter: current volume > 2x 20-period average
+    # Volume filter: current volume > 1.5x 50-period average
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    vol_ma = vol_series.rolling(window=50, min_periods=50).mean().values
+    volume_filter = volume > (1.5 * vol_ma)
     
-    # Proximity to 200EMA: within 0.5%
-    ema_distance = np.abs(close - ema_200) / ema_200
-    near_ema = ema_distance <= 0.005
+    # Range filter: avoid trading too close to pivot (±0.5%)
+    price_to_pivot = np.abs(close - weekly_pivot_12h) / weekly_pivot_12h
+    range_filter = price_to_pivot > 0.005
+    
+    # Volatility filter: avoid low volatility regimes
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    atr_ratio = atr / close
+    volatility_filter = atr_ratio > 0.01  # Adjusted for 12h
     
     signals = np.zeros(n)
     
-    for i in range(200, n):
-        # Skip if required data is NaN
-        if (np.isnan(ema_200[i]) or np.isnan(weekly_hh_6h[i]) or 
-            np.isnan(weekly_hl_6h[i]) or np.isnan(weekly_lh_6h[i]) or 
-            np.isnan(weekly_ll_6h[i]) or np.isnan(vol_ma[i])):
+    for i in range(100, n):
+        # Skip if any required data is NaN
+        if (np.isnan(weekly_pivot_12h[i]) or np.isnan(weekly_r1_12h[i]) or 
+            np.isnan(weekly_s1_12h[i]) or np.isnan(weekly_r2_12h[i]) or 
+            np.isnan(weekly_s2_12h[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(atr_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend based on weekly structure
-        # Uptrend: price above EMA200 and weekly making higher highs/lows
-        # Downtrend: price below EMA200 and weekly making lower highs/lows
-        is_uptrend = (close[i] > ema_200[i]) and (weekly_hh_6h[i] > weekly_hh_6h[i-1]) and (weekly_hl_6h[i] > weekly_hl_6h[i-1])
-        is_downtrend = (close[i] < ema_200[i]) and (weekly_lh_6h[i] < weekly_lh_6h[i-1]) and (weekly_ll_6h[i] < weekly_ll_6h[i-1])
-        
-        # Only trade with volume spike and near EMA
-        if volume_spike[i] and near_ema[i]:
-            if is_uptrend:
-                # Long on pullback to EMA in uptrend
+        # Only trade when all filters pass
+        if volume_filter[i] and range_filter[i] and volatility_filter[i]:
+            # Long: break above R2 with volume
+            if close[i] > weekly_r2_12h[i]:
                 signals[i] = 0.25
-            elif is_downtrend:
-                # Short on rally to EMA in downtrend
+            # Short: break below S2 with volume
+            elif close[i] < weekly_s2_12h[i]:
                 signals[i] = -0.25
             else:
                 signals[i] = signals[i-1]
@@ -83,6 +77,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_200EMA_Trend_Pullback_With_Volume_Spike"
-timeframe = "6h"
+name = "12h_WeeklyPivot_R2_S2_Breakout_Volume_RangeVolatilityFilter"
+timeframe = "12h"
 leverage = 1.0
