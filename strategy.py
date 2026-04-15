@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 12h Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout)
-# combined with 1d EMA50 trend filter and volume confirmation. 
+# Hypothesis: 4h strategy using 1d Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout)
+# combined with 1w EMA200 trend filter and volume confirmation. 
 # In ranging markets (price between R3-S3), fade extremes; in trending markets (price outside R4-S4), 
 # breakout continuation. Volume filter ensures momentum validity. Designed for low trade frequency 
-# (12-30/year) to minimize fee drag while adapting to regime via pivot structure.
+# (20-50/year) to minimize fee drag while adapting to regime via pivot structure.
+# Works in both bull and bear: mean reversion in ranges, breakout continuation in trends.
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,38 +24,38 @@ def generate_signals(prices):
     # Pre-compute session hours to avoid datetime operations in loop
     hours = pd.DatetimeIndex(open_time).hour
     
-    # Get 12h and 1d HTF data once before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Get 1d and 1w HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_12h) < 30 or len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 30 or len(df_1w) < 30:
         return np.zeros(n)
     
-    # === 12h Indicators: Camarilla Pivot Levels (using typical price) ===
+    # === 1d Indicators: Camarilla Pivot Levels (using typical price) ===
     # Typical price = (high + low + close) / 3
-    typical_price_12h = (df_12h['high'].values + df_12h['low'].values + df_12h['close'].values) / 3.0
+    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
     
     # Calculate pivot and support/resistance levels
-    pivot_12h = typical_price_12h
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    range_12h = high_12h - low_12h
+    pivot_1d = typical_price_1d
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    range_1d = high_1d - low_1d
     
     # Camarilla levels
-    r3_12h = pivot_12h + (range_12h * 1.1 / 4)
-    s3_12h = pivot_12h - (range_12h * 1.1 / 4)
-    r4_12h = pivot_12h + (range_12h * 1.1 / 2)
-    s4_12h = pivot_12h - (range_12h * 1.1 / 2)
+    r3_1d = pivot_1d + (range_1d * 1.1 / 4)
+    s3_1d = pivot_1d - (range_1d * 1.1 / 4)
+    r4_1d = pivot_1d + (range_1d * 1.1 / 2)
+    s4_1d = pivot_1d - (range_1d * 1.1 / 2)
     
-    # Align to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
-    r4_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
-    s4_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
+    # Align to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    # === 1d Indicators: Trend Filter ===
-    # 1d EMA(50) for trend bias
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # === 1w Indicators: Trend Filter ===
+    # 1w EMA(200) for long-term trend bias
+    ema_200_1w = pd.Series(df_1w['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
     signals = np.zeros(n)
     
@@ -75,7 +76,7 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
             np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i])):
+            np.isnan(ema_200_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -92,7 +93,8 @@ def generate_signals(prices):
         # 1. In ranging market AND price at S3 support (mean reversion long)
         # 2. OR in uptrend AND breakout above R4 (continuation long)
         # 3. Volume confirmation
-        if vol_confirm:
+        # 4. Long-term trend filter: price above weekly EMA200
+        if vol_confirm and close[i] > ema_200_1w_aligned[i]:
             if (in_range and close[i] <= s3_aligned[i] * 1.002) or \
                (in_uptrend and close[i] > r4_aligned[i]):
                 signals[i] = 0.25
@@ -101,7 +103,8 @@ def generate_signals(prices):
         # 1. In ranging market AND price at R3 resistance (mean reversion short)
         # 2. OR in downtrend AND breakdown below S4 (continuation short)
         # 3. Volume confirmation
-        elif vol_confirm:
+        # 4. Long-term trend filter: price below weekly EMA200
+        elif vol_confirm and close[i] < ema_200_1w_aligned[i]:
             if (in_range and close[i] >= r3_aligned[i] * 0.998) or \
                (in_downtrend and close[i] < s4_aligned[i]):
                 signals[i] = -0.25
@@ -111,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3S3_R4S4_EMA50_VolFilter_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_R4S4_EMA200_1w_VolFilter_v1"
+timeframe = "4h"
 leverage = 1.0
