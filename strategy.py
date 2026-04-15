@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + Weekly Momentum Filter
-# Uses Elder Ray (Bull/Bear Power) from daily data to identify institutional buying/selling pressure.
-# Filters trades with weekly RSI momentum: only take long signals when weekly RSI > 50 (bullish bias),
-# and short signals when weekly RSI < 50 (bearish bias). Works in bull markets (buy strength) and
-# bear markets (sell weakness). Target: 50-150 total trades over 4 years.
+# Hypothesis: 12h Williams Fractal breakout with 1d trend filter and volume confirmation
+# Uses Williams fractals from 1d to identify potential reversal points. Enters on breakout
+# above bearish fractal or below bullish fractal with volume confirmation and 1d EMA trend filter.
+# Works in both bull and bear markets by trading breakouts in the direction of the 1d trend.
+# Target: 50-150 total trades over 4 years (12-37/year).
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,75 +19,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for Elder Ray calculation
+    # Load 1d data for Williams fractals and EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 22:  # Need at least ~1 month for EMA
+    if len(df_1d) < 10:
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Load weekly data for momentum filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
-        return np.zeros(n)
-    close_1w = df_1w['close'].values
+    # Williams Fractals (5-bar pattern)
+    # Bearish fractal: high[n-2] is highest of high[n-4:n+1]
+    # Bullish fractal: low[n-2] is lowest of low[n-4:n+1]
+    bearish_fractal = np.full(len(high_1d), np.nan)
+    bullish_fractal = np.full(len(low_1d), np.nan)
     
-    # Calculate Elder Ray components (13-period EMA as in original)
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high_1d - ema13_1d  # Bull Power: High - EMA13
-    bear_power = low_1d - ema13_1d   # Bear Power: Low - EMA13
+    for i in range(2, len(high_1d) - 2):
+        if (high_1d[i] == np.max(high_1d[i-2:i+3]) and 
+            high_1d[i] > high_1d[i-1] and high_1d[i] > high_1d[i-2] and
+            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
+            bearish_fractal[i] = high_1d[i]
+        
+        if (low_1d[i] == np.min(low_1d[i-2:i+3]) and 
+            low_1d[i] < low_1d[i-1] and low_1d[i] < low_1d[i-2] and
+            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
+            bullish_fractal[i] = low_1d[i]
     
-    # Calculate weekly RSI (14-period)
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1w = 100 - (100 / (1 + rs))
+    # 1d EMA(34) for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align Elder Bull/Bear Power to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    
-    # Align weekly RSI to 6f timeframe (no extra delay needed for RSI)
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Align fractals and EMA to 12h timeframe with 2-bar delay for fractal confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25  # Position size (25% of capital)
+    base_size = 0.25  # Position size
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
-            np.isnan(rsi_1w_aligned[i])):
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
+            np.isnan(ema_34_aligned[i])):
             continue
         
-        # Long entry: Bull Power > 0 (buying pressure) + weekly RSI > 50 (bullish momentum)
-        if (bull_power_aligned[i] > 0 and
-            rsi_1w_aligned[i] > 50 and
+        # Long entry: price breaks above bearish fractal + volume confirmation + price > EMA34 (uptrend)
+        if (close[i] > bearish_fractal_aligned[i] and
+            volume[i] > 1.5 * np.median(volume[max(0, i-10):i+1]) and
+            close[i] > ema_34_aligned[i] and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: Bear Power < 0 (selling pressure) + weekly RSI < 50 (bearish momentum)
-        elif (bear_power_aligned[i] < 0 and
-              rsi_1w_aligned[i] < 50 and
+        # Short entry: price breaks below bullish fractal + volume confirmation + price < EMA34 (downtrend)
+        elif (close[i] < bullish_fractal_aligned[i] and
+              volume[i] > 1.5 * np.median(volume[max(0, i-10):i+1]) and
+              close[i] < ema_34_aligned[i] and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: Opposite signal appears
-        elif position == 1 and bear_power_aligned[i] < 0:
+        # Exit: opposite fractal breakout or trend reversal
+        elif position == 1 and (close[i] < bullish_fractal_aligned[i] or close[i] < ema_34_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and bull_power_aligned[i] > 0:
+        elif position == -1 and (close[i] > bearish_fractal_aligned[i] or close[i] > ema_34_aligned[i]):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "6h_ElderRay_WeeklyRSI_Filter"
-timeframe = "6h"
+name = "12h_Williams_Fractal_Breakout_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
