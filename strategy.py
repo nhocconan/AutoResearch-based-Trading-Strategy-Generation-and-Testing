@@ -1,12 +1,12 @@
+# 6h_12h_Donchian_1d_Volume_CCI - Novel combination using 12h Donchian breakout with 1d volume and CCI confirmation
+# Works in bull markets (breakouts up) and bear markets (breakouts down) with volume confirmation to filter false breakouts
+# CCI helps identify overbought/oversold conditions to avoid chasing extended moves
+# Target: 50-150 total trades over 4 years = 12-37/year
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 12h 1-day Channels with Volume Spike and ADX Trend Filter
-# Uses previous day's high/low as support/resistance. Breakouts confirmed by volume spike (2x 20-period median) 
-# and ADX > 25 (trending market). Works in bull/bear markets via directional breakouts.
-# Timeframe: 12h, HTF: 1d for levels, 12h for ADX. Target: 50-150 total trades over 4 years.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,93 +18,83 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for previous day's high/low
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Load 12h data for ADX trend filter
+    # Load 12h data for Donchian breakout
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    if len(df_12h) < 30:
         return np.zeros(n)
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     
-    # Previous day's high and low (shifted by 1 to avoid look-ahead)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
+    # Load 1d data for volume and CCI
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Align previous day's high/low to 12h timeframe
-    prev_high_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_high_1d)
-    prev_low_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_low_1d)
+    # Calculate Donchian Channel (20-period) on 12h
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate ADX (14-period) on 12h
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    # Align Donchian levels to 6h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
     
-    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
-                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)), 
-                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Calculate CCI (20-period) on 1d
+    typical_price = (high_1d + low_1d + close_1d) / 3
+    sma_tp = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
+    mad = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    cci = (typical_price - sma_tp) / (0.015 * mad + 1e-10)
     
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    # Align CCI to 6h timeframe
+    cci_aligned = align_htf_to_ltf(prices, df_1d, cci)
     
-    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+    # Calculate volume ratio (current vs 20-period average) on 1d
+    vol_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume_1d / (vol_ma + 1e-10)
     
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    # Align volume ratio to 6h timeframe
+    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25
+    base_size = 0.25  # Position size
     
     for i in range(100, n):
-        if (np.isnan(prev_high_1d_aligned[i]) or np.isnan(prev_low_1d_aligned[i]) or
-            np.isnan(adx_aligned[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(cci_aligned[i]) or np.isnan(vol_ratio_aligned[i])):
             continue
         
-        # Long entry: break above prev day high + volume spike + ADX > 25
-        if (close[i] > prev_high_1d_aligned[i] and
-            volume[i] > 2.0 * np.median(volume[max(0, i-20):i+1]) and
-            adx_aligned[i] > 25 and
+        # Long entry: price breaks above 12h Donchian high + volume confirmation + CCI not overbought
+        if (close[i] > donchian_high_aligned[i] and
+            vol_ratio_aligned[i] > 1.5 and
+            cci_aligned[i] < 100 and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: break below prev day low + volume spike + ADX > 25
-        elif (close[i] < prev_low_1d_aligned[i] and
-              volume[i] > 2.0 * np.median(volume[max(0, i-20):i+1]) and
-              adx_aligned[i] > 25 and
+        # Short entry: price breaks below 12h Donchian low + volume confirmation + CCI not oversold
+        elif (close[i] < donchian_low_aligned[i] and
+              vol_ratio_aligned[i] > 1.5 and
+              cci_aligned[i] > -100 and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse breakout or ADX < 20 (ranging market)
-        elif position == 1 and (close[i] < prev_low_1d_aligned[i] or adx_aligned[i] < 20):
+        # Exit: opposite breakout or CCI reaches extreme levels
+        elif position == 1 and (close[i] < donchian_low_aligned[i] or cci_aligned[i] > 200):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > prev_high_1d_aligned[i] or adx_aligned[i] < 20):
+        elif position == -1 and (close[i] > donchian_high_aligned[i] or cci_aligned[i] < -200):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "12h_1d_Channel_Breakout_Volume_ADX"
-timeframe = "12h"
+name = "6h_12h_Donchian_1d_Volume_CCI"
+timeframe = "6h"
 leverage = 1.0
