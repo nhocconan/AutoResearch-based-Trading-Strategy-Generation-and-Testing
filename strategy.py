@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 1d ADX regime filter + volume confirmation
-# Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low
-# Long when Bull Power > 0 AND 1d ADX > 25 (trending) AND volume > 1.5x 20-period avg
-# Short when Bear Power > 0 AND 1d ADX > 25 (trending) AND volume > 1.5x 20-period avg
+# Hypothesis: 12h Donchian(20) breakout with 1d ADX25 trend filter and volume confirmation
+# Long when price breaks above 12h Donchian upper(20) + 1d ADX > 25 (trending) + volume > 1.5x 20-period avg
+# Short when price breaks below 12h Donchian lower(20) + 1d ADX > 25 (trending) + volume > 1.5x 20-period avg
 # Uses discrete position sizing (0.25) to minimize fee drag and control drawdown.
-# 1d ADX > 25 ensures we only trade in trending markets, reducing whipsaws in ranging conditions.
-# Volume confirmation targets ~12-25 trades/year to minimize fee drag on 6h timeframe.
-# Elder Ray captures the underlying bull/bear power behind price moves.
+# 1d ADX > 25 ensures we only trade in trending markets, reducing whipsaws in ranging periods.
+# Volume threshold (1.5x) targets ~20-40 trades/year to minimize fee drag on 12h timeframe.
+# Donchian channels provide objective breakout levels that work in both bull and bear markets.
 
 def generate_signals(prices):
     n = len(prices)
@@ -28,7 +27,7 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # === 1d Indicator: ADX(14) ===
@@ -44,33 +43,39 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First period
     
     # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    up_move[0] = 0
-    down_move[0] = 0
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            result[period-1] = np.nansum(data[:period])
+            for i in range(period, len(data)):
+                result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    # Smoothed values
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
+    atr_1d = wilders_smoothing(tr, 14)
+    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
+    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr_1d != 0, (dm_plus_smooth / atr_1d) * 100, 0)
+    di_minus = np.where(atr_1d != 0, (dm_minus_smooth / atr_1d) * 100, 0)
     
     # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    dx[np.isnan(dx)] = 0
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx[np.isnan(adx)] = 0
+    dx = np.where((di_plus + di_minus) != 0, np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
+    adx_1d = wilders_smoothing(dx, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # === 6h Indicator: EMA13 for Elder Ray ===
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray components
-    bull_power = high - ema_13
-    bear_power = ema_13 - low
+    # === 12h Donchian Channel (20) ===
+    donchian_window = 20
+    donchian_upper = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    donchian_lower = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -78,7 +83,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(13, 14, 20) + 5  # EMA13 + ADX + volume(20) + buffer
+    warmup = max(50, donchian_window, 20) + 5  # ADX + Donchian + volume(20) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -87,27 +92,29 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(ema_13[i]) or np.isnan(adx_aligned[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
+            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter: current volume > 1.5x 20-period volume SMA
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
+        # Trend filter: 1d ADX > 25 (trending market)
+        trending = adx_1d_aligned[i] > 25
+        
         # === LONG CONDITIONS ===
-        # 1. Bull Power > 0 (buying pressure)
-        # 2. 1d ADX > 25 (strong trend)
+        # 1. Price breaks above Donchian upper(20) (close > upper)
+        # 2. 1d ADX > 25 (trending)
         # 3. Volume confirmation
-        if (bull_power[i] > 0) and \
-           (adx_aligned[i] > 25) and vol_confirm:
+        if (close[i] > donchian_upper[i]) and trending and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Bear Power > 0 (selling pressure)
-        # 2. 1d ADX > 25 (strong trend)
+        # 1. Price breaks below Donchian lower(20) (close < lower)
+        # 2. 1d ADX > 25 (trending)
         # 3. Volume confirmation
-        elif (bear_power[i] > 0) and \
-             (adx_aligned[i] > 25) and vol_confirm:
+        elif (close[i] < donchian_lower[i]) and trending and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -115,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_1dADX25_Volume_Filter_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dADX25_Volume_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
