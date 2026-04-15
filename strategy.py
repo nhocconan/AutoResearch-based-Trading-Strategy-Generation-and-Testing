@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 300:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -31,17 +31,16 @@ def generate_signals(prices):
     daily_r1_12h = align_htf_to_ltf(prices, daily, daily_r1)
     daily_s1_12h = align_htf_to_ltf(prices, daily, daily_s1)
     daily_r2_12h = align_htf_to_ltf(prices, daily, daily_r2)
-    daily_s1_12h = align_htf_to_ltf(prices, daily, daily_s1)
     daily_s2_12h = align_htf_to_ltf(prices, daily, daily_s2)
     
-    # Volume filter: current volume > 2x 20-period average
+    # Volume filter: current volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma)
+    volume_filter = volume > (1.5 * vol_ma)
     
-    # Range filter: avoid trading near pivot (±1.0%)
+    # Range filter: avoid trading too close to pivot (±0.8%)
     price_to_pivot = np.abs(close - daily_pivot_12h) / daily_pivot_12h
-    range_filter = price_to_pivot > 0.01
+    range_filter = price_to_pivot > 0.008
     
     # Volatility filter: avoid low volatility regimes
     tr1 = high[1:] - low[1:]
@@ -50,11 +49,11 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_ratio = atr / close
-    volatility_filter = atr_ratio > 0.015  # Slightly higher threshold for 12h
+    volatility_filter = atr_ratio > 0.012  # Adjusted for 12h
     
     signals = np.zeros(n)
     
-    for i in range(300, n):
+    for i in range(200, n):
         # Skip if any required data is NaN
         if (np.isnan(daily_pivot_12h[i]) or np.isnan(daily_r1_12h[i]) or 
             np.isnan(daily_s1_12h[i]) or np.isnan(daily_r2_12h[i]) or 
