@@ -3,6 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 1h strategy using 4h Donchian breakout for direction and 1d volume spike for confirmation.
+# Uses 4h for signal direction (reducing trade frequency) and 1h only for entry timing precision.
+# Volume spike filter avoids low-quality breakouts. Session filter (08-20 UTC) reduces noise.
+# Designed to work in both bull (breakouts continue) and bear (failed breaks reverse) markets.
+# Target: 15-35 trades/year per symbol to minimize fee drag.
+
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
@@ -13,96 +19,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h HTF data once before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 4h HTF data once before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Calculate 12h Donchian channels (20-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    upper_20_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    lower_20_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Calculate 4h Donchian channels (20-period)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    upper_20_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lower_20_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Align 12h Donchian to 12h (no shift needed as we're using same timeframe)
-    upper_20_12h_aligned = align_htf_to_ltf(prices, df_12h, upper_20_12h)
-    lower_20_12h_aligned = align_htf_to_ltf(prices, df_12h, lower_20_12h)
+    # Align 4h Donchian to 1h
+    upper_20_1h = align_htf_to_ltf(prices, df_4h, upper_20_4h)
+    lower_20_1h = align_htf_to_ltf(prices, df_4h, lower_20_4h)
     
-    # Get 1d HTF data for weekly pivot levels
+    # Get 1d HTF data for volume spike confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly pivot points from prior week (using 1d data)
-    # Weekly high/low/close from 5 trading days ago (prior week)
-    weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().shift(5).values
-    weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().shift(5).values
-    weekly_close = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).last().shift(5).values
+    # Calculate 1d volume 20-period average
+    vol_20_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_20_1h = align_htf_to_ltf(prices, df_1d, vol_20_1d)
     
-    # Weekly pivot: (H+L+C)/3
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    # Weekly R1: 2*P - L
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    # Weekly S1: 2*P - H
-    weekly_s1 = 2 * weekly_pivot - weekly_high
-    
-    # Align weekly pivot levels to 12h
-    weekly_pivot_12h = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-    weekly_r1_12h = align_htf_to_ltf(prices, df_1d, weekly_r1)
-    weekly_s1_12h = align_htf_to_ltf(prices, df_1d, weekly_s1)
-    
-    # Calculate 12h ATR(14) for volatility filter
+    # Calculate 1h ATR(14) for volatility filter
     tr1 = high - low
     tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
     tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 12h volume ratio (current vs 20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ratio = volume / (vol_ma_20 + 1e-10)
-    
     signals = np.zeros(n)
     
-    # Precompute session filter (00-24 UTC for 12h - always true, kept for structure)
+    # Precompute session filter (08-20 UTC)
     hours = prices.index.hour
-    in_session = (hours >= 0) & (hours <= 23)  # Always true for 12h, kept for structure
+    in_session = (hours >= 8) & (hours <= 20)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_20_12h_aligned[i]) or np.isnan(lower_20_12h_aligned[i]) or 
-            np.isnan(weekly_pivot_12h[i]) or np.isnan(weekly_r1_12h[i]) or 
-            np.isnan(weekly_s1_12h[i]) or np.isnan(atr_14[i]) or 
-            np.isnan(volume_ratio[i]) or not in_session[i]):
+        if (np.isnan(upper_20_1h[i]) or np.isnan(lower_20_1h[i]) or 
+            np.isnan(vol_20_1h[i]) or np.isnan(atr_14[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
+        # Volume spike: current 1h volume > 2.0 x 1d average volume (scaled to 1h)
+        # 1d average volume / 24 = approximate 1h average volume
+        vol_spike = volume[i] > (2.0 * vol_20_1h[i] / 24.0)
+        
         # Long conditions:
-        # 1. 12h price breaks above 12h Donchian upper (20) - bullish breakout
-        # 2. Price above weekly pivot (bullish bias from prior week)
-        # 3. Volume confirmation: volume > 1.3x average
-        # 4. Volatility filter: ATR > 0.4% of price (avoid low volatility chop)
-        if (close[i] > upper_20_12h_aligned[i] and
-            close[i] > weekly_pivot_12h[i] and
-            volume_ratio[i] > 1.3 and
-            atr_14[i] > 0.004 * close[i]):
-            signals[i] = 0.25
+        # 1. 1h price breaks above 4h Donchian upper (20) - bullish breakout
+        # 2. Volume confirmation: volume spike
+        # 3. Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
+        if (close[i] > upper_20_1h[i] and
+            vol_spike and
+            atr_14[i] > 0.005 * close[i]):
+            signals[i] = 0.20
             
         # Short conditions:
-        # 1. 12h price breaks below 12h Donchian lower (20) - bearish breakdown
-        # 2. Price below weekly pivot (bearish bias from prior week)
-        # 3. Volume confirmation: volume > 1.3x average
-        # 4. Volatility filter: ATR > 0.4% of price
-        elif (close[i] < lower_20_12h_aligned[i] and
-              close[i] < weekly_pivot_12h[i] and
-              volume_ratio[i] > 1.3 and
-              atr_14[i] > 0.004 * close[i]):
-            signals[i] = -0.25
+        # 1. 1h price breaks below 4h Donchian lower (20) - bearish breakdown
+        # 2. Volume confirmation: volume spike
+        # 3. Volatility filter: ATR > 0.5% of price
+        elif (close[i] < lower_20_1h[i] and
+              vol_spike and
+              atr_14[i] > 0.005 * close[i]):
+            signals[i] = -0.20
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "12h_12h_Donchian20_1d_WeeklyPivot_Volume_Filter_v1"
-timeframe = "12h"
+name = "1h_4h_Donchian20_1d_VolumeSpike_Session_v1"
+timeframe = "1h"
 leverage = 1.0
