@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot R3/S3 breakout with 1d Williams %R extreme filter and volume confirmation
-# Long when price breaks above Camarilla R3 + 1d Williams %R < -80 (oversold) + volume > 1.5x 24-period avg
-# Short when price breaks below Camarilla S3 + 1d Williams %R > -20 (overbought) + volume > 1.5x 24-period avg
-# Uses discrete position sizing (0.30) to balance risk and return.
-# Williams %R on 1d provides mean-reversion edge in ranging markets while Camarilla breakouts capture momentum.
-# Volume filter (1.5x) targets ~25-40 trades/year on 12h timeframe to avoid overtrading and fee drag.
-# Camarilla R3/S3 levels provide stronger structure than R1/S1, reducing false breakouts.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike
+# Long when price breaks above Donchian upper + 1d EMA50 uptrend + volume > 2.0x 20-period avg
+# Short when price breaks below Donchian lower + 1d EMA50 downtrend + volume > 2.0x 20-period avg
+# Uses discrete position sizing (0.30) to balance profit potential and drawdown control.
+# 1d EMA50 provides strong trend filter reducing whipsaws in both bull and bear markets.
+# Volume threshold (2.0x) targets ~25-40 trades/year on 4h timeframe to avoid overtrading.
+# Donchian channels provide clear structure-based entries that work in trending and ranging markets.
 
 def generate_signals(prices):
     n = len(prices)
@@ -27,47 +27,30 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 1d Indicator: Williams %R (14-period) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === 1d Indicator: EMA50 ===
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where(
-        (highest_high - lowest_low) != 0,
-        ((highest_high - close_1d) / (highest_high - lowest_low)) * -100,
-        -50.0  # neutral when range is zero
-    )
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # === 4h Donchian Channel (20-period) ===
+    # Upper = max(high, 20)
+    # Lower = min(low, 20)
+    # Using rolling window with min_periods to avoid look-ahead
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # === 12h Camarilla Pivot Levels (based on prior bar) ===
-    # Pivot = (H + L + C) / 3
-    # R3 = Pivot + (H - L) * 1.1 / 4
-    # S3 = Pivot - (H - L) * 1.1 / 4
-    # Using prior bar's OHLC to avoid look-ahead
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
-    
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    camarilla_r3 = pivot + (prev_high - prev_low) * 1.1 / 4.0
-    camarilla_s3 = pivot - (prev_high - prev_low) * 1.1 / 4.0
-    
-    # Volume SMA for confirmation (using 24-period ~ 12h * 2 = 1 day)
-    vol_sma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume SMA for confirmation (using 20-period)
+    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(24, 14) + 5  # volume(24) + Williams %R(14) + buffer
+    warmup = max(50, 20) + 5  # EMA50 + Donchian(20) + volume(20) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -76,28 +59,28 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or
-            np.isnan(williams_r_aligned[i]) or np.isnan(vol_sma_24[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 24-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_24[i] * 1.5)
+        # Volume filter: current volume > 2.0x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above Camarilla R3 (close > R3)
-        # 2. 1d Williams %R oversold (< -80)
+        # 1. Price breaks above Donchian upper (close > upper)
+        # 2. 1d EMA50 uptrend (close > EMA50)
         # 3. Volume confirmation
-        if (close[i] > camarilla_r3[i]) and \
-           (williams_r_aligned[i] < -80) and vol_confirm:
+        if (close[i] > donchian_upper[i]) and \
+           (close[i] > ema_50_1d_aligned[i]) and vol_confirm:
             signals[i] = 0.30
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below Camarilla S3 (close < S3)
-        # 2. 1d Williams %R overbought (> -20)
+        # 1. Price breaks below Donchian lower (close < lower)
+        # 2. 1d EMA50 downtrend (close < EMA50)
         # 3. Volume confirmation
-        elif (close[i] < camarilla_s3[i]) and \
-             (williams_r_aligned[i] > -20) and vol_confirm:
+        elif (close[i] < donchian_lower[i]) and \
+             (close[i] < ema_50_1d_aligned[i]) and vol_confirm:
             signals[i] = -0.30
         
         else:
@@ -105,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_1dWilliamsR_Volume_Filter_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA50_Volume_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
