@@ -13,42 +13,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for 1d HTF context
-    daily = get_htf_data(prices, '1d')
+    # Get weekly data for 1w HTF context
+    weekly = get_htf_data(prices, '1w')
     
-    # Calculate ATR on daily for volatility filter
-    tr1 = daily['high'].values[1:] - daily['low'].values[1:]
-    tr2 = np.abs(daily['high'].values[1:] - daily['close'].values[:-1])
-    tr3 = np.abs(daily['low'].values[1:] - daily['close'].values[:-1])
+    # Calculate weekly ATR for volatility filter
+    tr1 = weekly['high'].values[1:] - weekly['low'].values[1:]
+    tr2 = np.abs(weekly['high'].values[1:] - weekly['close'].values[:-1])
+    tr3 = np.abs(weekly['low'].values[1:] - weekly['close'].values[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14d_aligned = align_htf_to_ltf(prices, daily, atr_14d)
+    atr_14w = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14w_aligned = align_htf_to_ltf(prices, weekly, atr_14w)
     
-    # Volatility filter: ATR > 0.3% of price to avoid low volatility chop
-    vol_filter = atr_14d_aligned > (0.003 * close)
+    # Volatility filter: ATR > 0.5% of price to avoid low volatility chop
+    vol_filter = atr_14w_aligned > (0.005 * close)
     
-    # Calculate 4-period EMA of daily volume for volume spike detection
-    vol_ema_4d = pd.Series(daily['volume'].values).ewm(span=4, adjust=False, min_periods=4).mean().values
-    vol_ema_4d_aligned = align_htf_to_ltf(prices, daily, vol_ema_4d)
+    # Calculate weekly EMA10 for trend direction
+    weekly_ema_10 = pd.Series(weekly['close'].values).ewm(span=10, adjust=False, min_periods=10).mean().values
+    weekly_ema_10_aligned = align_htf_to_ltf(prices, weekly, weekly_ema_10)
     
-    # Volume filter: current volume > 1.5x 4-day average volume
-    vol_threshold = 1.5 * vol_ema_4d_aligned
+    # Calculate weekly EMA30 for additional trend confirmation
+    weekly_ema_30 = pd.Series(weekly['close'].values).ewm(span=30, adjust=False, min_periods=30).mean().values
+    weekly_ema_30_aligned = align_htf_to_ltf(prices, weekly, weekly_ema_30)
+    
+    # Calculate weekly volume average for volume spike detection
+    vol_ma_4w = pd.Series(weekly['volume'].values).rolling(window=4, min_periods=4).mean().values
+    vol_ma_4w_aligned = align_htf_to_ltf(prices, weekly, vol_ma_4w)
+    
+    # Volume filter: current volume > 1.3x 4-week average volume
+    vol_threshold = 1.3 * vol_ma_4w_aligned
     vol_spike = volume > vol_threshold
-    
-    # Calculate daily EMA20 for trend direction
-    daily_ema_20 = pd.Series(daily['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    daily_ema_20_aligned = align_htf_to_ltf(prices, daily, daily_ema_20)
-    
-    # Calculate daily EMA50 for additional trend confirmation
-    daily_ema_50 = pd.Series(daily['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    daily_ema_50_aligned = align_htf_to_ltf(prices, daily, daily_ema_50)
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14d_aligned[i]) or np.isnan(vol_ema_4d_aligned[i]) or 
-            np.isnan(daily_ema_20_aligned[i]) or np.isnan(daily_ema_50_aligned[i])):
+        if (np.isnan(atr_14w_aligned[i]) or np.isnan(weekly_ema_10_aligned[i]) or 
+            np.isnan(weekly_ema_30_aligned[i]) or np.isnan(vol_ma_4w_aligned[i])):
             continue
         
         # Only trade when volatility is sufficient (avoid chop)
@@ -56,21 +56,21 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        # Long: Price above both EMA20 and EMA50 + volume spike
-        if (close[i] > daily_ema_20_aligned[i] and 
-            close[i] > daily_ema_50_aligned[i] and 
+        # Long: Price above both EMA10 and EMA30 + volume spike
+        if (close[i] > weekly_ema_10_aligned[i] and 
+            close[i] > weekly_ema_30_aligned[i] and 
             vol_spike[i]):
             signals[i] = 0.25
         
-        # Short: Price below both EMA20 and EMA50 + volume spike
-        elif (close[i] < daily_ema_20_aligned[i] and 
-              close[i] < daily_ema_50_aligned[i] and 
+        # Short: Price below both EMA10 and EMA30 + volume spike
+        elif (close[i] < weekly_ema_10_aligned[i] and 
+              close[i] < weekly_ema_30_aligned[i] and 
               vol_spike[i]):
             signals[i] = -0.25
         
         # Exit: reverse signal on opposite direction
-        elif (close[i] < daily_ema_20_aligned[i] and signals[i-1] > 0) or \
-             (close[i] > daily_ema_20_aligned[i] and signals[i-1] < 0):
+        elif (close[i] < weekly_ema_10_aligned[i] and signals[i-1] > 0) or \
+             (close[i] > weekly_ema_10_aligned[i] and signals[i-1] < 0):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -79,6 +79,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA20_50_Volume_Spike_Filter"
-timeframe = "4h"
+name = "12h_WeeklyEMA10_30_Volume_Spike_Filter"
+timeframe = "12h"
 leverage = 1.0
