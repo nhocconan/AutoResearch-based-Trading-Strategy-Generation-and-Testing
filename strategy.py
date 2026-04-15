@@ -13,16 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly Donchian channel (breakout structure) - main signal
-    weekly = get_htf_data(prices, '1w')
-    high_w = weekly['high'].values
-    low_w = weekly['low'].values
-    high_20w = pd.Series(high_w).rolling(window=20, min_periods=20).max().values
-    low_20w = pd.Series(low_w).rolling(window=20, min_periods=20).min().values
-    high_20w_aligned = align_htf_to_ltf(prices, weekly, high_20w)
-    low_20w_aligned = align_htf_to_ltf(prices, weekly, low_20w)
-    
-    # Daily ATR for volatility filter - to avoid choppy markets
+    # 1d Daily ATR for volatility filter (14-period)
     daily = get_htf_data(prices, '1d')
     high_d = daily['high'].values
     low_d = daily['low'].values
@@ -33,9 +24,18 @@ def generate_signals(prices):
     atr_14d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14d_aligned = align_htf_to_ltf(prices, daily, atr_14d)
     
-    # Volume confirmation: current > 1.8x median of last 20 bars (stricter than before)
-    vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median()
-    vol_threshold = 1.8 * vol_median
+    # 1w Weekly Donchian channel (20-period)
+    weekly = get_htf_data(prices, '1w')
+    high_w = weekly['high'].values
+    low_w = weekly['low'].values
+    high_20w = pd.Series(high_w).rolling(window=20, min_periods=20).max().values
+    low_20w = pd.Series(low_w).rolling(window=20, min_periods=20).min().values
+    high_20w_aligned = align_htf_to_ltf(prices, weekly, high_20w)
+    low_20w_aligned = align_htf_to_ltf(prices, weekly, low_20w)
+    
+    # Volume confirmation: current > 1.5x median of last 30 bars
+    vol_median = pd.Series(volume).rolling(window=30, min_periods=30).median()
+    vol_threshold = 1.5 * vol_median
     
     signals = np.zeros(n)
     
@@ -45,9 +45,9 @@ def generate_signals(prices):
             np.isnan(atr_14d_aligned[i]) or np.isnan(vol_threshold[i])):
             continue
         
-        # Volatility filter: avoid extremes (0.7x to 2.5x of median ATR)
-        atr_median = pd.Series(atr_14d_aligned).rolling(window=40, min_periods=40).median()
-        vol_filter = (atr_14d_aligned[i] > 0.7 * atr_median[i]) and (atr_14d_aligned[i] < 2.5 * atr_median[i])
+        # Volatility filter: avoid extremes (0.5x to 3.0x of median ATR)
+        atr_median = pd.Series(atr_14d_aligned).rolling(window=50, min_periods=50).median()
+        vol_filter = (atr_14d_aligned[i] > 0.5 * atr_median[i]) and (atr_14d_aligned[i] < 3.0 * atr_median[i])
         
         # Long: Weekly Donchian breakout up + volume spike + volatility filter
         if (close[i] > high_20w_aligned[i] and 
@@ -73,6 +73,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyDonchian20_Vol1.8x_ATR14dFilter"
-timeframe = "1d"
+name = "12h_WeeklyDonchian20_Vol1.5x_ATR14dFilter"
+timeframe = "12h"
 leverage = 1.0
