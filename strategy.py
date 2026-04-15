@@ -3,93 +3,97 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + volume confirmation + ADX(14) trend filter
-# Uses 20-period Donchian channels on 4h data for breakout signals.
-# Enter long when price breaks above upper band, short when breaks below lower band.
-# Requires volume > 1.5x median volume (20-bar lookback) and ADX > 25 (trending market).
-# Exits on opposite breakout or ADX < 20 (ranging market).
-# Works in bull markets (upward breakouts) and bear markets (downward breakouts).
-# Target: 50-150 total trades over 4 years.
+# Hypothesis: 1d Bollinger Band Breakout with Weekly Volume Confirmation and Trend Filter
+# Uses Bollinger Bands (20, 2) on daily timeframe for volatility-based breakouts.
+# Trades breakouts above upper band or below lower band only when confirmed by:
+# 1. Volume > 1.5x 20-day average volume (on daily)
+# 2. Weekly trend filter: price above/below weekly 50 EMA (trending market)
+# Works in bull markets (breakouts up) and bear markets (breakouts down).
+# Target: 20-80 total trades over 4 years (5-20/year).
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period) on 4h
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Load daily data for Bollinger Bands and volume average
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate ADX (14-period) on 4h
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    # Load weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    close_1w = df_1w['close'].values
     
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Calculate Bollinger Bands (20, 2) on daily close
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_band = sma + (bb_std * std)
+    lower_band = sma - (bb_std * std)
     
-    # Smoothed values
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    # Calculate 20-day average volume on daily
+    vol_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+    # Calculate weekly 50 EMA for trend filter
+    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # Align all indicators to 1d timeframe (since we're trading on 1d)
+    upper_band_aligned = align_htf_to_ltf(close, df_1d, upper_band)
+    lower_band_aligned = align_htf_to_ltf(close, df_1d, lower_band)
+    vol_ma_aligned = align_htf_to_ltf(close, df_1d, vol_ma)
+    ema_50_aligned = align_htf_to_ltf(close, df_1w, ema_50)
     
     signals = np.zeros(n)
     position = 0
     base_size = 0.25  # Position size (25% of capital)
     
-    for i in range(20, n):
+    # Start from index 30 to ensure we have enough data for indicators
+    for i in range(30, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(adx[i])):
+        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or
+            np.isnan(vol_ma_aligned[i]) or np.isnan(ema_50_aligned[i])):
             continue
         
-        # Long entry: price breaks above upper Donchian band + volume confirmation + ADX > 25
-        if (close[i] > highest_high[i] and
-            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-            adx[i] > 25 and
+        # Long entry: price breaks above upper Bollinger Band + volume confirmation + uptrend
+        if (close[i] > upper_band_aligned[i] and
+            volume[i] > 1.5 * vol_ma_aligned[i] and
+            close[i] > ema_50_aligned[i] and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below lower Donchian band + volume confirmation + ADX > 25
-        elif (close[i] < lowest_low[i] and
-              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-              adx[i] > 25 and
+        # Short entry: price breaks below lower Bollinger Band + volume confirmation + downtrend
+        elif (close[i] < lower_band_aligned[i] and
+              volume[i] > 1.5 * vol_ma_aligned[i] and
+              close[i] < ema_50_aligned[i] and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: opposite breakout or ADX < 20 (ranging market)
-        elif position == 1 and (close[i] < lowest_low[i] or adx[i] < 20):
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and (close[i] > highest_high[i] or adx[i] < 20):
+        # Exit: reverse breakout or when price crosses back inside Bollinger Bands
+        elif position == 1 and close[i] < sma[-1] if i < len(sma) else False:  # Simplified exit logic
+            # Actually, we need to check against the aligned SMA
+            sma_aligned = align_htf_to_ltf(close, df_1d, sma)
+            if not np.isnan(sma_aligned[i]) and close[i] < sma_aligned[i]:
+                position = 0
+                signals[i] = 0.0
+        elif position == -1 and not np.isnan(sma_aligned[i]) and close[i] > sma_aligned[i]:
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_ADX"
-timeframe = "4h"
+name = "1d_Bollinger_Breakout_1wEMA_Volume"
+timeframe = "1d"
 leverage = 1.0
