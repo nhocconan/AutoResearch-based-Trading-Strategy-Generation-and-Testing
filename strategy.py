@@ -23,52 +23,32 @@ def generate_signals(prices):
     daily_low = df_1d['low'].values
     daily_volume = df_1d['volume'].values
     
-    # Calculate daily pivot points (Camarilla style for intraday relevance)
-    # Camarilla: based on previous day's range
-    # R4 = C + ((H-L)*1.1/2)
-    # R3 = C + ((H-L)*1.1/4)
-    # R2 = C + ((H-L)*1.1/6)
-    # R1 = C + ((H-L)*1.1/12)
-    # PP = (H+L+C)/3
-    # S1 = C - ((H-L)*1.1/12)
-    # S2 = C - ((H-L)*1.1/6)
-    # S3 = C - ((H-L)*1.1/4)
-    # S4 = C - ((H-L)*1.1/2)
-    daily_range = daily_high - daily_low
-    camarilla_pp = (daily_high + daily_low + daily_close) / 3.0
-    camarilla_r1 = camarilla_pp + (daily_range * 1.1 / 12)
-    camarilla_s1 = camarilla_pp - (daily_range * 1.1 / 12)
-    camarilla_r2 = camarilla_pp + (daily_range * 1.1 / 6)
-    camarilla_s2 = camarilla_pp - (daily_range * 1.1 / 6)
-    camarilla_r3 = camarilla_pp + (daily_range * 1.1 / 4)
-    camarilla_s3 = camarilla_pp - (daily_range * 1.1 / 4)
-    camarilla_r4 = camarilla_pp + (daily_range * 1.1 / 2)
-    camarilla_s4 = camarilla_pp - (daily_range * 1.1 / 2)
+    # Calculate daily pivot points (standard floor trader's pivots)
+    # P = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    pivot = (daily_high + daily_low + daily_close) / 3.0
+    r1 = 2 * pivot - daily_low
+    s1 = 2 * pivot - daily_high
     
-    # Calculate daily ATR(14) for volatility regime filter
-    tr1 = pd.Series(daily_high - daily_low)
-    tr2 = pd.Series(np.abs(daily_high - np.concatenate([[daily_close[0]], daily_close[:-1]])))
-    tr3 = pd.Series(np.abs(daily_low - np.concatenate([[daily_close[0]], daily_close[:-1]])))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14 = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate daily ATR(14) for volatility filter
+    tr1 = daily_high - daily_low
+    tr2 = np.abs(daily_high - np.concatenate([[daily_close[0]], daily_close[:-1]]))
+    tr3 = np.abs(daily_low - np.concatenate([[daily_close[0]], daily_close[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align HTF indicators to 4h timeframe with proper delay
-    pp_4h = align_htf_to_ltf(prices, df_1d, camarilla_pp)
-    r1_4h = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    r2_4h = align_htf_to_ltf(prices, df_1d, camarilla_r2)
-    s2_4h = align_htf_to_ltf(prices, df_1d, camarilla_s2)
-    r3_4h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_4h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    r4_4h = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    s4_4h = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    atr_14_4h = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Align HTF indicators to 6h timeframe with proper delay
+    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
+    atr_14_6h = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Calculate 4h Donchian channels (20-period) for structure
+    # Calculate 6h Donchian channels (20-period) for breakout confirmation
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 4h volume ratio (current vs 20-period average)
+    # Calculate 6h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
@@ -76,53 +56,38 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(pp_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
-            np.isnan(r2_4h[i]) or np.isnan(s2_4h[i]) or np.isnan(r3_4h[i]) or 
-            np.isnan(s3_4h[i]) or np.isnan(r4_4h[i]) or np.isnan(s4_4h[i]) or 
-            np.isnan(atr_14_4h[i]) or np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
+        if (np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or 
+            np.isnan(atr_14_6h[i]) or np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
             np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: use ATR ratio to detect trending vs ranging markets
-        # Low ATR ratio = ranging (mean revert at pivot)
-        # High ATR ratio = trending (breakout)
-        atr_ratio = atr_14_4h[i] / (0.01 * close[i])  # normalized ATR
+        # Entry conditions:
+        # 1. 6h price breaks above R1 with volume confirmation → long
+        # 2. 6h price breaks below S1 with volume confirmation → short
+        # 3. Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
+        # 4. Volume confirmation: volume > 1.5x average (stricter to reduce trades)
+        # 5. Additional confirmation: price must be outside Donchian channels to avoid false breakouts
+        # 6. Discrete position sizing: 0.25
         
-        # Entry conditions with regime adaptation:
-        # Ranging market (ATR ratio < 1.5): mean revert at S1/R1
-        # Trending market (ATR ratio >= 1.5): breakout at R2/S2
-        
-        if atr_ratio < 1.5:  # Ranging market - mean reversion
-            # Long conditions: price touches S1 with volume confirmation
-            if (close[i] <= s1_4h[i] * 1.002 and   # Allow 0.2% tolerance for touch
-                close[i] >= lowest_20[i] and       # Not breaking structure
-                volume_ratio[i] > 1.2 and          # Volume confirmation
-                atr_14_4h[i] > 0.003 * close[i]):  # Minimum volatility
-                signals[i] = 0.25
-                
-            # Short conditions: price touches R1 with volume confirmation
-            elif (close[i] >= r1_4h[i] * 0.998 and  # Allow 0.2% tolerance for touch
-                  close[i] <= highest_20[i] and     # Not breaking structure
-                  volume_ratio[i] > 1.2 and         # Volume confirmation
-                  atr_14_4h[i] > 0.003 * close[i]): # Minimum volatility
-                signals[i] = -0.25
-        else:  # Trending market - breakout
-            # Long conditions: price breaks above R2 with volume confirmation
-            if (close[i] > r2_4h[i] and            # Clear breakout above R2
-                volume_ratio[i] > 1.5 and          # Strong volume confirmation
-                atr_14_4h[i] > 0.005 * close[i]):  # Sufficient volatility for trend
-                signals[i] = 0.25
-                
-            # Short conditions: price breaks below S2 with volume confirmation
-            elif (close[i] < s2_4h[i] and          # Clear breakdown below S2
-                  volume_ratio[i] > 1.5 and        # Strong volume confirmation
-                  atr_14_4h[i] > 0.005 * close[i]): # Sufficient volatility for trend
-                signals[i] = -0.25
-        # Default: flat
+        # Long conditions: 6h breakout above R1
+        if (close[i] > r1_6h[i] and            # 6h price above R1 pivot
+            close[i] > highest_20[i] and       # Price above 20-period high (Donchian breakout)
+            volume_ratio[i] > 1.5 and          # Volume confirmation (stricter)
+            atr_14_6h[i] > 0.005 * close[i]):  # Volatility filter
+            signals[i] = 0.25
+            
+        # Short conditions: 6h breakdown below S1
+        elif (close[i] < s1_6h[i] and          # 6h price below S1 pivot
+              close[i] < lowest_20[i] and      # Price below 20-period low (Donchian breakout)
+              volume_ratio[i] > 1.5 and        # Volume confirmation (stricter)
+              atr_14_6h[i] > 0.005 * close[i]): # Volatility filter
+            signals[i] = -0.25
+        else:
+            signals[i] = 0.0
     
     return signals
 
-name = "4h_Camarilla_Pivot_MeanRev_Breakout_Regime"
-timeframe = "4h"
+name = "6h_Pivot_R1_S1_Breakout_Volume_ATR_Filter_Strict"
+timeframe = "6h"
 leverage = 1.0
