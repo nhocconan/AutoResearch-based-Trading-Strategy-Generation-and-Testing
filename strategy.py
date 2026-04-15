@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Bollinger Band Squeeze with Volume Spike and ATR Stop
-# Identifies low volatility periods (BB width < 20th percentile) followed by volatility expansion
-# (BB width > 80th percentile) with volume confirmation (>2x average volume).
-# Trades in direction of breakout (close outside Bollinger Bands).
-# Works in both bull and bear markets by capturing volatility expansion after contraction.
-# Uses 1d ATR for stop loss and 1w trend filter to avoid counter-trend trades.
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ADX(14) trend filter on 12h
+# Uses the highest high and lowest low of the past 20 bars as dynamic support/resistance.
+# Breakouts above 20-period high or below 20-period low are traded only when confirmed by volume
+# and ADX > 25 (trending market). Works in bull markets (breakouts up) and bear markets (breakouts down).
 # Target: 50-150 total trades over 4 years.
+# Timeframe: 4h, HTF: 12h
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,103 +20,86 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Bollinger Bands and ATR
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Donchian channels (20-period high and low)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Load 12h data for ADX trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Load 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    close_1w = df_1w['close'].values
-    
-    # Calculate Bollinger Bands (20, 2) on 1d
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
-    bb_width = (upper_bb - lower_bb) / sma_20
-    
-    # Bollinger Band width percentile (20th and 80th) for squeeze detection
-    bb_width_series = pd.Series(bb_width)
-    bb_width_20th = bb_width_series.rolling(window=50, min_periods=50).quantile(0.20).values
-    bb_width_80th = bb_width_series.rolling(window=50, min_periods=50).quantile(0.80).values
-    
-    # Squeeze condition: BB width < 20th percentile (low volatility)
-    squeeze = bb_width < bb_width_20th
-    
-    # Expansion condition: BB width > 80th percentile (high volatility)
-    expansion = bb_width > bb_width_80th
-    
-    # Breakout conditions
-    breakout_up = close_1d > upper_bb
-    breakout_down = close_1d < lower_bb
-    
-    # Volume condition: volume > 2x average volume
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2 * avg_volume
-    
-    # Trend filter: 50-period EMA on 1w
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_1w = close_1w > ema_50_1w
-    downtrend_1w = close_1w < ema_50_1w
-    
-    # Align 1d indicators to 12h timeframe
-    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze)
-    expansion_aligned = align_htf_to_ltf(prices, df_1d, expansion)
-    breakout_up_aligned = align_htf_to_ltf(prices, df_1d, breakout_up)
-    breakout_down_aligned = align_htf_to_ltf(prices, df_1d, breakout_down)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
-    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
-    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
-    
-    # ATR for stop loss (14-period on 1d)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # Calculate ADX (14-period) on 12h
+    # True Range
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    tr[0] = tr1[0]  # First value
+    
+    # Directional Movement
+    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
+                       np.maximum(high_12h - np.roll(close_12h, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(close_12h, 1)), 
+                        np.maximum(np.roll(close_12h, 1) - low_12h, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
+    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25  # Position size
+    base_size = 0.25  # Position size (25% of capital)
     
-    for i in range(100, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(squeeze_aligned[i]) or np.isnan(expansion_aligned[i]) or
-            np.isnan(breakout_up_aligned[i]) or np.isnan(breakout_down_aligned[i]) or
-            np.isnan(volume_spike_aligned[i]) or np.isnan(uptrend_1w_aligned[i]) or
-            np.isnan(downtrend_1w_aligned[i]) or np.isnan(atr_1d_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(adx_aligned[i])):
             continue
         
-        # Long entry: bullish breakout after squeeze, with volume spike and uptrend
-        if (squeeze_aligned[i-1] and expansion_aligned[i] and breakout_up_aligned[i] and
-            volume_spike_aligned[i] and uptrend_1w_aligned[i] and position <= 0):
+        # Long entry: price breaks above 20-period high + volume confirmation + ADX > 25
+        if (close[i] > highest_high[i] and
+            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
+            adx_aligned[i] > 25 and
+            position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: bearish breakout after squeeze, with volume spike and downtrend
-        elif (squeeze_aligned[i-1] and expansion_aligned[i] and breakout_down_aligned[i] and
-              volume_spike_aligned[i] and downtrend_1w_aligned[i] and position >= 0):
+        # Short entry: price breaks below 20-period low + volume confirmation + ADX > 25
+        elif (close[i] < lowest_low[i] and
+              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
+              adx_aligned[i] > 25 and
+              position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse breakout or volatility contraction (squeeze returns)
-        elif position == 1 and (breakout_down_aligned[i] or squeeze_aligned[i]):
+        # Exit: reverse breakout or ADX < 20 (ranging market)
+        elif position == 1 and (close[i] < lowest_low[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (breakout_up_aligned[i] or squeeze_aligned[i]):
+        elif position == -1 and (close[i] > highest_high[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "12h_Bollinger_Squeeze_Volume_Spike"
-timeframe = "12h"
+name = "4h_Donchian20_Volume_ADX"
+timeframe = "4h"
 leverage = 1.0
