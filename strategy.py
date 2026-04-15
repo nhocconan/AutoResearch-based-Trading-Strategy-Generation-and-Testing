@@ -1,19 +1,19 @@
-# 1d_Long_Term_Trend_With_Weekly_Filter
-# Hypothesis: Long-term trend following on daily timeframe with weekly trend filter.
-# Uses 50-day EMA for trend direction and 200-day EMA for long-term bias.
-# Weekly trend filter ensures we only trade in the direction of the weekly trend.
-# Entry when price crosses above/below 50-day EMA with volume confirmation.
-# Exit when price crosses back below/above 50-day EMA.
-# Designed to capture major trends while avoiding counter-trend trades.
-# Conservative sizing (0.25) to limit trade frequency and avoid fee drag.
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 4h Williams Alligator + 1d RSI Mean Reversion + Volume Spike
+# Williams Alligator identifies trend direction via three smoothed moving averages (Jaw, Teeth, Lips).
+# Long when Lips > Teeth > Jaw (bullish alignment) and RSI < 40 (oversold).
+# Short when Lips < Teeth < Jaw (bearish alignment) and RSI > 60 (overbought).
+# Volume confirmation requires > 1.5x 20-bar median volume.
+# Designed to work in bull markets (trend following via Alligator) and bear markets (mean reversion via RSI extremes).
+# Conservative sizing (0.25) to limit trade frequency and avoid fee drag.
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,51 +21,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 50-day EMA for trend direction
-    close_series = pd.Series(close)
-    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1-day RSI(14) for mean reversion signals
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d.values)
     
-    # 200-day EMA for long-term bias
-    ema_200 = close_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Williams Alligator on 4h close
+    # Jaw: 13-period SMMA, 8-period offset
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean()
+    jaw = jaw.shift(8)  # 8-period offset
+    # Teeth: 8-period SMMA, 5-period offset
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean()
+    teeth = teeth.shift(5)  # 5-period offset
+    # Lips: 5-period SMMA, 3-period offset
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean()
+    lips = lips.shift(3)  # 3-period offset
     
-    # Weekly trend filter: 20-week EMA on weekly data
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    jaw_arr = jaw.values
+    teeth_arr = teeth.values
+    lips_arr = lips.values
     
-    # Volume confirmation: current > 1.5x 20-day median volume
+    # Volume confirmation: current > 1.5x median of last 20 bars
     vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
     vol_threshold = 1.5 * vol_median
     
     signals = np.zeros(n)
     
-    for i in range(50, n):  # Start after warmup for 50-day EMA
+    for i in range(20, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(ema_50[i]) or np.isnan(ema_200[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_threshold[i])):
+        if (np.isnan(lips_arr[i]) or np.isnan(teeth_arr[i]) or np.isnan(jaw_arr[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or np.isnan(vol_threshold[i])):
             continue
         
-        # Long: price above 50-day EMA, above 200-day EMA (long-term bias), 
-        # weekly trend up (price above weekly EMA), volume spike
-        if (close[i] > ema_50[i] and 
-            close[i] > ema_200[i] and 
-            close[i] > ema_20_1w_aligned[i] and 
+        # Bullish alignment: Lips > Teeth > Jaw
+        bullish_alignment = lips_arr[i] > teeth_arr[i] and teeth_arr[i] > jaw_arr[i]
+        # Bearish alignment: Lips < Teeth < Jaw
+        bearish_alignment = lips_arr[i] < teeth_arr[i] and teeth_arr[i] < jaw_arr[i]
+        
+        # Long: Bullish alignment, RSI oversold (<40), volume spike
+        if (bullish_alignment and 
+            rsi_1d_aligned[i] < 40 and 
             volume[i] > vol_threshold[i]):
             signals[i] = 0.25
         
-        # Short: price below 50-day EMA, below 200-day EMA (long-term bias),
-        # weekly trend down (price below weekly EMA), volume spike
-        elif (close[i] < ema_50[i] and 
-              close[i] < ema_200[i] and 
-              close[i] < ema_20_1w_aligned[i] and 
+        # Short: Bearish alignment, RSI overbought (>60), volume spike
+        elif (bearish_alignment and 
+              rsi_1d_aligned[i] > 60 and 
               volume[i] > vol_threshold[i]):
             signals[i] = -0.25
         
-        # Exit: price crosses back below/above 50-day EMA
+        # Exit: Alligator alignment breaks or RSI returns to neutral (40-60)
         elif (i > 0 and 
-              ((signals[i-1] == 0.25 and close[i] < ema_50[i]) or
-               (signals[i-1] == -0.25 and close[i] > ema_50[i]))):
+              ((signals[i-1] == 0.25 and (not bullish_alignment or rsi_1d_aligned[i] >= 40)) or
+               (signals[i-1] == -0.25 and (not bearish_alignment or rsi_1d_aligned[i] <= 60)))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -74,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Long_Term_Trend_With_Weekly_Filter"
-timeframe = "1d"
+name = "4h_WilliamsAlligator_RSI1d_Volume"
+timeframe = "4h"
 leverage = 1.0
