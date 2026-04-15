@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h mean-reversion strategy using 4h Bollinger Bands and 1h RSI with volume confirmation
-# Uses 4h Bollinger Bands (20, 2.0) for mean-reversion zones and 1h RSI(14) for oversold/overbought
+# Hypothesis: 1h mean-reversion strategy using 1d Bollinger Bands and 1h RSI with volume confirmation
+# Uses 1d Bollinger Bands (20, 2.0) for mean-reversion zones and 1h RSI(14) for oversold/overbought
 # Volume filter ensures trades occur during high conviction periods
 # Designed for low trade frequency (target 15-35/year) to avoid fee drag
 # Works in ranging markets (mean reversion at BB extremes) and trending markets (avoid trades against trend)
@@ -20,17 +20,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data once
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load 1d data once
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 4h Bollinger Bands (20, 2.0)
-    close_4h = df_4h['close'].values
-    sma20_4h = pd.Series(close_4h).rolling(window=20, min_periods=20).mean().values
-    std20_4h = pd.Series(close_4h).rolling(window=20, min_periods=20).std().values
-    upper_bb_4h = sma20_4h + 2.0 * std20_4h
-    lower_bb_4h = sma20_4h - 2.0 * std20_4h
+    # 1d Bollinger Bands (20, 2.0)
+    close_1d = df_1d['close'].values
+    sma20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb_1d = sma20_1d + 2.0 * std20_1d
+    lower_bb_1d = sma20_1d - 2.0 * std20_1d
     
     # 1h RSI(14) for momentum
     delta = np.diff(close, prepend=close[0])
@@ -44,14 +44,21 @@ def generate_signals(prices):
     # 1h volume moving average for confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    
     signals = np.zeros(n)
     position = 0
     position_size = 0.20  # 20% position size
     
     for i in range(100, n):
+        # Skip outside session
+        if not (8 <= hours[i] <= 20):
+            continue
+        
         # Get aligned indicators
-        upper_bb_aligned = align_htf_to_ltf(prices, df_4h, upper_bb_4h)[i]
-        lower_bb_aligned = align_htf_to_ltf(prices, df_4h, lower_bb_4h)[i]
+        upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)[i]
+        lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)[i]
         
         # Skip if not enough data
         if np.isnan(upper_bb_aligned) or np.isnan(lower_bb_aligned) or np.isnan(rsi_1h[i]) or np.isnan(volume_ma[i]):
@@ -69,15 +76,15 @@ def generate_signals(prices):
             position = -1
             signals[i] = -position_size
         # Exit: price returns to middle of BB or RSI returns to neutral zone
-        elif position == 1 and (close[i] >= sma20_4h[i//16] if i >= 16 else close[i] or rsi_1h[i] > 50):
+        elif position == 1 and (close[i] >= sma20_1d[i//24] if i >= 24 else close[i] or rsi_1h[i] > 50):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] <= sma20_4h[i//16] if i >= 16 else close[i] or rsi_1h[i] < 50):
+        elif position == -1 and (close[i] <= sma20_1d[i//24] if i >= 24 else close[i] or rsi_1h[i] < 50):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "1h_4h_BB_RSI_MeanReversion"
+name = "1h_1d_BB_RSI_MeanReversion"
 timeframe = "1h"
 leverage = 1.0
