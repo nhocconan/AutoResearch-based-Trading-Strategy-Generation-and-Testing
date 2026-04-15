@@ -3,93 +3,83 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + volume confirmation + 1d volatility filter
-# Uses Donchian breakouts for trend capture, volume to confirm breakout strength,
-# and 1d ATR-based volatility filter to avoid low-momentum environments.
-# Designed to work in both bull and bear markets by focusing on high-momentum breakouts.
-# Target: 100-200 total trades over 4 years (25-50/year) with selective entries.
+# Hypothesis: 1h RSI(2) mean reversion with 4h trend filter and volume confirmation
+# Uses extreme RSI(2) readings for mean reversion entries, filtered by 4h EMA50 trend
+# and confirmed by volume spikes. Works in bull/bear by only taking reversals
+# in the direction of the 4h trend. Target: 60-150 total trades over 4 years.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data (primary timeframe) for price action
+    # Load 4h data for trend filter
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 50:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
     
-    # Load 1d data for volatility filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Calculate RSI(2) on 1h
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate Donchian channels (20-period) on 4h
-    donch_high_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donch_low_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate ATR (14-period) on 1d for volatility filter
-    tr1 = df_1d['high'].values - df_1d['low'].values
-    tr2 = np.abs(df_1d['high'].values - np.roll(df_1d['close'].values, 1))
-    tr3 = np.abs(df_1d['low'].values - np.roll(df_1d['close'].values, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate EMA50 on 4h for trend filter
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate average volume (20-period) on 1d
-    vol_avg_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    # Calculate volume average (20-period on 1h)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align all indicators to 4h timeframe
-    donch_high_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_high_4h)
-    donch_low_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_low_4h)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    # Align 4h EMA50 to 1h timeframe
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25  # Position size (25% of capital)
+    base_size = 0.20  # Position size
     
-    for i in range(100, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(donch_high_4h_aligned[i]) or np.isnan(donch_low_4h_aligned[i]) or
-            np.isnan(atr_1d_aligned[i]) or np.isnan(vol_avg_aligned[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema50_4h_aligned[i]) or
+            np.isnan(vol_avg[i])):
             continue
         
-        # Long entry: price breaks above Donchian high + volume spike + high volatility
-        if (close[i] > donch_high_4h_aligned[i] and
-            volume[i] > 2.0 * vol_avg_aligned[i] and
-            atr_1d_aligned[i] > np.nanmedian(atr_1d_aligned[max(0, i-50):i+1]) and
+        # Long entry: RSI(2) < 10 (oversold) + volume spike + price above 4h EMA50
+        if (rsi[i] < 10 and
+            volume[i] > 1.5 * vol_avg[i] and
+            close[i] > ema50_4h_aligned[i] and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below Donchian low + volume spike + high volatility
-        elif (close[i] < donch_low_4h_aligned[i] and
-              volume[i] > 2.0 * vol_avg_aligned[i] and
-              atr_1d_aligned[i] > np.nanmedian(atr_1d_aligned[max(0, i-50):i+1]) and
+        # Short entry: RSI(2) > 90 (overbought) + volume spike + price below 4h EMA50
+        elif (rsi[i] > 90 and
+              volume[i] > 1.5 * vol_avg[i] and
+              close[i] < ema50_4h_aligned[i] and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse signal
-        elif position == 1 and close[i] < donch_low_4h_aligned[i]:
+        # Exit: RSI returns to neutral (40-60) or reverse signal
+        elif position == 1 and (rsi[i] > 40 or rsi[i] < 60):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > donch_high_4h_aligned[i]:
+        elif position == -1 and (rsi[i] < 60 or rsi[i] > 40):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian_Volume_Volatility_Filter"
-timeframe = "4h"
+name = "1h_RSI2_MeanReversion_4hTrend"
+timeframe = "1h"
 leverage = 1.0
