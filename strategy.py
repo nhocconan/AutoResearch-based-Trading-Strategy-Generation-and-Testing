@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1-day ATR Filter
-# Uses Williams Alligator (Jaw/Teeth/Lips) on 12h timeframe to identify trends.
-# Enters long when Lips > Teeth > Jaw (bullish alignment) and price > Lips,
-# enters short when Lips < Teeth < Jaw (bearish alignment) and price < Lips.
-# Filters trades using 1-day ATR volatility: only trade when ATR(14) > median ATR(50) to avoid low-volatility chop.
-# Works in bull markets (captures uptrends) and bear markets (captures downtrends).
-# Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 4h Donchian(20) breakout with 12h ADX trend filter and volume confirmation
+# Uses 4h Donchian channel breakouts for directional entries, confirmed by 12h ADX > 25 (trending market)
+# and volume > 1.5x 20-period median. Works in bull markets (long breakouts) and bear markets (short breakouts).
+# Target: 50-150 total trades over 4 years (12-38/year). Well within limits to avoid fee drag.
+# Timeframe: 4h, HTF: 12h for ADX filter.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,122 +19,86 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data for Williams Alligator
+    # Calculate 4h Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Load 12h data for ADX trend filter
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    if len(df_12h) < 30:
         return np.zeros(n)
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     
-    # Load 1d data for ATR filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate ADX (14-period) on 12h
+    # True Range
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Williams Alligator on 12h: SMMA (Smoothed Moving Average)
-    # Jaw: 13-period SMMA of median price, shifted 8 bars
-    # Teeth: 8-period SMMA of median price, shifted 5 bars
-    # Lips: 5-period SMMA of median price, shifted 3 bars
-    median_price_12h = (high_12h + low_12h) / 2
+    # Directional Movement
+    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
+                       np.maximum(high_12h - np.roll(close_12h, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(close_12h, 1)), 
+                        np.maximum(np.roll(close_12h, 1) - low_12h, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    def smma(arr, period):
-        """Smoothed Moving Average"""
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # First value is simple SMA
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Smoothed values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
     
-    jaw = smma(median_price_12h, 13)
-    teeth = smma(median_price_12h, 8)
-    lips = smma(median_price_12h, 5)
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
+    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
     
-    # Shift the lines as per Alligator definition
-    jaw = np.roll(jaw, 8)
-    teeth = np.roll(teeth, 5)
-    lips = np.roll(lips, 3)
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Align Alligator lines to 12h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
-    
-    # ATR on 1d for volatility filter
-    def calculate_atr(high, low, close, period):
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]  # First value
-        atr = np.full_like(tr, np.nan)
-        for i in range(period, len(tr)):
-            if i == period:
-                atr[i] = np.mean(tr[:period])
-            else:
-                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        return atr
-    
-    atr_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
-    atr_ma_1d = np.full_like(atr_1d, np.nan)
-    for i in range(50, len(atr_1d)):
-        if i == 50:
-            atr_ma_1d[i] = np.mean(atr_1d[:50])
-        else:
-            atr_ma_1d[i] = (atr_ma_1d[i-1] * 49 + atr_1d[i]) / 50
-    
-    # Align ATR and its MA to 12h timeframe
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25  # Position size
+    base_size = 0.25  # Position size (25% of capital)
     
-    for i in range(100, n):
+    for i in range(20, n):  # Start after Donchian warmup
         # Skip if any required data is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(atr_ma_1d_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(adx_aligned[i])):
             continue
         
-        # Volatility filter: only trade when ATR > MA(ATR) (avoid low-volatility chop)
-        vol_filter = atr_1d_aligned[i] > atr_ma_1d_aligned[i]
-        
-        # Bullish alignment: Lips > Teeth > Jaw
-        bullish_alignment = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
-        # Bearish alignment: Lips < Teeth < Jaw
-        bearish_alignment = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
-        
-        # Long entry: bullish alignment + price above Lips + volatility filter
-        if (bullish_alignment and close[i] > lips_aligned[i] and vol_filter and
+        # Long entry: price breaks above Donchian high + volume confirmation + ADX > 25
+        if (close[i] > highest_high[i] and
+            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
+            adx_aligned[i] > 25 and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: bearish alignment + price below Lips + volatility filter
-        elif (bearish_alignment and close[i] < lips_aligned[i] and vol_filter and
+        # Short entry: price breaks below Donchian low + volume confirmation + ADX > 25
+        elif (close[i] < lowest_low[i] and
+              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
+              adx_aligned[i] > 25 and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: opposite alignment or volatility filter fails
-        elif position == 1 and (not bullish_alignment or not vol_filter):
+        # Exit: reverse breakout or ADX < 20 (ranging market)
+        elif position == 1 and (close[i] < lowest_low[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (not bearish_alignment or not vol_filter):
+        elif position == -1 and (close[i] > highest_high[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "12h_Williams_Alligator_ATR_Filter"
-timeframe = "12h"
+name = "4h_Donchian20_Volume_ADX_Trend"
+timeframe = "4h"
 leverage = 1.0
