@@ -36,9 +36,10 @@ def generate_signals(prices):
     donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
     donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
     
-    # Calculate 4h volume ratio (current vs 20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ratio = volume / (vol_ma_20 + 1e-10)
+    # Calculate 1d volume ratio (current vs 20-period average)
+    vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    volume_ratio_1d = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    volume_ratio = volume / (volume_ratio_1d + 1e-10)
     
     signals = np.zeros(n)
     
@@ -82,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Vol_Regime_Donchian20_1dEMA34_Breakout_v7"
-timeframe = "4h"
+name = "1d_Vol_Regime_Donchian20_1dEMA34_Breakout_v3"
+timeframe = "1d"
 leverage = 1.0
