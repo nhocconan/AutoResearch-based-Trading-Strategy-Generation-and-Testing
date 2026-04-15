@@ -18,7 +18,7 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily ATR(14) for volatility filter
+    # Calculate daily ATR(14) for volatility filter and stoploss
     tr1 = df_1d['high'] - df_1d['low']
     tr2 = np.abs(df_1d['high'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
     tr3 = np.abs(df_1d['low'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
@@ -40,53 +40,63 @@ def generate_signals(prices):
     rsi_14_1d = 100 - (100 / (1 + rs))
     rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
     
-    # Calculate 6h Donchian(20) breakout levels
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    
+    # Track position for stoploss
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     for i in range(100, n):
         # Skip if any required data is NaN
         if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(rsi_14_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
+            np.isnan(rsi_14_1d_aligned[i])):
             signals[i] = 0.0
+            position = 0
+            continue
+        
+        current_price = close[i]
+        
+        # Check stoploss for existing position
+        if position == 1 and current_price < entry_price - 1.5 * atr_14_1d_aligned[i]:
+            signals[i] = 0.0
+            position = 0
+            continue
+        elif position == -1 and current_price > entry_price + 1.5 * atr_14_1d_aligned[i]:
+            signals[i] = 0.0
+            position = 0
             continue
         
         # Regime filter: only trade when daily ATR is elevated (> 0.3% of price)
-        vol_filter = atr_14_1d_aligned[i] > 0.003 * close[i]
-        
-        # Donchian breakout conditions
-        donchian_breakout_up = close[i] > highest_high[i-1]  # Break above previous period high
-        donchian_breakout_down = close[i] < lowest_low[i-1]  # Break below previous period low
+        vol_filter = atr_14_1d_aligned[i] > 0.003 * current_price
         
         # Long conditions:
         # 1. Price above daily EMA50 (bullish bias)
         # 2. Daily RSI between 30 and 70 (avoid extremes)
         # 3. Volatility filter
-        # 4. Donchian breakout up
-        if (close[i] > ema_50_1d_aligned[i] and
+        if (current_price > ema_50_1d_aligned[i] and
             30 <= rsi_14_1d_aligned[i] <= 70 and
             vol_filter and
-            donchian_breakout_up):
+            position != 1):
             signals[i] = 0.25
+            position = 1
+            entry_price = current_price
             
         # Short conditions:
         # 1. Price below daily EMA50 (bearish bias)
         # 2. Daily RSI between 30 and 70 (avoid extremes)
         # 3. Volatility filter
-        # 4. Donchian breakout down
-        elif (close[i] < ema_50_1d_aligned[i] and
+        elif (current_price < ema_50_1d_aligned[i] and
               30 <= rsi_14_1d_aligned[i] <= 70 and
               vol_filter and
-              donchian_breakout_down):
+              position != -1):
             signals[i] = -0.25
+            position = -1
+            entry_price = current_price
         else:
             signals[i] = 0.0
+            # Keep current position
     
     return signals
 
-name = "6h_EMA50_RSI14_Donchian20_VolFilter_v1"
-timeframe = "6h"
+name = "12h_EMA50_RSI14_VolFilter_SL_v1"
+timeframe = "12h"
 leverage = 1.0
