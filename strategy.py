@@ -3,12 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w Donchian channel (20) for long-term trend and 1d RSI(2) for short-term mean reversion.
-# In 1w uptrend (price > weekly upper Donchian), wait for 1d RSI(2) < 10 to go long (extreme oversold).
-# In 1w downtrend (price < weekly lower Donchian), wait for 1d RSI(2) > 90 to go short (extreme overbought).
-# Volume confirmation (current volume > 1.5x 20-day average) ensures momentum validity.
-# Designed for very low trade frequency (~10-20/year) to minimize fee drag while capturing major reversals.
-# Works in both bull (trend-following pullbacks) and bear (counter-trend bounces) markets.
+# Hypothesis: 6h strategy using 12h Donchian breakout for trend direction and 1d Elder Ray (Bull/Bear Power) for entry timing.
+# In 12h uptrend (price > upper Donchian), go long when 1d Bull Power turns positive (buying pressure emerging).
+# In 12h downtrend (price < lower Donchian), go short when 1d Bear Power turns negative (selling pressure emerging).
+# Volume confirmation ensures institutional participation. Target: 12-30 trades/year to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,35 +17,33 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
     # Pre-compute session hours to avoid datetime operations in loop
-    hours = pd.DatetimeIndex(open_time).hour
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    # Get 1w and 1d HTF data once before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Get HTF data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1w) < 30 or len(df_1d) < 30:
+    if len(df_12h) < 30 or len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1w Indicators: Donchian Channel (20) ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    donchian_high_1w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low_1w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    donchian_high_1w_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_1w)
-    donchian_low_1w_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_1w)
+    # === 12h Indicators: Donchian Channel (20) ===
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    donchian_high_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donchian_high_12h_aligned = align_htf_to_ltf(prices, df_12h, donchian_high_12h)
+    donchian_low_12h_aligned = align_htf_to_ltf(prices, df_12h, donchian_low_12h)
     
-    # === 1d Indicators: RSI(2) ===
+    # === 1d Indicators: Elder Ray (Bull Power / Bear Power) ===
     close_1d = df_1d['close'].values
-    delta = pd.Series(close_1d).diff().values
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_2_1d = 100 - (100 / (1 + rs))
-    rsi_2_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_2_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power_1d = high_1d - ema13_1d  # Bull Power = High - EMA13
+    bear_power_1d = low_1d - ema13_1d   # Bear Power = Low - EMA13
+    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     
     signals = np.zeros(n)
     
@@ -55,34 +51,34 @@ def generate_signals(prices):
     warmup = 100
     
     for i in range(warmup, n):
-        # Session filter: 08-20 UTC only
+        # Session filter: 08-20 UTC only (reduces noise, maintains edge)
         hour = hours[i]
         if hour < 8 or hour > 20:
             signals[i] = 0.0
             continue
             
-        # Volume filter: current volume > 1.5x 20-day volume SMA
+        # Volume filter: current volume > 1.5x 20-period volume SMA
         vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_1w_aligned[i]) or np.isnan(donchian_low_1w_aligned[i]) or
-            np.isnan(rsi_2_1d_aligned[i])):
+        if (np.isnan(donchian_high_12h_aligned[i]) or np.isnan(donchian_low_12h_aligned[i]) or
+            np.isnan(bull_power_1d_aligned[i]) or np.isnan(bear_power_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. In 1w uptrend (price > weekly upper Donchian)
-        # 2. 1d RSI(2) < 10 (extremely oversold)
+        # 1. In 12h uptrend (price > 12h upper Donchian)
+        # 2. 1d Bull Power > 0 (buying pressure > EMA13)
         # 3. Volume confirmation
-        if (close[i] > donchian_high_1w_aligned[i]) and (rsi_2_1d_aligned[i] < 10) and vol_confirm:
+        if (close[i] > donchian_high_12h_aligned[i]) and (bull_power_1d_aligned[i] > 0) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. In 1w downtrend (price < weekly lower Donchian)
-        # 2. 1d RSI(2) > 90 (extremely overbought)
+        # 1. In 12h downtrend (price < 12h lower Donchian)
+        # 2. 1d Bear Power < 0 (selling pressure > EMA13)
         # 3. Volume confirmation
-        elif (close[i] < donchian_low_1w_aligned[i]) and (rsi_2_1d_aligned[i] > 90) and vol_confirm:
+        elif (close[i] < donchian_low_12h_aligned[i]) and (bear_power_1d_aligned[i] < 0) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -90,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1w_RSI2_VolumeFilter_v1"
-timeframe = "1d"
+name = "6h_Donchian20_1dElderRay_VolumeFilter_v1"
+timeframe = "6h"
 leverage = 1.0
