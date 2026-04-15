@@ -3,102 +3,85 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h 12h EMA crossover + volume confirmation + volatility filter
-# Uses EMA crossover for trend changes, volume to confirm momentum,
-# and volatility filter (ATR ratio) to avoid choppy markets.
-# Works in both bull and bear by trading EMA crossovers with volume confirmation.
-# Target: 60-150 total trades over 4 years (15-38/year) with selective entries.
+# Hypothesis: 4h RSI(2) extreme + 12h trend filter + volume confirmation
+# Uses extremely short RSI to capture mean-reversion bounces in strong trends.
+# Works in bull markets (long on RSI<10 in uptrend) and bear markets (short on RSI>90 in downtrend).
+# Volume confirms momentum behind the move. Target: 80-150 total trades over 4 years.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data (primary timeframe) for price action and EMA
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Load 12h data for ATR calculation (volatility filter)
+    # Load 12h data for trend filter
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 50:
         return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    
     close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate EMA12 and EMA26 on 4h for crossover
-    ema12_4h = pd.Series(close_4h).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema26_4h = pd.Series(close_4h).ewm(span=26, adjust=False, min_periods=26).mean().values
+    # Calculate RSI(2) on price
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate ATR (14-period) on 12h for volatility filter
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate EMA(50) on 12h for trend filter
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate ATR ratio (current ATR / 50-period average ATR) for volatility regime
-    atr_avg_50 = pd.Series(atr_12h).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr_12h / (atr_avg_50 + 1e-10)
+    # Calculate volume average (20-period on 12h)
+    vol_avg_12h = pd.Series(volume_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Volume average (20-period on 4h)
-    vol_avg_4h = pd.Series(df_4h['volume'].values).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all indicators to 4h timeframe
-    ema12_4h_aligned = align_htf_to_ltf(prices, df_4h, ema12_4h)
-    ema26_4h_aligned = align_htf_to_ltf(prices, df_4h, ema26_4h)
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_12h, atr_ratio)
-    vol_avg_aligned = align_htf_to_ltf(prices, df_4h, vol_avg_4h)
+    # Align indicators to 4h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_12h, rsi)
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    vol_avg_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_12h)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25  # Position size
+    base_size = 0.25
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema12_4h_aligned[i]) or np.isnan(ema26_4h_aligned[i]) or
-            np.isnan(atr_ratio_aligned[i]) or np.isnan(vol_avg_aligned[i])):
+        if (np.isnan(rsi_aligned[i]) or np.isnan(ema50_12h_aligned[i]) or
+            np.isnan(vol_avg_12h_aligned[i])):
             continue
         
-        # Long entry: EMA12 crosses above EMA26 + volume spike + low volatility (atr_ratio < 1.5)
-        if (ema12_4h_aligned[i] > ema26_4h_aligned[i] and
-            ema12_4h_aligned[i-1] <= ema26_4h_aligned[i-1] and
-            volume[i] > 1.5 * vol_avg_aligned[i] and
-            atr_ratio_aligned[i] < 1.5 and
+        # Long entry: RSI < 10 (extremely oversold) + price above 12h EMA50 (uptrend) + volume spike
+        if (rsi_aligned[i] < 10 and
+            close[i] > ema50_12h_aligned[i] and
+            volume[i] > 1.5 * vol_avg_12h_aligned[i] and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: EMA12 crosses below EMA26 + volume spike + low volatility (atr_ratio < 1.5)
-        elif (ema12_4h_aligned[i] < ema26_4h_aligned[i] and
-              ema12_4h_aligned[i-1] >= ema26_4h_aligned[i-1] and
-              volume[i] > 1.5 * vol_avg_aligned[i] and
-              atr_ratio_aligned[i] < 1.5 and
+        # Short entry: RSI > 90 (extremely overbought) + price below 12h EMA50 (downtrend) + volume spike
+        elif (rsi_aligned[i] > 90 and
+              close[i] < ema50_12h_aligned[i] and
+              volume[i] > 1.5 * vol_avg_12h_aligned[i] and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse signal or high volatility (atr_ratio > 2.0) to avoid chop
-        elif position == 1 and (ema12_4h_aligned[i] < ema26_4h_aligned[i] or atr_ratio_aligned[i] > 2.0):
+        # Exit: RSI returns to neutral (40-60) or opposite extreme
+        elif position == 1 and (rsi_aligned[i] > 60 or rsi_aligned[i] > 90):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (ema12_4h_aligned[i] > ema26_4h_aligned[i] or atr_ratio_aligned[i] > 2.0):
+        elif position == -1 and (rsi_aligned[i] < 40 or rsi_aligned[i] < 10):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_EMA_Crossover_Volume_Volatility_Filter"
+name = "4h_RSI2_Extreme_12hTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
