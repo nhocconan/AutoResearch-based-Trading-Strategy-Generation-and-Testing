@@ -13,9 +13,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily HTF data once before loop
+    # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # Calculate 1d Donchian channels (20-period)
@@ -24,65 +24,48 @@ def generate_signals(prices):
     upper_20_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     lower_20_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align 1d Donchian to 1d (no shift needed for same timeframe, but using helper for consistency)
-    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20_1d)
-    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20_1d)
+    # Align 1d Donchian to 12h
+    upper_20_12h = align_htf_to_ltf(prices, df_1d, upper_20_1d)
+    lower_20_12h = align_htf_to_ltf(prices, df_1d, lower_20_1d)
     
-    # Get weekly HTF data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Calculate weekly EMA(21) for trend filter
-    weekly_close = df_1w['close'].values
-    weekly_ema_21 = pd.Series(weekly_close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Align weekly EMA to 1d
-    weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema_21)
-    
-    # Calculate 1d ATR(14) for volatility filter
+    # Calculate 12h ATR(14) for volatility filter
     tr1 = high - low
     tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
     tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 1d volume ratio (current vs 20-period average)
+    # Calculate 12h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
     signals = np.zeros(n)
     
-    # Precompute hour filter (avoid low-liquidity hours: 0-6 UTC)
+    # Precompute session filter (00-24 UTC for 12h - less restrictive)
     hours = prices.index.hour
-    in_session = (hours >= 6) & (hours <= 23)  # 6:00-23:59 UTC
+    in_session = (hours >= 0) & (hours <= 23)  # Always true for 12h, kept for structure
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
-            np.isnan(weekly_ema_aligned[i]) or np.isnan(atr_14[i]) or 
-            np.isnan(volume_ratio[i]) or not in_session[i]):
+        if (np.isnan(upper_20_12h[i]) or np.isnan(lower_20_12h[i]) or 
+            np.isnan(atr_14[i]) or np.isnan(volume_ratio[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
         # Long conditions:
-        # 1. 1d price breaks above 1d Donchian upper (20) - bullish breakout
-        # 2. Price above weekly EMA(21) (bullish weekly trend)
-        # 3. Volume confirmation: volume > 1.5x average
-        # 4. Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
-        if (close[i] > upper_20_aligned[i] and
-            close[i] > weekly_ema_aligned[i] and
+        # 1. 12h price breaks above 1d Donchian upper (20) - bullish breakout
+        # 2. Volume confirmation: volume > 1.5x average
+        # 3. Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
+        if (close[i] > upper_20_12h[i] and
             volume_ratio[i] > 1.5 and
             atr_14[i] > 0.005 * close[i]):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. 1d price breaks below 1d Donchian lower (20) - bearish breakdown
-        # 2. Price below weekly EMA(21) (bearish weekly trend)
-        # 3. Volume confirmation: volume > 1.5x average
-        # 4. Volatility filter: ATR > 0.5% of price
-        elif (close[i] < lower_20_aligned[i] and
-              close[i] < weekly_ema_aligned[i] and
+        # 1. 12h price breaks below 1d Donchian lower (20) - bearish breakdown
+        # 2. Volume confirmation: volume > 1.5x average
+        # 3. Volatility filter: ATR > 0.5% of price
+        elif (close[i] < lower_20_12h[i] and
               volume_ratio[i] > 1.5 and
               atr_14[i] > 0.005 * close[i]):
             signals[i] = -0.25
@@ -91,6 +74,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_WeeklyEMA21_Volume_Filter_v1"
-timeframe = "1d"
+name = "12h_1d_Donchian20_Volume_ATR_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
