@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,47 +13,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot levels
+    # Get daily data for weekly pivot levels
     daily = get_htf_data(prices, '1d')
     daily_high = daily['high'].values
     daily_low = daily['low'].values
     daily_close = daily['close'].values
     
-    # Calculate daily pivot levels
-    pivot = (daily_high + daily_low + daily_close) / 3.0
-    r1 = 2 * pivot - daily_low
-    s1 = 2 * pivot - daily_high
+    # Calculate weekly pivot levels from daily data
+    # Weekly high = max of last 5 daily highs
+    # Weekly low = min of last 5 daily lows
+    # Weekly close = last daily close
+    weekly_high = pd.Series(daily_high).rolling(window=5, min_periods=5).max().values
+    weekly_low = pd.Series(daily_low).rolling(window=5, min_periods=5).min().values
+    weekly_close = pd.Series(daily_close).rolling(window=5, min_periods=5).last().values
     
-    # Align pivot levels to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, daily, pivot)
-    r1_aligned = align_htf_to_ltf(prices, daily, r1)
-    s1_aligned = align_htf_to_ltf(prices, daily, s1)
+    # Calculate weekly pivot levels
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
     
-    # Volume filter: current 4h volume > 1.5x 20-period average volume
+    # Align weekly pivot levels to 6h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, daily, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, daily, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, daily, weekly_s1)
+    
+    # Volume filter: current 6h volume > 1.3x 20-period average volume
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    volume_filter = volume > (1.3 * vol_ma)
     
-    # Range filter: avoid trading when price is within 0.3% of pivot
-    price_to_pivot = np.abs(close - pivot_aligned) / pivot_aligned
-    range_filter = price_to_pivot > 0.003
+    # Range filter: avoid trading when price is within 0.25% of weekly pivot
+    price_to_pivot = np.abs(close - weekly_pivot_aligned) / weekly_pivot_aligned
+    range_filter = price_to_pivot > 0.0025
     
     signals = np.zeros(n)
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or 
+            np.isnan(weekly_s1_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Only trade when volume filter and range filter both pass
         if volume_filter[i] and range_filter[i]:
-            # Long conditions: price breaks above R1 with volume
-            if close[i] > r1_aligned[i]:
+            # Long conditions: price breaks above weekly R1 with volume
+            if close[i] > weekly_r1_aligned[i]:
                 signals[i] = 0.25
-            # Short conditions: price breaks below S1 with volume
-            elif close[i] < s1_aligned[i]:
+            # Short conditions: price breaks below weekly S1 with volume
+            elif close[i] < weekly_s1_aligned[i]:
                 signals[i] = -0.25
             else:
                 signals[i] = signals[i-1]
@@ -62,6 +70,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Pivot_R1_S1_Breakout_Volume_RangeFilter"
-timeframe = "4h"
+name = "6h_WeeklyPivot_R1_S1_Breakout_Volume_RangeFilter"
+timeframe = "6h"
 leverage = 1.0
