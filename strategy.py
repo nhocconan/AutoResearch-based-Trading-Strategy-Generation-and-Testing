@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w volume spike and 1w ADX trend filter.
-# Long when price breaks above 20-period 1d high AND volume > 1.5x 20-period 1w average AND 1w ADX > 25 (strong trending market).
-# Short when price breaks below 20-period 1d low AND volume > 1.5x 20-period 1w average AND 1w ADX > 25.
-# Exit when price crosses the 1d midpoint (upper+lower)/2 or ATR-based stoploss (2.5*ATR from entry).
-# Uses discrete position size 0.25. Designed to capture strong breakouts in trending markets (both bull and bear).
-# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag while maintaining edge.
+# Hypothesis: 12h Williams %R mean reversion with 1d volume spike and 1d chop regime filter.
+# Long when Williams %R(14) < -80 (oversold) AND volume > 1.5x 20-period 1d average AND chop > 61.8 (ranging market).
+# Short when Williams %R(14) > -20 (overbought) AND volume > 1.5x 20-period 1d average AND chop > 61.8.
+# Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts).
+# Uses discrete position size 0.25. Designed to capture mean reversion in ranging markets during both accumulation and distribution phases.
+# Target: 60-120 total trades over 4 years (15-30/year) to minimize fee drag while maintaining edge in ranging regimes.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,140 +20,103 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Indicators: Donchian Channel (20-period) ===
+    # === 1d Indicators: Williams %R (14-period), Volume Spike, Chop Index ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    vol_1d = df_1d['volume'].values
     
-    # Donchian upper and lower bands (20-period)
-    dc_upper_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    dc_lower_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    dc_mid_1d = (dc_upper_1d + dc_lower_1d) / 2
+    # Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
     
-    # Align to 1d timeframe (same as primary, so no alignment needed for 1d->1d)
-    dc_upper_1d_aligned = dc_upper_1d
-    dc_lower_1d_aligned = dc_lower_1d
-    dc_mid_1d_aligned = dc_mid_1d
+    # Volume Spike: volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike = vol_1d > (1.5 * vol_ma_20)
     
-    # === 1w Indicators: Volume Spike (volume > 1.5x 20-period average) ===
-    df_1w = get_htf_data(prices, '1w')
-    vol_1w = df_1w['volume'].values
-    vol_ma_1w = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
-    volume_spike = volume > (1.5 * vol_ma_1w_aligned)
-    
-    # === 1w Indicators: ADX > 25 (strong trending market filter) ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
+    # Chop Index: measures ranging vs trending market
     # True Range
-    tr1 = pd.Series(high_1w).diff()
-    tr2 = pd.Series(low_1w).diff().abs()
-    tr3 = pd.Series(close_1w).shift(1).diff().abs()
-    tr_1w = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1w = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    tr1 = pd.Series(high_1d).diff()
+    tr2 = pd.Series(low_1d).diff().abs()
+    tr3 = pd.Series(close_1d).shift(1).diff().abs()
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    # ATR(14)
+    atr_14 = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Chop = 100 * log10(sum(ATR14) / (max(high) - min(low))) / log10(14)
+    atr_sum = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
+    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (hh_14 - ll_14)) / np.log10(14)
+    # Handle division by zero and invalid values
+    chop = np.where((hh_14 - ll_14) == 0, 50, chop)
+    chop = np.where(np.isnan(chop) | np.isinf(chop), 50, chop)
+    chop_regime = chop > 61.8  # > 61.8 = ranging market (mean reversion favorable)
     
-    # Directional Movement
-    dm_plus = pd.Series(high_1w).diff()
-    dm_minus = pd.Series(low_1w).diff().abs()
-    dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
-    dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
-    
-    # Smoothed DM and TR
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_smooth = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * (dm_plus_smooth / atr_smooth)
-    di_minus = 100 * (dm_minus_smooth / atr_smooth)
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    strong_trend = adx_aligned > 25
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Align all 1d indicators to 12h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
+    chop_regime_aligned = align_htf_to_ltf(prices, df_1d, chop_regime)
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed for ADX/ATR)
-    warmup = 100
+    # Warmup: ensure all indicators are valid (max 50 periods needed)
+    warmup = 50
     
-    # Track position state and entry price for stoploss
+    # Track position state
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    
-    # Calculate 1d ATR for stoploss
-    tr1_1d = pd.Series(high_1d).diff()
-    tr2_1d = pd.Series(low_1d).diff().abs()
-    tr3_1d = pd.Series(close_1d).shift(1).diff().abs()
-    tr_1d = pd.concat([tr1_1d, tr2_1d, tr3_1d], axis=1).max(axis=1)
-    atr_1d_raw = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_1d_aligned = atr_1d_raw  # 1d ATR aligned to 1d timeframe
     
     for i in range(warmup, n):
-        # Skip if any required data is NaN or outside session
-        if (np.isnan(dc_upper_1d_aligned[i]) or np.isnan(dc_lower_1d_aligned[i]) or np.isnan(dc_mid_1d_aligned[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(strong_trend[i]) or np.isnan(atr_1d_aligned[i]) or
-            not session_filter[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(volume_spike_aligned[i]) or 
+            np.isnan(chop_regime_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values
-        price = close[i]
-        vol_spike = volume_spike[i]
-        is_strong_trend = strong_trend[i]
-        atr_val = atr_1d_aligned[i]
+        wr = williams_r_aligned[i]
+        vol_spike = volume_spike_aligned[i]
+        is_chop = chop_regime_aligned[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price crosses below midpoint
-            if price < dc_mid_1d_aligned[i]:
-                exit_signal = True
-            # ATR-based stoploss: 2.5*ATR below entry
-            elif price < entry_price - 2.5 * atr_val:
+            # Exit if Williams %R crosses above -50 (momentum returning)
+            if wr > -50:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price crosses above midpoint
-            if price > dc_mid_1d_aligned[i]:
-                exit_signal = True
-            # ATR-based stoploss: 2.5*ATR above entry
-            elif price > entry_price + 2.5 * atr_val:
+            # Exit if Williams %R crosses below -50 (momentum returning)
+            if wr < -50:
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
-            entry_price = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Donchian upper AND volume spike AND strong trending market
-            if price > dc_upper_1d_aligned[i] and vol_spike and is_strong_trend:
+            # LONG: Williams %R < -80 (oversold) AND volume spike AND choppy market
+            if wr < -80 and vol_spike and is_chop:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
             
-            # SHORT: Price breaks below Donchian lower AND volume spike AND strong trending market
-            elif price < dc_lower_1d_aligned[i] and vol_spike and is_strong_trend:
+            # SHORT: Williams %R > -20 (overbought) AND volume spike AND choppy market
+            elif wr > -20 and vol_spike and is_chop:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
         
         else:
             signals[i] = position * 0.25
     
     return signals
 
-name = "1d_Donchian20_1wVolumeSpike_1wADX_V1"
-timeframe = "1d"
+name = "12h_WilliamsR_1dVolumeSpike_ChopFilter_V1"
+timeframe = "12h"
 leverage = 1.0
