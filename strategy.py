@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot breakout with 12h volume confirmation and 1d ADX trend filter.
-# Long when price breaks above 6h Camarilla R4 AND 12h volume > 1.5x 20-period average AND 1d ADX > 20.
-# Short when price breaks below 6h Camarilla S4 AND 12h volume > 1.5x 20-period average AND 1d ADX > 20.
-# Exit when price crosses the 6h Camarilla midpoint (R3/S3) or ATR-based stoploss (2*ATR from entry).
-# Uses discrete position size 0.25. Designed to capture major breakouts in trending markets with volume confirmation.
-# Target: 75-150 total trades over 4 years (19-37/year) to minimize fee drag while maintaining edge.
-# Works in both bull and bear markets by requiring trend (ADX>20) and volume confirmation.
+# Hypothesis: 4h TRIX(9) zero-line crossover with 1d volume spike and 1d ADX trend filter.
+# Long when TRIX crosses above zero AND volume > 2.0x 20-period 1d average AND 1d ADX > 25.
+# Short when TRIX crosses below zero AND volume > 2.0x 20-period 1d average AND 1d ADX > 25.
+# Exit when TRIX crosses back across zero or ATR-based stoploss (2*ATR from entry).
+# Uses discrete position size 0.25. Designed to capture momentum shifts in strong trending markets.
+# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag while maintaining edge.
+# Works in both bull and bear markets by requiring strong trend (ADX>25) and volume confirmation.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,29 +21,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 6h Indicators: Camarilla Pivot Levels (based on prior 6h bar) ===
-    # Calculate prior bar's high, low, close for pivot
-    prior_high = np.roll(high, 1)
-    prior_low = np.roll(low, 1)
-    prior_close = np.roll(close, 1)
-    prior_high[0] = prior_low[0] = prior_close[0] = np.nan  # First bar has no prior
+    # === 4h Indicators: TRIX(9) ===
+    # TRIX = EMA(EMA(EMA(close, 9), 9), 9) - 1 period percent change
+    ema1 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean()
+    ema2 = ema1.ewm(span=9, adjust=False, min_periods=9).mean()
+    ema3 = ema2.ewm(span=9, adjust=False, min_periods=9).mean()
+    trix = ema3.pct_change() * 100  # Convert to percentage
     
-    # Camarilla pivot calculation
-    camarilla_pivot = (prior_high + prior_low + prior_close) / 3
-    camarilla_range = prior_high - prior_low
-    camarilla_r4 = camarilla_pivot + (camarilla_range * 1.1 / 2)
-    camarilla_s4 = camarilla_pivot - (camarilla_range * 1.1 / 2)
-    camarilla_mid = camarilla_pivot  # Midpoint is the pivot level
-    
-    # === 12h Indicators: Volume Spike (volume > 1.5x 20-period average) ===
-    df_12h = get_htf_data(prices, '12h')
-    vol_12h = df_12h['volume'].values
-    vol_ma_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
-    volume_spike = volume > (1.5 * vol_ma_12h_aligned)
-    
-    # === 1d Indicators: ADX > 20 (trending market filter) ===
+    # === 1d Indicators: Volume Spike (volume > 2.0x 20-period average) ===
     df_1d = get_htf_data(prices, '1d')
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    volume_spike = volume > (2.0 * vol_ma_1d_aligned)
+    
+    # === 1d Indicators: ADX > 25 (strong trending market filter) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -72,7 +64,7 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    strong_trend = adx_aligned > 20
+    strong_trend = adx_aligned > 25
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -80,24 +72,24 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed for ADX/ATR)
+    # Warmup: ensure all indicators are valid (max 50 periods needed for TRIX/ADX/ATR)
     warmup = 100
     
     # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Calculate 6h ATR for stoploss
-    tr1_6h = pd.Series(high).diff()
-    tr2_6h = pd.Series(low).diff().abs()
-    tr3_6h = pd.Series(close).shift(1).diff().abs()
-    tr_6h = pd.concat([tr1_6h, tr2_6h, tr3_6h], axis=1).max(axis=1)
-    atr_6h_raw = pd.Series(tr_6h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Calculate 4h ATR for stoploss
+    tr1_4h = pd.Series(high).diff()
+    tr2_4h = pd.Series(low).diff().abs()
+    tr3_4h = pd.Series(close).shift(1).diff().abs()
+    tr_4h = pd.concat([tr1_4h, tr2_4h, tr3_4h], axis=1).max(axis=1)
+    atr_4h_raw = pd.Series(tr_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(camarilla_r4[i]) or np.isnan(camarilla_s4[i]) or np.isnan(camarilla_mid[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(strong_trend[i]) or np.isnan(atr_6h_raw[i]) or
+        if (np.isnan(trix.iloc[i] if hasattr(trix, 'iloc') else trix[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(strong_trend[i]) or np.isnan(atr_4h_raw[i]) or
             not session_filter[i]):
             signals[i] = 0.0
             position = 0
@@ -105,24 +97,26 @@ def generate_signals(prices):
         
         # Current values
         price = close[i]
+        trix_val = trix.iloc[i] if hasattr(trix, 'iloc') else trix[i]
+        trix_prev = trix.iloc[i-1] if hasattr(trix, 'iloc') else trix[i-1]
         vol_spike = volume_spike[i]
         is_strong_trend = strong_trend[i]
-        atr_val = atr_6h_raw[i]
+        atr_val = atr_4h_raw[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price crosses below Camarilla midpoint
-            if price < camarilla_mid[i]:
+            # Exit if TRIX crosses below zero
+            if trix_prev > 0 and trix_val <= 0:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR below entry
             elif price < entry_price - 2.0 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price crosses above Camarilla midpoint
-            if price > camarilla_mid[i]:
+            # Exit if TRIX crosses above zero
+            if trix_prev < 0 and trix_val >= 0:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR above entry
             elif price > entry_price + 2.0 * atr_val:
@@ -136,14 +130,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Camarilla R4 AND volume spike AND strong trending market
-            if price > camarilla_r4[i] and vol_spike and is_strong_trend:
+            # LONG: TRIX crosses above zero AND volume spike AND strong trending market
+            if trix_prev <= 0 and trix_val > 0 and vol_spike and is_strong_trend:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: Price breaks below Camarilla S4 AND volume spike AND strong trending market
-            elif price < camarilla_s4[i] and vol_spike and is_strong_trend:
+            # SHORT: TRIX crosses below zero AND volume spike AND strong trending market
+            elif trix_prev >= 0 and trix_val < 0 and vol_spike and is_strong_trend:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -153,6 +147,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R4_S4_12hVolumeSpike_1dADX_V1"
-timeframe = "6h"
+name = "4h_TRIX9_1dVolumeSpike_1dADX_V1"
+timeframe = "4h"
 leverage = 1.0
