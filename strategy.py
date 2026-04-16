@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ATR volatility filter and ATR trailing stop
-# Uses 4h primary timeframe with 1d HTF for volatility regime detection (low volatility = contraction before expansion).
+# Hypothesis: 4h Donchian(20) breakout with 1d ADX trend filter and ATR trailing stop
+# Uses 4h primary timeframe with 1d HTF for trend regime detection (ADX > 25 = trending).
 # Donchian(20) breakout captures medium-term momentum with clear structure.
-# Volatility filter: 1d ATR(14) < 0.5x 50-period median ATR identifies low-volatility regimes prone to breakouts.
+# Trend filter: 1d ADX(14) > 25 ensures we only trade in trending markets (avoids chop).
 # ATR trailing stop (2.5x) protects gains and limits drawdown.
 # Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag while maintaining edge.
-# Works in bull markets via upside breakouts and in bear markets via downside breakouts after volatility contraction.
+# Works in bull markets via upside breakouts and in bear markets via downside breakouts in trending regimes.
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,7 +26,7 @@ def generate_signals(prices):
     low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
     
-    # === 1d data (HTF for volatility regime) ===
+    # === 1d data (HTF for trend regime) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -38,13 +38,34 @@ def generate_signals(prices):
     donch_high_aligned = align_htf_to_ltf(prices, df_4h, donch_high)
     donch_low_aligned = align_htf_to_ltf(prices, df_4h, donch_low)
     
-    # === 1d ATR-based volatility filter ===
-    tr_1d = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), np.abs(low_1d - np.roll(close_1d, 1))))
-    tr_1d[0] = high_1d[0] - low_1d[0]  # first bar
-    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_median_50_1d = pd.Series(atr_14_1d).rolling(window=50, min_periods=50).median().values
-    low_volatility = atr_14_1d < (0.5 * atr_median_50_1d)  # True when volatility is contracted
-    low_volatility_aligned = align_htf_to_ltf(prices, df_1d, low_volatility)
+    # === 1d ADX trend filter ===
+    # True Range
+    tr_1d = np.maximum(high_1d - low_1d, 
+                       np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
+                                  np.abs(low_1d - np.roll(close_1d, 1))))
+    tr_1d[0] = high_1d[0] - low_1d[0]
+    # Directional Movement
+    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    # Handle first bar
+    plus_dm[0] = 0
+    minus_dm[0] = 0
+    # Smoothed values
+    tr_ma = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_dm_ma = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    minus_dm_ma = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Directional Indicators
+    plus_di = 100 * plus_dm_ma / tr_ma
+    minus_di = 100 * minus_dm_ma / tr_ma
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    dx = np.where(np.isnan(dx), 0, dx)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Trend filter: ADX > 25
+    trending = adx > 25
+    trending_aligned = align_htf_to_ltf(prices, df_1d, trending)
     
     signals = np.zeros(n)
     
@@ -61,13 +82,13 @@ def generate_signals(prices):
         # Skip if any data is NaN
         if (np.isnan(donch_high_aligned[i]) or 
             np.isnan(donch_low_aligned[i]) or
-            np.isnan(low_volatility_aligned[i])):
+            np.isnan(trending_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        vol_ok = low_volatility_aligned[i]
+        trend_ok = trending_aligned[i]
         
         # === ATR CALCULATION FOR TRAILING STOP ===
         atr_4h = np.abs(high_4h - low_4h)
@@ -121,8 +142,8 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Require low volatility (contraction before expansion)
-            if vol_ok:
+            # Require trending market (ADX > 25)
+            if trend_ok:
                 # Go long when price breaks above Donchian high (bullish breakout)
                 if price > donch_high_aligned[i]:
                     signals[i] = 0.25
@@ -148,6 +169,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dATRVolFilter_ATRTrail"
+name = "4h_Donchian20_1dADXTrendFilter_ATRTrail"
 timeframe = "4h"
 leverage = 1.0
