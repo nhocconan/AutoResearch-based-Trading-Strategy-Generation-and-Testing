@@ -1,15 +1,14 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R combined with 1d EMA trend filter and volume confirmation.
-# Williams %R(14) identifies overbought/oversold conditions: > -20 = overbought, < -80 = oversold.
-# In trending markets (price > 1d EMA50): short at overbought, long at oversold with continuation.
-# In ranging markets (price near 1d EMA50): mean reversion at extreme %R levels.
-# Volume confirmation (>1.3x average) filters weak signals. Position size 0.25 for risk control.
-# Designed to work in bull (trend continuations) and bear (mean reversion in ranges).
+# Hypothesis: 12h CCI(20) combined with 1d ADX(14) trend filter and volume confirmation.
+# CCI > +100 indicates strong uptrend, CCI < -100 indicates strong downtrend.
+# In trending markets (ADX > 25): follow CCI signals (long >+100, short <-100).
+# In ranging markets (ADX < 20): mean reversion at CCI extremes (>+200 long, <-200 short).
+# Volume confirmation (>1.5x average) filters weak signals. Position size 0.25.
+# Designed to work in bull (trend following) and bear (mean reversion in ranges).
 
 def generate_signals(prices):
     n = len(prices)
@@ -28,23 +27,46 @@ def generate_signals(prices):
     low_12h = df_12h['low'].values
     volume_12h = df_12h['volume'].values
     
-    # === 1d data (higher timeframe for EMA trend filter) ===
+    # === 1d data (higher timeframe for ADX trend filter) ===
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === 12h Williams %R(14) ===
-    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_12h) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
-    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
+    # === 12h CCI(20) ===
+    tp_12h = (high_12h + low_12h + close_12h) / 3.0
+    sma_tp = pd.Series(tp_12h).rolling(window=20, min_periods=20).mean().values
+    mad = pd.Series(tp_12h).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    cci = (tp_12h - sma_tp) / (0.015 * mad)
+    cci = np.where(mad == 0, 0, cci)
+    cci_cci = align_htf_to_ltf(prices, df_12h, cci)
     
-    # === 1d EMA(50) for trend filter ===
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # === 1d ADX(14) for trend filter ===
+    # Calculate +DM, -DM, TR
+    high_diff = np.diff(high_1d, prepend=high_1d[0])
+    low_diff = np.diff(low_1d, prepend=low_1d[0]) * -1  # inverted for calculation
+    plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0)
+    minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0)
+    
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = np.abs(high_1d[0] - close_1d[0])
+    tr3[0] = np.abs(low_1d[0] - close_1d[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Smoothed values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    
+    # DI and DX
+    plus_di = 100 * plus_dm_smooth / atr
+    minus_di = 100 * minus_dm_smooth / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx = np.where((plus_di + minus_di) == 0, 0, adx)
+    adx_cci = align_htf_to_ltf(prices, df_1d, adx)
     
     # === 12h volume ratio for confirmation ===
     vol_ma_10_12h = pd.Series(volume_12h).rolling(window=10, min_periods=10).mean().values
@@ -61,21 +83,20 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(williams_r_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or
+        if (np.isnan(cci_cci[i]) or 
+            np.isnan(adx_cci[i]) or
             np.isnan(vol_ratio_12h[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        wr = williams_r_aligned[i]
-        ema50 = ema_50_aligned[i]
+        cci_val = cci_cci[i]
+        adx_val = adx_cci[i]
         vol_ratio = vol_ratio_12h[i]
         
         # === STOPLOSS LOGIC ===
         if position == 1:  # Long position
-            # Dynamic stop loss based on volatility
             atr_12h = np.abs(high_12h - low_12h)
             atr_ma = pd.Series(atr_12h).rolling(window=14, min_periods=14).mean().values
             atr_aligned = align_htf_to_ltf(prices, df_12h, atr_ma)
@@ -87,7 +108,6 @@ def generate_signals(prices):
                 continue
         
         elif position == -1:  # Short position
-            # Dynamic stop loss based on volatility
             atr_12h = np.abs(high_12h - low_12h)
             atr_ma = pd.Series(atr_12h).rolling(window=14, min_periods=14).mean().values
             atr_aligned = align_htf_to_ltf(prices, df_12h, atr_ma)
@@ -100,16 +120,16 @@ def generate_signals(prices):
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when Williams %R reaches overbought or trend changes
-            if wr > -20 or price < ema50:
+            # Exit when CCI returns to neutral or trend weakens
+            if cci_val < 0 or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when Williams %R reaches oversold or trend changes
-            if wr < -80 or price > ema50:
+            # Exit when CCI returns to neutral or trend weakens
+            if cci_val > 0 or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -117,29 +137,26 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Determine market regime based on price vs EMA
-            if price > ema50 * 1.02:  # Strong uptrend (>2% above EMA)
-                # Look for oversold pullback to enter long
-                if wr < -80 and vol_ratio > 1.3:
+            if adx_val > 25:  # Trending market
+                # Follow CCI trend
+                if cci_val > 100 and vol_ratio > 1.5:
                     signals[i] = 0.25
                     position = 1
                     entry_price = price
                     continue
-            elif price < ema50 * 0.98:  # Strong downtrend (>2% below EMA)
-                # Look for overbought rally to enter short
-                if wr > -20 and vol_ratio > 1.3:
+                elif cci_val < -100 and vol_ratio > 1.5:
                     signals[i] = -0.25
                     position = -1
                     entry_price = price
                     continue
-            else:  # Ranging market (near EMA)
-                # Mean reversion at extreme Williams %R levels
-                if wr < -85 and vol_ratio > 1.3:  # Deep oversold
+            else:  # Ranging market (ADX < 25)
+                # Mean reversion at extreme CCI levels
+                if cci_val < -200 and vol_ratio > 1.5:  # Deep oversold
                     signals[i] = 0.25
                     position = 1
                     entry_price = price
                     continue
-                elif wr > -15 and vol_ratio > 1.3:  # Deep overbought
+                elif cci_val > 200 and vol_ratio > 1.5:  # Deep overbought
                     signals[i] = -0.25
                     position = -1
                     entry_price = price
@@ -155,6 +172,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsR_EMA50_VolumeFilter_v1"
+name = "12h_CCI_ADX_VolumeFilter_v1"
 timeframe = "12h"
 leverage = 1.0
