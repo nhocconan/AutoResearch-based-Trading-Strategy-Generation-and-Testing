@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d volume spike and 1d chop regime filter
-# Uses 12h primary timeframe with 1d HTF for volume confirmation and chop regime.
+# Hypothesis: 4h Donchian(20) breakout with 12h volume spike and 12h chop regime filter
+# Uses 4h primary timeframe with 12h HTF for volume confirmation and chop regime.
 # Donchian breakouts capture strong momentum moves; volume spike confirms institutional participation.
 # Chop regime filter avoids false breakouts in ranging markets (Chop > 61.8 = range, < 38.2 = trend).
 # Works in both bull and bear markets by only taking breakouts aligned with higher timeframe structure.
-# Target: 50-150 trades over 4 years (12-37/year) to balance statistical significance and fee drag.
+# Target: 75-200 trades over 4 years (19-50/year) to balance statistical significance and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,39 +20,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h data (primary timeframe) ===
+    # === 4h data (primary timeframe) ===
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # === 12h data (HTF for volume confirmation, chop regime, and Donchian calculation) ===
     df_12h = get_htf_data(prices, '12h')
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # === 1d data (HTF for volume confirmation, chop regime, and Donchian calculation) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # === 12h Donchian channels (20-period) ===
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # === 1d Donchian channels (20-period) ===
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Align Donchian levels to 4h timeframe (wait for 12h bar close)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
     
-    # Align Donchian levels to 12h timeframe (wait for 1d bar close)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    
-    # === 1d Chop regime filter (Ehler's Chop Index) ===
-    atr_1d = np.abs(high_1d - low_1d)
-    atr_sum_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
-    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # === 12h Chop regime filter (Ehler's Chop Index) ===
+    atr_12h = np.abs(high_12h - low_12h)
+    atr_sum_14 = pd.Series(atr_12h).rolling(window=14, min_periods=14).sum().values
+    max_high_14 = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    min_low_14 = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
     chop_raw = 100 * np.log10(atr_sum_14 / (max_high_14 - min_low_14 + 1e-10)) / np.log10(14)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_raw)
+    chop_aligned = align_htf_to_ltf(prices, df_12h, chop_raw)
     
-    # === 1d Volume confirmation ===
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_1d > (2.0 * vol_ma_20_1d)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
+    # === 12h Volume confirmation ===
+    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_12h > (2.0 * vol_ma_20_12h)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_12h, vol_spike)
     
     signals = np.zeros(n)
     
@@ -81,9 +81,9 @@ def generate_signals(prices):
         
         # === STOPLOSS LOGIC (ATR-based) ===
         if position == 1:  # Long position
-            atr_12h = np.abs(high_12h - low_12h)
-            atr_ma = pd.Series(atr_12h).rolling(window=14, min_periods=14).mean().values
-            atr_aligned = align_htf_to_ltf(prices, df_12h, atr_ma)
+            atr_4h = np.abs(high_4h - low_4h)
+            atr_ma = pd.Series(atr_4h).rolling(window=14, min_periods=14).mean().values
+            atr_aligned = align_htf_to_ltf(prices, df_4h, atr_ma)
             atr_val = atr_aligned[i]
             if price < entry_price - 2.5 * atr_val:
                 signals[i] = 0.0
@@ -92,9 +92,9 @@ def generate_signals(prices):
                 continue
         
         elif position == -1:  # Short position
-            atr_12h = np.abs(high_12h - low_12h)
-            atr_ma = pd.Series(atr_12h).rolling(window=14, min_periods=14).mean().values
-            atr_aligned = align_htf_to_ltf(prices, df_12h, atr_ma)
+            atr_4h = np.abs(high_4h - low_4h)
+            atr_ma = pd.Series(atr_4h).rolling(window=14, min_periods=14).mean().values
+            atr_aligned = align_htf_to_ltf(prices, df_4h, atr_ma)
             atr_val = atr_aligned[i]
             if price > entry_price + 2.5 * atr_val:
                 signals[i] = 0.0
@@ -146,6 +146,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_VolumeSpike_ChopFilter"
-timeframe = "12h"
+name = "4h_Donchian20_12hVolumeSpike_ChopFilter"
+timeframe = "4h"
 leverage = 1.0
