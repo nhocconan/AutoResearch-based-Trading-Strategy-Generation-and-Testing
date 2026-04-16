@@ -1,16 +1,18 @@
-# 4h_RSI_Trend_Confirmation
-# Hypothesis: RSI(14) combined with 4h EMA(50) trend filter provides reliable entries in both bull and bear markets.
-# Long: RSI crosses above 50 + price above EMA(50) + volume confirmation.
-# Short: RSI crosses below 50 + price below EMA(50) + volume confirmation.
-# Uses 4h timeframe for execution, 1d for volume confirmation and trend confirmation.
-# Target: 100-150 trades over 4 years (25-38/year) with disciplined entries.
+#!/usr/bin/env python3
+"""
+1D_3ATR_Channel_Breakout_TrendFilter
+Hypothesis: On daily timeframe, a 3ATR channel breakout with ADX trend filter captures momentum in both bull and bear markets.
+Breakouts above upper channel (mean + 3*ATR) go long, below lower channel (mean - 3*ATR) go short, only when ADX > 25.
+Uses weekly timeframe for higher-timeframe trend confirmation to avoid counter-trend trades.
+Target: 15-30 trades per year (~60-120 total over 4 years) with disciplined entries.
+"""
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,98 +20,120 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h data (primary) ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    volume_4h = df_4h['volume'].values
+    # === Daily ATR (14-period) for channel width ===
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])
     
-    # === 1d data (HTF for volume confirmation) ===
-    df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
+    # Wilder's smoothing for ATR
+    def wilders_smoothing(x, period):
+        result = np.full_like(x, np.nan)
+        if len(x) >= period:
+            result[period-1] = np.nanmean(x[1:period])
+            for i in range(period, len(x)):
+                result[i] = result[i-1] - (result[i-1]/period) + x[i]
+        return result
     
-    # === RSI(14) on 4h close ===
-    delta = np.diff(close_4h)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    atr = wilders_smoothing(tr, 14)
     
-    avg_gain = np.full_like(close_4h, np.nan)
-    avg_loss = np.full_like(close_4h, np.nan)
+    # === Daily SMA(20) as mean for channel ===
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
     
-    # Wilder's smoothing for RSI
-    period = 14
-    if len(gain) >= period:
-        avg_gain[period-1] = np.mean(gain[:period])
-        avg_loss[period-1] = np.mean(loss[:period])
-        for i in range(period, len(gain)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+    # === Upper and Lower Channels (SMA ± 3*ATR) ===
+    upper_channel = sma_20 + (3.0 * atr)
+    lower_channel = sma_20 - (3.0 * atr)
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # === Daily ADX(14) for trend filter ===
+    # Directional Movement
+    up_move = high[1:] - high[:-1]
+    down_move = low[:-1] - low[1:]
+    dm_plus = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    dm_minus = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
     
-    # === EMA(50) on 4h close ===
-    ema_50 = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Smoothed DM and ATR
+    atr_smooth = wilders_smoothing(tr, 14)  # Already calculated above
+    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
+    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
     
-    # === Volume confirmation: 1d volume ratio ===
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1d = volume_1d / vol_ma_20_1d
+    # DI+ and DI-
+    di_plus = np.where(atr_smooth != 0, 100 * dm_plus_smooth / atr_smooth, 0)
+    di_minus = np.where(atr_smooth != 0, 100 * dm_minus_smooth / atr_smooth, 0)
     
-    # Align all HTF data to 4h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_4h, rsi)
-    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
-    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilders_smoothing(dx, 14)
+    
+    # === Weekly trend filter (higher timeframe) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    # Weekly EMA(20) for trend direction
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Align daily indicators to daily timeframe (no alignment needed as already daily)
+    # But we'll keep the pattern for consistency
+    upper_channel_aligned = upper_channel
+    lower_channel_aligned = lower_channel
+    adx_aligned = adx
     
     signals = np.zeros(n)
     
-    # Warmup: enough for RSI and EMA calculations
-    warmup = 60
+    # Warmup: enough for ATR, SMA, ADX calculations
+    warmup = 40
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(rsi_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or 
-            np.isnan(vol_ratio_1d_aligned[i])):
+        if (np.isnan(upper_channel_aligned[i]) or 
+            np.isnan(lower_channel_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or 
+            np.isnan(ema_20_1w_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        rsi_val = rsi_aligned[i]
-        ema_val = ema_50_aligned[i]
-        vol_ratio = vol_ratio_1d_aligned[i]
+        upper = upper_channel_aligned[i]
+        lower = lower_channel_aligned[i]
+        adx_val = adx_aligned[i]
+        weekly_ema = ema_20_1w_aligned[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit: RSI crosses below 50 OR price closes below EMA(50)
-            if rsi_val < 50 or price < ema_val:
+            # Exit: price closes below SMA(20) OR weekly trend turns bearish
+            if price < sma_20[i] or price < weekly_ema:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit: RSI crosses above 50 OR price closes above EMA(50)
-            if rsi_val > 50 or price > ema_val:
+            # Exit: price closes above SMA(20) OR weekly trend turns bullish
+            if price > sma_20[i] or price > weekly_ema:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: RSI crosses above 50 + price above EMA(50) + volume confirmation
-            if rsi_val > 50 and price > ema_val and vol_ratio > 1.2:
-                signals[i] = 0.25
-                position = 1
-                continue
-            # SHORT: RSI crosses below 50 + price below EMA(50) + volume confirmation
-            elif rsi_val < 50 and price < ema_val and vol_ratio > 1.2:
-                signals[i] = -0.25
-                position = -1
-                continue
+            # Only take trades when ADX indicates trending market
+            if adx_val > 25:
+                # LONG: Break above upper channel with weekly uptrend confirmation
+                if price > upper and price > weekly_ema:
+                    signals[i] = 0.25
+                    position = 1
+                    continue
+                # SHORT: Break below lower channel with weekly downtrend confirmation
+                elif price < lower and price < weekly_ema:
+                    signals[i] = -0.25
+                    position = -1
+                    continue
         
         # Hold current position
         if position == 1:
@@ -121,6 +145,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI_Trend_Confirmation"
-timeframe = "4h"
+name = "1D_3ATR_Channel_Breakout_TrendFilter"
+timeframe = "1d"
 leverage = 1.0
