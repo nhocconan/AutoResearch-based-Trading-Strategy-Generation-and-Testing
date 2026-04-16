@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and ATR regime filter
-# Long when price breaks above 20-period Donchian high AND 1d volume > 1.5x 20-period volume SMA AND 1d ATR(14) > ATR(50)
-# Short when price breaks below 20-period Donchian low AND 1d volume > 1.5x 20-period volume SMA AND 1d ATR(14) > ATR(50)
-# Donchian channels provide clear trend structure, volume spike confirms conviction, ATR filter ensures trending market
-# Discrete position sizing (0.25) to control drawdown. Target: 75-200 total trades over 4 years
+# Hypothesis: 4h Donchian(20) breakout with 1d ATR regime and volume spike filter
+# Long when price breaks above Donchian high AND 1d ATR(14) > ATR(50) AND 1d volume > 1.8x 20-period volume SMA
+# Short when price breaks below Donchian low AND same filters
+# ATR regime ensures trending market, volume spike confirms conviction
+# Position size 0.25 to limit drawdown. Target: 75-200 total trades over 4 years
 
 def generate_signals(prices):
     n = len(prices)
@@ -90,8 +90,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 1d volume > 1.5x 20-period 1d volume SMA
-        vol_threshold = vol_sma_20_1d_aligned[i] * 1.5
+        # Volume filter: current 1d volume > 1.8x 20-period 1d volume SMA
+        vol_threshold = vol_sma_20_1d_aligned[i] * 1.8
         vol_confirm = vol_1d_aligned[i] > vol_threshold
         
         # Volatility filter: ATR(14) > ATR(50) indicates expanding volatility (trend favorable)
@@ -112,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dVolumeSpike_ATR_Filter_v1"
+name = "4h_Donchian20_1dVolumeSpike_ATR_Filter_v2"
 timeframe = "4h"
 leverage = 1.0
