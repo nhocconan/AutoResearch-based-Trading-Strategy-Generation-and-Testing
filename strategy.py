@@ -4,10 +4,10 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1d ADX trend filter.
-# Long when price breaks above 4h Donchian upper(20) AND 1d volume > 1.5x 20-period average AND 1d ADX > 20.
-# Short when price breaks below 4h Donchian lower(20) AND 1d volume > 1.5x 20-period average AND 1d ADX > 20.
+# Long when price breaks above 4h Donchian upper(20) AND 1d volume > 1.8x 20-period average AND 1d ADX > 25.
+# Short when price breaks below 4h Donchian lower(20) AND 1d volume > 1.8x 20-period average AND 1d ADX > 25.
 # Exit when price returns to 4h Donchian midpoint.
-# Uses discrete position size 0.25. Volume confirmation reduces false signals, 1d ADX ensures trending regime.
+# Uses discrete position size 0.25. Stricter volume (1.8x) and ADX (>25) filters reduce false signals and overtrading.
 # Target: 80-160 total trades over 4 years (20-40/year) to balance opportunity and fee drag.
 
 def generate_signals(prices):
@@ -114,11 +114,11 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         
-        # Volume filter: volume > 1.5x 20-period average (using 1d volume MA)
-        vol_filter = vol > 1.5 * vol_ma_val if vol_ma_val > 0 else False
+        # Volume filter: volume > 1.8x 20-period average (using 1d volume MA)
+        vol_filter = vol > 1.8 * vol_ma_val if vol_ma_val > 0 else False
         
-        # Trend filter: 1d ADX > 20 (trending regime)
-        trend_filter = adx_val > 20
+        # Trend filter: 1d ADX > 25 (strong trending regime)
+        trend_filter = adx_val > 25
         
         # === EXIT LOGIC ===
         exit_signal = False
@@ -158,6 +158,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dVolumeSpike_1dADXTrend_V1"
+name = "4h_Donchian20_1dVolumeSpike1.8x_1dADX25_V1"
 timeframe = "4h"
 leverage = 1.0
