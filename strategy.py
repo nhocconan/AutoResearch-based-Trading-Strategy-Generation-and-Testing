@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,45 +13,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h data (primary) ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    volume_12h = df_12h['volume'].values
-    
-    # === 1d data (HTF for trend) ===
+    # === 1d data (primary) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # === 1d EMA for trend direction (21 period) ===
-    ema_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # === 1w data (HTF for trend) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # === 12h ATR for volatility and stop (14 period) ===
-    tr_12h = np.maximum(high_12h - low_12h, 
-                       np.maximum(np.abs(high_12h - np.roll(close_12h, 1)), 
-                                  np.abs(low_12h - np.roll(close_12h, 1))))
-    tr_12h[0] = high_12h[0] - low_12h[0]
-    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
+    # === 1d ATR for volatility and stop (14 period) ===
+    tr_1d = np.maximum(high_1d - low_1d, 
+                       np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
+                                  np.abs(low_1d - np.roll(close_1d, 1))))
+    tr_1d[0] = high_1d[0] - low_1d[0]
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # === 12h volume ratio for confirmation ===
-    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_12h = volume_12h / vol_ma_20_12h
-    vol_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio_12h)
+    # === 1d volume ratio for confirmation ===
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_1d = volume_1d / vol_ma_20_1d
+    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
-    # === 12h Donchian channels (20 period) ===
-    highest_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    highest_20_aligned = align_htf_to_ltf(prices, df_12h, highest_20)
-    lowest_20_aligned = align_htf_to_ltf(prices, df_12h, lowest_20)
+    # === 1d Donchian channels (20 period) ===
+    highest_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    highest_20_aligned = align_htf_to_ltf(prices, df_1d, highest_20)
+    lowest_20_aligned = align_htf_to_ltf(prices, df_1d, lowest_20)
+    
+    # === 1w EMA for trend direction (21 period) ===
+    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     signals = np.zeros(n)
     
-    # Warmup: enough for EMA and ATR
+    # Warmup: enough for ATR and EMA
     warmup = 50
     
     # Track position and entry price
@@ -60,17 +58,17 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(atr_12h_aligned[i]) or 
-            np.isnan(vol_ratio_12h_aligned[i]) or np.isnan(highest_20_aligned[i]) or 
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(vol_ratio_1d_aligned[i]) or np.isnan(highest_20_aligned[i]) or 
             np.isnan(lowest_20_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        ema_trend = ema_1d_aligned[i]
-        atr_val = atr_12h_aligned[i]
-        vol_ratio_val = vol_ratio_12h_aligned[i]
+        ema_trend = ema_1w_aligned[i]
+        atr_val = atr_1d_aligned[i]
+        vol_ratio_val = vol_ratio_1d_aligned[i]
         upper_channel = highest_20_aligned[i]
         lower_channel = lowest_20_aligned[i]
         
@@ -91,7 +89,7 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Trend filter: price above/below 1d EMA with volume
+            # Trend filter: price above/below 1w EMA with volume
             if price > ema_trend and vol_ratio_val > 1.3:
                 # LONG: price above trend with volume
                 signals[i] = 0.25
@@ -115,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_EMA_Trend_Volume"
-timeframe = "12h"
+name = "1d_Donchian_1wEMA_Volume_v2"
+timeframe = "1d"
 leverage = 1.0
