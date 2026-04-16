@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using daily Donchian(20) breakout with 1w ADX filter and volume confirmation.
-# Long when price breaks above daily Donchian high(20) with 1w ADX > 20 and volume > 1.5x 20-period average.
-# Short when price breaks below daily Donchian low(20) with 1w ADX > 20 and volume > 1.5x 20-period average.
-# Exit when price returns to daily Donchian midpoint (mean reversion) or opposite Donchian level.
-# Uses discrete position size 0.25. Daily Donchian provides structure from higher timeframe, 4h provides entry timing.
-# Target: 75-200 total trades over 4 years (19-50/year) to balance edge and fee drag.
+# Hypothesis: 1d strategy using weekly Donchian(20) breakout with 1w ADX > 25 and volume > 2x 20-period average.
+# Long when price breaks above weekly Donchian high(20), short when breaks below weekly Donchian low(20).
+# Exit when price returns to weekly Donchian midpoint.
+# Uses discrete position size 0.25. Weekly Donchian provides structure, 1d provides execution timing.
+# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag and work in both bull/bear markets.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,33 +19,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once before loop for Donchian levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # === Daily Indicators: Donchian Channel (20) based on prior day ===
-    # Calculate using prior day's high, low, close (shift by 1 to use completed day only)
-    phigh = np.roll(high_1d, 1)
-    plow = np.roll(low_1d, 1)
-    phigh[0] = np.nan
-    plow[0] = np.nan
-    
-    # Donchian high and low (20-period)
-    donch_high = pd.Series(phigh).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(plow).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2.0
-    
-    # Align daily Donchian levels to 4h timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
-    donch_mid_aligned = align_htf_to_ltf(prices, df_1d, donch_mid)
-    
-    # Get weekly data once before loop for ADX filter
+    # Get weekly data once before loop for Donchian levels and ADX
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 30:
         return np.zeros(n)
@@ -54,6 +27,19 @@ def generate_signals(prices):
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
+    
+    # === Weekly Indicators: Donchian Channel (20) based on prior week ===
+    # Calculate using prior week's high, low, close (shift by 1 to use completed week only)
+    phigh = np.roll(high_1w, 1)
+    plow = np.roll(low_1w, 1)
+    phigh[0] = np.nan
+    plow[0] = np.nan
+    
+    # Donchian high and low (20-period)
+    donch_high = pd.Series(phigh).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(plow).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2.0
     
     # === Weekly Indicators: ADX (14) for trend strength filter ===
     # True Range
@@ -86,10 +72,13 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Align weekly ADX to 4h timeframe
+    # Align weekly Donchian levels and ADX to 1d timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1w, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1w, donch_low)
+    donch_mid_aligned = align_htf_to_ltf(prices, df_1w, donch_mid)
     adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
-    # Volume moving average (20-period) on 4h
+    # Volume moving average (20-period) on 1d
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -124,13 +113,13 @@ def generate_signals(prices):
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price returns to daily Donchian midpoint or drops to Donchian low
-            if price <= dcm or price <= dcl:
+            # Exit if price returns to weekly Donchian midpoint
+            if price <= dcm:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price returns to daily Donchian midpoint or rises to Donchian high
-            if price >= dcm or price >= dch:
+            # Exit if price returns to weekly Donchian midpoint
+            if price >= dcm:
                 exit_signal = True
         
         if exit_signal:
@@ -141,19 +130,19 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Trend filter: only trade when ADX > 20 (moderate trend)
-            trend_filter = adx_val > 20
+            # Trend filter: only trade when ADX > 25 (strong trend)
+            trend_filter = adx_val > 25
             
-            # Volume filter: volume > 1.5x 20-period average
-            vol_filter = vol > 1.5 * vol_ma
+            # Volume filter: volume > 2.0x 20-period average
+            vol_filter = vol > 2.0 * vol_ma
             
-            # LONG: Price breaks above daily Donchian high with trend and volume confirmation
+            # LONG: Price breaks above weekly Donchian high with trend and volume confirmation
             if (price > dch) and trend_filter and vol_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: Price breaks below daily Donchian low with trend and volume confirmation
+            # SHORT: Price breaks below weekly Donchian low with trend and volume confirmation
             elif (price < dcl) and trend_filter and vol_filter:
                 signals[i] = -0.25
                 position = -1
@@ -164,6 +153,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dDonchian20_1wADX_VolumeConfirmation_V1"
-timeframe = "4h"
+name = "1d_1wDonchian20_1wADX_VolumeConfirmation_V1"
+timeframe = "1d"
 leverage = 1.0
