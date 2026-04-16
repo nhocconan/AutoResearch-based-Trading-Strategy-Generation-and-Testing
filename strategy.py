@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Camarilla pivot R1/S1 breakout with volume confirmation and ATR trailing stop.
-# Long when price breaks above 1d Camarilla R1 level with volume > 1.8x median volume.
-# Short when price breaks below 1d Camarilla S1 level with volume > 1.8x median volume.
-# Uses discrete position size 0.25. Exits when price reaches opposite Camarilla level (S1 for long, R1 for short) or ATR stoploss hits (2.5x ATR).
-# Camarilla pivots identify intraday support/resistance; breakouts with volume filter false moves. Works in both bull/bear markets as it trades volatility expansion around key levels.
+# Hypothesis: 4h strategy using 1d Williams Fractal breakouts with volume confirmation.
+# Long when price breaks above the most recent bullish fractal (high) with volume > 1.5x median.
+# Short when price breaks below the most recent bearish fractal (low) with volume > 1.5x median.
+# Uses discrete position size 0.25. Exits on opposite fractal break or ATR stoploss (2.0x ATR).
+# Williams Fractals identify key swing points; breakouts with volume filter false moves.
+# Works in both bull/bear markets by trading volatility expansion around structural levels.
 # 4h timeframe targets 19-50 trades/year (75-200 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
@@ -20,20 +21,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once before loop for Camarilla pivots
+    # Get 1d data once before loop for Williams Fractals
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # === 1d Indicators: Camarilla Pivot Levels (R1, S1) ===
-    # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
-    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
+    # === 1d Indicators: Williams Fractals ===
+    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n-1] > high[n-3] and high[n-1] > high[n+1]
+    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n-1] < low[n-3] and low[n-1] < low[n+1]
+    n_1d = len(high_1d)
+    bearish_fractal = np.full(n_1d, np.nan)
+    bullish_fractal = np.full(n_1d, np.nan)
+    
+    for i in range(2, n_1d - 2):
+        if (high_1d[i-2] < high_1d[i-1] and 
+            high_1d[i] < high_1d[i-1] and
+            high_1d[i-3] < high_1d[i-1] and
+            high_1d[i+1] < high_1d[i-1]):
+            bearish_fractal[i-1] = high_1d[i-1]  # Place at the center bar
+        
+        if (low_1d[i-2] > low_1d[i-1] and 
+            low_1d[i] > low_1d[i-1] and
+            low_1d[i-3] > low_1d[i-1] and
+            low_1d[i+1] > low_1d[i-1]):
+            bullish_fractal[i-1] = low_1d[i-1]  # Place at the center bar
     
     # === 1d Indicators: Volume Median (20-period) ===
     vol_median_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).median().values
@@ -46,15 +61,16 @@ def generate_signals(prices):
     atr_14 = pd.Series(true_range).rolling(window=14, min_periods=14).mean().values
     
     # Align all indicators to primary timeframe (4h)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Williams Fractals need additional_delay_bars=2 for confirmation (require 2 future 1d bars)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     vol_median_aligned = align_htf_to_ltf(prices, df_1d, vol_median_20)
     # ATR is already on primary timeframe
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(20, 14)  # Volume median, ATR
+    warmup = max(20, 14) + 2  # Volume median, ATR, plus fractal delay
     
     # Track position state and entry price for ATR stoploss
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,7 +78,7 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
             np.isnan(vol_median_aligned[i]) or np.isnan(atr_14[i])):
             signals[i] = 0.0
             position = 0
@@ -71,8 +87,8 @@ def generate_signals(prices):
         
         # Current values (aligned)
         price = close[i]
-        r1 = camarilla_r1_aligned[i]
-        s1 = camarilla_s1_aligned[i]
+        bear_fract = bearish_fractal_aligned[i]
+        bull_fract = bullish_fractal_aligned[i]
         vol_median = vol_median_aligned[i]
         atr = atr_14[i]
         
@@ -80,22 +96,20 @@ def generate_signals(prices):
         vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
         current_vol_1d = vol_1d_aligned[i]
         
-        # Volume spike filter: current 1d volume > 1.8x median volume
-        volume_spike = current_vol_1d > (vol_median * 1.8)
+        # Volume spike filter: current 1d volume > 1.5x median volume
+        volume_spike = current_vol_1d > (vol_median * 1.5)
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit when price reaches or falls below S1 (mean reversion to support)
-            # OR ATR stoploss hit (2.5 * ATR below entry)
-            if price <= s1 or price <= entry_price - 2.5 * atr:
+            # Exit when price breaks below bullish fractal (support) OR ATR stoploss hit
+            if price < bull_fract or price <= entry_price - 2.0 * atr:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit when price reaches or rises above R1 (mean reversion to resistance)
-            # OR ATR stoploss hit (2.5 * ATR above entry)
-            if price >= r1 or price >= entry_price + 2.5 * atr:
+            # Exit when price breaks above bearish fractal (resistance) OR ATR stoploss hit
+            if price > bear_fract or price >= entry_price + 2.0 * atr:
                 exit_signal = True
         
         if exit_signal:
@@ -106,14 +120,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: price breaks above R1 with volume spike
-            if price > r1 and volume_spike:
+            # LONG: price breaks above bearish fractal (resistance) with volume spike
+            if price > bear_fract and volume_spike:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: price breaks below S1 with volume spike
-            elif price < s1 and volume_spike:
+            # SHORT: price breaks below bullish fractal (support) with volume spike
+            elif price < bull_fract and volume_spike:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -123,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_CamarillaR1S1_1dVolumeSpike1.8x_ATRTrail2.5_v1"
+name = "4h_WilliamsFractal_Breakout_VolumeSpike1.5x_ATRTrail2.0_v1"
 timeframe = "4h"
 leverage = 1.0
