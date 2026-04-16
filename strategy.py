@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and chop regime filter.
-# Long when price breaks above Donchian upper band AND 1d volume > 1.5x 20-period average AND chop > 61.8 (range regime).
-# Short when price breaks below Donchian lower band AND 1d volume > 1.5x 20-period average AND chop > 61.8 (range regime).
-# Uses discrete position size 0.25. Donchian captures breakouts, volume confirms participation, chop filter ensures we only trade in ranging markets to avoid whipsaws in strong trends.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag while capturing meaningful moves.
+# Hypothesis: 6h Williams %R(14) mean reversion with 1d EMA(50) trend filter and volume confirmation.
+# Long when Williams %R < -80 AND price > 1d EMA(50) (bullish bias) AND volume > 1.3x 20-period average.
+# Short when Williams %R > -20 AND price < 1d EMA(50) (bearish bias) AND volume > 1.3x 20-period average.
+# Uses discrete position size 0.25. Williams %R captures overextended moves, 1d EMA ensures we trade with higher timeframe trend (reducing whipsaws),
+# volume spike confirms participation. Designed to work in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets.
+# Target: 80-160 trades over 4 years (20-40/year) to balance opportunity and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,78 +20,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h Indicators: Donchian(20) ===
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === 6h Indicators: Williams %R(14) ===
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r_values = williams_r.values
     
-    # === 12h Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    # === 6h Indicators: Volume Spike (volume > 1.3x 20-period average) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (1.3 * vol_ma)
     
-    # Get 1d data once before loop for chop regime filter
+    # Get 1d data once before loop for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need enough for chop calculation
+    if len(df_1d) < 60:  # Need enough for EMA calculation
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === 1d Indicators: Choppiness Index(14) for regime filter ===
-    # True Range
-    tr1 = pd.Series(high_1d).diff()
-    tr2 = pd.Series(low_1d).diff().abs()
-    tr3 = pd.Series(close_1d).shift(1).diff().abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum()
+    # === 1d Indicators: EMA(50) for trend filter ===
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Highest high and lowest low over 14 periods
-    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max()
-    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min()
-    
-    # Choppiness Index
-    chop = 100 * np.log10(atr_sum / (hh - ll)) / np.log10(14)
-    chop_values = chop.values
-    
-    # Align 1d chop to 12h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_values)
+    # Align 1d EMA to 6h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 34 periods needed for Donchian, 20 for volume MA, 28 for chop)
-    warmup = 40
+    # Warmup: ensure all indicators are valid (max 50 periods needed for EMA, 20 for volume MA, 14 for Williams %R)
+    warmup = 60
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(williams_r_values[i]) or np.isnan(ema_50_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values
         price = close[i]
-        upper_band = highest_high[i]
-        lower_band = lowest_low[i]
+        williams_val = williams_r_values[i]
+        ema_50_val = ema_50_aligned[i]
         vol_spike = volume_spike[i]
-        chop_val = chop_aligned[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price returns to mid-band or volume spike ends
-            mid_band = (upper_band + lower_band) / 2
-            if price <= mid_band or not vol_spike:
+            # Exit if Williams %R returns to neutral (-50) or volume spike ends
+            if williams_val >= -50 or not vol_spike:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price returns to mid-band or volume spike ends
-            mid_band = (upper_band + lower_band) / 2
-            if price >= mid_band or not vol_spike:
+            # Exit if Williams %R returns to neutral (-50) or volume spike ends
+            if williams_val <= -50 or not vol_spike:
                 exit_signal = True
         
         if exit_signal:
@@ -100,13 +85,13 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price > upper band AND volume spike AND chop > 61.8 (range regime)
-            if price > upper_band and vol_spike and chop_val > 61.8:
+            # LONG: Williams %R < -80 AND price > 1d EMA(50) (bullish bias) AND volume spike
+            if williams_val < -80 and price > ema_50_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
             
-            # SHORT: Price < lower band AND volume spike AND chop > 61.8 (range regime)
-            elif price < lower_band and vol_spike and chop_val > 61.8:
+            # SHORT: Williams %R > -20 AND price < 1d EMA(50) (bearish bias) AND volume spike
+            elif williams_val > -20 and price < ema_50_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
@@ -115,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dVolumeSpike_ChopFilter_V1"
-timeframe = "12h"
+name = "6h_WilliamsR14_1dEMA50_VolumeSpike_V1"
+timeframe = "6h"
 leverage = 1.0
