@@ -3,102 +3,108 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI(14) mean reversion with 4h trend filter and volume confirmation
-# Long when RSI(14) < 30 AND price > 4h EMA50 AND volume > 1.3x 20-period average volume
-# Short when RSI(14) > 70 AND price < 4h EMA50 AND volume > 1.3x 20-period average volume
-# Exit when RSI returns to neutral (40-60 range) or opposing signal appears
-# Designed for low trade frequency (target: 60-150 total trades over 4 years) to minimize fee drag on 1h timeframe
-# RSI mean reversion works in ranging markets, EMA50 filter avoids counter-trend trades in trends
+# Hypothesis: 6h Williams Alligator (Jaw/Teeth/Lips) with 1-week EMA50 trend filter
+# Long when Lips > Teeth > Jaw (bullish alignment) AND price > 1w EMA50
+# Short when Lips < Teeth < Jaw (bearish alignment) AND price < 1w EMA50
+# Exit when alignment breaks or price crosses 8-period EMA (signal line)
+# Williams Alligator identifies trend phases; 1w EMA50 filters counter-trend trades
+# Designed for low trade frequency (target: 50-150 total trades over 4 years) to minimize fee drag on 6h timeframe
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # === RSI(14) calculation ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # neutral RSI when insufficient data
+    # === 1-week EMA50 (trend filter) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # === 4h EMA50 (trend filter) ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # === 6h Williams Alligator (13,8,5 SMAs shifted) ===
+    df_6h = get_htf_data(prices, '6h')
+    # Jaw (13-period SMA, shifted 8 bars)
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
+    jaw = np.roll(jaw, 8)
+    jaw[:8] = np.nan
+    # Teeth (8-period SMA, shifted 5 bars)
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values
+    teeth = np.roll(teeth, 5)
+    teeth[:5] = np.nan
+    # Lips (5-period SMA, shifted 3 bars)
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values
+    lips = np.roll(lips, 3)
+    lips[:3] = np.nan
     
-    # === Volume confirmation (20-period average) ===
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # === 6h EMA8 (exit signal) ===
+    ema_8 = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 50
+    warmup = 60
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(rsi[i]) or 
-            np.isnan(ema_50_4h_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(ema_8[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        rsi_val = rsi[i]
-        ema_50_val = ema_50_4h_aligned[i]
-        vol_ma_val = vol_ma_20[i]
-        vol_confirm = volume[i] > vol_ma_val * 1.3  # 1.3x average volume for confirmation
+        jaw_val = jaw[i]
+        teeth_val = teeth[i]
+        lips_val = lips[i]
+        ema_8_val = ema_8[i]
+        ema_50_val = ema_50_1w_aligned[i]
         
-        # === EXIT CONDITIONS ===
+        # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when RSI returns to neutral (40-60) or opposing signal
-            if rsi_val >= 40 or (rsi_val > 70 and price < ema_50_val and vol_confirm):
+            # Exit if Alligator alignment breaks (Lips <= Teeth or Teeth <= Jaw) OR price crosses below EMA8
+            if not (lips_val > teeth_val and teeth_val > jaw_val) or price < ema_8_val:
                 signals[i] = 0.0
                 position = 0
                 continue
+        
         elif position == -1:  # Short position
-            # Exit when RSI returns to neutral (40-60) or opposing signal
-            if rsi_val <= 60 or (rsi_val < 30 and price > ema_50_val and vol_confirm):
+            # Exit if Alligator alignment breaks (Lips >= Teeth or Teeth >= Jaw) OR price crosses above EMA8
+            if not (lips_val < teeth_val and teeth_val < jaw_val) or price > ema_8_val:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Long when: RSI < 30 (oversold) AND price > 4h EMA50 (uptrend) AND volume confirmation
-            if rsi_val < 30 and price > ema_50_val and vol_confirm:
-                signals[i] = 0.20
+            # Bullish alignment: Lips > Teeth > Jaw AND price above 1w EMA50
+            if lips_val > teeth_val and teeth_val > jaw_val and price > ema_50_val:
+                signals[i] = 0.25
                 position = 1
                 continue
-            # Short when: RSI > 70 (overbought) AND price < 4h EMA50 (downtrend) AND volume confirmation
-            elif rsi_val > 70 and price < ema_50_val and vol_confirm:
-                signals[i] = -0.20
+            # Bearish alignment: Lips < Teeth < Jaw AND price below 1w EMA50
+            elif lips_val < teeth_val and teeth_val < jaw_val and price < ema_50_val:
+                signals[i] = -0.25
                 position = -1
                 continue
         
         # Hold current position
         if position == 1:
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif position == -1:
-            signals[i] = -0.20
+            signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1h_RSI14_4hEMA50_VolumeConfirm_MeanRev"
-timeframe = "1h"
+name = "6h_WilliamsAlligator_1wEMA50_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
