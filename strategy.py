@@ -31,13 +31,14 @@ def generate_signals(prices):
     ema_20_4h = close_4h_series.ewm(span=20, min_periods=20, adjust=False).mean().values
     ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
-    # === 1d data (HTF for volatility regime) ===
+    # === 1d data (HTF for regime) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
+    
+    # 1d ATR for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    
-    # 1d ATR for volatility filter (14 periods)
     tr1 = np.abs(high_1d - low_1d)
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -57,7 +58,7 @@ def generate_signals(prices):
     rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
     
-    # Volume spike detection (volume > 2x 10-period MA)
+    # Volume spike detection
     vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     vol_ratio = volume / vol_ma_10
     
