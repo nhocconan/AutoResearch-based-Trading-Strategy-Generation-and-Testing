@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d ATR-based volatility breakout with volume confirmation and ADX regime filter.
-# Long when price breaks above 1d close + 0.5 * 1d ATR(14) with 4h volume spike (>2.0x median) and ADX>20.
-# Short when price breaks below 1d close - 0.5 * 1d ATR(14) with same filters.
-# Exit via ATR(10) trailing stop: long exits when price < highest high since entry - 2.5*ATR,
-# short exits when price > lowest low since entry + 2.5*ATR.
-# Uses discrete position size 0.25. Target: 50-120 total trades over 4 years (12-30/year).
-# ATR breakout captures volatility expansion, volume confirms conviction, ADX filters chop,
-# ATR stop adapts to volatility and reduces whipsaws in both bull and bear markets.
+# Hypothesis: 4h strategy using 1d Donchian channel breakout with volume confirmation and ADX regime filter.
+# Long when price breaks above 1d Donchian upper (20-period high) with 4h volume spike (>1.8x median) and ADX>25.
+# Short when price breaks below 1d Donchian lower (20-period low) with same filters.
+# Exit via ATR(10) trailing stop: long exits when price < highest high since entry - 2.0*ATR,
+# short exits when price > lowest low since entry + 2.0*ATR.
+# Uses discrete position size 0.30. Target: 75-200 total trades over 4 years (19-50/year).
+# Donchian breakout captures volatility expansion and trend continuation, volume confirms conviction,
+# ADX filters chop, ATR stop adapts to volatility and reduces whipsaws.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,28 +21,19 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 1d data once before loop for ATR breakout levels
+    # Get 1d data once before loop for Donchian breakout levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # === 1d Indicators: ATR(14) for breakout levels ===
-    # True Range
-    tr1 = pd.Series(high_1d - low_1d)
-    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
-    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
-    tr2.iloc[0] = tr1.iloc[0]
-    tr3.iloc[0] = tr1.iloc[0]
-    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    
-    # Breakout levels: close ± 0.5 * ATR
-    upper_break_1d = close_1d + 0.5 * atr_14_1d
-    lower_break_1d = close_1d - 0.5 * atr_14_1d
+    # === 1d Indicators: Donchian Channel (20-period) ===
+    # Upper band: 20-period high
+    upper_donch_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    # Lower band: 20-period low
+    lower_donch_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
     # Get 4h data for volume, ADX, and ATR
     df_4h = get_htf_data(prices, '4h')
@@ -93,8 +84,8 @@ def generate_signals(prices):
     atr_10 = pd.Series(tr_4h).rolling(window=10, min_periods=10).mean().values
     
     # Align all indicators to primary timeframe (4h)
-    upper_break_aligned = align_htf_to_ltf(prices, df_1d, upper_break_1d)
-    lower_break_aligned = align_htf_to_ltf(prices, df_1d, lower_break_1d)
+    upper_donch_aligned = align_htf_to_ltf(prices, df_1d, upper_donch_1d)
+    lower_donch_aligned = align_htf_to_ltf(prices, df_1d, lower_donch_1d)
     vol_median_aligned = align_htf_to_ltf(prices, df_4h, vol_median_20)
     adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
     atr_aligned = align_htf_to_ltf(prices, df_4h, atr_10)
@@ -102,7 +93,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(20, 14, 10)  # volume median(20), ADX(14), ATR(10)
+    warmup = max(20, 14, 10)  # Donchian(20), ADX(14), ATR(10)
     
     # Track position state for trailing stops
     position = 0  # 0: flat, 1: long, -1: short
@@ -111,7 +102,7 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_break_aligned[i]) or np.isnan(lower_break_aligned[i]) or 
+        if (np.isnan(upper_donch_aligned[i]) or np.isnan(lower_donch_aligned[i]) or 
             np.isnan(vol_median_aligned[i]) or np.isnan(adx_aligned[i]) or np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             position = 0
@@ -120,8 +111,8 @@ def generate_signals(prices):
             continue
         
         # Current values (aligned)
-        upper_break = upper_break_aligned[i]
-        lower_break = lower_break_aligned[i]
+        upper_donch = upper_donch_aligned[i]
+        lower_donch = lower_donch_aligned[i]
         vol_median = vol_median_aligned[i]
         adx_val = adx_aligned[i]
         atr = atr_aligned[i]
@@ -131,15 +122,15 @@ def generate_signals(prices):
         vol_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_4h)
         current_vol_4h = vol_4h_aligned[i]
         
-        # Volume spike filter: current 4h volume > 2.0x median volume (stricter to reduce trades)
-        volume_spike = current_vol_4h > (vol_median * 2.0)
+        # Volume spike filter: current 4h volume > 1.8x median volume (balanced to reduce trades)
+        volume_spike = current_vol_4h > (vol_median * 1.8)
         
-        # Trend filter: ADX > 20 (lower threshold to capture more trends but still filter chop)
-        trending = adx_val > 20
+        # Trend filter: ADX > 25 (stronger trend filter to reduce whipsaws)
+        trending = adx_val > 25
         
         # Breakout conditions
-        breakout_long = price > upper_break
-        breakout_short = price < lower_break
+        breakout_long = price > upper_donch
+        breakout_short = price < lower_donch
         
         # === EXIT LOGIC (trailing stop) ===
         exit_signal = False
@@ -147,15 +138,15 @@ def generate_signals(prices):
             # Update highest high since entry
             if price > highest_since_entry:
                 highest_since_entry = price
-            # Exit when price drops below highest high - 2.5*ATR
-            if price < highest_since_entry - 2.5 * atr:
+            # Exit when price drops below highest high - 2.0*ATR
+            if price < highest_since_entry - 2.0 * atr:
                 exit_signal = True
         elif position == -1:  # short position
             # Update lowest low since entry
             if price < lowest_since_entry:
                 lowest_since_entry = price
-            # Exit when price rises above lowest low + 2.5*ATR
-            if price > lowest_since_entry + 2.5 * atr:
+            # Exit when price rises above lowest low + 2.0*ATR
+            if price > lowest_since_entry + 2.0 * atr:
                 exit_signal = True
         
         if exit_signal:
@@ -168,24 +159,24 @@ def generate_signals(prices):
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
             # LONG CONDITIONS
-            # Breakout above upper level, volume spike, and trending market (ADX>20)
+            # Breakout above upper Donchian, volume spike, and trending market (ADX>25)
             if breakout_long and volume_spike and trending:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 highest_since_entry = price  # initialize trailing stop
             
             # SHORT CONDITIONS
-            # Breakout below lower level, volume spike, and trending market (ADX>20)
+            # Breakout below lower Donchian, volume spike, and trending market (ADX>25)
             elif breakout_short and volume_spike and trending:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 lowest_since_entry = price  # initialize trailing stop
         
         else:
-            signals[i] = position * 0.25  # maintain position
+            signals[i] = position * 0.30  # maintain position
     
     return signals
 
-name = "4h_ATRBreakout_VolumeSpike2.0x_ADX20_ATRTrail2.5_v1"
+name = "4h_1dDonchianBreakout_VolumeSpike1.8x_ADX25_ATRTrail2.0_v1"
 timeframe = "4h"
 leverage = 1.0
