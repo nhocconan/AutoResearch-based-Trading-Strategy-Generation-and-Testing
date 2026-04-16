@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 12h Donchian(20) breakout with 1d ADX filter and volume confirmation.
-# Long when price breaks above 12h Donchian high(20) with 1d ADX > 25 and volume > 2.0x 20-period average.
-# Short when price breaks below 12h Donchian low(20) with 1d ADX > 25 and volume > 2.0x 20-period average.
-# Exit when price returns to 12h Donchian midpoint.
-# Uses discrete position size 0.25. 12h Donchian provides structure from higher timeframe, 6h provides entry timing.
-# Target: 50-150 total trades over 4 years (12-37/year) to balance edge and fee drag.
+# Hypothesis: 4h strategy using daily Williams %R (14) with 1h volume spike and 4h chop regime filter.
+# Long when daily %R < -80 (oversold) + 1h volume > 2.0x 20-period average + 4h chop > 61.8 (range).
+# Short when daily %R > -20 (overbought) + 1h volume > 2.0x 20-period average + 4h chop > 61.8 (range).
+# Exit when daily %R crosses above -50 (long) or below -50 (short) or chop < 38.2 (trend).
+# Uses discrete position size 0.25. Williams %R identifies mean reversion extremes in higher timeframe.
+# Volume spike confirms institutional interest. Chop filter ensures ranging market for mean reversion.
+# Target: 80-180 total trades over 4 years (20-45/year) to balance edge and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,149 +21,129 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data once before loop for Donchian levels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    
-    # === 12h Indicators: Donchian Channel (20) based on prior 12h bar ===
-    # Calculate using prior 12h bar's high, low (shift by 1 to use completed 12h bar only)
-    phigh = np.roll(high_12h, 1)
-    plow = np.roll(low_12h, 1)
-    phigh[0] = np.nan
-    plow[0] = np.nan
-    
-    # Donchian high and low (20-period)
-    donch_high = pd.Series(phigh).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(plow).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2.0
-    
-    # Align 12h Donchian levels to 6h timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low)
-    donch_mid_aligned = align_htf_to_ltf(prices, df_12h, donch_mid)
-    
-    # Get daily data once before loop for ADX filter
+    # Get daily data once before loop for Williams %R
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === Daily Indicators: ADX (14) for trend strength filter ===
+    # === Daily Indicators: Williams %R (14) ===
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid division by zero
+    
+    # Align daily Williams %R to 4h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    
+    # Get 1h data once before loop for volume spike
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 20:
+        return np.zeros(n)
+    
+    volume_1h = df_1h['volume'].values
+    vol_ma_20_1h = pd.Series(volume_1h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1h, vol_ma_20_1h)
+    
+    # Get 4h data once before loop for chop regime
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 14:
+        return np.zeros(n)
+    
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # === 4h Indicators: Chopiness Index (14) ===
     # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
     tr1[0] = 0
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    up_move[0] = 0
-    down_move[0] = 0
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Sum of TR over 14 periods
+    tr_sum_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
     
-    # Smoothed TR, +DM, -DM (using Wilder's smoothing)
-    tr_smooth = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Highest high and lowest low over 14 periods
+    hh_14 = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
     
-    # Plus Directional Indicator (+DI) and Minus Directional Indicator (-DI)
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
+    # Chopiness Index
+    chop = np.where((hh_14 - ll_14) == 0, 50, 100 * np.log10(tr_sum_14 / (hh_14 - ll_14)) / np.log10(14))
     
-    # Directional Index (DX) and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Align daily ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume moving average (20-period) on 6h
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align 4h chop to 4h timeframe (same timeframe, no alignment needed)
+    chop_aligned = chop  # already on 4h timeframe
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
     warmup = 100
     
-    # Track position state and entry price for stoploss
+    # Track position state
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
-            np.isnan(donch_mid_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(vol_ma_aligned[i]) or 
+            np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             position = 0
-            entry_price = 0.0
             continue
         
         # Current values
-        dch = donch_high_aligned[i]
-        dcl = donch_low_aligned[i]
-        dcm = donch_mid_aligned[i]
-        adx_val = adx_aligned[i]
+        wr = williams_r_aligned[i]
+        vol_ma = vol_ma_aligned[i]
+        chop_val = chop_aligned[i]
         price = close[i]
         vol = volume[i]
-        vol_ma = vol_ma_20[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price returns to 12h Donchian midpoint
-            if price <= dcm:
+            # Exit if Williams %R crosses above -50 or chop < 38.2 (trending)
+            if wr > -50 or chop_val < 38.2:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price returns to 12h Donchian midpoint
-            if price >= dcm:
+            # Exit if Williams %R crosses below -50 or chop < 38.2 (trending)
+            if wr < -50 or chop_val < 38.2:
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
-            entry_price = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Trend filter: only trade when ADX > 25 (strong trend)
-            trend_filter = adx_val > 25
-            
-            # Volume filter: volume > 2.0x 20-period average
+            # Volume filter: volume > 2.0x 20-period average (1h volume aligned to 4h)
             vol_filter = vol > 2.0 * vol_ma
             
-            # LONG: Price breaks above 12h Donchian high with trend and volume confirmation
-            if (price > dch) and trend_filter and vol_filter:
+            # Chop filter: chop > 61.8 (ranging market)
+            chop_filter = chop_val > 61.8
+            
+            # LONG: Williams %R < -80 (oversold) with volume and chop confirmation
+            if (wr < -80) and vol_filter and chop_filter:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
             
-            # SHORT: Price breaks below 12h Donchian low with trend and volume confirmation
-            elif (price < dcl) and trend_filter and vol_filter:
+            # SHORT: Williams %R > -20 (overbought) with volume and chop confirmation
+            elif (wr > -20) and vol_filter and chop_filter:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
         
         else:
             signals[i] = position * 0.25
     
     return signals
 
-name = "6h_12hDonchian20_1dADX_VolumeConfirmation_V1"
-timeframe = "6h"
+name = "4h_1dWilliamsR14_1hVolumeSpike_4hChopFilter_V1"
+timeframe = "4h"
 leverage = 1.0
