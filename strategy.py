@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike (2.0x) and 1d ADX > 25.
-# Uses discrete position size 0.25. Volume filter uses 1d volume MA to avoid intrabar noise.
-# Long when price > 4h Donchian upper(20) AND 1d volume > 2.0x 20-period average AND 1d ADX > 25.
-# Short when price < 4h Donchian lower(20) AND 1d volume > 2.0x 20-period average AND 1d ADX > 25.
-# Exit when price returns to 4h Donchian midpoint.
-# Target: 60-120 total trades over 4 years (15-30/year) to reduce fee drag and improve generalization.
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike (using 4h volume) and 1d ADX > 25 trend filter.
+# Uses discrete position size 0.25. Volume confirmation reduces false signals, 1d ADX ensures strong trending regime.
+# Entry: price breaks above/below 4h Donchian(20) with 4h volume > 2.0x 20-period 4h volume MA AND 1d ADX > 25.
+# Exit: price returns to 4h Donchian midpoint.
+# Target: 80-160 total trades over 4 years (20-40/year) to balance opportunity and fee drag.
+# Designed to work in both bull (breakouts continue) and bear (strong downtrends) markets via ADX filter.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,13 +20,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data once before loop for Donchian calculation
+    # Get 4h data once before loop for Donchian and volume calculations
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 20:
         return np.zeros(n)
     
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
     
     # === 4h Indicators: Donchian channels (20-period) ===
     upper_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
@@ -38,7 +40,11 @@ def generate_signals(prices):
     lower_aligned = align_htf_to_ltf(prices, df_4h, lower_20)
     middle_aligned = align_htf_to_ltf(prices, df_4h, middle_20)
     
-    # Get 1d data once before loop for volume and ADX filters
+    # === 4h Indicators: Volume spike filter (20-period MA) ===
+    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20)
+    
+    # Get 1d data once before loop for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -46,11 +52,6 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
-    
-    # === 1d Indicators: Volume spike filter ===
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     # === 1d Indicators: ADX(14) for trend filter ===
     # True Range
@@ -114,7 +115,7 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         
-        # Volume filter: volume > 2.0x 20-period average (using 1d volume MA)
+        # Volume filter: volume > 2.0x 20-period 4h volume average
         vol_filter = vol > 2.0 * vol_ma_val if vol_ma_val > 0 else False
         
         # Trend filter: 1d ADX > 25 (strong trending regime)
@@ -158,6 +159,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dVolumeSpike2.0x_1dADX25Trend_V1"
+name = "4h_Donchian20_4hVolumeSpike2.0x_1dADX25Trend_V1"
 timeframe = "4h"
 leverage = 1.0
