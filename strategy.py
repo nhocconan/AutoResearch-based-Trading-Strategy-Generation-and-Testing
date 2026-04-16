@@ -3,11 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h TRIX momentum with 12h volume spike and chop regime filter
-# Uses 4h primary timeframe with 12h HTF for volume confirmation and chop regime.
-# TRIX (triple-smoothed EMA) filters noise and identifies sustained momentum.
-# Volume spike confirms institutional participation. Chop regime avoids false signals in ranging markets.
-# Works in both bull and bear markets by taking momentum breakouts aligned with higher timeframe structure.
+# Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and chop regime filter
+# Uses Donchian channel breakouts for trend capture, confirmed by 12h volume spike
+# and filtered by 12h chop regime to avoid false signals in ranging markets.
+# Works in both bull and bear markets by taking breakouts aligned with higher timeframe structure.
 # Target: 75-200 trades over 4 years (19-50/year) to balance statistical significance and fee drag.
 
 def generate_signals(prices):
@@ -33,20 +32,16 @@ def generate_signals(prices):
     close_12h = df_12h['close'].values
     volume_12h = df_12h['volume'].values
     
-    # === 12h TRIX (15-period) ===
-    # TRIX = EMA(EMA(EMA(close, 15), 15), 15)
-    ema1 = pd.Series(close_12h).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = pd.Series(ema3).pct_change() * 100  # Percentage change
-    trix_values = trix.values
-    
-    # Align TRIX to 4h timeframe (wait for 12h bar close)
-    trix_aligned = align_htf_to_ltf(prices, df_12h, trix_values)
+    # === 4h Donchian Channel (20-period) ===
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
     # === 12h Chop regime filter (Ehler's Chop Index) ===
-    atr_12h = np.abs(high_12h - low_12h)
-    atr_sum_14 = pd.Series(atr_12h).rolling(window=14, min_periods=14).sum().values
+    tr_12h = np.maximum(np.abs(high_12h - low_12h),
+                        np.maximum(np.abs(high_12h - np.roll(close_12h, 1)),
+                                   np.abs(low_12h - np.roll(close_12h, 1))))
+    tr_12h[0] = high_12h[0] - low_12h[0]  # First value
+    atr_sum_14 = pd.Series(tr_12h).rolling(window=14, min_periods=14).sum().values
     max_high_14 = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
     min_low_14 = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
     chop_raw = 100 * np.log10(atr_sum_14 / (max_high_14 - min_low_14 + 1e-10)) / np.log10(14)
@@ -68,7 +63,8 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(trix_aligned[i]) or 
+        if (np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or
             np.isnan(chop_aligned[i]) or
             np.isnan(vol_spike_aligned[i])):
             signals[i] = 0.0
@@ -76,13 +72,17 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        trix_val = trix_aligned[i]
+        donch_high = donchian_high[i]
+        donch_low = donchian_low[i]
         chop = chop_aligned[i]
         vol_conf = vol_spike_aligned[i]
         
         # === STOPLOSS LOGIC (ATR-based) ===
         if position == 1:  # Long position
-            atr_4h = np.abs(high_4h - low_4h)
+            atr_4h = np.maximum(np.abs(high_4h - low_4h),
+                                np.maximum(np.abs(high_4h - np.roll(close_4h, 1)),
+                                           np.abs(low_4h - np.roll(close_4h, 1))))
+            atr_4h[0] = high_4h[0] - low_4h[0]
             atr_ma = pd.Series(atr_4h).rolling(window=14, min_periods=14).mean().values
             atr_aligned = align_htf_to_ltf(prices, df_4h, atr_ma)
             atr_val = atr_aligned[i]
@@ -93,7 +93,10 @@ def generate_signals(prices):
                 continue
         
         elif position == -1:  # Short position
-            atr_4h = np.abs(high_4h - low_4h)
+            atr_4h = np.maximum(np.abs(high_4h - low_4h),
+                                np.maximum(np.abs(high_4h - np.roll(close_4h, 1)),
+                                           np.abs(low_4h - np.roll(close_4h, 1))))
+            atr_4h[0] = high_4h[0] - low_4h[0]
             atr_ma = pd.Series(atr_4h).rolling(window=14, min_periods=14).mean().values
             atr_aligned = align_htf_to_ltf(prices, df_4h, atr_ma)
             atr_val = atr_aligned[i]
@@ -105,16 +108,16 @@ def generate_signals(prices):
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when TRIX turns negative (momentum fading)
-            if trix_val <= 0:
+            # Exit when price breaks below Donchian low
+            if price < donch_low:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when TRIX turns positive (momentum fading)
-            if trix_val >= 0:
+            # Exit when price breaks above Donchian high
+            if price > donch_high:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -124,14 +127,14 @@ def generate_signals(prices):
         if position == 0:
             # Require trending regime (Chop < 38.2) and volume spike
             if chop < 38.2 and vol_conf:
-                # Go long when TRIX crosses above zero with volume
-                if trix_val > 0:
+                # Go long when price breaks above Donchian high with volume
+                if price > donch_high:
                     signals[i] = 0.25
                     position = 1
                     entry_price = price
                     continue
-                # Go short when TRIX crosses below zero with volume
-                elif trix_val < 0:
+                # Go short when price breaks below Donchian low with volume
+                elif price < donch_low:
                     signals[i] = -0.25
                     position = -1
                     entry_price = price
@@ -147,6 +150,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_TRIX15_12hVolumeSpike_ChopFilter"
+name = "4h_Donchian20_12hVolumeSpike_ChopFilter"
 timeframe = "4h"
 leverage = 1.0
