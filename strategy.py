@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA200 trend filter and volume confirmation.
-# Long when price breaks above Donchian(20) high AND 1w EMA200 is rising AND volume > 1.5x 20-day average.
-# Short when price breaks below Donchian(20) low AND 1w EMA200 is falling AND volume > 1.5x 20-day average.
-# Uses discrete position size 0.25. Donchian captures breakouts, 1w EMA200 ensures we trade with higher timeframe trend (avoiding counter-trend whipsaws),
-# volume spike confirms institutional participation. Designed to work in both bull (breakouts up) and bear (breakdowns down) markets.
-# Target: 40-80 trades over 4 years (10-20/year) to balance opportunity and fee drag.
+# Hypothesis: 6h Bollinger Band squeeze breakout with 1d volume confirmation and ATR filter.
+# Long when price breaks above upper BB(20,2) AND 1d volume > 1.5x 20-period average AND 6h ATR(14) > 0.5*ATR(50) (expanding volatility).
+# Short when price breaks below lower BB(20,2) AND 1d volume > 1.5x 20-period average AND 6h ATR(14) > 0.5*ATR(50).
+# Uses discrete position size 0.25. BB squeeze identifies low volatility compression, breakout captures expansion.
+# 1d volume filter ensures participation across higher timeframe, ATR filter avoids breakouts during low volatility.
+# Designed to work in both bull (buy breakouts) and bear (sell breakdowns) markets.
+# Target: 80-180 trades over 4 years (20-45/year) to balance opportunity and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,62 +21,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Indicators: Donchian(20) ===
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === 6h Indicators: Bollinger Bands (20,2) ===
+    close_s = pd.Series(close)
+    bb_ma = close_s.rolling(window=20, min_periods=20).mean()
+    bb_std = close_s.rolling(window=20, min_periods=20).std()
+    bb_upper = (bb_ma + 2 * bb_std).values
+    bb_lower = (bb_ma - 2 * bb_std).values
+    
+    # === 6h Indicators: ATR(14) and ATR(50) for volatility filter ===
+    # True Range
+    tr1 = pd.Series(high).diff()
+    tr2 = pd.Series(low).diff().abs()
+    tr3 = pd.Series(close).shift(1).diff().abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    atr_50 = pd.Series(tr).ewm(alpha=1/50, adjust=False, min_periods=50).mean()
+    atr_ratio = (atr_14 / atr_50).values  # > 0.5 indicates expanding volatility
     
     # === 1d Indicators: Volume Spike (volume > 1.5x 20-period average) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
-    
-    # Get 1w data once before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:  # Need enough for EMA calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    
-    # === 1w Indicators: EMA200 for trend filter ===
-    ema_200 = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200)
-    
-    # EMA200 slope (rising/falling) - using 5-period change
-    ema_200_slope = np.zeros_like(ema_200_aligned)
-    ema_200_slope[5:] = ema_200_aligned[5:] - ema_200_aligned[:-5]
+    volume_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = volume_1d > (1.5 * vol_ma_1d)
+    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 200 periods needed for EMA200, 20 for Donchian/volume MA)
-    warmup = 220
+    # Warmup: ensure all indicators are valid (max 50 periods needed for ATR(50), 20 for BB)
+    warmup = 60
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(ema_200_aligned[i]) or np.isnan(ema_200_slope[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or
+            np.isnan(atr_ratio[i]) or np.isnan(volume_spike_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values
         price = close[i]
-        vol_spike = volume_spike[i]
-        ema_slope = ema_200_slope[i]
+        bb_up = bb_upper[i]
+        bb_low = bb_lower[i]
+        vol_expanding = atr_ratio[i] > 0.5
+        vol_spike = volume_spike_1d_aligned[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price breaks below Donchian low (failed breakout) or EMA slope turns negative
-            if price < lowest_low[i] or ema_slope <= 0:
+            # Exit if price returns to middle band or volatility contracts
+            if price <= bb_ma.iloc[i] or not vol_expanding:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price breaks above Donchian high (failed breakdown) or EMA slope turns positive
-            if price > highest_high[i] or ema_slope >= 0:
+            # Exit if price returns to middle band or volatility contracts
+            if price >= bb_ma.iloc[i] or not vol_expanding:
                 exit_signal = True
         
         if exit_signal:
@@ -85,13 +91,13 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Donchian high AND EMA200 rising AND volume spike
-            if price > highest_high[i] and ema_slope > 0 and vol_spike:
+            # LONG: Price breaks above upper BB AND 1d volume spike AND volatility expanding
+            if price > bb_up and vol_spike and vol_expanding:
                 signals[i] = 0.25
                 position = 1
             
-            # SHORT: Price breaks below Donchian low AND EMA200 falling AND volume spike
-            elif price < lowest_low[i] and ema_slope < 0 and vol_spike:
+            # SHORT: Price breaks below lower BB AND 1d volume spike AND volatility expanding
+            elif price < bb_low and vol_spike and vol_expanding:
                 signals[i] = -0.25
                 position = -1
         
@@ -100,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wEMA200_VolumeSpike_V1"
-timeframe = "1d"
+name = "6h_BB_Squeeze_Breakout_1dVol_ATRFilter_V1"
+timeframe = "6h"
 leverage = 1.0
