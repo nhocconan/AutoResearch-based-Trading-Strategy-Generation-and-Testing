@@ -1,3 +1,10 @@
+# 6h Ichimoku Cloud with Daily Timeframe Filter
+# Uses Ichimoku components from daily chart as trend filter on 6h chart
+# Entry: Tenkan/Kijun cross in direction of daily cloud color
+# Exit: Opposite cross or price exits cloud
+# Position size: 0.25
+# Designed for 50-150 total trades over 4 years
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,163 +12,106 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # === Daily data (HTF for key levels) ===
+    # === Daily data for Ichimoku (HTF) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === Previous Day Values for Pivot Calculation ===
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    # First day uses current day values (no look-ahead)
-    prev_close_1d[0] = close_1d[0]
-    prev_high_1d[0] = high_1d[0]
-    prev_low_1d[0] = low_1d[0]
+    # Ichimoku parameters
+    tenkan_period = 9
+    kijun_period = 26
+    senkou_span_b_period = 52
     
-    # === Daily Pivot Points (Standard) ===
-    pivot_point = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen = (pd.Series(high_1d).rolling(window=tenkan_period, min_periods=tenkan_period).max() + 
+                  pd.Series(low_1d).rolling(window=tenkan_period, min_periods=tenkan_period).min()) / 2
     
-    # Calculate Fibonacci-based levels: R1 at 0.382, S1 at 0.382
-    prev_range = prev_high_1d - prev_low_1d
-    r1 = pivot_point + prev_range * 0.382
-    s1 = pivot_point - prev_range * 0.382
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen = (pd.Series(high_1d).rolling(window=kijun_period, min_periods=kijun_period).max() + 
+                 pd.Series(low_1d).rolling(window=kijun_period, min_periods=kijun_period).min()) / 2
     
-    # === Additional levels for exit: R2 at 0.618, S2 at 0.618 ===
-    r2 = pivot_point + prev_range * 0.618
-    s2 = pivot_point - prev_range * 0.618
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
     
-    # Align all levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
+    senkou_span_b = (pd.Series(high_1d).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).max() + 
+                     pd.Series(low_1d).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).min()) / 2
     
-    # === ADX Trend Filter (Daily) ===
-    # Calculate True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    # First TR uses high-low only (no look-ahead)
-    tr[0] = high_1d[0] - low_1d[0]
+    # Chikou Span (Lagging Span): current close plotted 26 periods back
+    # Not used for signals but calculated for completeness
+    chikou_span = close_1d
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    # First period DM is zero (no look-ahead)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smooth with Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            # First value is simple average
-            result[period-1] = np.mean(data[:period])
-            # Subsequent values: Wilder's smoothing
-            for i in range(period, len(data)):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    period = 14
-    tr14 = wilders_smooth(tr, period)
-    dm_plus14 = wilders_smooth(dm_plus, period)
-    dm_minus14 = wilders_smooth(dm_minus, period)
-    
-    # Avoid division by zero
-    dm_plus14_safe = np.where(tr14 == 0, 1, dm_plus14)
-    dm_minus14_safe = np.where(tr14 == 0, 1, dm_minus14)
-    tr14_safe = np.where(tr14 == 0, 1, tr14)
-    
-    di_plus = 100 * dm_plus14 / tr14_safe
-    di_minus = 100 * dm_minus14 / tr14_safe
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    # First DX value may be NaN if di_plus+di_minus=0
-    adx = wilders_smooth(dx, period)
-    
-    # Align ADX to 4h
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # === Volume Confirmation (4h) ===
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma_20
-    
-    # === ATR for dynamic stop (4h) ===
-    tr_4h = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr_4h[0] = high[0] - low[0]
-    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
+    # Align Ichimoku components to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen.values)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen.values)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a.values)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b.values)
     
     signals = np.zeros(n)
     
-    # Warmup: enough for ADX calculation (14+14+14=42) plus buffer
-    warmup = 50
+    # Warmup: enough for Ichimoku calculation (52 periods)
+    warmup = 60
     
-    # Track position and entry price for stop management
+    # Track position
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ratio[i]) or 
-            np.isnan(atr_4h[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        r2_val = r2_aligned[i]
-        s2_val = s2_aligned[i]
-        adx_val = adx_aligned[i]
-        vol_ratio_val = vol_ratio[i]
-        atr_val = atr_4h[i]
+        tenkan = tenkan_sen_aligned[i]
+        kijun = kijun_sen_aligned[i]
+        senkou_a = senkou_span_a_aligned[i]
+        senkou_b = senkou_span_b_aligned[i]
+        
+        # Determine cloud top and bottom
+        cloud_top = max(senkou_a, senkou_b)
+        cloud_bottom = min(senkou_a, senkou_b)
+        
+        # Determine cloud color (green = bullish, red = bearish)
+        cloud_bullish = senkou_a > senkou_b
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit conditions: stop at S1, target at R2, or adverse 2x ATR move
-            if price < s1_val or price > r2_val or price < entry_price - 2.0 * atr_val:
+            # Exit: Tenkan/Kijun death cross or price below cloud
+            if (tenkan < kijun) or (price < cloud_bottom):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit conditions: stop at R1, target at S2, or adverse 2x ATR move
-            if price > r1_val or price < s2_val or price > entry_price + 2.0 * atr_val:
+            # Exit: Tenkan/Kijun golden cross or price above cloud
+            if (tenkan > kijun) or (price > cloud_top):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Strong trend filter: ADX > 25
-            if adx_val > 25:
-                # LONG: Price breaks above R1 with volume confirmation
-                if price > r1_val and vol_ratio_val > 2.0:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = price
-                    continue
-                
-                # SHORT: Price breaks below S1 with volume confirmation
-                elif price < s1_val and vol_ratio_val > 2.0:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = price
-                    continue
+            # LONG: Tenkan/Kijun golden cross in bullish cloud
+            if (tenkan > kijun) and cloud_bullish and (price > cloud_bottom):
+                signals[i] = 0.25
+                position = 1
+                continue
+            
+            # SHORT: Tenkan/Kijun death cross in bearish cloud
+            elif (tenkan < kijun) and (not cloud_bullish) and (price < cloud_top):
+                signals[i] = -0.25
+                position = -1
+                continue
         
         # Hold current position
         if position == 1:
@@ -173,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_FibPivot_Volume_ADX_Filter"
-timeframe = "4h"
+name = "6h_Ichimoku_Cloud_Filter"
+timeframe = "6h"
 leverage = 1.0
