@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R mean reversion with 1d volume spike filter and 1w ADX trend filter.
-# Long when Williams %R < -80 (oversold) AND volume > 2.0x 20-period 1d average AND 1w ADX < 20 (ranging/weak trend).
-# Short when Williams %R > -20 (overbought) AND volume > 2.0x 20-period 1d average AND 1w ADX < 20.
-# Exit when Williams %R crosses back above -50 (for longs) or below -50 (for shorts).
-# Uses discrete position size 0.25. Designed to capture mean reversion in ranging markets during both bull and bear cycles.
-# Target: 80-120 total trades over 4 years (20-30/year) to minimize fee drag while maintaining edge.
+# Hypothesis: 12h Camarilla R1/S1 breakout with 1d volume spike and 1w ADX trend filter.
+# Long when price breaks above R1 AND volume > 2.0x 20-period 1d average AND 1w ADX > 20 (trending market).
+# Short when price breaks below S1 AND volume > 2.0x 20-period 1d average AND 1w ADX > 20.
+# Exit when price crosses the 12h midpoint (R1+S1)/2.
+# Uses discrete position size 0.25. Designed to capture breakouts in trending markets with strict filters to minimize trades.
+# Target: 60-100 total trades over 4 years (15-25/year) to minimize fee drag while maintaining edge.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,12 +20,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 6h Indicators: Williams %R (14-period) ===
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when high == low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # === 12h Indicators: Camarilla R1/S1 levels (from previous bar) ===
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    
+    # Camarilla R1 and S1 levels
+    R1 = pivot + (range_hl * 1.1 / 12)  # R1 = pivot + range*1.1/12
+    S1 = pivot - (range_hl * 1.1 / 12)  # S1 = pivot - range*1.1/12
+    midpoint = (R1 + S1) / 2  # Exit level
     
     # === 1d Indicators: Volume Spike (volume > 2.0x 20-period average) ===
     df_1d = get_htf_data(prices, '1d')
@@ -34,7 +43,7 @@ def generate_signals(prices):
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     volume_spike = volume > (2.0 * vol_ma_1d_aligned)
     
-    # === 1w Indicators: ADX < 20 (ranging/weak trend filter) ===
+    # === 1w Indicators: ADX > 20 (trending market filter) ===
     df_1w = get_htf_data(prices, '1w')
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
@@ -64,40 +73,45 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    ranging = adx_aligned < 20  # Ranging or weak trend market
+    trending = adx_aligned > 20
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed for Williams %R and ADX)
-    warmup = 50
+    # Warmup: ensure all indicators are valid (max 50 periods needed for ADX/ATR)
+    warmup = 100
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
-        # Skip if any required data is NaN
-        if (np.isnan(williams_r[i]) or np.isnan(volume_spike[i]) or 
-            np.isnan(ranging[i])):
+        # Skip if any required data is NaN or outside session
+        if (np.isnan(R1[i]) or np.isnan(S1[i]) or np.isnan(midpoint[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(trending[i]) or
+            not session_filter[i]):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values
-        wr = williams_r[i]
+        price = close[i]
         vol_spike = volume_spike[i]
-        is_ranging = ranging[i]
+        is_trending = trending[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if Williams %R crosses back above -50
-            if wr > -50:
+            # Exit if price crosses below midpoint
+            if price < midpoint[i]:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if Williams %R crosses back below -50
-            if wr < -50:
+            # Exit if price crosses above midpoint
+            if price > midpoint[i]:
                 exit_signal = True
         
         if exit_signal:
@@ -107,13 +121,13 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Williams %R < -80 (oversold) AND volume spike AND ranging market
-            if wr < -80 and vol_spike and is_ranging:
+            # LONG: Price breaks above R1 AND volume spike AND trending market
+            if price > R1[i] and vol_spike and is_trending:
                 signals[i] = 0.25
                 position = 1
             
-            # SHORT: Williams %R > -20 (overbought) AND volume spike AND ranging market
-            elif wr > -20 and vol_spike and is_ranging:
+            # SHORT: Price breaks below S1 AND volume spike AND trending market
+            elif price < S1[i] and vol_spike and is_trending:
                 signals[i] = -0.25
                 position = -1
         
@@ -122,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_MeanReversion_1dVolumeSpike_1wADX_V1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_Volume_1d_ADX1w_V1"
+timeframe = "12h"
 leverage = 1.0
