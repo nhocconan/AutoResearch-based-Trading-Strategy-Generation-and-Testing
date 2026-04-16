@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Donchian channel breakout with volume confirmation and ADX regime filter.
-# Long when price breaks above 1d Donchian upper (20-period high) with 4h volume spike (>1.8x median) and ADX>25.
+# Hypothesis: 4h strategy using 1d Donchian breakout with volume confirmation and ADX regime filter.
+# Long when price breaks above 1d Donchian upper (20-period high) with 4h volume spike (>2.0x median) and ADX>30.
 # Short when price breaks below 1d Donchian lower (20-period low) with same filters.
-# Exit via ATR(10) trailing stop: long exits when price < highest high since entry - 2.0*ATR,
-# short exits when price > lowest low since entry + 2.0*ATR.
-# Uses discrete position size 0.30. Target: 75-200 total trades over 4 years (19-50/year).
-# Donchian breakout captures volatility expansion and trend continuation, volume confirms conviction,
-# ADX filters chop, ATR stop adapts to volatility and reduces whipsaws.
+# Exit via ATR(10) trailing stop: long exits when price < highest high since entry - 2.5*ATR,
+# short exits when price > lowest low since entry + 2.5*ATR.
+# Uses discrete position size 0.25. Target: 75-200 total trades over 4 years (19-50/year).
+# Higher volume threshold (2.0x) and ADX>30 reduce trades vs v1. Wider ATR stop (2.5x) reduces whipsaw exits.
 
 def generate_signals(prices):
     n = len(prices)
@@ -122,11 +121,11 @@ def generate_signals(prices):
         vol_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_4h)
         current_vol_4h = vol_4h_aligned[i]
         
-        # Volume spike filter: current 4h volume > 1.8x median volume (balanced to reduce trades)
-        volume_spike = current_vol_4h > (vol_median * 1.8)
+        # Volume spike filter: current 4h volume > 2.0x median volume (higher threshold to reduce trades)
+        volume_spike = current_vol_4h > (vol_median * 2.0)
         
-        # Trend filter: ADX > 25 (stronger trend filter to reduce whipsaws)
-        trending = adx_val > 25
+        # Trend filter: ADX > 30 (stronger trend filter to reduce whipsaws)
+        trending = adx_val > 30
         
         # Breakout conditions
         breakout_long = price > upper_donch
@@ -138,15 +137,15 @@ def generate_signals(prices):
             # Update highest high since entry
             if price > highest_since_entry:
                 highest_since_entry = price
-            # Exit when price drops below highest high - 2.0*ATR
-            if price < highest_since_entry - 2.0 * atr:
+            # Exit when price drops below highest high - 2.5*ATR
+            if price < highest_since_entry - 2.5 * atr:
                 exit_signal = True
         elif position == -1:  # short position
             # Update lowest low since entry
             if price < lowest_since_entry:
                 lowest_since_entry = price
-            # Exit when price rises above lowest low + 2.0*ATR
-            if price > lowest_since_entry + 2.0 * atr:
+            # Exit when price rises above lowest low + 2.5*ATR
+            if price > lowest_since_entry + 2.5 * atr:
                 exit_signal = True
         
         if exit_signal:
@@ -159,24 +158,24 @@ def generate_signals(prices):
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
             # LONG CONDITIONS
-            # Breakout above upper Donchian, volume spike, and trending market (ADX>25)
+            # Breakout above upper Donchian, volume spike, and trending market (ADX>30)
             if breakout_long and volume_spike and trending:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
                 highest_since_entry = price  # initialize trailing stop
             
             # SHORT CONDITIONS
-            # Breakout below lower Donchian, volume spike, and trending market (ADX>25)
+            # Breakout below lower Donchian, volume spike, and trending market (ADX>30)
             elif breakout_short and volume_spike and trending:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
                 lowest_since_entry = price  # initialize trailing stop
         
         else:
-            signals[i] = position * 0.30  # maintain position
+            signals[i] = position * 0.25  # maintain position
     
     return signals
 
-name = "4h_1dDonchianBreakout_VolumeSpike1.8x_ADX25_ATRTrail2.0_v1"
+name = "4h_1dDonchianBreakout_VolumeSpike2.0x_ADX30_ATRTrail2.5_v1"
 timeframe = "4h"
 leverage = 1.0
