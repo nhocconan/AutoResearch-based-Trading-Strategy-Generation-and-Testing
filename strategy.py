@@ -3,14 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Williams Alligator (Jaw/Teeth/Lips) for trend direction,
-# combined with 4h volume spike and ADX regime filter. Alligator provides smoothed trend
-# via SMAs, volume confirms momentum strength, ADX > 25 ensures trending market to avoid
-# whipsaws. Long when Lips > Teeth > Jaw (bullish alignment), price > VWAP, volume > 1.5x
-# 20-period average, ADX > 25. Short when Lips < Teeth < Jaw (bearish alignment), price < VWAP,
-# volume > 1.5x 20-period average, ADX > 25. Exit when Alligator alignment breaks or ADX < 20.
-# Uses discrete position size 0.25. Target: 75-200 total trades over 4 years (19-50/year).
-# Alligator is effective in both bull and bear markets as it identifies trend strength and direction.
+# Hypothesis: 1d strategy using 1w Supertrend trend filter with volume spike and ATR-based dynamic stoploss.
+# Long when 1w Supertrend is bullish, volume > 2x 20-period average, and price > 1w Supertrend line.
+# Short when 1w Supertrend is bearish, volume > 2x 20-period average, and price < 1w Supertrend line.
+# Exit when price crosses the Supertrend line in the opposite direction or ATR-based trailing stop is hit.
+# Uses discrete position size 0.30. Supertrend provides robust trend identification, volume confirms momentum.
+# Target: 30-100 total trades over 4 years (7-25/year) with strong performance in both bull and bear markets.
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,171 +20,174 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once before loop for Alligator
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data once before loop for Supertrend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # === 1d Indicators: Williams Alligator ===
-    # Jaw (Blue): 13-period SMMA, shifted 8 bars
-    jaw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().values
-    jaw = np.roll(jaw, 8)
-    jaw[:8] = np.nan
-    
-    # Teeth (Red): 8-period SMMA, shifted 5 bars
-    teeth = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().values
-    teeth = np.roll(teeth, 5)
-    teeth[:5] = np.nan
-    
-    # Lips (Green): 5-period SMMA, shifted 3 bars
-    lips = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values
-    lips = np.roll(lips, 3)
-    lips[:3] = np.nan
-    
-    # Alligator alignment: 1 = bullish (Lips > Teeth > Jaw), -1 = bearish (Lips < Teeth < Jaw), 0 = entwined
-    alligator_align = np.zeros_like(close_1d)
-    bullish = (lips > teeth) & (teeth > jaw)
-    bearish = (lips < teeth) & (teeth < jaw)
-    alligator_align[bullish] = 1
-    alligator_align[bearish] = -1
-    
-    # Align 1d Alligator alignment to 4h timeframe
-    alligator_align_aligned = align_htf_to_ltf(prices, df_1d, alligator_align)
-    
-    # Get 4h data once before loop for VWAP, volume, and ADX
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
-    
-    # Typical price for VWAP
-    typical_price_4h = (high_4h + low_4h + close_4h) / 3.0
-    vp = typical_price_4h * volume_4h
-    
-    # Cumulative VWAP (reset daily)
-    cum_vp = np.cumsum(vp)
-    cum_vol = np.cumsum(volume_4h)
-    vwap = np.divide(cum_vp, cum_vol, out=np.zeros_like(cum_vp), where=cum_vol!=0)
-    
-    # Volume moving average (20-period) on 4h
-    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    
-    # ADX calculation (14-period)
+    # === 1w Indicators: Supertrend (ATR=10, mult=3.0) ===
     # True Range
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr1[0] = 0
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # +DM and -DM
-    up_move = high_4h - np.roll(high_4h, 1)
-    down_move = np.roll(low_4h, 1) - low_4h
-    up_move[0] = 0
-    down_move[0] = 0
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # ATR (10-period)
+    atr_1w = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # Smoothed TR, +DM, -DM (using Wilder's smoothing = EMA with alpha=1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(data[:period]) / period
-        # Subsequent values: Wilder's smoothing
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Basic Upper and Lower Bands
+    hl2 = (high_1w + low_1w) / 2.0
+    upper_band = hl2 + (3.0 * atr_1w)
+    lower_band = hl2 - (3.0 * atr_1w)
     
-    atr = wilders_smoothing(tr, 14)
-    plus_di = 100 * wilders_smoothing(plus_dm, 14) / atr
-    minus_di = 100 * wilders_smoothing(minus_dm, 14) / atr
-    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
-    adx = wilders_smoothing(dx, 14)
+    # Supertrend calculation
+    supertrend = np.zeros_like(close_1w)
+    direction = np.ones_like(close_1w)  # 1 for uptrend, -1 for downtrend
+    
+    supertrend[0] = upper_band[0]
+    direction[0] = 1
+    
+    for i in range(1, len(close_1w)):
+        if close_1w[i-1] > upper_band[i-1]:
+            direction[i] = 1
+        elif close_1w[i-1] < lower_band[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+        
+        if direction[i] == 1:
+            supertrend[i] = max(lower_band[i], supertrend[i-1])
+        else:
+            supertrend[i] = min(upper_band[i], supertrend[i-1])
+    
+    # Align 1w Supertrend and direction to 1d timeframe
+    supertrend_aligned = align_htf_to_ltf(prices, df_1w, supertrend)
+    direction_aligned = align_htf_to_ltf(prices, df_1w, direction)
+    
+    # Get 1d data for volume and ATR (for stoploss)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
+    
+    # Volume moving average (20-period) on 1d
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    
+    # ATR (14-period) on 1d for dynamic stoploss
+    tr1d = high_1d - low_1d
+    tr2d = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3d = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1d[0] = 0
+    tr2d[0] = 0
+    tr3d[0] = 0
+    tr_d = np.maximum(tr1d, np.maximum(tr2d, tr3d))
+    atr_14_1d = pd.Series(tr_d).rolling(window=14, min_periods=14).mean().values
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
     warmup = 100
     
-    # Track position state
+    # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    stop_price = 0.0
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(alligator_align_aligned[i]) or np.isnan(vwap[i]) or 
-            np.isnan(vol_ma_20_4h[i]) or np.isnan(adx[i])):
+        if (np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i]) or 
+            np.isnan(vol_ma_aligned[i]) or np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             position = 0
+            entry_price = 0.0
+            stop_price = 0.0
             continue
         
         # Current values
-        alligator_val = alligator_align_aligned[i]
-        vwap_val = vwap[i]
-        vol_ma_val = vol_ma_20_4h[i]
-        adx_val = adx[i]
+        st_val = supertrend_aligned[i]
+        dir_val = direction_aligned[i]
+        vol_ma_val = vol_ma_aligned[i]
+        atr_val = atr_aligned[i]
         price = close[i]
         vol = volume[i]
         
-        # === EXIT LOGIC ===
-        exit_signal = False
-        
+        # Update stoploss for existing position
         if position == 1:  # Long position
-            # Exit if Alligator alignment turns bearish/entwined or ADX drops below 20
-            if alligator_val <= 0 or adx_val < 20:
-                exit_signal = True
+            # Trailing stop: highest high since entry minus 3*ATR
+            if i == warmup or position == 0:  # New position or warmup
+                entry_price = price
+                stop_price = price - 3.0 * atr_val
+            else:
+                # Update highest high and trailing stop
+                if price > entry_price:
+                    entry_price = price  # Trail entry price up to current high for simplicity
+                stop_price = max(stop_price, price - 3.0 * atr_val)
+            
+            # Exit if price breaks Supertrend line downward or hits stoploss
+            if price < st_val or price <= stop_price:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+                stop_price = 0.0
+                continue
         
         elif position == -1:  # Short position
-            # Exit if Alligator alignment turns bullish/entwined or ADX drops below 20
-            if alligator_val >= 0 or adx_val < 20:
-                exit_signal = True
-        
-        if exit_signal:
-            signals[i] = 0.0
-            position = 0
-            continue
+            # Trailing stop: lowest low since entry plus 3*ATR
+            if i == warmup or position == 0:  # New position or warmup
+                entry_price = price
+                stop_price = price + 3.0 * atr_val
+            else:
+                # Update lowest low and trailing stop
+                if price < entry_price:
+                    entry_price = price  # Trail entry price down to current low for simplicity
+                stop_price = min(stop_price, price + 3.0 * atr_val)
+            
+            # Exit if price breaks Supertrend line upward or hits stoploss
+            if price > st_val or price >= stop_price:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+                stop_price = 0.0
+                continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Trend filter: Alligator alignment must be non-zero (trending)
-            trend_filter = alligator_val != 0
+            # Volume filter: volume > 2x 20-period average
+            vol_filter = vol > 2.0 * vol_ma_val
             
-            # Volume filter: volume > 1.5x 20-period average
-            vol_filter = vol > 1.5 * vol_ma_val
-            
-            # Regime filter: ADX > 25 (strong trend)
-            regime_filter = adx_val > 25
-            
-            # Price filter: price must be on correct side of VWAP
-            price_filter_long = price > vwap_val
-            price_filter_short = price < vwap_val
-            
-            # LONG: Alligator bullish, price > VWAP, volume spike, strong trend
-            if (alligator_val > 0) and price_filter_long and vol_filter and regime_filter:
-                signals[i] = 0.25
+            # LONG: Supertrend bullish, price above Supertrend line, volume spike
+            if (dir_val > 0) and (price > st_val) and vol_filter:
+                signals[i] = 0.30
                 position = 1
+                entry_price = price
+                stop_price = price - 3.0 * atr_val
             
-            # SHORT: Alligator bearish, price < VWAP, volume spike, strong trend
-            elif (alligator_val < 0) and price_filter_short and vol_filter and regime_filter:
-                signals[i] = -0.25
+            # SHORT: Supertrend bearish, price below Supertrend line, volume spike
+            elif (dir_val < 0) and (price < st_val) and vol_filter:
+                signals[i] = -0.30
                 position = -1
+                entry_price = price
+                stop_price = price + 3.0 * atr_val
         
         else:
-            signals[i] = position * 0.25
+            # Maintain current position size
+            signals[i] = position * 0.30
     
     return signals
 
-name = "4h_1dAlligator_VWAP_VolumeSpike_ADXFilter_V1"
-timeframe = "4h"
+name = "1d_1wSupertrend_VolumeSpike_ATRTrailingStop_V1"
+timeframe = "1d"
 leverage = 1.0
