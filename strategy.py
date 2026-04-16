@@ -3,12 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w HMA(21) trend filter and volume confirmation
-# Long when price breaks above 1d Donchian upper channel (20-period high) with price > 1w HMA21 and volume > 1.5x 20-period average
-# Short when price breaks below 1d Donchian lower channel (20-period low) with price < 1w HMA21 and volume > 1.5x 20-period average
+# Hypothesis: 6h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above 1d Camarilla R1 level with price > 1d EMA34 and volume > 1.5x 6h average
+# Short when price breaks below 1d Camarilla S1 level with price < 1d EMA34 and volume > 1.5x 6h average
 # ATR-based trailing stop (2.0x ATR) to manage risk and reduce whipsaws
-# Designed for low trade frequency (target: 30-100 total trades over 4 years) to minimize fee drag
-# Works in both bull and bear markets via trend filter and volatility-based stops
+# Designed for low trade frequency (target: 50-150 total trades over 4 years) to minimize fee drag
+# Camarilla levels from higher timeframe provide institutional support/resistance
+# EMA34 filter ensures we trade with the higher timeframe trend
+# Volume confirmation adds conviction to breakouts
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,51 +22,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Donchian(20) channels ===
+    # === 1d Camarilla Pivot Levels (R1, S1) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Donchian upper: 20-period high
-    donch_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    # Donchian lower: 20-period low
-    donch_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate pivot point
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Calculate Camarilla levels
+    range_1d = high_1d - low_1d
+    r1_1d = close_1d + range_1d * 1.1 / 12
+    s1_1d = close_1d - range_1d * 1.1 / 12
     
-    # Align to 1d timeframe (no shift needed as we're already on 1d)
-    donch_high_aligned = donch_high_1d
-    donch_low_aligned = donch_low_1d
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # === 1d Volume Confirmation (20-period average) ===
-    vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = vol_ma_20
+    # === 1d EMA34 (trend filter) ===
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === 1d ATR for trailing stop (14-period) ===
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(df_1d['close'].values, 1))
-    tr3 = np.abs(low_1d - np.roll(df_1d['close'].values, 1))
+    # === 6h Volume Confirmation (20-period average) ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # === 6h ATR for trailing stop (14-period) ===
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_aligned = atr_1d
-    
-    # === 1w HMA21 (trend filter) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # HMA calculation: WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-    half_len = 21 // 2
-    sqrt_len = int(np.sqrt(21))
-    wma_half = pd.Series(close_1w).rolling(window=half_len, min_periods=half_len).apply(
-        lambda x: np.dot(x, np.arange(1, half_len+1)) / np.sum(np.arange(1, half_len+1)), raw=True
-    ).values
-    wma_full = pd.Series(close_1w).rolling(window=21, min_periods=21).apply(
-        lambda x: np.dot(x, np.arange(1, 22)) / np.sum(np.arange(1, 22)), raw=True
-    ).values
-    wma_diff = 2 * wma_half - wma_full
-    hma_21 = pd.Series(wma_diff).rolling(window=sqrt_len, min_periods=sqrt_len).apply(
-        lambda x: np.dot(x, np.arange(1, sqrt_len+1)) / np.sum(np.arange(1, sqrt_len+1)), raw=True
-    ).values
-    hma_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
+    atr_6h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     
@@ -79,21 +67,20 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or
-            np.isnan(hma_aligned[i]) or
-            np.isnan(vol_ma_aligned[i]) or
-            np.isnan(atr_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or
+            np.isnan(ema_34_aligned[i]) or
+            np.isnan(atr_6h[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        donch_high_val = donch_high_aligned[i]
-        donch_low_val = donch_low_aligned[i]
-        hma_val = hma_aligned[i]
-        vol_confirm = volume[i] > vol_ma_aligned[i] * 1.5  # 1.5x average volume
-        atr_val = atr_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema_val = ema_34_aligned[i]
+        vol_confirm = volume[i] > vol_ma_20[i] * 1.5  # 1.5x average volume
+        atr_val = atr_6h[i]
         
         # === TRAILING STOP LOGIC ===
         if position == 1:  # Long position
@@ -120,16 +107,16 @@ def generate_signals(prices):
         
         # === EXIT LOGIC (trend filter reversal) ===
         if position == 1:  # Long position
-            # Exit when price crosses below 1w HMA21
-            if price < hma_val:
+            # Exit when price crosses below 1d EMA34
+            if price < ema_val:
                 signals[i] = 0.0
                 position = 0
                 highest_since_entry = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price crosses above 1w HMA21
-            if price > hma_val:
+            # Exit when price crosses above 1d EMA34
+            if price > ema_val:
                 signals[i] = 0.0
                 position = 0
                 lowest_since_entry = 0.0
@@ -137,15 +124,15 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Long when: price breaks above Donchian high AND price > HMA21 AND volume confirmation
-            if price > donch_high_val and price > hma_val and vol_confirm:
+            # Long when: price breaks above Camarilla R1 AND price > EMA34 AND volume confirmation
+            if price > r1_val and price > ema_val and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 highest_since_entry = price
                 continue
-            # Short when: price breaks below Donchian low AND price < HMA21 AND volume confirmation
-            elif price < donch_low_val and price < hma_val and vol_confirm:
+            # Short when: price breaks below Camarilla S1 AND price < EMA34 AND volume confirmation
+            elif price < s1_val and price < ema_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -162,6 +149,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wHMA21_VolumeConfirm_ATRTrail"
-timeframe = "1d"
+name = "6h_Camarilla_R1_S1_1dEMA34_VolumeConfirm_ATRTrail"
+timeframe = "6h"
 leverage = 1.0
