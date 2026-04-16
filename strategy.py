@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R1/S1 breakout with 12h volume confirmation and ATR volatility filter.
-# Long when close breaks above R1 with volume > 1.2x 12h average volume and ATR(14) > 0.5 * ATR(50).
-# Short when close breaks below S1 with same volume and volatility filters.
-# Exit on opposite Camarilla level (S1 for longs, R1 for shorts) or ATR trailing stop (3*ATR from extreme).
-# Uses discrete position size 0.25. Camarilla levels from 12h pivot provide intraday structure.
-# Volume and volatility filters avoid false breakouts in low-momentum environments.
-# Works in bull/bear by requiring both volume expansion and volatility expansion for breakout validity.
+# Hypothesis: 4h Bollinger Band breakout with 1d ADX trend filter and volume confirmation.
+# Long when price closes above upper BB(20,2) AND 1d ADX > 25 AND volume > 1.5x 20-period average.
+# Short when price closes below lower BB(20,2) AND 1d ADX > 25 AND volume > 1.5x 20-period average.
+# Exit on opposite BB touch or ATR-based stoploss (2*ATR from entry).
+# Uses discrete position size 0.25. ADX filter ensures we only trade in trending markets,
+# reducing whipsaws in ranging conditions. Volume confirmation adds conviction to breakouts.
+# Target: 75-200 total trades over 4 years (19-50/year).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,47 +21,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h HTF: Camarilla pivot levels (R1, S1) and ATR filters ===
-    df_12h = get_htf_data(prices, '12h')
-    h_12h = df_12h['high'].values
-    l_12h = df_12h['low'].values
-    c_12h = df_12h['close'].values
+    # === 4h Indicators: Bollinger Bands (20,2) ===
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
     
-    # Calculate pivot point (PP) = (H + L + C) / 3
-    pp_12h = (h_12h + l_12h + c_12h) / 3.0
-    # Calculate range
-    range_12h = h_12h - l_12h
-    # Camarilla levels
-    r1_12h = pp_12h + (range_12h * 1.0 / 12.0)  # R1 = PP + (H-L) * 1/12
-    s1_12h = pp_12h - (range_12h * 1.0 / 12.0)  # S1 = PP - (H-L) * 1/12
+    # Previous close for BB touch detection
+    close_prev = np.roll(close, 1)
+    close_prev[0] = np.nan
     
-    # Align 12h levels to 6h
-    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
-    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    # === 1d Indicators: ADX (14-period) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === 12h Volume and ATR filters ===
-    vol_12h = df_12h['volume'].values
-    vol_ma_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
-    volume_spike = volume > (1.2 * vol_ma_12h_aligned)
+    # True Range
+    tr1 = pd.Series(high_1d).diff()
+    tr2 = pd.Series(low_1d).diff().abs()
+    tr3 = pd.Series(close_1d).shift(1).diff().abs()
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # ATR(14) and ATR(50) for volatility expansion filter
-    tr1_12h = pd.Series(h_12h).diff()
-    tr2_12h = pd.Series(l_12h).diff().abs()
-    tr3_12h = pd.Series(c_12h).shift(1).diff().abs()
-    tr_12h = pd.concat([tr1_12h, tr2_12h, tr3_12h], axis=1).max(axis=1)
-    atr_14_12h = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_50_12h = pd.Series(tr_12h).ewm(alpha=1/50, adjust=False, min_periods=50).mean().values
-    atr_14_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_14_12h)
-    atr_50_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_50_12h)
-    volatility_expansion = atr_14_12h_aligned > (0.5 * atr_50_12h_aligned)
+    # Directional Movement
+    up_move = pd.Series(high_1d).diff()
+    down_move = pd.Series(low_1d).diff().abs()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # === 6h ATR for trailing stop ===
-    tr1_6h = pd.Series(high).diff()
-    tr2_6h = pd.Series(low).diff().abs()
-    tr3_6h = pd.Series(close).shift(1).diff().abs()
-    tr_6h = pd.concat([tr1_6h, tr2_6h, tr3_6h], axis=1).max(axis=1)
-    atr_6h_raw = pd.Series(tr_6h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Smoothed DM and TR
+    plus_di_1d = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
+    minus_di_1d = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    adx_1d = pd.Series(dx_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # === 1d Volume Spike ===
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    volume_spike = volume > (1.5 * vol_ma_1d_aligned)
+    
+    # === 4h ATR for stoploss ===
+    tr1_4h = pd.Series(high).diff()
+    tr2_4h = pd.Series(low).diff().abs()
+    tr3_4h = pd.Series(close).shift(1).diff().abs()
+    tr_4h = pd.concat([tr1_4h, tr2_4h, tr3_4h], axis=1).max(axis=1)
+    atr_4h = pd.Series(tr_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -69,20 +76,18 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed)
-    warmup = 100
+    # Warmup: ensure all indicators are valid (max 50 periods needed for 1d calculations)
+    warmup = 60
     
-    # Track position state and extremes for trailing stop
+    # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    long_extreme = 0.0
-    short_extreme = 0.0
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(volatility_expansion[i]) or
-            np.isnan(atr_6h_raw[i]) or not session_filter[i]):
+        if (np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or np.isnan(close_prev[i]) or
+            np.isnan(adx_1d_aligned[i]) or np.isnan(volume_spike[i]) or np.isnan(atr_4h[i]) or
+            not session_filter[i]):
             signals[i] = 0.0
             position = 0
             continue
@@ -90,65 +95,54 @@ def generate_signals(prices):
         # Current values
         price = close[i]
         vol_spike = volume_spike[i]
-        vol_exp = volatility_expansion[i]
-        atr_val = atr_6h_raw[i]
+        atr_val = atr_4h[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price breaks below S1 (failed breakout)
-            if price < s1_12h_aligned[i]:
+            # Exit if price touches or crosses below middle BB (SMA20)
+            if price <= sma_20[i]:
                 exit_signal = True
-            # ATR trailing stop: 3*ATR below long extreme
-            elif price < long_extreme - 3.0 * atr_val:
+            # ATR-based stoploss: 2*ATR below entry
+            elif price < entry_price - 2.0 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price breaks above R1 (failed breakdown)
-            if price > r1_12h_aligned[i]:
+            # Exit if price touches or crosses above middle BB (SMA20)
+            if price >= sma_20[i]:
                 exit_signal = True
-            # ATR trailing stop: 3*ATR above short extreme
-            elif price > short_extreme + 3.0 * atr_val:
+            # ATR-based stoploss: 2*ATR above entry
+            elif price > entry_price + 2.0 * atr_val:
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
             entry_price = 0.0
-            long_extreme = 0.0
-            short_extreme = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Close breaks above R1 with volume spike and volatility expansion
-            if (close[i] > r1_12h_aligned[i] and close[i-1] <= r1_12h_aligned[i-1] and
-                vol_spike and vol_exp):
+            # LONG: Price closes above upper BB AND 1d ADX > 25 AND volume spike
+            if (close[i] > upper_bb[i] and close_prev[i] <= upper_bb[i] and 
+                adx_1d_aligned[i] > 25 and vol_spike):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-                long_extreme = price
             
-            # SHORT: Close breaks below S1 with volume spike and volatility expansion
-            elif (close[i] < s1_12h_aligned[i] and close[i-1] >= s1_12h_aligned[i-1] and
-                  vol_spike and vol_exp):
+            # SHORT: Price closes below lower BB AND 1d ADX > 25 AND volume spike
+            elif (close[i] < lower_bb[i] and close_prev[i] >= lower_bb[i] and 
+                  adx_1d_aligned[i] > 25 and vol_spike):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
-                short_extreme = price
         
         else:
-            # Update extremes for trailing stop
-            if position == 1:
-                long_extreme = max(long_extreme, price)
-                signals[i] = 0.25
-            elif position == -1:
-                short_extreme = min(short_extreme, price)
-                signals[i] = -0.25
+            signals[i] = position * 0.25
     
     return signals
 
-name = "6h_Camarilla_R1_S1_Breakout_Volume_Volatility_V1"
-timeframe = "6h"
+name = "4h_BB_Breakout_1dADX_VolumeSpike_V1"
+timeframe = "4h"
 leverage = 1.0
