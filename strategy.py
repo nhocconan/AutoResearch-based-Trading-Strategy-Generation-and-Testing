@@ -13,18 +13,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 6h data (primary timeframe) ===
-    df_6h = get_htf_data(prices, '6h')
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
-    volume_6h = df_6h['volume'].values
-    
-    # === 12h data (HTF) ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # === 4h data (primary timeframe) ===
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
     
     # === 1d data (HTF) ===
     df_1d = get_htf_data(prices, '1d')
@@ -33,15 +27,19 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 12h ATR (14)
-    tr_12h = np.maximum(high_12h - low_12h,
-                        np.maximum(np.abs(high_12h - np.roll(close_12h, 1)),
-                                   np.abs(low_12h - np.roll(close_12h, 1))))
-    tr_12h[0] = high_12h[0] - low_12h[0]
-    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
+    # === 1w data (HTF) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d ATR (14)
+    # Calculate ATR on 4h (14-period)
+    tr_4h = np.maximum(high_4h - low_4h,
+                       np.maximum(np.abs(high_4h - np.roll(close_4h, 1)),
+                                  np.abs(low_4h - np.roll(close_4h, 1))))
+    tr_4h[0] = high_4h[0] - low_4h[0]
+    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
+    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    
+    # Calculate ATR on 1d (14-period)
     tr_1d = np.maximum(high_1d - low_1d,
                        np.maximum(np.abs(high_1d - np.roll(close_1d, 1)),
                                   np.abs(low_1d - np.roll(close_1d, 1))))
@@ -49,138 +47,82 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # === 6h Donchian Channel (20) ===
-    highest_20 = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    # === 1d Bollinger Bands (20, 2) for volatility regime ===
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_band = sma_20 + (2 * std_20)
+    lower_band = sma_20 - (2 * std_20)
+    bb_width = (upper_band - lower_band) / sma_20
+    bb_width_aligned = align_htf_to_ltf(prices, df_1d, bb_width)
     
-    # === 12h Supertrend (ATR=10, mult=3) for trend filter ===
-    # Calculate basic upper/lower bands
-    hl2_12h = (high_12h + low_12h) / 2
-    upper_basic = hl2_12h + 3 * atr_12h
-    lower_basic = hl2_12h - 3 * atr_12h
+    # Percentile of BB width over 50 days for regime detection
+    bb_width_percentile = pd.Series(bb_width_aligned).rolling(window=50, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
     
-    # Initialize final bands
-    upper_final = np.full_like(upper_basic, np.nan)
-    lower_final = np.full_like(lower_basic, np.nan)
+    # === 1w EMA 200 for long-term trend filter ===
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    for i in range(len(upper_basic)):
-        if np.isnan(upper_basic[i]) or np.isnan(lower_basic[i]):
-            continue
-        if i == 0:
-            upper_final[i] = upper_basic[i]
-            lower_final[i] = lower_basic[i]
-        else:
-            upper_final[i] = upper_basic[i] if (upper_basic[i] < upper_final[i-1] or close_12h[i-1] > upper_final[i-1]) else upper_final[i-1]
-            lower_final[i] = lower_basic[i] if (lower_basic[i] > lower_final[i-1] or close_12h[i-1] < lower_final[i-1]) else lower_final[i-1]
+    # === 4h Donchian Channel (20) for breakout signals ===
+    highest_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_upper = highest_20
+    donchian_lower = lowest_20
     
-    # Determine Supertrend direction
-    supertrend_dir = np.full_like(close_12h, np.nan)
-    for i in range(len(close_12h)):
-        if np.isnan(upper_final[i]) or np.isnan(lower_final[i]):
-            continue
-        if i == 0:
-            supertrend_dir[i] = 1 if close_12h[i] > upper_final[i] else -1
-        else:
-            if supertrend_dir[i-1] == -1 and close_12h[i] > upper_final[i]:
-                supertrend_dir[i] = 1
-            elif supertrend_dir[i-1] == 1 and close_12h[i] < lower_final[i]:
-                supertrend_dir[i] = -1
-            else:
-                supertrend_dir[i] = supertrend_dir[i-1]
-    
-    supertrend_dir_aligned = align_htf_to_ltf(prices, df_12h, supertrend_dir)
-    
-    # === 6d ADX (14) for trend strength ===
-    # Calculate +DM, -DM, TR
-    plus_dm = np.zeros_like(high_1d)
-    minus_dm = np.zeros_like(low_1d)
-    tr_1d_adx = np.zeros_like(high_1d)
-    
-    for i in range(1, len(high_1d)):
-        plus_dm[i] = max(high_1d[i] - high_1d[i-1], 0) if (high_1d[i] - high_1d[i-1]) > (low_1d[i-1] - low_1d[i]) else 0
-        minus_dm[i] = max(low_1d[i-1] - low_1d[i], 0) if (low_1d[i-1] - low_1d[i]) > (high_1d[i] - high_1d[i-1]) else 0
-        tr_1d_adx[i] = max(high_1d[i] - low_1d[i], abs(high_1d[i] - high_1d[i-1]), abs(low_1d[i] - low_1d[i-1]))
-    
-    tr_1d_adx[0] = high_1d[0] - low_1d[0]
-    
-    # Smooth with Wilder's smoothing (equivalent to RMA)
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(data[:period])
-        # Subsequent values: smoothed = (prev_smooth * (period-1) + current) / period
-        for i in range(period, len(data)):
-            if np.isnan(result[i-1]) or np.isnan(data[i]):
-                result[i] = np.nan
-            else:
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    atr_1d_adx = wilders_smooth(tr_1d_adx, 14)
-    plus_di_14 = 100 * wilders_smooth(plus_dm, 14) / atr_1d_adx
-    minus_di_14 = 100 * wilders_smooth(minus_dm, 14) / atr_1d_adx
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
-    adx = wilders_smooth(dx, 14)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # === 6d Williams %R (14) for overbought/oversold ===
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
-    williams_r[highest_high_14 == lowest_low_14] = -50  # Avoid division by zero
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # === 4h Volume spike detection ===
+    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume_4h / vol_ma_20
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators have valid data
-    warmup = 100
+    warmup = 200
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_12h_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
-            np.isnan(supertrend_dir_aligned[i]) or np.isnan(adx_aligned[i]) or
-            np.isnan(williams_r_aligned[i])):
+        if (np.isnan(atr_4h_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(bb_width_percentile[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(ema_200_1w_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        price = close_6h[i]
-        atr_12h_val = atr_12h_aligned[i]
-        supertrend_dir_val = supertrend_dir_aligned[i]
-        adx_val = adx_aligned[i]
-        williams_r_val = williams_r_aligned[i]
+        price = close_4h[i]
+        atr_4h_val = atr_4h_aligned[i]
+        bb_width_pct = bb_width_percentile[i]
+        vol_ratio_val = vol_ratio[i]
+        ema_200_1w_val = ema_200_1w_aligned[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price closes below 6h Donchian lower OR ADX weakens (<20) OR Supertrend turns bearish
-            if (price < lowest_20[i]) or (adx_val < 20) or (supertrend_dir_val == -1):
+            # Exit when price closes below Donchian lower OR volatility regime shifts to high
+            if (price < donchian_lower[i]) or (bb_width_pct > 80):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price closes above 6h Donchian upper OR ADX weakens (<20) OR Supertrend turns bullish
-            if (price > highest_20[i]) or (adx_val < 20) or (supertrend_dir_val == 1):
+            # Exit when price closes above Donchian upper OR volatility regime shifts to high
+            if (price > donchian_upper[i]) or (bb_width_pct > 80):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above 6h Donchian upper AND Supertrend bullish AND Williams %R oversold (< -80)
-            if (price > highest_20[i]) and (supertrend_dir_val == 1) and (williams_r_val < -80):
+            # LONG: Price breaks above Donchian upper AND low volatility regime AND volume spike AND above weekly EMA200
+            if (price > donchian_upper[i]) and (bb_width_pct < 30) and (vol_ratio_val > 1.5) and (price > ema_200_1w_val):
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Price breaks below 6h Donchian lower AND Supertrend bearish AND Williams %R overbought (> -20)
-            elif (price < lowest_20[i]) and (supertrend_dir_val == -1) and (williams_r_val > -20):
+            # SHORT: Price breaks below Donchian lower AND low volatility regime AND volume spike AND below weekly EMA200
+            elif (price < donchian_lower[i]) and (bb_width_pct < 30) and (vol_ratio_val > 1.5) and (price < ema_200_1w_val):
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -195,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian_Supertrend_WilliamsR"
-timeframe = "6h"
+name = "4h_Donchian_Breakout_LowVol_Volume_WeeklyTrend"
+timeframe = "4h"
 leverage = 1.0
