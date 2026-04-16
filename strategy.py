@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,104 +13,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Daily Camarilla Pivot Levels (from previous day) ===
+    # === Daily ATR for volatility filter ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot and levels from previous day (shifted by 1)
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    r1 = pp + (high_1d - low_1d) * 1.083
-    s1 = pp - (high_1d - low_1d) * 1.083
-    r2 = pp + (high_1d - low_1d) * 1.166
-    s2 = pp - (high_1d - low_1d) * 1.166
-    r3 = pp + (high_1d - low_1d) * 1.250
-    s3 = pp - (high_1d - low_1d) * 1.250
-    r4 = pp + (high_1d - low_1d) * 1.500
-    s4 = pp - (high_1d - low_1d) * 1.500
-    
-    # Align to 6h timeframe (use previous day's levels)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # === 6h ATR for volatility filter ===
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
+    # True Range calculation
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
+    tr = np.concatenate([[np.nan], tr])  # First value NaN
     
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # === Volume Spike Detection (20-period volume MA) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)  # Strong volume spike
+    # === 12h EMA Trend Filter (34-period) ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    
+    # === Price Momentum (ROC 3-period) ===
+    roc_3 = ((pd.Series(close).pct_change(3) * 100)).values
+    
+    # === Volume Spike Detection (15-period volume MA) ===
+    vol_ma = pd.Series(volume).rolling(window=15, min_periods=15).mean().values
+    volume_spike = volume > (1.8 * vol_ma)  # Strong volume spike
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators have valid data
-    warmup = 50
+    warmup = 100  # Need ROC(3), EMA34, ATR14
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(atr[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(roc_3[i]) or np.isnan(ema_34_12h_aligned[i]) or
+            np.isnan(atr_1d_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
+        roc = roc_3[i]
+        ema34 = ema_34_12h_aligned[i]
+        atr = atr_1d_aligned[i]
+        vol_spike = volume_spike[i]
         
-        # === EXIT LOGIC: Exit when price touches opposite S1/R1 or volatility drops ===
+        # === EXIT LOGIC: Exit when momentum fades or volatility drops ===
         if position == 1:  # Long position
-            # Exit when price touches S1 or volatility drops significantly
-            if price <= s1_aligned[i] or atr[i] < (atr[i-1] * 0.6 if i > warmup else atr[i]):
+            # Exit when momentum turns negative OR volatility drops significantly
+            if roc < 0 or atr < (atr_1d_aligned[i-1] * 0.7 if i > 0 else atr):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price touches R1 or volatility drops significantly
-            if price >= r1_aligned[i] or atr[i] < (atr[i-1] * 0.6 if i > warmup else atr[i]):
+            # Exit when momentum turns positive OR volatility drops significantly
+            if roc > 0 or atr < (atr_1d_aligned[i-1] * 0.7 if i > 0 else atr):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Break above R1 with volume spike (continuation)
-            if price > r1_aligned[i] and volume_spike[i]:
+            # LONG: Strong positive momentum + price above EMA34 + volume spike
+            if roc > 0.8 and price > ema34 and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Break below S1 with volume spike (continuation)
-            elif price < s1_aligned[i] and volume_spike[i]:
-                signals[i] = -0.25
-                position = -1
-                continue
-            
-            # LONG: Mean reversion from S3 (strong oversold)
-            elif price <= s3_aligned[i] and volume_spike[i]:
-                signals[i] = 0.25
-                position = 1
-                continue
-            
-            # SHORT: Mean reversion from R3 (strong overbought)
-            elif price >= r3_aligned[i] and volume_spike[i]:
+            # SHORT: Strong negative momentum + price below EMA34 + volume spike
+            elif roc < -0.8 and price < ema34 and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -125,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_S1S3_R1R3_Breakout_MeanReversion"
-timeframe = "6h"
+name = "12h_EMA34_ROC3_VolumeSpike_ATRFilter"
+timeframe = "12h"
 leverage = 1.0
