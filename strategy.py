@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volatility regime filter and volume confirmation
+# Hypothesis: 4h Donchian(20) breakout with 1d volatility regime and volume confirmation
 # Uses 4h primary timeframe with 1d HTF for volatility regime detection and volume spike confirmation.
 # Volatility regime filter: only trade when 1d ATR(14) > 1d ATR(50) (expanding volatility) to avoid choppy markets.
 # Volume confirmation: require 4h volume > 1.8x 20-period average on breakout bar.
