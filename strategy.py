@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d RSI(14) extreme reversal with volume confirmation and ATR trailing stop.
-# Long when 1d RSI crosses above 30 (oversold reversal) with volume > 1.8x median volume.
-# Short when 1d RSI crosses below 70 (overbought reversal) with volume > 1.8x median volume.
+# Hypothesis: 4h strategy using 1d Williams %R reversal with volume confirmation and ATR trailing stop.
+# Long when 1d Williams %R crosses above -80 (oversold reversal) with volume > 2.0x median volume.
+# Short when 1d Williams %R crosses below -20 (overbought reversal) with volume > 2.0x median volume.
 # Uses discrete position size 0.25. Exits when price reaches opposite Camarilla level (S1 for long, R1 for short) or ATR stoploss hits (2.5x ATR).
-# RSI identifies momentum extremes; reversal with volume filter captures mean reversion in both bull/bear markets.
+# Williams %R identifies momentum extremes; reversal with volume filter captures mean reversion in both bull/bear markets.
 # 4h timeframe targets 19-50 trades/year (75-200 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
@@ -20,7 +20,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once before loop for RSI and Camarilla pivots
+    # Get 1d data once before loop for Williams %R and Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 14:
         return np.zeros(n)
@@ -30,15 +30,11 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # === 1d Indicators: RSI (14-period) ===
-    delta = pd.Series(close_1d).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # === 1d Indicators: Williams %R (14-period) ===
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min()
+    williams_r = -100 * ((highest_high - close_1d) / (highest_high - lowest_low))
+    williams_r_values = williams_r.values
     
     # === 1d Indicators: Camarilla Pivot Levels (R1, S1) ===
     camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
@@ -55,7 +51,7 @@ def generate_signals(prices):
     atr_14 = pd.Series(true_range).rolling(window=14, min_periods=14).mean().values
     
     # Align all indicators to primary timeframe (4h)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r_values)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     vol_median_aligned = align_htf_to_ltf(prices, df_1d, vol_median_20)
@@ -64,7 +60,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(14, 20)  # RSI, Volume median
+    warmup = max(14, 20)  # Williams %R, Volume median
     
     # Track position state and entry price for ATR stoploss
     position = 0  # 0: flat, 1: long, -1: short
@@ -72,7 +68,7 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or
             np.isnan(camarilla_s1_aligned[i]) or np.isnan(vol_median_aligned[i]) or
             np.isnan(atr_14[i])):
             signals[i] = 0.0
@@ -82,7 +78,7 @@ def generate_signals(prices):
         
         # Current values (aligned)
         price = close[i]
-        rsi_val = rsi_aligned[i]
+        wr_val = williams_r_aligned[i]
         r1 = camarilla_r1_aligned[i]
         s1 = camarilla_s1_aligned[i]
         vol_median = vol_median_aligned[i]
@@ -92,12 +88,12 @@ def generate_signals(prices):
         vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
         current_vol_1d = vol_1d_aligned[i]
         
-        # Volume spike filter: current 1d volume > 1.8x median volume
-        volume_spike = current_vol_1d > (vol_median * 1.8)
+        # Volume spike filter: current 1d volume > 2.0x median volume
+        volume_spike = current_vol_1d > (vol_median * 2.0)
         
-        # RSI crossover signals
-        rsi_cross_up_30 = (rsi_val > 30) and (i == warmup or rsi_aligned[i-1] <= 30)
-        rsi_cross_down_70 = (rsi_val < 70) and (i == warmup or rsi_aligned[i-1] >= 70)
+        # Williams %R crossover signals
+        wr_cross_up_80 = (wr_val > -80) and (i == warmup or williams_r_aligned[i-1] <= -80)
+        wr_cross_down_20 = (wr_val < -20) and (i == warmup or williams_r_aligned[i-1] >= -20)
         
         # === EXIT LOGIC ===
         exit_signal = False
@@ -122,14 +118,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: RSI crosses above 30 (oversold reversal) with volume spike
-            if rsi_cross_up_30 and volume_spike:
+            # LONG: Williams %R crosses above -80 (oversold reversal) with volume spike
+            if wr_cross_up_80 and volume_spike:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: RSI crosses below 70 (overbought reversal) with volume spike
-            elif rsi_cross_down_70 and volume_spike:
+            # SHORT: Williams %R crosses below -20 (overbought reversal) with volume spike
+            elif wr_cross_down_20 and volume_spike:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -139,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI14_1dVolumeSpike1.8x_CamarillaExit_ATRTrail2.5_v1"
+name = "4h_WilliamsR14_1dVolumeSpike2.0x_CamarillaExit_ATRTrail2.5_v1"
 timeframe = "4h"
 leverage = 1.0
