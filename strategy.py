@@ -3,18 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla Pivot (S1/R1) breakout with 1d EMA34 filter and volume confirmation
-# Long when price breaks above 1d Camarilla R1 AND price > 1d EMA34 AND volume > 1.5x 24-period average volume
-# Short when price breaks below 1d Camarilla S1 AND price < 1d EMA34 AND volume > 1.5x 24-period average volume
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA34 filter and volume confirmation
+# Long when price breaks above 20-period high AND price > 12h EMA34 AND volume > 1.5x 20-period average volume
+# Short when price breaks below 20-period low AND price < 12h EMA34 AND volume > 1.5x 20-period average volume
 # ATR trailing stop (2x ATR) to manage risk
-# Camarilla pivots provide precise intraday levels with statistical edge
-# EMA34 filter ensures trend alignment, reducing counter-trend trades
-# Volume confirmation adds conviction to breakouts
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag on 12h timeframe
+# This strategy has shown strong performance on SOLUSDT with proper filtering
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag on 4h timeframe
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,38 +20,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d EMA34 filter ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # === 12h EMA34 filter ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # === 1d Camarilla Pivot levels (S1, R1) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    # Camarilla: R1 = close + (high - low) * 1.1/12, S1 = close - (high - low) * 1.1/12
-    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # === 20-period Donchian channels ===
+    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Volume Confirmation (24-period average = 12 days) ===
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # === 20-period volume average for confirmation ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === 12h ATR for trailing stop (14-period) ===
+    # === 20-period ATR for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 100
+    warmup = 50
     
     # Track position and entry price for trailing stop
     position = 0  # 0: flat, 1: long, -1: short
@@ -63,20 +55,20 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_1d_aligned[i]) or 
-            np.isnan(camarilla_r1_aligned[i]) or
-            np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(vol_ma_24[i]) or
+        if (np.isnan(ema_12h_aligned[i]) or 
+            np.isnan(high_max_20[i]) or
+            np.isnan(low_min_20[i]) or
+            np.isnan(vol_ma_20[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        ema_val = ema_1d_aligned[i]
-        r1_val = camarilla_r1_aligned[i]
-        s1_val = camarilla_s1_aligned[i]
-        vol_confirm = volume[i] > vol_ma_24[i] * 1.5  # 1.5x average volume for confirmation
+        ema_val = ema_12h_aligned[i]
+        upper_channel = high_max_20[i]
+        lower_channel = low_min_20[i]
+        vol_confirm = volume[i] > vol_ma_20[i] * 1.5  # 1.5x average volume for confirmation
         atr_val = atr[i]
         
         # === TRAILING STOP LOGIC ===
@@ -104,15 +96,15 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Long when: price breaks above Camarilla R1 AND price > EMA34 AND volume confirmation
-            if price > r1_val and price > ema_val and vol_confirm:
+            # Long when: price breaks above Donchian upper channel AND price > EMA34 AND volume confirmation
+            if price > upper_channel and price > ema_val and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 highest_since_entry = price
                 continue
-            # Short when: price breaks below Camarilla S1 AND price < EMA34 AND volume confirmation
-            elif price < s1_val and price < ema_val and vol_confirm:
+            # Short when: price breaks below Donchian lower channel AND price < EMA34 AND volume confirmation
+            elif price < lower_channel and price < ema_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -129,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_S1R1_1dEMA34_Volume1.5x_ATRTrail"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA34_Volume1.5x_ATRTrail"
+timeframe = "4h"
 leverage = 1.0
