@@ -20,11 +20,9 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # === 12h data (HTF for trend filter) ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # === 4h data (HTF for trend filter) ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
     # === Calculate 1d Camarilla pivot levels ===
     # Using previous day's OHLC
@@ -42,21 +40,17 @@ def generate_signals(prices):
     # Resistance and Support levels
     r3 = camarilla_base + camarilla_range * 1.1 / 4
     s3 = camarilla_base - camarilla_range * 1.1 / 4
-    r4 = camarilla_base + camarilla_range * 1.1 / 2
-    s4 = camarilla_base - camarilla_range * 1.1 / 2
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     camarilla_base_aligned = align_htf_to_ltf(prices, df_1d, camarilla_base)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # === 12h EMA34 for trend filter ===
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # === 4h EMA34 for trend filter ===
+    ema_34_4h = pd.Series(close_4h).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
-    # === Volume confirmation (12h) ===
+    # === Volume confirmation (4h) ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma_20
     
@@ -71,8 +65,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # Skip if any data is NaN
         if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_ratio[i])):
+            np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -80,36 +73,34 @@ def generate_signals(prices):
         price = close[i]
         r3_val = r3_aligned[i]
         s3_val = s3_aligned[i]
-        r4_val = r4_aligned[i]
-        s4_val = s4_aligned[i]
-        ema_34_12h_val = ema_34_12h_aligned[i]
+        ema_34_4h_val = ema_34_4h_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price closes below S3 or hits R4 (take profit)
-            if price < s3_val or price > r4_val:
+            # Exit when price closes below S3 (stop) or hits R3*1.5 (take profit)
+            if price < s3_val or price > r3_val * 1.5:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price closes above R3 or hits S4 (take profit)
-            if price > r3_val or price < s4_val:
+            # Exit when price closes above R3 (stop) or hits S3*0.5 (take profit)
+            if price > r3_val or price < s3_val * 0.5:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above R3 with volume AND above 12h EMA34 (uptrend)
-            if (price > r3_val) and (price > ema_34_12h_val) and (vol_ratio_val > 2.0):
+            # LONG: Price breaks above R3 with volume AND above 4h EMA34 (uptrend)
+            if (price > r3_val) and (price > ema_34_4h_val) and (vol_ratio_val > 2.0):
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Price breaks below S3 with volume AND below 12h EMA34 (downtrend)
-            elif (price < s3_val) and (price < ema_34_12h_val) and (vol_ratio_val > 2.0):
+            # SHORT: Price breaks below S3 with volume AND below 4h EMA34 (downtrend)
+            elif (price < s3_val) and (price < ema_34_4h_val) and (vol_ratio_val > 2.0):
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -124,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_Volume_EMA34"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_Volume_EMA34_v2"
+timeframe = "4h"
 leverage = 1.0
