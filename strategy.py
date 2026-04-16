@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h EMA50 trend filter and volume confirmation.
-# Bull Power = High - EMA13, Bear Power = EMA13 - Low.
-# Long when Bull Power > 0 AND 12h EMA50 rising AND volume > 1.5x 20-period average.
-# Short when Bear Power > 0 AND 12h EMA50 falling AND volume > 1.5x 20-period average.
-# Exit when power reverses sign OR volume drops below average.
-# Uses discrete position size 0.25. Designed to capture momentum in both bull and bear markets.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA(34) trend filter and volume confirmation.
+# Long when price breaks above Donchian upper AND 1d EMA34 slope > 0 (uptrend) AND volume > 1.5x 20-period average.
+# Short when price breaks below Donchian lower AND 1d EMA34 slope < 0 (downtrend) AND volume > 1.5x 20-period average.
+# Exit when price crosses Donchian middle (20-period average of high/low).
+# Uses discrete position size 0.25. Designed to capture strong trends with trend filter reducing whipsaw.
+# Target: 75-200 trades over 4 years (19-50/year) to balance opportunity and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,63 +20,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 6h Indicators: Elder Ray (EMA13) ===
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = ema13 - low
+    # === 4h Indicators: Donchian Channel (20) ===
+    high_ma = pd.Series(high).rolling(window=20, min_periods=20).max()
+    low_ma = pd.Series(low).rolling(window=20, min_periods=20).min()
+    upper = high_ma.values
+    lower = low_ma.values
+    middle = ((upper + lower) / 2)
     
-    # === 6h Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    # === 4h Indicators: Volume Spike (volume > 1.5x 20-period average) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
-    # Get 12h data once before loop for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:  # Need enough for EMA calculation
+    # Get 1d data once before loop for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 40:  # Need enough for EMA calculation
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
     
-    # === 12h Indicators: EMA50 for trend filter ===
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # === 1d Indicators: EMA(34) for trend filter ===
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Slope of EMA: positive = uptrend, negative = downtrend
+    ema_slope = np.diff(ema_34, prepend=ema_34[0])
     
-    # Calculate EMA50 slope (rising/falling) - use 3-bar difference to reduce noise
-    ema50_slope = np.zeros_like(ema50_12h_aligned)
-    ema50_slope[3:] = ema50_12h_aligned[3:] - ema50_12h_aligned[:-3]
+    # Align 1d EMA slope to 4h timeframe
+    ema_slope_aligned = align_htf_to_ltf(prices, df_1d, ema_slope)
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed for EMA50, 20 for volume MA)
-    warmup = 60
+    # Warmup: ensure all indicators are valid (max 34 periods needed for EMA, 20 for Donchian/volume MA)
+    warmup = 40
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(ema50_slope[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(middle[i]) or
+            np.isnan(ema_slope_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values
-        bull_val = bull_power[i]
-        bear_val = bear_power[i]
-        ema50_slope_val = ema50_slope[i]
+        price = close[i]
+        ema_slope_val = ema_slope_aligned[i]
         vol_spike = volume_spike[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if Bull Power becomes negative OR volume spike ends
-            if bull_val <= 0 or not vol_spike:
+            # Exit if price crosses below Donchian middle
+            if price < middle[i]:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if Bear Power becomes negative OR volume spike ends
-            if bear_val <= 0 or not vol_spike:
+            # Exit if price crosses above Donchian middle
+            if price > middle[i]:
                 exit_signal = True
         
         if exit_signal:
@@ -87,13 +87,13 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Bull Power > 0 AND 12h EMA50 rising AND volume spike
-            if bull_val > 0 and ema50_slope_val > 0 and vol_spike:
+            # LONG: Price breaks above Donchian upper AND 1d EMA34 slope > 0 (uptrend) AND volume spike
+            if price > upper[i] and ema_slope_val > 0 and vol_spike:
                 signals[i] = 0.25
                 position = 1
             
-            # SHORT: Bear Power > 0 AND 12h EMA50 falling AND volume spike
-            elif bear_val > 0 and ema50_slope_val < 0 and vol_spike:
+            # SHORT: Price breaks below Donchian lower AND 1d EMA34 slope < 0 (downtrend) AND volume spike
+            elif price < lower[i] and ema_slope_val < 0 and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
@@ -102,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_EMA13_VolumeSpike_V1"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA34Slope_VolumeSpike_V1"
+timeframe = "4h"
 leverage = 1.0
