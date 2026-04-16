@@ -3,16 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h trend filter (HMA21) and volume confirmation.
-# Long when price breaks above Camarilla R3 AND 4h HMA trending up AND volume > 1.3x 20-period average.
-# Short when price breaks below Camarilla S3 AND 4h HMA trending down AND volume > 1.3x 20-period average.
-# Exit on opposite Camarilla level (S3 for long, R3 for short).
-# Uses discrete position size 0.20. Target: 60-150 trades over 4 years (15-37/year) to minimize fee drag.
-# Session filter (08-20 UTC) reduces noise. Works in both bull/bear by requiring 4h trend and volume confirmation.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d regime filter and volume confirmation.
+# Bull Power = High - EMA13, Bear Power = EMA13 - Low.
+# Long when Bull Power > 0 AND Bear Power < previous Bear Power (weakening bears) AND price > 1d VWAP AND volume > 1.5x 20-period average.
+# Short when Bear Power > 0 AND Bull Power < previous Bull Power (weakening bulls) AND price < 1d VWAP AND volume > 1.5x 20-period average.
+# Exit on opposite Elder Ray crossover or ATR-based stoploss (2*ATR from entry).
+# Uses discrete position size 0.25. Designed to capture momentum shifts with institutional participation (volume) in trending markets.
+# Works in both bull and bear markets by requiring Elder Ray convergence and volume confirmation, avoiding false signals.
+# Target: 75-200 total trades over 4 years (19-50/year) to balance edge and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,46 +22,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1h Indicators: Camarilla levels (based on previous day) ===
-    # Camarilla uses previous day's high, low, close
-    # We approximate using rolling window of 24 periods (24*1h = 1 day)
-    lookback = 24
-    if n < lookback:
-        return np.zeros(n)
+    # === 6h Indicators: EMA13 for Elder Ray ===
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = ema13 - low
     
-    # Calculate Camarilla levels using previous day's OHLC
-    prev_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().shift(1)
-    prev_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().shift(1)
-    prev_close = pd.Series(close).rolling(window=lookback, min_periods=lookback).mean().shift(1)
+    # === 1d Indicators: VWAP ===
+    df_1d = get_htf_data(prices, '1d')
+    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
+    volume_1d = df_1d['volume'].values
+    vwap_1d = (np.cumsum(typical_price_1d * volume_1d) / np.cumsum(volume_1d)).values
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
-    # Avoid division by zero
-    range_val = prev_high - prev_low
-    range_val = np.where(range_val == 0, 1e-10, range_val)
+    # === 1d Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    volume_spike = volume > (1.5 * vol_ma_1d_aligned)
     
-    camarilla_r3 = prev_close + (range_val * 1.1 / 4)
-    camarilla_s3 = prev_close - (range_val * 1.1 / 4)
-    camarilla_r4 = prev_close + (range_val * 1.1 / 2)
-    camarilla_s4 = prev_close - (range_val * 1.1 / 2)
-    
-    # === 4h Indicators: HMA(21) for trend ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    # HMA calculation: WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-    half_len = 10  # 21/2 rounded
-    sqrt_len = 4   # sqrt(21) rounded
-    wma_half = pd.Series(close_4h).ewm(span=half_len, adjust=False, min_periods=half_len).mean().values
-    wma_full = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    raw_hma = 2 * wma_half - wma_full
-    hma_4h = pd.Series(raw_hma).ewm(span=sqrt_len, adjust=False, min_periods=sqrt_len).mean().values
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
-    hma_up = hma_4h_aligned > np.roll(hma_4h_aligned, 1)
-    hma_down = hma_4h_aligned < np.roll(hma_4h_aligned, 1)
-    
-    # === 4h Indicators: Volume Spike (volume > 1.3x 20-period average) ===
-    vol_4h = df_4h['volume'].values
-    vol_ma_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
-    volume_spike = volume > (1.3 * vol_ma_4h_aligned)
+    # === 6h ATR for stoploss ===
+    tr1 = pd.Series(high).diff()
+    tr2 = pd.Series(low).diff().abs()
+    tr3 = pd.Series(close).shift(1).diff().abs()
+    tr_6h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_6h_raw = pd.Series(tr_6h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -67,17 +52,17 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid
-    warmup = 50
+    # Warmup: ensure all indicators are valid (max 50 periods needed for EMA/VWAP/ATR)
+    warmup = 100
     
-    # Track position state and entry price
+    # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or np.isnan(hma_4h_aligned[i]) or
-            np.isnan(volume_spike[i]) or
+        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(vwap_1d_aligned[i]) or np.isnan(volume_spike[i]) or np.isnan(atr_6h_raw[i]) or
             not session_filter[i]):
             signals[i] = 0.0
             position = 0
@@ -86,18 +71,29 @@ def generate_signals(prices):
         # Current values
         price = close[i]
         vol_spike = volume_spike[i]
+        atr_val = atr_6h_raw[i]
+        
+        # Previous Elder Ray values for momentum check
+        prev_bull_power = bull_power[i-1]
+        prev_bear_power = bear_power[i-1]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price breaks below Camarilla S3
-            if price < camarilla_s3[i]:
+            # Exit if Bear Power becomes positive (bulls losing control)
+            if bear_power[i] > 0:
+                exit_signal = True
+            # ATR-based stoploss: 2*ATR below entry
+            elif price < entry_price - 2.0 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price breaks above Camarilla R3
-            if price > camarilla_r3[i]:
+            # Exit if Bull Power becomes positive (bears losing control)
+            if bull_power[i] > 0:
+                exit_signal = True
+            # ATR-based stoploss: 2*ATR above entry
+            elif price > entry_price + 2.0 * atr_val:
                 exit_signal = True
         
         if exit_signal:
@@ -108,23 +104,23 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Camarilla R3 AND 4h HMA trending up AND volume spike
-            if price > camarilla_r3[i] and hma_up[i] and vol_spike:
-                signals[i] = 0.20
+            # LONG: Bull Power positive AND weakening bears (declining Bear Power) AND price > VWAP AND volume spike
+            if bull_power[i] > 0 and bear_power[i] < prev_bear_power and price > vwap_1d_aligned[i] and vol_spike:
+                signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: Price breaks below Camarilla S3 AND 4h HMA trending down AND volume spike
-            elif price < camarilla_s3[i] and hma_down[i] and vol_spike:
-                signals[i] = -0.20
+            # SHORT: Bear Power positive AND weakening bulls (declining Bull Power) AND price < VWAP AND volume spike
+            elif bear_power[i] > 0 and bull_power[i] < prev_bull_power and price < vwap_1d_aligned[i] and vol_spike:
+                signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         else:
-            signals[i] = position * 0.20
+            signals[i] = position * 0.25
     
     return signals
 
-name = "1h_CamarillaR3S3_4hHMA21_VolumeSpike_V1"
-timeframe = "1h"
+name = "6h_ElderRay_BullBearPower_1dVWAP_VolumeSpike_V1"
+timeframe = "6h"
 leverage = 1.0
