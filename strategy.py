@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R1/S1 breakout with 1w ADX(14) trend filter, volume confirmation, and ATR(14) stoploss.
-# Long when price breaks above Camarilla R1 AND 1w ADX > 25 AND volume > 1.5x 20-period average.
-# Short when price breaks below Camarilla S1 AND 1w ADX > 25 AND volume > 1.5x 20-period average.
-# Exit on ATR-based stoploss (2*ATR from entry) or opposite Camarilla break.
-# Uses discrete position size 0.25. Designed to capture strong momentum moves in trending markets.
-# Works in both bull and bear markets by requiring 1w trend filter (ADX > 25) and volume confirmation, avoiding false breakouts.
-# Target: 50-150 total trades over 4 years (12-37/year) to balance edge and fee drag.
+# Hypothesis: 4h Bollinger Band breakout with 1d EMA(34) trend filter, volume confirmation, and ATR(14) stoploss.
+# Long when price breaks above upper Bollinger Band (20,2.0) AND 1d EMA(34) trending up AND volume > 1.4x 20-period average.
+# Short when price breaks below lower Bollinger Band (20,2.0) AND 1d EMA(34) trending down AND volume > 1.4x 20-period average.
+# Exit on ATR-based stoploss (2*ATR from entry) or opposite Bollinger Band break.
+# Uses discrete position size 0.25. Bollinger Bands adapt to volatility, making them effective in both trending and ranging markets.
+# The 1d EMA(34) filter ensures we only trade in the direction of the higher timeframe trend, avoiding counter-trend breakouts.
+# Volume confirmation adds conviction to breakouts. Target: 75-200 total trades over 4 years (19-50/year) to balance edge and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,56 +21,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h Indicators: Camarilla Pivot Levels (R1, S1) ===
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_r1 = close + (high - low) * 1.1 / 12
-    camarilla_s1 = close - (high - low) * 1.1 / 12
+    # === 4h Indicators: Bollinger Bands (20,2.0) ===
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper = sma_20 + 2.0 * std_20
+    bb_lower = sma_20 - 2.0 * std_20
     
-    # === 1w Indicators: ADX(14) for trend strength ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === 1d Indicators: EMA(34) for trend ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_up = ema_34_1d_aligned > np.roll(ema_34_1d_aligned, 1)
+    ema_down = ema_34_1d_aligned < np.roll(ema_34_1d_aligned, 1)
     
-    # True Range
-    tr1 = pd.Series(high_1w).diff()
-    tr2 = pd.Series(low_1w).diff().abs()
-    tr3 = pd.Series(close_1w).shift(1).diff().abs()
-    tr_1w = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    # === 1d Indicators: Volume Spike (volume > 1.4x 20-period average) ===
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    volume_spike = volume > (1.4 * vol_ma_1d_aligned)
     
-    # Directional Movement
-    dm_plus = pd.Series(high_1w).diff()
-    dm_minus = pd.Series(low_1w).diff().abs()
-    dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0.0)
-    dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0.0)
-    
-    # Smoothed values
-    atr_1w = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / atr_1w
-    di_minus = 100 * dm_minus_smooth / atr_1w
-    
-    # ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx_1w = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
-    adx_strong = adx_1w_aligned > 25
-    
-    # === 1w Indicators: Volume Spike (volume > 1.5x 20-period average) ===
-    vol_1w = df_1w['volume'].values
-    vol_ma_1w = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
-    volume_spike = volume > (1.5 * vol_ma_1w_aligned)
-    
-    # === 12h ATR for stoploss ===
+    # === 4h ATR for stoploss ===
     tr1 = pd.Series(high).diff()
     tr2 = pd.Series(low).diff().abs()
     tr3 = pd.Series(close).shift(1).diff().abs()
-    tr_12h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_12h_raw = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    tr_4h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_4h_raw = pd.Series(tr_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -78,7 +54,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed for ADX/ATR)
+    # Warmup: ensure all indicators are valid (max 70 periods needed for EMA/ATR/BB)
     warmup = 100
     
     # Track position state and entry price for stoploss
@@ -87,8 +63,8 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or np.isnan(adx_1w_aligned[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(atr_12h_raw[i]) or
+        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(atr_4h_raw[i]) or
             not session_filter[i]):
             signals[i] = 0.0
             position = 0
@@ -97,22 +73,22 @@ def generate_signals(prices):
         # Current values
         price = close[i]
         vol_spike = volume_spike[i]
-        atr_val = atr_12h_raw[i]
+        atr_val = atr_4h_raw[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price breaks below Camarilla S1
-            if price < camarilla_s1[i]:
+            # Exit if price breaks below lower Bollinger Band
+            if price < bb_lower[i]:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR below entry
             elif price < entry_price - 2.0 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price breaks above Camarilla R1
-            if price > camarilla_r1[i]:
+            # Exit if price breaks above upper Bollinger Band
+            if price > bb_upper[i]:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR above entry
             elif price > entry_price + 2.0 * atr_val:
@@ -126,14 +102,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Camarilla R1 AND ADX > 25 AND volume spike
-            if price > camarilla_r1[i] and adx_strong[i] and vol_spike:
+            # LONG: Price breaks above upper BB AND EMA trending up AND volume spike
+            if price > bb_upper[i] and ema_up[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: Price breaks below Camarilla S1 AND ADX > 25 AND volume spike
-            elif price < camarilla_s1[i] and adx_strong[i] and vol_spike:
+            # SHORT: Price breaks below lower BB AND EMA trending down AND volume spike
+            elif price < bb_lower[i] and ema_down[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -143,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_1wADX14_VolumeSpike_V1"
-timeframe = "12h"
+name = "4h_BB20_1dEMA34_VolumeSpike_V1"
+timeframe = "4h"
 leverage = 1.0
