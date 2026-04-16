@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,97 +13,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 6h data (primary) ===
-    df_6h = get_htf_data(prices, '6h')
-    close_6h = df_6h['close'].values
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    volume_6h = df_6h['volume'].values
+    # === 4h data (primary) ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    volume_4h = df_4h['volume'].values
     
-    # === 1d data (HTF for Williams Alligator) ===
+    # === 1d data (HTF for EMA trend) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     
-    # === Williams Alligator (1d) ===
-    # Jaw: 13-period smoothed, 8 periods future
-    jaw_raw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().values
-    jaw = np.roll(jaw_raw, 8)
-    jaw[:8] = np.nan
+    # === 1d EMA34 (trend filter) ===
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Teeth: 8-period smoothed, 5 periods future
-    teeth_raw = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().values
-    teeth = np.roll(teeth_raw, 5)
-    teeth[:5] = np.nan
+    # === 4h Donchian channel (20-period) ===
+    donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Lips: 5-period smoothed, 3 periods future
-    lips_raw = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values
-    lips = np.roll(lips_raw, 3)
-    lips[:3] = np.nan
+    # Shift by 1 to avoid look-ahead (use previous bar's channel)
+    donch_high = np.roll(donch_high, 1)
+    donch_low = np.roll(donch_low, 1)
+    donch_high[0] = np.nan
+    donch_low[0] = np.nan
     
-    # Align Alligator lines to 6t
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    
-    # === 6x EMA (trend filter) ===
-    ema_6_6h = pd.Series(close_6h).ewm(span=6, adjust=False, min_periods=6).mean().values
-    
-    # === 6x Volume ratio for confirmation ===
-    vol_ma_6_6h = pd.Series(volume_6h).rolling(window=6, min_periods=6).mean().values
-    vol_ratio_6h = volume_6h / vol_ma_6_6h
+    # === 4h volume ratio for confirmation ===
+    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_4h = volume_4h / vol_ma_20_4h
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 100
+    warmup = 50
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(jaw_aligned[i]) or 
-            np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or 
-            np.isnan(ema_6_6h[i]) or 
-            np.isnan(vol_ratio_6h[i])):
+        if (np.isnan(donch_high[i]) or 
+            np.isnan(donch_low[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_ratio_4h[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
-        ema_trend = ema_6_6h[i]
-        vol_ratio = vol_ratio_6h[i]
+        upper = donch_high[i]
+        lower = donch_low[i]
+        ema_trend = ema_34_1d_aligned[i]
+        vol_ratio = vol_ratio_4h[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit: Alligator lines cross (lips below teeth) OR trend weakens
-            if lips_val < teeth_val or price < ema_trend:
+            # Exit: price closes below Donchian lower OR trend reverses
+            if price < lower or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit: Alligator lines cross (lips above teeth) OR trend weakens
-            if lips_val > teeth_val or price > ema_trend:
+            # Exit: price closes above Donchian upper OR trend reverses
+            if price > upper or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Lips > Teeth > Jaw (bullish alignment) with volume, above EMA
-            if lips_val > teeth_val and teeth_val > jaw_val and vol_ratio > 1.3 and price > ema_trend:
+            # LONG: Break above Donchian upper with volume, in uptrend
+            if price > upper and vol_ratio > 1.5 and price > ema_trend:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # SHORT: Lips < Teeth < Jaw (bearish alignment) with volume, below EMA
-            elif lips_val < teeth_val and teeth_val < jaw_val and vol_ratio > 1.3 and price < ema_trend:
+            # SHORT: Break below Donchian lower with volume, in downtrend
+            elif price < lower and vol_ratio > 1.5 and price < ema_trend:
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -118,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsAlligator_EMA_Volume"
-timeframe = "6h"
+name = "4h_Donchian_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
