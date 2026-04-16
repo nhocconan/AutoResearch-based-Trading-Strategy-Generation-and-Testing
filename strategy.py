@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA trend filter, volume confirmation, and ATR-based stoploss.
-# Long when price breaks above Donchian upper band AND 12h EMA50 uptrend (price > EMA50) AND volume > 1.5x 20-period average.
-# Short when price breaks below Donchian lower band AND 12h EMA50 downtrend (price < EMA50) AND volume > 1.5x 20-period average.
-# Uses discrete position size 0.25. Donchian breakout captures momentum, 12h EMA50 ensures alignment with higher timeframe trend,
+# Hypothesis: 1h Donchian breakout with 4h trend filter and volume confirmation.
+# Long when price breaks above 20-bar 1h Donchian high AND 4h EMA50 uptrend (price > EMA50) AND 1h volume > 1.5x 20-period average.
+# Short when price breaks below 20-bar 1h Donchian low AND 4h EMA50 downtrend (price < EMA50) AND 1h volume > 1.5x 20-period average.
+# Uses discrete position size 0.20. Donchian breakouts capture momentum, 4h EMA50 ensures alignment with higher timeframe trend,
 # volume spike confirms participation. Designed to work in both bull (buy breakouts) and bear (sell breakdowns) markets.
-# Target: 100-180 trades over 4 years (25-45/year) to balance opportunity and fee drag.
+# Session filter: 08-20 UTC to reduce noise trades.
+# Target: 60-150 total trades over 4 years = 15-37/year for 1h.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,101 +21,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Indicators: Donchian Channel (20-period) ===
+    # === 1h Indicators: Donchian Channel (20-period) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper = highest_high
-    donchian_lower = lowest_low
     
-    # === 4h Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    # === 1h Indicators: Volume Spike (volume > 1.5x 20-period average) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
-    # === 4h Indicators: ATR (14-period) for stoploss ===
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
-    
-    # Get 12h data once before loop for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:  # Need enough for EMA50 calculation
+    # Get 4h data once before loop for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:  # Need enough for EMA50 calculation
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    close_4h = df_4h['close'].values
     
-    # === 12h Indicators: EMA50 for trend filter ===
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # === 4h Indicators: EMA50 for trend filter ===
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 12h EMA50 to 4h timeframe
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Align 4h EMA50 to 1h timeframe
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed for EMA, 20 for Donchian/volume)
+    # Warmup: ensure all indicators are valid (max 50 periods needed for EMA, 20 for Donchian/volume MA)
     warmup = 60
     
-    # Track position state and entry price for ATR-based stoploss
+    # Track position state
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             position = 0
-            entry_price = 0.0
             continue
         
         # Current values
         price = close[i]
-        dc_upper = donchian_upper[i]
-        dc_lower = donchian_lower[i]
-        ema_12h = ema_50_12h_aligned[i]
+        donchian_high = highest_high[i]
+        donchian_low = lowest_low[i]
+        ema_4h = ema_50_4h_aligned[i]
         vol_spike = volume_spike[i]
-        atr_val = atr[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price breaks below Donchian lower band OR 2*ATR stoploss hit
-            if price < dc_lower or (entry_price > 0 and price < entry_price - 2.0 * atr_val):
+            # Exit if price breaks below Donchian low or volume spike ends
+            if price < donchian_low or not vol_spike:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price breaks above Donchian upper band OR 2*ATR stoploss hit
-            if price > dc_upper or (entry_price > 0 and price > entry_price + 2.0 * atr_val):
+            # Exit if price breaks above Donchian high or volume spike ends
+            if price > donchian_high or not vol_spike:
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
-            entry_price = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Donchian upper band AND price > 12h EMA50 (uptrend) AND volume spike
-            if price > dc_upper and price > ema_12h and vol_spike:
-                signals[i] = 0.25
+            # LONG: Price breaks above Donchian high AND price > 4h EMA50 (uptrend) AND volume spike
+            if price > donchian_high and price > ema_4h and vol_spike:
+                signals[i] = 0.20
                 position = 1
-                entry_price = price
             
-            # SHORT: Price breaks below Donchian lower band AND price < 12h EMA50 (downtrend) AND volume spike
-            elif price < dc_lower and price < ema_12h and vol_spike:
-                signals[i] = -0.25
+            # SHORT: Price breaks below Donchian low AND price < 4h EMA50 (downtrend) AND volume spike
+            elif price < donchian_low and price < ema_4h and vol_spike:
+                signals[i] = -0.20
                 position = -1
-                entry_price = price
         
         else:
-            signals[i] = position * 0.25
+            signals[i] = position * 0.20
     
     return signals
 
-name = "4h_Donchian20_12hEMA50_VolumeSpike_ATRStop_V1"
-timeframe = "4h"
+name = "1h_Donchian20_4hEMA50_VolumeSpike_SessionFilter_V1"
+timeframe = "1h"
 leverage = 1.0
