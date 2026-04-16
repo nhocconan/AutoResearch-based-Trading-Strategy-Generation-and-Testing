@@ -3,123 +3,123 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Choppiness Index + RSI + 1d Bollinger Band Mean Reversion
-# Long when 4h Choppiness Index > 61.8 (range) AND RSI(14) < 30 AND price < 1d Lower Bollinger Band
-# Short when 4h Choppiness Index > 61.8 (range) AND RSI(14) > 70 AND price > 1d Upper Bollinger Band
-# Exit when RSI returns to neutral (40-60) or opposite Bollinger band touch
-# Uses 1d Bollinger Bands for mean reversion in ranging markets identified by 4h Choppiness
-# Designed for low-volatility ranging markets (common in 2025 BTC/ETH) with mean reversion edge
-# Target: 75-200 total trades over 4 years (19-50/year) with strict entry conditions
+# Hypothesis: 12h Donchian breakout with 1w trend filter and volume confirmation.
+# Long when price breaks above 12h Donchian upper channel (20-period) AND price > 1w EMA50 AND volume > 1.5x 20-period average.
+# Short when price breaks below 12h Donchian lower channel (20-period) AND price < 1w EMA50 AND volume > 1.5x 20-period average.
+# Exit on ATR-based stoploss (2*ATR from entry) or opposite Donchian breakout.
+# Uses discrete position size 0.25. Works in both bull and bear markets by requiring
+# volume confirmation and trend alignment via 1w EMA50. Target: 50-150 total trades over 4 years (12-37/year).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === 4h Indicators: Choppiness Index (14) and RSI (14) ===
-    # True Range
+    # === 12h Indicators: Donchian Channel (20-period) ===
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_upper = highest_high
+    donchian_lower = lowest_low
+    donchian_upper_prev = np.roll(donchian_upper, 1)
+    donchian_lower_prev = np.roll(donchian_lower, 1)
+    donchian_upper_prev[0] = np.nan
+    donchian_lower_prev[0] = np.nan
+    
+    # === 1w Indicators: EMA50 and Volume Spike ===
+    df_1w = get_htf_data(prices, '1w')
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    vol_1w = df_1w['volume'].values
+    vol_ma_1w = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
+    volume_spike = volume > (1.5 * vol_ma_1w_aligned)
+    
+    # === 12h ATR for stoploss ===
     tr1 = pd.Series(high).diff()
     tr2 = pd.Series(low).diff().abs()
     tr3 = pd.Series(close).shift(1).diff().abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    tr_12h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_12h_raw = pd.Series(tr_12h).ewm(alpha=1/20, adjust=False, min_periods=20).mean().values
     
-    # Choppiness Index: (sum(ATR) / (max(high) - min(low))) * 100 * log10(14)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    sum_atr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(14) * sum_atr / (highest_high - lowest_low + 1e-10)
-    
-    # RSI (14)
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # === 1d Indicators: Bollinger Bands (20, 2) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + (2 * std_20)
-    lower_bb = sma_20 - (2 * std_20)
-    
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
-    
-    # Session filter: 08-20 UTC (active trading hours)
+    # Session filter: 08-20 UTC
     hours = prices.index.hour
     session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 20 periods needed)
-    warmup = 30
+    # Warmup: ensure all indicators are valid (max 50 periods needed for EMA50)
+    warmup = 60
     
-    # Track position state
+    # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(chop[i]) or np.isnan(rsi[i]) or np.isnan(upper_bb_aligned[i]) or
-            np.isnan(lower_bb_aligned[i]) or not session_filter[i]):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(donchian_upper_prev[i]) or
+            np.isnan(donchian_lower_prev[i]) or np.isnan(ema_50_1w_aligned[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(atr_12h_raw[i]) or not session_filter[i]):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values
         price = close[i]
-        chop_val = chop[i]
-        rsi_val = rsi[i]
-        upper_bb_val = upper_bb_aligned[i]
-        lower_bb_val = lower_bb_aligned[i]
+        vol_spike = volume_spike[i]
+        atr_val = atr_12h_raw[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit when RSI returns to neutral (40-60) or price touches upper BB
-            if rsi_val >= 40 and rsi_val <= 60:
+            # Exit if price breaks below Donchian lower channel
+            if price < donchian_lower[i]:
                 exit_signal = True
-            elif price >= upper_bb_val:
+            # ATR-based stoploss: 2*ATR below entry
+            elif price < entry_price - 2.0 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit when RSI returns to neutral (40-60) or price touches lower BB
-            if rsi_val >= 40 and rsi_val <= 60:
+            # Exit if price breaks above Donchian upper channel
+            if price > donchian_upper[i]:
                 exit_signal = True
-            elif price <= lower_bb_val:
+            # ATR-based stoploss: 2*ATR above entry
+            elif price > entry_price + 2.0 * atr_val:
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
+            entry_price = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Chop > 61.8 (range) AND RSI < 30 (oversold) AND price < lower BB
-            if (chop_val > 61.8 and rsi_val < 30 and price < lower_bb_val):
+            # LONG: Price breaks above Donchian upper channel AND price > 1w EMA50 AND volume spike
+            if (price > donchian_upper[i] and 
+                price > ema_50_1w_aligned[i] and vol_spike):
                 signals[i] = 0.25
                 position = 1
+                entry_price = price
             
-            # SHORT: Chop > 61.8 (range) AND RSI > 70 (overbought) AND price > upper BB
-            elif (chop_val > 61.8 and rsi_val > 70 and price > upper_bb_val):
+            # SHORT: Price breaks below Donchian lower channel AND price < 1w EMA50 AND volume spike
+            elif (price < donchian_lower[i] and 
+                  price < ema_50_1w_aligned[i] and vol_spike):
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         else:
             signals[i] = position * 0.25
     
     return signals
 
-name = "4h_Chop_RSI_BB_MeanRev_V1"
-timeframe = "4h"
+name = "12h_Donchian20_1wEMA50_VolumeSpike_V1"
+timeframe = "12h"
 leverage = 1.0
