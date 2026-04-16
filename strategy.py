@@ -36,6 +36,63 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=15, min_periods=15).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
+    # === Choppiness regime filter (14-period) ===
+    # Calculate True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Set first TR to high-low to avoid roll artifact
+    tr[0] = tr1[0]
+    
+    # Calculate +DI and -DI
+    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    # Set first values to 0
+    plus_dm[0] = 0
+    minus_dm[0] = 0
+    
+    # Smooth with Wilder's smoothing (alpha = 1/period)
+    atr = np.zeros_like(tr)
+    plus_di_smooth = np.zeros_like(tr)
+    minus_di_smooth = np.zeros_like(tr)
+    
+    # Initialize first values
+    atr[0] = tr[0]
+    plus_di_smooth[0] = plus_dm[0]
+    minus_di_smooth[0] = minus_dm[0]
+    
+    # Wilder smoothing
+    for i in range(1, len(tr)):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+        plus_di_smooth[i] = (plus_di_smooth[i-1] * 13 + plus_dm[i]) / 14
+        minus_di_smooth[i] = (minus_di_smooth[i-1] * 13 + minus_dm[i]) / 14
+    
+    # Calculate DI values
+    plus_di = np.where(atr != 0, plus_di_smooth / atr * 100, 0)
+    minus_di = np.where(atr != 0, minus_di_smooth / atr * 100, 0)
+    
+    # Calculate DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
+    adx = np.zeros_like(dx)
+    adx[0] = dx[0]
+    for i in range(1, len(dx)):
+        adx[i] = (adx[i-1] * 13 + dx[i]) / 14
+    
+    # Chop = log(sum(TR,14)/ (max(high,14)-min(low,14))) / log(14) * 100
+    # Using rolling window for efficiency
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = np.where((max_high - min_low) != 0, 
+                    np.log10(tr_sum / (max_high - min_low)) / np.log10(14) * 100, 50)
+    chop[np.isnan(chop)] = 50  # Default to neutral chop
+    
+    # Chop regime: >61.8 = ranging (mean revert), <38.2 = trending (trend follow)
+    chopping = chop > 61.8  # True when chopping/ranging
+    
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators have valid data
@@ -47,7 +104,8 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # Skip if any required data is NaN
         if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
-            np.isnan(ema_4h[i]) or np.isnan(volume_spike[i])):
+            np.isnan(ema_4h[i]) or np.isnan(volume_spike[i]) or
+            np.isnan(chopping[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -57,35 +115,37 @@ def generate_signals(prices):
         s1_level = s1_4h[i]
         ema_val = ema_4h[i]
         vol_spike = volume_spike[i]
+        is_chopping = chopping[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price drops below S1
-            if price < s1_level:
+            # Exit when price drops below S1 OR chop regime ends
+            if price < s1_level or not is_chopping:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price rises above R1
-            if price > r1_level:
+            # Exit when price rises above R1 OR chop regime ends
+            if price > r1_level or not is_chopping:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above R1 with volume spike, above EMA34
-            if price > r1_level and vol_spike and price > ema_val:
-                signals[i] = 0.25
-                position = 1
-                continue
-            
-            # SHORT: Price breaks below S1 with volume spike, below EMA34
-            elif price < s1_level and vol_spike and price < ema_val:
-                signals[i] = -0.25
-                position = -1
-                continue
+            # In chopping regime, mean revert at pivot levels
+            if is_chopping:
+                # LONG: Price touches S1 with volume spike
+                if abs(price - s1_level) < (r1_level - s1_level) * 0.02 and vol_spike:
+                    signals[i] = 0.25
+                    position = 1
+                    continue
+                # SHORT: Price touches R1 with volume spike
+                elif abs(price - r1_level) < (r1_level - s1_level) * 0.02 and vol_spike:
+                    signals[i] = -0.25
+                    position = -1
+                    continue
         
         # Hold current position
         if position == 1:
@@ -97,6 +157,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Pivot_R1_S1_Breakout_Volume_EMA34Filter"
+name = "4h_Pivot_R1_S1_Chop_MeanReversion_Volume"
 timeframe = "4h"
 leverage = 1.0
