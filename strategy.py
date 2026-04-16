@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and 12h ADX trend filter.
-# Long when price breaks above 20-period 4h high AND volume > 1.3x 20-period 12h average AND 12h ADX > 20.
-# Short when price breaks below 20-period 4h low AND volume > 1.3x 20-period 12h average AND 12h ADX > 20.
-# Exit when price crosses the 4h midpoint or ATR-based stoploss (2*ATR from entry).
-# Uses discrete position size 0.25. Designed to capture major breakouts with volume and trend confirmation.
-# Target: 75-200 total trades over 4 years (19-50/year) to balance edge and fee drag.
+# Hypothesis: 4h Camarilla pivot R1/S1 breakout with 1d volume confirmation and 1h session filter.
+# Long when price breaks above 4h Camarilla R1 AND 1d volume > 1.2x 20-period average AND hour in 08-20 UTC.
+# Short when price breaks below 4h Camarilla S1 AND 1d volume > 1.2x 20-period average AND hour in 08-20 UTC.
+# Exit when price retests the 4h pivot point (PP) or ATR-based stoploss (1.5*ATR from entry).
+# Uses discrete position size 0.20. Designed to capture intraday breakouts with volume confirmation in active sessions.
+# Target: 80-180 total trades over 4 years (20-45/year) to balance opportunity and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,68 +20,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Indicators: Donchian Channel (20-period) ===
+    # === 4h Indicators: Camarilla Pivot Points (based on prior 4h bar) ===
     df_4h = get_htf_data(prices, '4h')
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
     
-    # Donchian upper and lower bands (20-period)
-    dc_upper_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    dc_lower_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    dc_mid_4h = (dc_upper_4h + dc_lower_4h) / 2
+    # Prior 4h bar's OHLC for Camarilla calculation
+    prior_high_4h = np.roll(high_4h, 1)
+    prior_low_4h = np.roll(low_4h, 1)
+    prior_close_4h = np.roll(close_4h, 1)
+    # Set first value to NaN (no prior bar)
+    prior_high_4h[0] = np.nan
+    prior_low_4h[0] = np.nan
+    prior_close_4h[0] = np.nan
     
-    # Align to 4h timeframe
-    dc_upper_4h_aligned = align_htf_to_ltf(prices, df_4h, dc_upper_4h)
-    dc_lower_4h_aligned = align_htf_to_ltf(prices, df_4h, dc_lower_4h)
-    dc_mid_4h_aligned = align_htf_to_ltf(prices, df_4h, dc_mid_4h)
+    # Camarilla formulas
+    pp_4h = (prior_high_4h + prior_low_4h + prior_close_4h) / 3
+    range_4h = prior_high_4h - prior_low_4h
+    r1_4h = pp_4h + (range_4h * 1.1 / 12)
+    s1_4h = pp_4h - (range_4h * 1.1 / 12)
     
-    # === 12h Indicators: Volume Spike (volume > 1.3x 20-period average) ===
-    df_12h = get_htf_data(prices, '12h')
-    vol_12h = df_12h['volume'].values
-    vol_ma_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
-    volume_spike = volume > (1.3 * vol_ma_12h_aligned)
+    # Align to 1h timeframe (wait for completed 4h bar)
+    pp_4h_aligned = align_htf_to_ltf(prices, df_4h, pp_4h)
+    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
+    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
     
-    # === 12h Indicators: ADX > 20 (trending market filter) ===
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # === 1d Indicators: Volume Spike (volume > 1.2x 20-period average) ===
+    df_1d = get_htf_data(prices, '1d')
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    volume_spike = volume > (1.2 * vol_ma_1d_aligned)
     
-    # True Range
-    tr1 = pd.Series(high_12h).diff()
-    tr2 = pd.Series(low_12h).diff().abs()
-    tr3 = pd.Series(close_12h).shift(1).diff().abs()
-    tr_12h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_12h = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Movement
-    dm_plus = pd.Series(high_12h).diff()
-    dm_minus = pd.Series(low_12h).diff().abs()
-    dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
-    dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
-    
-    # Smoothed DM and TR
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_smooth = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * (dm_plus_smooth / atr_smooth)
-    di_minus = 100 * (dm_minus_smooth / atr_smooth)
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
-    strong_trend = adx_aligned > 20
-    
-    # Session filter: 08-20 UTC
+    # Session filter: 08-20 UTC (using DatetimeIndex)
     hours = prices.index.hour
     session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed for ADX/ATR)
-    warmup = 100
+    # Warmup: ensure all indicators are valid (max 20 periods needed for volume MA)
+    warmup = 50
     
     # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
@@ -97,8 +76,8 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(dc_upper_4h_aligned[i]) or np.isnan(dc_lower_4h_aligned[i]) or np.isnan(dc_mid_4h_aligned[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(strong_trend[i]) or np.isnan(atr_4h_aligned[i]) or
+        if (np.isnan(pp_4h_aligned[i]) or np.isnan(r1_4h_aligned[i]) or np.isnan(s1_4h_aligned[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(atr_4h_aligned[i]) or
             not session_filter[i]):
             signals[i] = 0.0
             position = 0
@@ -107,26 +86,25 @@ def generate_signals(prices):
         # Current values
         price = close[i]
         vol_spike = volume_spike[i]
-        is_strong_trend = strong_trend[i]
         atr_val = atr_4h_aligned[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price crosses below midpoint
-            if price < dc_mid_4h_aligned[i]:
+            # Exit if price retests pivot point (PP)
+            if price <= pp_4h_aligned[i]:
                 exit_signal = True
-            # ATR-based stoploss: 2*ATR below entry
-            elif price < entry_price - 2.0 * atr_val:
+            # ATR-based stoploss: 1.5*ATR below entry
+            elif price < entry_price - 1.5 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price crosses above midpoint
-            if price > dc_mid_4h_aligned[i]:
+            # Exit if price retests pivot point (PP)
+            if price >= pp_4h_aligned[i]:
                 exit_signal = True
-            # ATR-based stoploss: 2*ATR above entry
-            elif price > entry_price + 2.0 * atr_val:
+            # ATR-based stoploss: 1.5*ATR above entry
+            elif price > entry_price + 1.5 * atr_val:
                 exit_signal = True
         
         if exit_signal:
@@ -137,23 +115,23 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Donchian upper AND volume spike AND strong trending market
-            if price > dc_upper_4h_aligned[i] and vol_spike and is_strong_trend:
-                signals[i] = 0.25
+            # LONG: Price breaks above Camarilla R1 AND volume spike AND in session
+            if price > r1_4h_aligned[i] and vol_spike:
+                signals[i] = 0.20
                 position = 1
                 entry_price = price
             
-            # SHORT: Price breaks below Donchian lower AND volume spike AND strong trending market
-            elif price < dc_lower_4h_aligned[i] and vol_spike and is_strong_trend:
-                signals[i] = -0.25
+            # SHORT: Price breaks below Camarilla S1 AND volume spike AND in session
+            elif price < s1_4h_aligned[i] and vol_spike:
+                signals[i] = -0.20
                 position = -1
                 entry_price = price
         
         else:
-            signals[i] = position * 0.25
+            signals[i] = position * 0.20
     
     return signals
 
-name = "4h_Donchian20_12hVolumeSpike_12hADX_V1"
-timeframe = "4h"
+name = "4h_Camarilla_R1_S1_Breakout_1dVolumeSpike_1hSession_V1"
+timeframe = "1h"
 leverage = 1.0
