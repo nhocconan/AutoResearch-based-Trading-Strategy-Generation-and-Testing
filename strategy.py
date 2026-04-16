@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 12h pivot direction filter and volume confirmation.
-# Long when price breaks above Donchian upper band AND 12h pivot shows bullish bias (price > daily pivot) AND volume > 1.5x 20-period average.
-# Short when price breaks below Donchian lower band AND 12h pivot shows bearish bias (price < daily pivot) AND volume > 1.5x 20-period average.
-# Uses discrete position size 0.25. Donchian captures breakouts, 12h pivot ensures alignment with higher timeframe structure, volume confirms participation.
-# Designed to work in both bull (buy breakouts) and bear (sell breakdowns) markets with strict entry conditions to limit trades and reduce fee drag.
-# Target: 75-175 trades over 4 years (19-44/year) to balance opportunity and cost.
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA(34) trend filter + volume confirmation.
+# Long when price breaks above Donchian upper band AND 1d EMA(34) is rising AND volume > 1.5x 20-period average.
+# Short when price breaks below Donchian lower band AND 1d EMA(34) is falling AND volume > 1.5x 20-period average.
+# Uses discrete position size 0.25. Donchian captures structural breaks, 1d EMA ensures alignment with higher timeframe trend,
+# volume spike confirms institutional participation. Designed to work in both bull (breakouts up) and bear (breakdowns down) markets.
+# Target: 80-180 trades over 4 years (20-45/year) to balance opportunity and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,44 +20,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 6h Indicators: Donchian Channel (20) ===
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    donchian_up = highest_high
-    donchian_low = lowest_low
+    # === 4h Indicators: Donchian(20) ===
+    high_ma = pd.Series(high).rolling(window=20, min_periods=20).max()
+    low_ma = pd.Series(low).rolling(window=20, min_periods=20).min()
+    upper_band = high_ma.values
+    lower_band = low_ma.values
     
-    # === 6h Indicators: Volume Spike (volume > 1.5x 20-period average) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # === 4h Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     volume_spike = volume > (1.5 * vol_ma)
     
-    # Get 12h data once before loop for pivot filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:  # Need enough for pivot calculation
+    # Get 1d data once before loop for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 40:  # Need enough for EMA calculation
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
     
-    # === 12h Indicators: Daily Pivot Points (Classic) ===
-    pivot = (high_12h + low_12h + close_12h) / 3.0
-    r1 = 2 * pivot - low_12h
-    s1 = 2 * pivot - high_12h
-    # Bullish bias: price > pivot, Bearish bias: price < pivot
-    bullish_bias = close_12h > pivot
-    bearish_bias = close_12h < pivot
+    # === 1d Indicators: EMA(34) for trend filter ===
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean()
+    ema_34_values = ema_34.values
     
-    # Align 12h data to 6h timeframe
-    donchian_up_aligned = align_htf_to_ltf(prices, df_12h, donchian_up)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
-    bullish_bias_aligned = align_htf_to_ltf(prices, df_12h, bullish_bias.astype(float))
-    bearish_bias_aligned = align_htf_to_ltf(prices, df_12h, bearish_bias.astype(float))
-    vol_ma_aligned = align_htf_to_ltf(prices, df_12h, vol_ma)
+    # Align 1d EMA to 4h timeframe
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_values)
+    
+    # Calculate EMA slope (rising/falling)
+    ema_slope = np.diff(ema_34_aligned, prepend=ema_34_aligned[0])
+    ema_rising = ema_slope > 0
+    ema_falling = ema_slope < 0
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 20 periods needed for Donchian and volume MA)
+    # Warmup: ensure all indicators are valid (max 34 periods needed for EMA, 20 for Donchian/volume MA)
     warmup = 40
     
     # Track position state
@@ -65,32 +59,29 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_up_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(bullish_bias_aligned[i]) or np.isnan(bearish_bias_aligned[i]) or
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values
         price = close[i]
-        vol_spike = volume[i] > (1.5 * vol_ma_aligned[i])
-        bull_bias = bullish_bias_aligned[i] > 0.5
-        bear_bias = bearish_bias_aligned[i] > 0.5
+        vol_spike = volume_spike[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price returns to Donchian midpoint or volume spike ends
-            midpoint = (donchian_up_aligned[i] + donchian_low_aligned[i]) / 2.0
-            if price <= midpoint or not vol_spike:
+            # Exit if price returns to mid-band or volume spike ends
+            mid_band = (upper_band[i] + lower_band[i]) / 2
+            if price <= mid_band or not vol_spike:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price returns to Donchian midpoint or volume spike ends
-            midpoint = (donchian_up_aligned[i] + donchian_low_aligned[i]) / 2.0
-            if price >= midpoint or not vol_spike:
+            # Exit if price returns to mid-band or volume spike ends
+            mid_band = (upper_band[i] + lower_band[i]) / 2
+            if price >= mid_band or not vol_spike:
                 exit_signal = True
         
         if exit_signal:
@@ -100,13 +91,13 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Donchian upper band AND 12h bullish bias AND volume spike
-            if price > donchian_up_aligned[i] and bull_bias and vol_spike:
+            # LONG: Price > upper band AND EMA rising AND volume spike
+            if price > upper_band[i] and ema_rising[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
             
-            # SHORT: Price breaks below Donchian lower band AND 12h bearish bias AND volume spike
-            elif price < donchian_low_aligned[i] and bear_bias and vol_spike:
+            # SHORT: Price < lower band AND EMA falling AND volume spike
+            elif price < lower_band[i] and ema_falling[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
@@ -115,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_12hPivotBias_VolumeSpike_V1"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA34_VolumeSpike_V1"
+timeframe = "4h"
 leverage = 1.0
