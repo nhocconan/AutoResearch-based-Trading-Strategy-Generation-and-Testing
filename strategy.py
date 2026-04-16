@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 1d trend filter and volume confirmation
-# Long when Williams %R < -80 (oversold) AND price > 200 EMA (uptrend bias) AND 1d ADX > 25 AND volume > 1.5x 20-period SMA
-# Short when Williams %R > -20 (overbought) AND price < 200 EMA (downtrend bias) AND 1d ADX > 25 AND volume > 1.5x 20-period SMA
-# Williams %R identifies extreme reversals, 200 EMA provides trend bias, ADX filters choppy markets, volume confirms conviction
-# Discrete position sizing (0.25) to control drawdown. Target: 75-200 total trades over 4 years
+# Hypothesis: 4h KAMA trend + 1d RSI extremes + volume confirmation
+# Long when KAMA direction is up (price > KAMA) AND 1d RSI < 30 (oversold) AND volume > 1.5x 20-period 1d volume SMA
+# Short when KAMA direction is down (price < KAMA) AND 1d RSI > 70 (overbought) AND volume > 1.5x 20-period 1d volume SMA
+# KAMA adapts to market noise, reducing false signals in choppy markets. RSI identifies extremes for mean reversion.
+# Volume confirms conviction. Discrete position sizing (0.25) to control drawdown and fees.
+# Target: 75-200 total trades over 4 years (19-50/year)
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,75 +24,54 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 4h data once before loop for Williams %R calculation
+    # Get 4h data once before loop for KAMA calculation
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Get 1d data once before loop for EMA200, ADX, and volume filters
+    # Get 1d data once before loop for RSI and volume filters
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 4h Indicator: Williams %R (14-period) ===
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * ((highest_high - close) / (highest_high - lowest_low))
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid division by zero
+    # === 4h Indicator: KAMA (10, 2, 30) ===
+    close_4h = df_4h['close'].values
+    # Efficiency Ratio
+    change = np.abs(np.diff(close_4h, n=10))
+    volatility = np.sum(np.abs(np.diff(close_4h, n=1)), axis=0)[:len(change)]
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # KAMA calculation
+    kama = np.full_like(close_4h, np.nan)
+    kama[9] = close_4h[9]  # start after first 10 periods
+    for i in range(10, len(close_4h)):
+        kama[i] = kama[i-1] + sc[i] * (close_4h[i] - kama[i-1])
+    # Align KAMA to 4h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_4h, kama)
     
-    # Align Williams %R to 4h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_4h, williams_r)
-    
-    # === 1d Indicator: EMA200 for trend bias ===
-    ema200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # === 1d Indicator: RSI (14-period) ===
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.concatenate([np.full(14, np.nan), rsi])  # align length
+    # Align RSI to 1d timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
     # === 1d Indicator: Volume SMA (20-period) for confirmation ===
     volume_1d = df_1d['volume'].values
     vol_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_20_1d)
     
-    # === 1d Indicator: ADX (14-period) for trend strength ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range calculation
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed TR, DM+, DM- (Wilder's smoothing = EMA with alpha=1/period)
-    atr_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / atr_1d
-    di_minus = 100 * dm_minus_smooth / atr_1d
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    dx = np.where((di_plus + di_minus) == 0, 0, dx)
-    adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Align ADX to 1d timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (need 200 periods for EMA200 + 14 for Williams %R + ADX)
-    warmup = 250
+    # Warmup: ensure all indicators are valid (need 30 periods for KAMA + 14 for RSI + 20 for volume SMA)
+    warmup = 50
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -100,8 +80,8 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema200_aligned[i]) or
-            np.isnan(vol_sma_20_1d_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or
+            np.isnan(vol_sma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -114,17 +94,13 @@ def generate_signals(prices):
             vol_confirm = vol_1d_aligned[i] > vol_threshold
         
         # === LONG CONDITIONS ===
-        # Williams %R < -80 (oversold) AND price > 200 EMA (uptrend bias) 
-        # AND ADX > 25 (trending market) AND volume confirmation
-        if (williams_r_aligned[i] < -80) and (close[i] > ema200_aligned[i]) and \
-           (adx_aligned[i] > 25) and vol_confirm:
+        # Price > KAMA (uptrend) AND RSI < 30 (oversold) AND volume confirmation
+        if (close[i] > kama_aligned[i]) and (rsi_aligned[i] < 30) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # Williams %R > -20 (overbought) AND price < 200 EMA (downtrend bias)
-        # AND ADX > 25 (trending market) AND volume confirmation
-        elif (williams_r_aligned[i] > -20) and (close[i] < ema200_aligned[i]) and \
-             (adx_aligned[i] > 25) and vol_confirm:
+        # Price < KAMA (downtrend) AND RSI > 70 (overbought) AND volume confirmation
+        elif (close[i] < kama_aligned[i]) and (rsi_aligned[i] > 70) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -132,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_1dEMA200_ADX_Volume_Filter_v1"
+name = "4h_KAMA_1dRSI_Volume_Filter_v1"
 timeframe = "4h"
 leverage = 1.0
