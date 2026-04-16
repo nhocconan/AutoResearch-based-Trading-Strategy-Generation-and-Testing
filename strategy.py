@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R + 1d EMA trend filter + volume spike
-# Williams %R identifies overbought/oversold conditions that work in both bull/bear markets.
-# 1d EMA filter ensures we trade with the higher timeframe trend.
-# Volume spike (2.0x 20-period MA) confirms conviction on reversal signals.
-# ATR-based stoploss manages risk with proper alignment.
-# Target: 100-200 total trades over 4 years (25-50/year) to balance opportunity and fees.
+# Hypothesis: 1d Donchian breakout (20) + 1w EMA trend filter + volume confirmation
+# Donchian channels on daily timeframe capture major trend changes that work in both bull/bear markets.
+# 1w EMA filter ensures we trade with the higher timeframe trend (reduces whipsaw).
+# Volume confirmation adds conviction to breakout signals (avoid false breakouts).
+# ATR-based trailing stop manages risk without look-ahead.
+# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag on 1d timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,36 +20,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h data (primary timeframe) ===
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
-    
-    # === 1d data (HTF for trend filter) ===
+    # === 1d data (primary timeframe) ===
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # === 4h Williams %R (14) ===
-    highest_high_14 = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close_4h) / (highest_high_14 - lowest_low_14)
-    williams_r_aligned = align_htf_to_ltf(prices, df_4h, williams_r)
+    # === 1w data (HTF for trend filter) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # === 1d EMA Trend Filter (34) ===
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # === 1d Donchian Channel (20) ===
+    highest_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_upper = highest_high_20
+    donchian_lower = lowest_low_20
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
     
-    # === 4h Volume Spike (2.0x 20-period MA) ===
-    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20)
+    # === 1w EMA Trend Filter (34) ===
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # === 4h ATR (15) for stoploss ===
-    tr = np.maximum(high_4h - low_4h, np.maximum(np.abs(high_4h - np.roll(close_4h, 1)), np.abs(low_4h - np.roll(close_4h, 1))))
-    tr[0] = high_4h[0] - low_4h[0]
-    atr_4h = pd.Series(tr).ewm(span=15, adjust=False, min_periods=15).mean().values
-    atr_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    # === 1d Volume Confirmation (20-period average) ===
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    
+    # === 1d ATR (15) for trailing stop ===
+    atr_1d = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), np.abs(low_1d - np.roll(close_1d, 1))))
+    atr_1d[0] = high_1d[0] - low_1d[0]  # Fix first value
+    atr_ma = pd.Series(atr_1d).ewm(span=15, adjust=False, min_periods=15).mean().values
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_ma)
     
     signals = np.zeros(n)
     
@@ -59,10 +61,13 @@ def generate_signals(prices):
     # Track position and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    highest_since_entry = 0.0  # For long trailing stop
+    lowest_since_entry = 0.0   # For short trailing stop
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(williams_r_aligned[i]) or 
+        if (np.isnan(donchian_upper_aligned[i]) or 
+            np.isnan(donchian_lower_aligned[i]) or
             np.isnan(ema_34_aligned[i]) or
             np.isnan(vol_ma_aligned[i]) or
             np.isnan(atr_aligned[i])):
@@ -71,41 +76,73 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        wr = williams_r_aligned[i]
+        upper = donchian_upper_aligned[i]
+        lower = donchian_lower_aligned[i]
         ema_trend = ema_34_aligned[i]
-        vol_confirm = volume[i] > vol_ma_aligned[i] * 2.0  # 2.0x average volume for spike
+        vol_confirm = volume[i] > vol_ma_aligned[i] * 1.5  # 1.5x average volume for confirmation
         atr_val = atr_aligned[i]
         
-        # === STOPLOSS LOGIC (2.0*ATR) ===
+        # === TRAILING STOP LOGIC ===
         if position == 1:  # Long position
-            if price < entry_price - 2.0 * atr_val:
+            # Update highest price since entry
+            if price > highest_since_entry:
+                highest_since_entry = price
+            # Trail stop: exit if price drops 2.5*ATR from high
+            if price < highest_since_entry - 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
+                highest_since_entry = 0.0
                 continue
         
         elif position == -1:  # Short position
-            if price > entry_price + 2.0 * atr_val:
+            # Update lowest price since entry
+            if price < lowest_since_entry:
+                lowest_since_entry = price
+            # Trail stop: exit if price rises 2.5*ATR from low
+            if price > lowest_since_entry + 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
+                lowest_since_entry = 0.0
+                continue
+        
+        # === EXIT LOGIC (Donchian reversal) ===
+        if position == 1:  # Long position
+            # Exit when price breaks below lower Donchian band
+            if price < lower:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+                highest_since_entry = 0.0
+                continue
+        
+        elif position == -1:  # Short position
+            # Exit when price breaks above upper Donchian band
+            if price > upper:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+                lowest_since_entry = 0.0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Require volume spike confirmation
+            # Require volume confirmation
             if vol_confirm:
-                # Long when Williams %R crosses above -80 (oversold) AND price above 1d EMA
-                if wr > -80 and price > ema_trend:
+                # Long when price breaks above upper Donchian band AND price above 1w EMA (uptrend)
+                if price > upper and price > ema_trend:
                     signals[i] = 0.25
                     position = 1
                     entry_price = price
+                    highest_since_entry = price
                     continue
-                # Short when Williams %R crosses below -20 (overbought) AND price below 1d EMA
-                elif wr < -20 and price < ema_trend:
+                # Short when price breaks below lower Donchian band AND price below 1w EMA (downtrend)
+                elif price < lower and price < ema_trend:
                     signals[i] = -0.25
                     position = -1
                     entry_price = price
+                    lowest_since_entry = price
                     continue
         
         # Hold current position
@@ -118,6 +155,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA34_VolumeConfirm_ATRTrail"
+timeframe = "1d"
 leverage = 1.0
