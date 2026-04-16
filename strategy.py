@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout (20) with 1d volume confirmation (1.5x) and 1d ADX trend filter (>25)
-# Long when price breaks above Donchian upper (20) AND volume > 1.5x 1d average volume AND 1d ADX > 25
-# Short when price breaks below Donchian lower (20) AND volume > 1.5x 1d average volume AND 1d ADX > 25
-# ATR trailing stop (2.0x ATR) to manage risk
-# Donchian channels provide clear breakout levels, volume confirms conviction, ADX filters for trending markets
+# Hypothesis: 4h Donchian breakout (55-period) with 1d volume confirmation and 1d ADX trend filter
+# Long when price breaks above Donchian upper (55) AND volume > 1.5x 1d average volume AND 1d ADX > 25
+# Short when price breaks below Donchian lower (55) AND volume > 1.5x 1d average volume AND 1d ADX > 25
+# ATR trailing stop (2.5x ATR) to manage risk
+# Using longer Donchian period (55) to reduce trade frequency and avoid overtrading
+# Volume confirms conviction, ADX filters for trending markets, ATR manages risk
 # Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and fee drag
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,14 +21,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Donchian channels (20-period) ===
+    # === 4h Donchian channels (55-period) ===
     df_4h = get_htf_data(prices, '4h')
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
     
     # Calculate Donchian channels
-    donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donch_high = pd.Series(high_4h).rolling(window=55, min_periods=55).max().values
+    donch_low = pd.Series(low_4h).rolling(window=55, min_periods=55).min().values
     
     donch_high_aligned = align_htf_to_ltf(prices, df_4h, donch_high)
     donch_low_aligned = align_htf_to_ltf(prices, df_4h, donch_low)
@@ -87,7 +88,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 50
+    warmup = 100
     
     # Track position and entry price for trailing stop
     position = 0  # 0: flat, 1: long, -1: short
@@ -124,8 +125,8 @@ def generate_signals(prices):
             # Update highest price since entry
             if price > highest_since_entry:
                 highest_since_entry = price
-            # Trail stop: exit if price drops 2.0*ATR from highest
-            if atr_val > 0 and price < highest_since_entry - 2.0 * atr_val:
+            # Trail stop: exit if price drops 2.5*ATR from highest
+            if atr_val > 0 and price < highest_since_entry - 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 highest_since_entry = 0.0
@@ -135,8 +136,8 @@ def generate_signals(prices):
             # Update lowest price since entry
             if price < lowest_since_entry or lowest_since_entry == 0:
                 lowest_since_entry = price
-            # Trail stop: exit if price rises 2.0*ATR from lowest
-            if atr_val > 0 and price > lowest_since_entry + 2.0 * atr_val:
+            # Trail stop: exit if price rises 2.5*ATR from lowest
+            if atr_val > 0 and price > lowest_since_entry + 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 lowest_since_entry = 0.0
@@ -146,14 +147,14 @@ def generate_signals(prices):
         if position == 0:
             # Long when: price breaks above Donchian upper AND volume confirmation AND trend filter
             if price > donch_high_val and vol_confirm and trend_filter:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 entry_price = price
                 highest_since_entry = price
                 continue
             # Short when: price breaks below Donchian lower AND volume confirmation AND trend filter
             elif price < donch_low_val and vol_confirm and trend_filter:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 entry_price = price
                 lowest_since_entry = price
@@ -161,14 +162,14 @@ def generate_signals(prices):
         
         # Hold current position
         if position == 1:
-            signals[i] = 0.25
+            signals[i] = 0.30
         elif position == -1:
-            signals[i] = -0.25
+            signals[i] = -0.30
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian20_1dVolume1.5x_ADX25_ATRTrail_2.0x"
+name = "4h_Donchian55_1dVolume1.5x_ADX25_ATRTrail_2.5x"
 timeframe = "4h"
 leverage = 1.0
