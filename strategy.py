@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Williams %R for mean reversion in extreme zones with volume confirmation.
-# Long when 1d Williams %R < -80 (oversold) + price > 4h VWAP + volume > 1.5x 20-period average.
-# Short when 1d Williams %R > -20 (overbought) + price < 4h VWAP + volume > 1.5x 20-period average.
-# Exit when Williams %R returns to neutral zone (-80 to -20) or volume drops below average.
-# Uses discrete position size 0.25. Williams %R identifies exhaustion points, VWAP provides dynamic support/resistance,
-# volume confirmation ensures institutional participation. Target: 80-180 total trades over 4 years (20-45/year).
+# Hypothesis: 6h strategy using 1d Williams %R reversal + 1w EMA trend filter + volume confirmation.
+# Long when 1d Williams %R < -80 (oversold) and price crosses above -50 level, with 1w EMA up and volume > 1.5x average.
+# Short when 1d Williams %R > -20 (overbought) and price crosses below -50 level, with 1w EMA down and volume > 1.5x average.
+# Uses discrete position size 0.25. Williams %R provides mean reversion in extremes, 1w EMA ensures trend alignment,
+# volume confirmation avoids false breakouts. Target: 50-150 total trades over 4 years (12-37/year).
 
 def generate_signals(prices):
     n = len(prices)
@@ -30,43 +29,43 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Williams %R calculation (14-period)
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
-        if i < 13 or np.isnan(highest_high_14[i]) or np.isnan(lowest_low_14[i]) or (highest_high_14[i] - lowest_low_14[i]) == 0:
-            williams_r[i] = -50.0  # neutral
+    williams_r = np.full_like(close_1d, np.nan)
+    for i in range(14, len(close_1d)):
+        highest_high = np.max(high_1d[i-14:i+1])
+        lowest_low = np.min(low_1d[i-14:i+1])
+        if highest_high != lowest_low:
+            williams_r[i] = (highest_high - close_1d[i]) / (highest_high - lowest_low) * -100
         else:
-            williams_r[i] = (highest_high_14[i] - close_1d[i]) / (highest_high_14[i] - lowest_low_14[i]) * -100
+            williams_r[i] = -50  # neutral when range is zero
     
-    # Align 1d Williams %R to 4h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Williams %R signal: 1 for bullish cross above -50, -1 for bearish cross below -50, 0 otherwise
+    williams_signal = np.zeros_like(close_1d)
+    for i in range(15, len(close_1d)):
+        prev_r = williams_r[i-1]
+        curr_r = williams_r[i]
+        if prev_r <= -50 and curr_r > -50:
+            williams_signal[i] = 1   # bullish crossover
+        elif prev_r >= -50 and curr_r < -50:
+            williams_signal[i] = -1  # bearish crossover
     
-    # Get 4h data once before loop for VWAP and volume
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get 1w data once before loop for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    close_1w = df_1w['close'].values
     
-    # Typical price for VWAP
-    typical_price_4h = (high_4h + low_4h + close_4h) / 3.0
-    vp = typical_price_4h * volume_4h
+    # 1w EMA (34-period) for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_dir = np.zeros_like(ema_34_1w)
+    ema_34_1w_dir[1:] = np.where(ema_34_1w[1:] > ema_34_1w[:-1], 1, np.where(ema_34_1w[1:] < ema_34_1w[:-1], -1, 0))
     
-    # Cumulative VWAP (reset periodically)
-    cum_vp = np.cumsum(vp)
-    cum_vol = np.cumsum(volume_4h)
-    vwap = np.divide(cum_vp, cum_vol, out=np.zeros_like(cum_vp), where=cum_vol!=0)
+    # Align 1d Williams %R signal and 1w EMA direction to 6h timeframe
+    williams_signal_aligned = align_htf_to_ltf(prices, df_1d, williams_signal)
+    ema_34_1w_dir_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w_dir)
     
-    # Align 4h VWAP to 4h timeframe (no alignment needed as same timeframe)
-    vwap_aligned = vwap  # already aligned
-    
-    # Volume moving average (20-period) on 4h
-    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = vol_ma_20_4h  # already aligned
+    # Volume moving average (20-period) on 6h
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
@@ -78,30 +77,33 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(vwap_aligned[i]) or 
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(williams_signal_aligned[i]) or 
+            np.isnan(ema_34_1w_dir_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values
-        wr = williams_r_aligned[i]
-        vwap_val = vwap_aligned[i]
-        vol_ma_val = vol_ma_aligned[i]
-        price = close[i]
+        williams_sig = williams_signal_aligned[i]
+        ema_dir = ema_34_1w_dir_aligned[i]
+        vol_ma_val = vol_ma_20[i]
         vol = volume[i]
+        
+        # Volume filter: volume > 1.5x 20-period average
+        vol_filter = vol > 1.5 * vol_ma_val
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if Williams %R returns to neutral zone or price drops below VWAP
-            if wr > -80 or price < vwap_val:
+            # Exit if Williams %R signal turns bearish or EMA trend turns down
+            if williams_sig <= 0 or ema_dir <= 0:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if Williams %R returns to neutral zone or price rises above VWAP
-            if wr < -20 or price > vwap_val:
+            # Exit if Williams %R signal turns bullish or EMA trend turns up
+            if williams_sig >= 0 or ema_dir >= 0:
                 exit_signal = True
         
         if exit_signal:
@@ -111,20 +113,16 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Volume filter: volume > 1.5x 20-period average
-            vol_filter = vol > 1.5 * vol_ma_val
+            # Trend filter: 1w EMA must be trending (non-zero)
+            trend_filter = ema_dir != 0
             
-            # Price filter: price must be on correct side of VWAP
-            price_filter_long = price > vwap_val
-            price_filter_short = price < vwap_val
-            
-            # LONG: Williams %R oversold (< -80), price > VWAP, volume confirmation
-            if wr < -80 and price_filter_long and vol_filter:
+            # LONG: Williams %R bullish cross, EMA up, volume confirmation
+            if (williams_sig > 0) and (ema_dir > 0) and vol_filter and trend_filter:
                 signals[i] = 0.25
                 position = 1
             
-            # SHORT: Williams %R overbought (> -20), price < VWAP, volume confirmation
-            elif wr > -20 and price_filter_short and vol_filter:
+            # SHORT: Williams %R bearish cross, EMA down, volume confirmation
+            elif (williams_sig < 0) and (ema_dir < 0) and vol_filter and trend_filter:
                 signals[i] = -0.25
                 position = -1
         
@@ -133,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dWilliamsR_VWAP_VolumeConfirmation_V1"
-timeframe = "4h"
+name = "6h_1dWilliamsR_1wEMA34_VolumeConfirmation_V1"
+timeframe = "6h"
 leverage = 1.0
