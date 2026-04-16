@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R1/S1 breakout with 12h volume spike (>2.0x median) and 12h EMA50 trend filter
-# Uses tighter volume threshold (2.0x) to reduce overtrading while maintaining edge
-# Long when price > R1 AND 12h volume > 2.0x 20-period 12h volume median AND close > 12h EMA50
-# Short when price < S1 AND 12h volume > 2.0x 20-period 12h volume median AND close < 12h EMA50
+# Hypothesis: 4h Camarilla R1/S1 breakout with 12h volume spike (>2.5x median) and 12h EMA50 trend filter
+# Uses tighter volume threshold (2.5x) and session filter (08-20 UTC) to reduce overtrading while maintaining edge
+# Long when price > R1 AND 12h volume > 2.5x 20-period 12h volume median AND close > 12h EMA50
+# Short when price < S1 AND 12h volume > 2.5x 20-period 12h volume median AND close < 12h EMA50
 # Exit on price returning to pivot point (PP) or ATR stoploss (2.0 ATR)
 # Position size 0.25 to limit fee drag. Target: 50-150 total trades over 4 years.
 
@@ -102,8 +102,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 12h volume > 2.0x 20-period 12h volume median
-        vol_threshold = vol_median_20_12h_aligned[i] * 2.0
+        # Volume filter: current 12h volume > 2.5x 20-period 12h volume median
+        vol_threshold = vol_median_20_12h_aligned[i] * 2.5
         vol_confirm = vol_12h_aligned[i] > vol_threshold
         
         # Trend filter: price vs 12h EMA50
@@ -154,6 +154,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_12hVolMedian2.0x_EMA50_v1"
+name = "4h_Camarilla_R1S1_12hVolMedian2.5x_EMA50_v1"
 timeframe = "4h"
 leverage = 1.0
