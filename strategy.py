@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h TRIX(12) zero-cross with 1d HMA(34) trend filter, volume confirmation (1.5x 20-period average), and ATR(14) stoploss (2*ATR).
-# Long when TRIX crosses above zero AND 1d HMA(34) trending up AND volume spike.
-# Short when TRIX crosses below zero AND 1d HMA(34) trending down AND volume spike.
-# Exit on ATR-based stoploss or opposite TRIX zero-cross.
-# Uses discrete position size 0.25. TRIX is a momentum oscillator that filters noise and identifies trend changes.
-# Volume confirmation avoids false breakouts. HMA(34) on 1d ensures alignment with higher timeframe trend.
-# Designed for low trade frequency (<50/year) to minimize fee drag while capturing strong momentum moves.
-# Works in both bull and bear markets by requiring 1d trend filter and volume confirmation.
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d ADX(14) trend filter and volume confirmation.
+# Long when price breaks above Camarilla R1 AND 1d ADX > 25 AND +DI > -DI AND volume > 1.5x 20-period average.
+# Short when price breaks below Camarilla S1 AND 1d ADX > 25 AND -DI > +DI AND volume > 1.5x 20-period average.
+# Exit on opposite Camarilla level touch (R1 for shorts, S1 for longs) or ATR-based stoploss (2*ATR).
+# Uses discrete position size 0.25. Designed to capture institutional breakouts with volume and trend confirmation.
+# Works in both bull and bear markets by requiring 1d trend strength (ADX) and volume confirmation, avoiding false breakouts.
+# Target: 75-200 total trades over 4 years (19-50/year) to balance edge and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,30 +21,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Indicators: TRIX(12) ===
-    # TRIX = EMA(EMA(EMA(close, 12), 12), 12) then percent change
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    trix_raw = 100 * (pd.Series(ema3).pct_change().values)
-    # Smoothed TRIX signal line (9-period EMA of TRIX)
-    trix_signal = pd.Series(trix_raw).ewm(span=9, adjust=False, min_periods=9).mean().values
-    trix_cross_up = (trix_signal > 0) & (np.roll(trix_signal, 1) <= 0)
-    trix_cross_down = (trix_signal < 0) & (np.roll(trix_signal, 1) >= 0)
+    # === 4h Indicators: Camarilla Pivot Levels (from previous day) ===
+    # Camarilla levels calculated from previous day's OHLC
+    # R1 = close + (high - low) * 1.1/12
+    # S1 = close - (high - low) * 1.1/12
+    # We need to shift by 1 to avoid look-ahead (use previous day's levels)
+    prev_high = pd.Series(high).shift(1).values
+    prev_low = pd.Series(low).shift(1).values
+    prev_close = pd.Series(close).shift(1).values
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # === 1d Indicators: HMA(34) for trend ===
+    # === 1d Indicators: ADX(14) for trend strength ===
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # HMA calculation: WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-    half_len = 17  # 34/2
-    sqrt_len = 6   # sqrt(34) ≈ 5.83
-    wma_half = pd.Series(close_1d).ewm(span=half_len, adjust=False, min_periods=half_len).mean().values
-    wma_full = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    raw_hma = 2 * wma_half - wma_full
-    hma_1d = pd.Series(raw_hma).ewm(span=sqrt_len, adjust=False, min_periods=sqrt_len).mean().values
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
-    hma_up = hma_1d_aligned > np.roll(hma_1d_aligned, 1)
-    hma_down = hma_1d_aligned < np.roll(hma_1d_aligned, 1)
+    
+    # True Range
+    tr1 = pd.Series(high_1d).diff()
+    tr2 = pd.Series(low_1d).diff().abs()
+    tr3 = pd.Series(close_1d).shift(1).diff().abs()
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Movement
+    up_move = pd.Series(high_1d).diff()
+    down_move = pd.Series(low_1d).diff().abs()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed DM
+    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / atr_1d
+    minus_di = 100 * minus_dm_smooth / atr_1d
+    
+    # ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Align 1d indicators to 4h
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    plus_di_aligned = align_htf_to_ltf(prices, df_1d, plus_di)
+    minus_di_aligned = align_htf_to_ltf(prices, df_1d, minus_di)
+    
+    # Trend conditions
+    adx_strong = adx_1d_aligned > 25
+    plus_di_dominant = plus_di_aligned > minus_di_aligned
+    minus_di_dominant = minus_di_aligned > plus_di_aligned
     
     # === 1d Indicators: Volume Spike (volume > 1.5x 20-period average) ===
     vol_1d = df_1d['volume'].values
@@ -54,10 +80,10 @@ def generate_signals(prices):
     volume_spike = volume > (1.5 * vol_ma_1d_aligned)
     
     # === 4h ATR for stoploss ===
-    tr1 = pd.Series(high - low).values
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1))).values
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1))).values
-    tr_4h = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr1 = pd.Series(high).diff()
+    tr2 = pd.Series(low).diff().abs()
+    tr3 = pd.Series(close).shift(1).diff().abs()
+    tr_4h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr_4h_raw = pd.Series(tr_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # Session filter: 08-20 UTC
@@ -66,8 +92,8 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed for TRIX/HMA/ATR)
-    warmup = 60
+    # Warmup: ensure all indicators are valid (max 50 periods needed for ADX/ATR)
+    warmup = 100
     
     # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
@@ -75,9 +101,9 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(trix_signal[i]) or np.isnan(hma_1d_aligned[i]) or np.isnan(volume_spike[i]) or
-            np.isnan(atr_4h_raw[i]) or
-            not session_filter[i]):
+        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or np.isnan(adx_1d_aligned[i]) or
+            np.isnan(plus_di_aligned[i]) or np.isnan(minus_di_aligned[i]) or np.isnan(volume_spike[i]) or
+            np.isnan(atr_4h_raw[i]) or not session_filter[i]):
             signals[i] = 0.0
             position = 0
             continue
@@ -91,16 +117,16 @@ def generate_signals(prices):
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if TRIX crosses below zero
-            if trix_cross_down[i]:
+            # Exit if price touches or breaks below Camarilla S1
+            if price <= camarilla_s1[i]:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR below entry
             elif price < entry_price - 2.0 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if TRIX crosses above zero
-            if trix_cross_up[i]:
+            # Exit if price touches or breaks above Camarilla R1
+            if price >= camarilla_r1[i]:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR above entry
             elif price > entry_price + 2.0 * atr_val:
@@ -114,14 +140,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: TRIX crosses above zero AND HMA trending up AND volume spike
-            if trix_cross_up[i] and hma_up[i] and vol_spike:
+            # LONG: Price breaks above Camarilla R1 AND ADX > 25 AND +DI > -DI AND volume spike
+            if price > camarilla_r1[i] and adx_strong[i] and plus_di_dominant[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: TRIX crosses below zero AND HMA trending down AND volume spike
-            elif trix_cross_down[i] and hma_down[i] and vol_spike:
+            # SHORT: Price breaks below Camarilla S1 AND ADX > 25 AND -DI > +DI AND volume spike
+            elif price < camarilla_s1[i] and adx_strong[i] and minus_di_dominant[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -131,6 +157,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_TRIX12_1dHMA34_VolumeSpike_V1"
+name = "4h_Camarilla_R1S1_1dADX14_VolumeSpike_V1"
 timeframe = "4h"
 leverage = 1.0
