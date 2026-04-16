@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -29,80 +29,86 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # === 4h EMA21 for trend filter ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
+    # === Weekly EMA34 for trend filter ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # === Price Momentum (ROC 5-period) ===
-    roc_5 = ((pd.Series(close).pct_change(5) * 100)).values
+    # === 14-day RSI for momentum ===
+    delta = np.diff(close, prepend=np.nan)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    gain_ma = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    loss_ma = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = gain_ma.values / np.maximum(loss_ma.values, 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # === Volume Spike Detection (15-period volume MA) ===
-    vol_ma = pd.Series(volume).rolling(window=15, min_periods=15).mean().values
-    volume_spike = volume > (1.8 * vol_ma)  # Strong volume spike
+    # === Volume Spike Detection (20-period volume MA) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators have valid data
-    warmup = 100  # Need ROC(5), EMA21, ATR14
+    warmup = 200  # Need RSI(14), EMA34(1w), ATR14
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(roc_5[i]) or np.isnan(ema_21_4h_aligned[i]) or
+        if (np.isnan(rsi[i]) or np.isnan(ema_34_1w_aligned[i]) or
             np.isnan(atr_1d_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        roc = roc_5[i]
-        ema21 = ema_21_4h_aligned[i]
+        rsi_val = rsi[i]
+        ema34w = ema_34_1w_aligned[i]
         atr = atr_1d_aligned[i]
         vol_spike = volume_spike[i]
         
-        # === EXIT LOGIC: Exit when momentum fades or volatility drops ===
+        # === EXIT LOGIC: Exit when trend weakens or volatility drops ===
         if position == 1:  # Long position
-            # Exit when momentum turns negative OR volatility drops significantly
-            if roc < 0 or atr < (atr_1d_aligned[i-1] * 0.7 if i > 0 else atr):
+            # Exit when RSI turns weak OR volatility drops significantly
+            if rsi_val < 50 or atr < (atr_1d_aligned[i-1] * 0.6 if i > 0 else atr):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when momentum turns positive OR volatility drops significantly
-            if roc > 0 or atr < (atr_1d_aligned[i-1] * 0.7 if i > 0 else atr):
+            # Exit when RSI turns strong OR volatility drops significantly
+            if rsi_val > 50 or atr < (atr_1d_aligned[i-1] * 0.6 if i > 0 else atr):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Strong positive momentum + price above EMA21 + volume spike
-            if roc > 0.5 and price > ema21 and vol_spike:
-                signals[i] = 0.30
+            # LONG: RSI > 60, price above weekly EMA34, volume spike
+            if rsi_val > 60 and price > ema34w and vol_spike:
+                signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Strong negative momentum + price below EMA21 + volume spike
-            elif roc < -0.5 and price < ema21 and vol_spike:
-                signals[i] = -0.30
+            # SHORT: RSI < 40, price below weekly EMA34, volume spike
+            elif rsi_val < 40 and price < ema34w and vol_spike:
+                signals[i] = -0.25
                 position = -1
                 continue
         
         # Hold current position
         if position == 1:
-            signals[i] = 0.30
+            signals[i] = 0.25
         elif position == -1:
-            signals[i] = -0.30
+            signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "4h_EMA21_ROC5_VolumeSpike_ATRFilter"
-timeframe = "4h"
+name = "1d_RSI14_EMA34_1w_VolumeSpike_Trend"
+timeframe = "1d"
 leverage = 1.0
