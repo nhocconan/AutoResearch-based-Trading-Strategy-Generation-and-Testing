@@ -1,14 +1,14 @@
+# 12-hour Donchian breakout with volume confirmation and ADX filter
+# Strategy: Enter long when price breaks above 12h Donchian upper (20) with volume > 1.5x 1d average and 1d ADX > 25
+# Short when price breaks below 12h Donchian lower (20) with same conditions
+# Use ATR trailing stop (2.0x) for risk management
+# Designed to capture trending moves with volume confirmation in both bull and bear markets
+# Target: 50-150 total trades over 4 years to minimize fee drag
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 12h Donchian breakout with 1d volume confirmation and 1d ADX trend filter
-# Long when price breaks above Donchian upper (20) AND volume > 1.5x 1d average volume AND 1d ADX > 25
-# Short when price breaks below Donchian lower (20) AND volume > 1.5x 1d average volume AND 1d ADX > 25
-# ATR trailing stop (2.0x ATR) to manage risk
-# Donchian channels provide clear breakout levels, volume confirms conviction, ADX filters for trending markets
-# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -70,13 +70,14 @@ def generate_signals(prices):
     
     # DX and ADX
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    dx = np.where((di_plus + di_minus) != 0, dx, 0)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     adx[np.isnan(dx)] = 0
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # === 12h ATR for trailing stop (14-period) ===
     tr1_12h = high_12h - low_12h
-    tr2_12h = np.abs(high_12h - np.roll(close, 1))  # Note: using 12h close for consistency
+    tr2_12h = np.abs(high_12h - np.roll(close, 1))
     tr3_12h = np.abs(low_12h - np.roll(close, 1))
     tr2_12h[0] = tr1_12h[0]
     tr3_12h[0] = tr1_12h[0]
