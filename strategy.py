@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h mean reversion with 4h/1d regime filters
-# Long when: 1h RSI < 30 AND price > 4h VWAP AND 1d close > 1d 200 EMA (bullish bias)
-# Short when: 1h RSI > 70 AND price < 4h VWAP AND 1d close < 1d 200 EMA (bearish bias)
-# Exit when 1h RSI crosses 50 (mean reversion complete) or ATR stoploss (1.5*ATR)
-# Uses discrete size 0.20. Target: 80-120 total trades over 4 years (20-30/year).
-# Works in bull markets via 1d EMA200 filter and in bear markets via short side.
-# Session filter 08-20 UTC reduces noise and fee drag.
+# Hypothesis: 6h Williams %R (14) mean reversion with 1w EMA(50) trend filter and 1d volume spike confirmation.
+# Long when Williams %R < -80 (oversold) AND price > 1w EMA50 (uptrend) AND 1d volume > 1.5x 20-period average.
+# Short when Williams %R > -20 (overbought) AND price < 1w EMA50 (downtrend) AND 1d volume > 1.5x 20-period average.
+# Exit when Williams %R crosses -50 (mean reversion midpoint) or ATR-based stoploss (2*ATR from entry).
+# Uses discrete position size 0.25. Designed to capture mean reversion swings within the weekly trend.
+# Target: 80-160 total trades over 4 years (20-40/year) to balance edge and fee drag.
+# Works in both bull and bear markets by requiring alignment with weekly trend and volume confirmation.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,48 +21,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1h Indicators ===
-    # RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # === 6h Indicators: Williams %R (14-period) ===
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
-    # VWAP approximation using typical price
-    typical_price = (high + low + close) / 3
-    vwap_num = pd.Series(typical_price * volume).cumsum()
-    vwap_den = pd.Series(volume).cumsum()
-    vwap = (vwap_num / vwap_den).values
+    # === 1w Indicators: EMA(50) for trend filter ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    price_above_weekly_ema = close > ema_50_1w_aligned
+    price_below_weekly_ema = close < ema_50_1w_aligned
     
-    # ATR(14) for stoploss
+    # === 1d Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    df_1d = get_htf_data(prices, '1d')
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    volume_spike = volume > (1.5 * vol_ma_1d_aligned)
+    
+    # === 6h ATR for stoploss ===
     tr1 = pd.Series(high).diff()
     tr2 = pd.Series(low).diff().abs()
     tr3 = pd.Series(close).shift(1).diff().abs()
-    tr_1h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1h = pd.Series(tr_1h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # === 4h Indicators: VWAP (same calculation as 1h but on 4h data) ===
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
-    
-    typical_price_4h = (high_4h + low_4h + close_4h) / 3
-    vwap_num_4h = pd.Series(typical_price_4h * volume_4h).cumsum()
-    vwap_den_4h = pd.Series(volume_4h).cumsum()
-    vwap_4h = (vwap_num_4h / vwap_den_4h).values
-    vwap_4h_aligned = align_htf_to_ltf(prices, df_4h, vwap_4h)
-    
-    # === 1d Indicators: EMA(200) for trend bias ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    tr_6h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_6h = pd.Series(tr_6h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -70,8 +54,8 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 200 periods needed for EMA200)
-    warmup = 200
+    # Warmup: ensure all indicators are valid (max 50 periods needed for weekly EMA)
+    warmup = 100
     
     # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
@@ -79,38 +63,37 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(rsi_values[i]) or np.isnan(vwap[i]) or np.isnan(vwap_4h_aligned[i]) or
-            np.isnan(ema_200_1d_aligned[i]) or np.isnan(atr_1h[i]) or
-            not session_filter[i]):
+        if (np.isnan(williams_r[i]) or np.isnan(price_above_weekly_ema[i]) or np.isnan(price_below_weekly_ema[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(atr_6h[i]) or not session_filter[i]):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values
         price = close[i]
-        rsi_val = rsi_values[i]
-        price_vwap = vwap[i]
-        vwap_4h = vwap_4h_aligned[i]
-        ema_200 = ema_200_1d_aligned[i]
-        atr_val = atr_1h[i]
+        wr = williams_r[i]
+        vol_spike = volume_spike[i]
+        above_weekly = price_above_weekly_ema[i]
+        below_weekly = price_below_weekly_ema[i]
+        atr_val = atr_6h[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if RSI crosses above 50 (mean reversion complete)
-            if rsi_val > 50:
+            # Exit if Williams %R crosses above -50 (mean reversion)
+            if wr > -50:
                 exit_signal = True
-            # ATR-based stoploss: 1.5*ATR below entry
-            elif price < entry_price - 1.5 * atr_val:
+            # ATR-based stoploss: 2*ATR below entry
+            elif price < entry_price - 2.0 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if RSI crosses below 50 (mean reversion complete)
-            if rsi_val < 50:
+            # Exit if Williams %R crosses below -50 (mean reversion)
+            if wr < -50:
                 exit_signal = True
-            # ATR-based stoploss: 1.5*ATR above entry
-            elif price > entry_price + 1.5 * atr_val:
+            # ATR-based stoploss: 2*ATR above entry
+            elif price > entry_price + 2.0 * atr_val:
                 exit_signal = True
         
         if exit_signal:
@@ -121,23 +104,23 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: RSI < 30 (oversold) AND price > 4h VWAP (4h bullish bias) AND 1d close > 1d EMA200 (bullish trend)
-            if rsi_val < 30 and price > vwap_4h and close_1d[-1] > ema_200:  # close_1d[-1] is latest 1d close
-                signals[i] = 0.20
+            # LONG: Williams %R oversold (< -80) AND price above weekly EMA AND volume spike
+            if wr < -80 and above_weekly and vol_spike:
+                signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: RSI > 70 (overbought) AND price < 4h VWAP (4h bearish bias) AND 1d close < 1d EMA200 (bearish trend)
-            elif rsi_val > 70 and price < vwap_4h and close_1d[-1] < ema_200:
-                signals[i] = -0.20
+            # SHORT: Williams %R overbought (> -20) AND price below weekly EMA AND volume spike
+            elif wr > -20 and below_weekly and vol_spike:
+                signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         else:
-            signals[i] = position * 0.20
+            signals[i] = position * 0.25
     
     return signals
 
-name = "1h_RSIMeanRev_4hVWAP_1dEMA200_V1"
-timeframe = "1h"
+name = "6h_WilliamsR14_1wEMA50_1dVolumeSpike_V1"
+timeframe = "6h"
 leverage = 1.0
