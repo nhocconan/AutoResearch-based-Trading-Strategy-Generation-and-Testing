@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation (2.0x median) and 1w trend filter (EMA50)
-# Long when price > Donchian upper band AND 1d volume > 2.0x 20-period median volume AND weekly close > weekly EMA50
-# Short when price < Donchian lower band AND 1d volume > 2.0x 20-period median volume AND weekly close < weekly EMA50
+# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation (1.8x median) and 1w ADX trend filter (>25)
+# Long when price > Donchian upper band AND 1d volume > 1.8x 20-period median volume AND weekly ADX > 25
+# Short when price < Donchian lower band AND 1d volume > 1.8x 20-period median volume AND weekly ADX > 25
 # Exit when price crosses Donchian middle band (mean reversion to equilibrium)
 # Uses discrete position size 0.25 to limit fee drag. Target: 75-200 total trades over 4 years.
-# Combines price channel breakout with volume confirmation and weekly trend filter for robustness in bull/bear markets.
+# Combines price channel breakout with volume confirmation and weekly trend strength filter for robustness.
 
 def generate_signals(prices):
     n = len(prices)
@@ -39,26 +39,75 @@ def generate_signals(prices):
     # Volume median
     vol_median_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).median().values
     
-    # Get weekly data for trend filter
+    # Get weekly data for trend filter (ADX)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 60:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # === Weekly Indicators: EMA50 trend filter ===
+    # === Weekly Indicators: ADX(14) trend strength filter ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # True Range
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Directional Movement
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_minus = np.concatenate([[np.nan], dm_minus])
+    
+    # Smoothed TR, DM+
+    tr_period = 14
+    atr = np.full_like(tr, np.nan, dtype=float)
+    dm_plus_smooth = np.full_like(dm_plus, np.nan, dtype=float)
+    dm_minus_smooth = np.full_like(dm_minus, np.nan, dtype=float)
+    
+    # Wilder's smoothing
+    for i in range(len(tr)):
+        if i < tr_period:
+            continue
+        if i == tr_period:
+            atr[i] = np.nanmean(tr[i-tr_period+1:i+1])
+            dm_plus_smooth[i] = np.nanmean(dm_plus[i-tr_period+1:i+1])
+            dm_minus_smooth[i] = np.nanmean(dm_minus[i-tr_period+1:i+1])
+        else:
+            atr[i] = (atr[i-1] * (tr_period-1) + tr[i]) / tr_period
+            dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (tr_period-1) + dm_plus[i]) / tr_period
+            dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (tr_period-1) + dm_minus[i]) / tr_period
+    
+    # DI+ and DI-
+    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = np.full_like(dx, np.nan, dtype=float)
+    for i in range(len(dx)):
+        if i < tr_period:
+            continue
+        if i == tr_period:
+            adx[i] = np.nanmean(dx[i-tr_period+1:i+1])
+        else:
+            adx[i] = (adx[i-1] * (tr_period-1) + dx[i]) / tr_period
     
     # Align all indicators to primary timeframe
     donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper_20)
     donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower_20)
     donchian_middle_aligned = align_htf_to_ltf(prices, df_1d, donchian_middle_20)
     vol_median_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_median_20_1d)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(30, 20, 50)  # 1d Donchian, 1d volume, weekly EMA
+    warmup = max(30, 20, 30)  # 1d Donchian, 1d volume, weekly ADX
     
     # Track position state for exits
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,7 +117,7 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
             np.isnan(donchian_middle_aligned[i]) or np.isnan(vol_median_20_1d_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i])):
+            np.isnan(adx_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -77,7 +126,7 @@ def generate_signals(prices):
         lower = donchian_lower_aligned[i]
         middle = donchian_middle_aligned[i]
         vol_median = vol_median_20_1d_aligned[i]
-        weekly_ema = ema_50_1w_aligned[i]
+        weekly_adx = adx_1w_aligned[i]
         
         # Current 1d volume (aligned)
         vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
@@ -85,18 +134,12 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 1d volume > 2.0x 20-period 1d volume median
-        vol_threshold = vol_median * 2.0
+        # Volume filter: current 1d volume > 1.8x 20-period 1d volume median
+        vol_threshold = vol_median * 1.8
         vol_confirm = vol_1d_aligned[i] > vol_threshold
         
-        # Weekly trend filter: need weekly close aligned
-        df_1w_close = get_htf_data(prices, '1w')['close'].values
-        weekly_close_aligned = align_htf_to_ltf(prices, df_1w, df_1w_close)
-        if np.isnan(weekly_close_aligned[i]):
-            signals[i] = 0.0
-            continue
-        weekly_trend_up = weekly_close_aligned[i] > weekly_ema
-        weekly_trend_down = weekly_close_aligned[i] < weekly_ema
+        # Weekly trend filter: ADX > 25 indicates strong trend
+        weekly_trend_strong = weekly_adx > 25.0
         
         # Price levels
         price = close[i]
@@ -121,15 +164,15 @@ def generate_signals(prices):
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
             # LONG CONDITIONS
-            # Price breaks above Donchian upper band AND volume confirmation AND weekly uptrend
-            if price > upper and vol_confirm and weekly_trend_up:
+            # Price breaks above Donchian upper band AND volume confirmation AND weekly strong trend
+            if price > upper and vol_confirm and weekly_trend_strong:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
             # SHORT CONDITIONS
-            # Price breaks below Donchian lower band AND volume confirmation AND weekly downtrend
-            elif price < lower and vol_confirm and weekly_trend_down:
+            # Price breaks below Donchian lower band AND volume confirmation AND weekly strong trend
+            elif price < lower and vol_confirm and weekly_trend_strong:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -139,6 +182,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dVolumeSpike2.0x_1wTrend_v1"
+name = "4h_Donchian20_1dVolumeSpike1.8x_1wADX25_v1"
 timeframe = "4h"
 leverage = 1.0
