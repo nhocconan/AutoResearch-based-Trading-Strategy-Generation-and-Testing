@@ -13,38 +13,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Daily data (HTF for key levels) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === Weekly data (HTF for key levels) ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # === Daily Previous Day Range Calculation ===
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d[0] = close_1d[0]
-    prev_high_1d[0] = high_1d[0]
-    prev_low_1d[0] = low_1d[0]
+    # === Weekly Previous Week Range Calculation ===
+    prev_close_1w = np.roll(close_1w, 1)
+    prev_high_1w = np.roll(high_1w, 1)
+    prev_low_1w = np.roll(low_1w, 1)
+    prev_close_1w[0] = close_1w[0]
+    prev_high_1w[0] = high_1w[0]
+    prev_low_1w[0] = low_1w[0]
     
-    prev_range = prev_high_1d - prev_low_1d
+    prev_range = prev_high_1w - prev_low_1w
     
-    # === Calculate Daily Pivot Points (Fibonacci-based) ===
-    pivot_point = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
+    # === Calculate Weekly Pivot Points (Fibonacci-based) ===
+    pivot_point = (prev_high_1w + prev_low_1w + prev_close_1w) / 3
     
     # Calculate key levels: R1 and S1 at 0.382 Fibonacci
     r1 = pivot_point + prev_range * 0.382
     s1 = pivot_point - prev_range * 0.382
     
-    # Align to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align to daily timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     
-    # === Daily EMA34 for trend filter ===
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # === Weekly EMA34 for trend filter ===
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # === Volume confirmation (4h) ===
+    # === Volume confirmation (daily) ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma_20
     
@@ -59,7 +59,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # Skip if any data is NaN
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -67,7 +67,7 @@ def generate_signals(prices):
         price = close[i]
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
-        ema_34_1d_val = ema_34_1d_aligned[i]
+        ema_34_1w_val = ema_34_1w_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # === EXIT LOGIC ===
@@ -87,14 +87,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above R1 with volume AND above daily EMA34 (uptrend)
-            if (price > r1_val) and (price > ema_34_1d_val) and (vol_ratio_val > 2.0):
+            # LONG: Price breaks above R1 with volume AND above weekly EMA34 (uptrend)
+            if (price > r1_val) and (price > ema_34_1w_val) and (vol_ratio_val > 2.0):
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Price breaks below S1 with volume AND below daily EMA34 (downtrend)
-            elif (price < s1_val) and (price < ema_34_1d_val) and (vol_ratio_val > 2.0):
+            # SHORT: Price breaks below S1 with volume AND below weekly EMA34 (downtrend)
+            elif (price < s1_val) and (price < ema_34_1w_val) and (vol_ratio_val > 2.0):
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -109,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_FibPivot_R1_S1_EMA34_VolumeSpike_v4"
-timeframe = "4h"
+name = "1d_FibPivot_R1_S1_EMA34_VolumeSpike_Weekly"
+timeframe = "1d"
 leverage = 1.0
