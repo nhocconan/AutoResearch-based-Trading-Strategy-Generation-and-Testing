@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 12h Camarilla pivot levels with volume confirmation and 1d ADX trend filter.
-# Long when price breaks above R4 with volume > 1.5x 20-period median and 1d ADX > 25 (strong uptrend).
-# Short when price breaks below S4 with volume > 1.5x 20-period median and 1d ADX > 25 (strong downtrend).
-# Exit when price returns to the 12h VWAP (mean reversion to fair value).
-# Uses discrete position size 0.25. Target: 50-150 total trades over 4 years (12-37/year).
-# This strategy captures strong breakouts in trending markets (ADX>25) while filtering out false breakouts in ranging markets.
-# Works in both bull and bear markets by using ADX to identify strong trends regardless of direction.
+# Hypothesis: 4h strategy using 4h Donchian(20) breakout with 1d volume spike confirmation and ATR-based stoploss.
+# Long when price breaks above 20-period Donchian high and 1d volume > 1.5x 20-period median volume.
+# Short when price breaks below 20-period Donchian low and same volume condition.
+# Exit via ATR(14) trailing stop: long exits when price < highest high since entry - 2.0*ATR,
+# short exits when price > lowest low since entry + 2.0*ATR.
+# Uses discrete position size 0.25. Target: 75-200 total trades over 4 years (19-50/year).
+# Donchian breakouts capture strong momentum moves; volume confirmation filters false breakouts;
+# ATR trailing stop adapts to volatility and reduces whipsaws in ranging markets.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,150 +22,125 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data once before loop for Camarilla pivots and VWAP
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4h data once before loop for Donchian channels and ATR
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # === 12h Indicators: Camarilla Pivot Levels (R3, R4, S3, S4) and VWAP ===
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    vol_12h = df_12h['volume'].values
+    # === 4h Indicators: Donchian(20) channels and ATR(14) ===
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate 12h pivot point (standard formula)
-    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
-    range_12h = high_12h - low_12h
+    # Donchian(20) channels
+    donchian_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla levels
-    r3_12h = pivot_12h + range_12h * 1.1 / 4.0
-    r4_12h = pivot_12h + range_12h * 1.1 / 2.0
-    s3_12h = pivot_12h - range_12h * 1.1 / 4.0
-    s4_12h = pivot_12h - range_12h * 1.1 / 2.0
+    # ATR(14)
+    tr1 = pd.Series(high_4h - low_4h)
+    tr2 = pd.Series(np.abs(high_4h - np.roll(close_4h, 1)))
+    tr3 = pd.Series(np.abs(low_4h - np.roll(close_4h, 1)))
+    tr2.iloc[0] = tr1.iloc[0]  # first bar: no previous close
+    tr3.iloc[0] = tr1.iloc[0]
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14 = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 12h VWAP (typical price * volume)
-    typical_price_12h = (high_12h + low_12h + close_12h) / 3.0
-    vwap_12h = (typical_price_12h * vol_12h).cumsum() / vol_12h.cumsum()
-    
-    # Get 1d data for trend filter (ADX)
+    # Get 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 1d Indicators: ADX for trend strength filter ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 1d Indicators: volume median ===
+    volume_1d = df_1d['volume'].values
+    vol_median_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).median().values
     
-    # Calculate ADX components
-    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Wilder's smoothing (period=14)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            result[period-1] = np.nansum(data[:period])
-            for i in range(period, len(data)):
-                result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
-    
-    period_adx = 14
-    plus_dm_smooth = wilders_smoothing(plus_dm, period_adx)
-    minus_dm_smooth = wilders_smoothing(minus_dm, period_adx)
-    tr_smooth = wilders_smoothing(tr, period_adx)
-    
-    # Avoid division by zero
-    plus_di = np.where(tr_smooth != 0, (plus_dm_smooth / tr_smooth) * 100, 0)
-    minus_di = np.where(tr_smooth != 0, (minus_dm_smooth / tr_smooth) * 100, 0)
-    dx = np.where((plus_di + minus_di) != 0, np.abs((plus_di - minus_di) / (plus_di + minus_di)) * 100, 0)
-    adx = wilders_smoothing(dx, period_adx)
-    
-    # Get 6h volume median (20-period)
-    vol_median_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
-    
-    # Align all indicators to primary timeframe (6h)
-    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
-    r4_12h_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
-    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
-    s4_12h_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
-    vwap_12h_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    vol_median_aligned = align_htf_to_ltf(prices, df_12h, vol_median_20)  # using 12h index for alignment
+    # Align all indicators to primary timeframe (4h)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_20)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_20)
+    atr_aligned = align_htf_to_ltf(prices, df_4h, atr_14)
+    vol_median_aligned = align_htf_to_ltf(prices, df_1d, vol_median_20)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(30, 20)  # ADX(30), VWAP needs history
+    warmup = max(20, 20, 14, 20)  # Donchian(20), ATR(14), volume median(20)
     
-    # Track position state for exits
+    # Track position state for trailing stops
     position = 0  # 0: flat, 1: long, -1: short
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_12h_aligned[i]) or np.isnan(r4_12h_aligned[i]) or 
-            np.isnan(s3_12h_aligned[i]) or np.isnan(s4_12h_aligned[i]) or 
-            np.isnan(vwap_12h_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_median_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(atr_aligned[i]) or np.isnan(vol_median_aligned[i])):
             signals[i] = 0.0
             position = 0
+            highest_since_entry = 0.0
+            lowest_since_entry = 0.0
             continue
         
         # Current values (aligned)
-        r3 = r3_12h_aligned[i]
-        r4 = r4_12h_aligned[i]
-        s3 = s3_12h_aligned[i]
-        s4 = s4_12h_aligned[i]
-        vwap = vwap_12h_aligned[i]
-        adx_val = adx_aligned[i]
+        upper = donchian_high_aligned[i]
+        lower = donchian_low_aligned[i]
+        atr = atr_aligned[i]
         vol_median = vol_median_aligned[i]
-        vol_6h = volume[i]  # current 6h volume
         price = close[i]
         
-        # === EXIT LOGIC ===
+        # Get current 1d volume for volume spike filter
+        df_1d = get_htf_data(prices, '1d')
+        vol_1d = df_1d['volume'].values
+        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
+        current_vol_1d = vol_1d_aligned[i]
+        
+        # Volume spike filter: current 1d volume > 1.5x median volume
+        volume_spike = current_vol_1d > (vol_median * 1.5)
+        
+        # === EXIT LOGIC (trailing stop) ===
         exit_signal = False
-        if position != 0:  # have a position
-            # Exit when price returns to 12h VWAP (mean reversion)
-            if abs(price - vwap) / vwap < 0.005:  # within 0.5% of VWAP
+        if position == 1:  # long position
+            # Update highest high since entry
+            if price > highest_since_entry:
+                highest_since_entry = price
+            # Exit when price drops below highest high - 2.0*ATR
+            if price < highest_since_entry - 2.0 * atr:
+                exit_signal = True
+        elif position == -1:  # short position
+            # Update lowest low since entry
+            if price < lowest_since_entry:
+                lowest_since_entry = price
+            # Exit when price rises above lowest low + 2.0*ATR
+            if price > lowest_since_entry + 2.0 * atr:
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
+            highest_since_entry = 0.0
+            lowest_since_entry = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Volume spike filter: current 6h volume > 1.5x median volume
-            volume_spike = vol_6h > (vol_median * 1.5)
-            # Trend filter: 1d ADX > 25 (strong trend)
-            strong_trend = adx_val > 25
-            
             # LONG CONDITIONS
-            # Price breaks above R4 with volume spike and strong trend
-            if price > r4 and volume_spike and strong_trend:
+            # Price breaks above Donchian high and volume spike
+            if price > upper and volume_spike:
                 signals[i] = 0.25
                 position = 1
+                highest_since_entry = price  # initialize trailing stop
             
             # SHORT CONDITIONS
-            # Price breaks below S4 with volume spike and strong trend
-            elif price < s4 and volume_spike and strong_trend:
+            # Price breaks below Donchian low and volume spike
+            elif price < lower and volume_spike:
                 signals[i] = -0.25
                 position = -1
+                lowest_since_entry = price  # initialize trailing stop
         
         else:
             signals[i] = position * 0.25  # maintain position
     
     return signals
 
-name = "6h_Camarilla_R4S4_Breakout_VolumeSpike1.5x_ADX25_v1"
-timeframe = "6h"
+name = "4h_Donchian20_1dVolumeSpike1.5x_ATRTrail2.0_v1"
+timeframe = "4h"
 leverage = 1.0
