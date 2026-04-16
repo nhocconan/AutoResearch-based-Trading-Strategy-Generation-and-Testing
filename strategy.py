@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R mean reversion with 12h volume spike and 1d ADX trend filter.
-# Long when Williams %R < -80 AND 12h volume > 2.0x 20-period average AND 1d ADX > 25.
-# Short when Williams %R > -20 AND 12h volume > 2.0x 20-period average AND 1d ADX > 25.
-# Exit when Williams %R crosses above -50 (for long) or below -50 (for short).
-# Uses discrete position size 0.30. Williams %R identifies overbought/oversold conditions.
-# Volume confirmation reduces false signals, 1d ADX ensures trending regime for better follow-through.
-# Target: 60-120 total trades over 4 years (15-30/year) to minimize fee drag while capturing reversals.
+# Hypothesis: 4h Donchian(20) breakout with 4h volume confirmation and 1d ADX(14) > 25 trend filter.
+# Long when price breaks above Donchian upper band (20-period high) AND 4h volume > 1.5x 20-period average AND 1d ADX > 25.
+# Short when price breaks below Donchian lower band (20-period low) AND 4h volume > 1.5x 20-period average AND 1d ADX > 25.
+# Exit when price crosses the 20-period EMA (mean reversion to midpoint).
+# Uses discrete position size 0.25. Donchian provides objective breakout levels, volume confirms conviction,
+# 1d ADX ensures we only trade in trending regimes (avoids chop/range bound markets).
+# Target: 100-180 total trades over 4 years (25-45/year) to balance opportunity and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,35 +21,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data once before loop for Williams %R calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # === 12h Indicators: Williams %R(14) ===
-    # Highest high over 14 periods
-    hh_14 = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    # Lowest low over 14 periods
-    ll_14 = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
-    
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    williams_r = np.where((hh_14 - ll_14) != 0, 
-                          -100 * (hh_14 - close_12h) / (hh_14 - ll_14), 
-                          -50)  # neutral when range is zero
-    
-    # Align Williams %R to 12h timeframe (already on 12h, just need alignment to primary)
-    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
-    
-    # Get 12h data for volume MA
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
     # Get 1d data once before loop for ADX filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:  # Need enough for ADX calculation
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -88,13 +62,24 @@ def generate_signals(prices):
     dx = np.where(np.isnan(dx), 0, dx)
     adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align ADX to 1d timeframe
+    # Align ADX to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # === 4h Indicators: Donchian channels and EMA exit ===
+    # Donchian(20) - 20-period high/low
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # 20-period EMA for exit
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # 4h volume MA(20)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 100
+    warmup = 50
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
@@ -102,21 +87,24 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(vol_ma_20[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(ema_20[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             position = 0
             entry_price = 0.0
             continue
         
         # Current values
-        wr_val = williams_r_aligned[i]
+        dc_high = donchian_high[i]
+        dc_low = donchian_low[i]
+        ema_val = ema_20[i]
         vol_ma_val = vol_ma_20[i]
         adx_val = adx_aligned[i]
         price = close[i]
         vol = volume[i]
         
-        # Volume filter: volume > 2.0x 20-period average
-        vol_filter = vol > 2.0 * vol_ma_val if vol_ma_val > 0 else False
+        # Volume filter: volume > 1.5x 20-period average
+        vol_filter = vol > 1.5 * vol_ma_val if vol_ma_val > 0 else False
         
         # Trend filter: 1d ADX > 25 (strong trending regime)
         trend_filter = adx_val > 25
@@ -125,13 +113,13 @@ def generate_signals(prices):
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if Williams %R crosses above -50 (exiting oversold territory)
-            if wr_val > -50:
+            # Exit if price crosses below 20-period EMA
+            if price < ema_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if Williams %R crosses below -50 (exiting overbought territory)
-            if wr_val < -50:
+            # Exit if price crosses above 20-period EMA
+            if price > ema_val:
                 exit_signal = True
         
         if exit_signal:
@@ -142,23 +130,23 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Williams %R < -80 (oversold) with volume and trend confirmation
-            if wr_val < -80 and vol_filter and trend_filter:
-                signals[i] = 0.30
+            # LONG: price breaks above Donchian upper band with volume and trend confirmation
+            if price > dc_high and vol_filter and trend_filter:
+                signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: Williams %R > -20 (overbought) with volume and trend confirmation
-            elif wr_val > -20 and vol_filter and trend_filter:
-                signals[i] = -0.30
+            # SHORT: price breaks below Donchian lower band with volume and trend confirmation
+            elif price < dc_low and vol_filter and trend_filter:
+                signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         else:
-            signals[i] = position * 0.30
+            signals[i] = position * 0.25
     
     return signals
 
-name = "12h_WilliamsR_12hVolumeSpike_1dADXTrend_V1"
-timeframe = "12h"
+name = "4h_Donchian20_4hVolumeSpike_1dADX25Trend_V1"
+timeframe = "4h"
 leverage = 1.0
