@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,14 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Weekly data for trend filter ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # Weekly EMA20 for trend
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # === Daily data for pivot points ===
+    # === Daily data for pivot points and ATR ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -32,46 +25,52 @@ def generate_signals(prices):
     r1 = pivot + range_hl
     s1 = pivot - range_hl
     
-    # Align daily pivot levels to daily timeframe
-    pivot_d = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_d = align_htf_to_ltf(prices, df_1d, r1)
-    s1_d = align_htf_to_ltf(prices, df_1d, s1)
+    # Align daily pivot levels to 12h timeframe
+    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume spike detection (20-period volume MA)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
-    
-    # Daily ATR for volatility filter
+    # Daily ATR for volatility filter (14-period)
     tr_1d = np.maximum(high_1d - low_1d, 
                        np.maximum(np.abs(high_1d - np.roll(close_1d, 1)),
                                   np.abs(low_1d - np.roll(close_1d, 1))))
     tr_1d[0] = high_1d[0] - low_1d[0]  # First value
     atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    atr_1d_d = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_1d_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # 12h EMA34 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_12h_12h = align_htf_to_ltf(prices, df_12h, ema_12h)
+    
+    # Volume spike detection (20-period volume MA)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators have valid data
-    warmup = 100
+    warmup = 50
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_d[i]) or np.isnan(r1_d[i]) or np.isnan(s1_d[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(atr_1d_d[i]) or np.isnan(ema_20_1w_aligned[i])):
+        if (np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(atr_1d_12h[i]) or np.isnan(ema_12h_12h[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        pivot_level = pivot_d[i]
-        r1_level = r1_d[i]
-        s1_level = s1_d[i]
+        pivot_level = pivot_12h[i]
+        r1_level = r1_12h[i]
+        s1_level = s1_12h[i]
         vol_spike = volume_spike[i]
-        atr = atr_1d_d[i]
-        ema_trend = ema_20_1w_aligned[i]
+        atr = atr_1d_12h[i]
+        ema_trend = ema_12h_12h[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
@@ -90,28 +89,28 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above R1 with volume spike, volatility filter, and uptrend (weekly EMA20)
+            # LONG: Price breaks above R1 with volume spike, volatility filter, and uptrend
             if price > r1_level and vol_spike and atr > 0 and price > ema_trend:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 continue
             
-            # SHORT: Price breaks below S1 with volume spike, volatility filter, and downtrend (weekly EMA20)
+            # SHORT: Price breaks below S1 with volume spike, volatility filter, and downtrend
             elif price < s1_level and vol_spike and atr > 0 and price < ema_trend:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 continue
         
         # Hold current position
         if position == 1:
-            signals[i] = 0.25
+            signals[i] = 0.30
         elif position == -1:
-            signals[i] = -0.25
+            signals[i] = -0.30
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1d_Pivot_R1_S1_Breakout_Volume_WeeklyEMA20"
-timeframe = "1d"
+name = "12h_Pivot_R1_S1_Breakout_Volume_EMA34Trend"
+timeframe = "12h"
 leverage = 1.0
