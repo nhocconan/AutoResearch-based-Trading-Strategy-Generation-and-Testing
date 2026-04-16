@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h breakout of 4h Donchian (20) with 1d EMA trend filter + volume confirmation + session filter (08-20 UTC)
-# Use 4h for signal direction (Donchian breakout + EMA trend), 1h only for entry timing precision
-# Volume confirmation ensures conviction, session filter reduces noise trades outside active hours
-# ATR-based trailing stop manages risk. Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag.
-# Discrete position sizing: 0.20 for clarity and fee control.
+# Hypothesis: 12h Donchian breakout (20) + 1d EMA trend filter + volume confirmation
+# Donchian channels provide clear breakout levels that work in both bull/bear markets.
+# 1d EMA filter ensures we trade with the higher timeframe trend.
+# Volume confirmation adds conviction to breakout signals.
+# ATR-based trailing stop manages risk without look-ahead.
+# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,42 +20,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Precompute session filter (UTC 08-20) ===
-    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # === 4h data (HTF for signal direction) ===
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    # === 12h data (primary timeframe) ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
     # === 1d data (HTF for trend filter) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # === 4h Donchian Channel (20) ===
-    highest_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # === 12h Donchian Channel (20) ===
+    highest_high_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     donchian_upper = highest_high_20
     donchian_lower = lowest_low_20
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
     
     # === 1d EMA Trend Filter (34) ===
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === 4h Volume Confirmation (20-period average) ===
-    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20)
+    # === 12h Volume Confirmation (20-period average) ===
+    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
     
-    # === 4h ATR (15) for trailing stop ===
-    atr_4h = np.maximum(high_4h - low_4h, np.maximum(np.abs(high_4h - np.roll(close_4h, 1)), np.abs(low_4h - np.roll(close_4h, 1))))
-    atr_4h[0] = high_4h[0] - low_4h[0]  # Fix first value
-    atr_ma = pd.Series(atr_4h).ewm(span=15, adjust=False, min_periods=15).mean().values
-    atr_aligned = align_htf_to_ltf(prices, df_4h, atr_ma)
+    # === 12h ATR (15) for trailing stop ===
+    atr_12h = np.maximum(high_12h - low_12h, np.maximum(np.abs(high_12h - np.roll(close_12h, 1)), np.abs(low_12h - np.roll(close_12h, 1))))
+    atr_12h[0] = high_12h[0] - low_12h[0]  # Fix first value
+    atr_ma = pd.Series(atr_12h).ewm(span=15, adjust=False, min_periods=15).mean().values
+    atr_aligned = align_htf_to_ltf(prices, df_12h, atr_ma)
     
     signals = np.zeros(n)
     
@@ -78,18 +75,6 @@ def generate_signals(prices):
             position = 0
             continue
         
-        # Session filter: only trade during active UTC hours
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-                highest_since_entry = 0.0
-                lowest_since_entry = 0.0
-            else:
-                signals[i] = 0.0
-            continue
-        
         price = close[i]
         upper = donchian_upper_aligned[i]
         lower = donchian_lower_aligned[i]
@@ -108,7 +93,6 @@ def generate_signals(prices):
                 position = 0
                 entry_price = 0.0
                 highest_since_entry = 0.0
-                lowest_since_entry = 0.0
                 continue
         
         elif position == -1:  # Short position
@@ -120,7 +104,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-                highest_since_entry = 0.0
                 lowest_since_entry = 0.0
                 continue
         
@@ -132,7 +115,6 @@ def generate_signals(prices):
                 position = 0
                 entry_price = 0.0
                 highest_since_entry = 0.0
-                lowest_since_entry = 0.0
                 continue
         
         elif position == -1:  # Short position
@@ -141,7 +123,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-                highest_since_entry = 0.0
                 lowest_since_entry = 0.0
                 continue
         
@@ -151,14 +132,14 @@ def generate_signals(prices):
             if vol_confirm:
                 # Long when price breaks above upper Donchian band AND price above 1d EMA (uptrend)
                 if price > upper and price > ema_trend:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
                     position = 1
                     entry_price = price
                     highest_since_entry = price
                     continue
                 # Short when price breaks below lower Donchian band AND price below 1d EMA (downtrend)
                 elif price < lower and price < ema_trend:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
                     position = -1
                     entry_price = price
                     lowest_since_entry = price
@@ -166,14 +147,14 @@ def generate_signals(prices):
         
         # Hold current position
         if position == 1:
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif position == -1:
-            signals[i] = -0.20
+            signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1h_Donchian20_1dEMA34_VolumeConfirm_SessionFilter_ATRTrail"
-timeframe = "1h"
+name = "12h_Donchian20_1dEMA34_VolumeConfirm_ATRTrail"
+timeframe = "12h"
 leverage = 1.0
