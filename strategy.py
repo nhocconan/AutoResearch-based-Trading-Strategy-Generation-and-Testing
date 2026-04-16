@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using Bollinger Band squeeze breakout from 1d timeframe.
-# Long when price breaks above upper BB(20,2) with volume > 1.5x 20-period median volume AND BB width at 20-period low (squeeze).
-# Short when price breaks below lower BB(20,2) with volume > 1.5x 20-period median volume AND BB width at 20-period low.
-# Uses discrete position size 0.25. Exits when price reaches opposite BB band (mean reversion) or ATR stoploss hits (2.0x ATR).
-# Bollinger squeeze identifies low volatility periods primed for explosive moves. Volume confirmation filters false breakouts.
-# 6h timeframe targets 12-37 trades/year (50-150 total over 4 years) to minimize fee drag. Works in both bull/bear markets as it trades volatility expansion.
+# Hypothesis: 6h strategy using 12h Williams %R (14) combined with 6h volume spike and price position relative to 6h EMA(50).
+# Long when Williams %R < -80 (oversold) AND 6h volume > 1.5x 20-period median volume AND price > 6h EMA(50).
+# Short when Williams %R > -20 (overbought) AND 6h volume > 1.5x 20-period median volume AND price < 6h EMA(50).
+# Exits when Williams %R crosses above -50 (for longs) or below -50 (for shorts) OR ATR(14) stoploss hit (2.0x ATR).
+# Williams %R identifies overextended moves prone to reversal. Volume confirmation ensures participation.
+# 6h EMA(50) filter ensures we trade in direction of intermediate trend. Targets 12-37 trades/year to minimize fee drag.
+# Works in bull markets (buy oversold dips in uptrend) and bear markets (sell overbought rallies in downtrend).
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,31 +21,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once before loop for Bollinger Bands
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 12h data once before loop for Williams %R
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 14:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # === 1d Indicators: Bollinger Bands (20,2) ===
-    bb_middle = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = bb_upper - bb_lower
+    # === 12h Indicators: Williams %R (14-period) ===
+    highest_high_14 = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close_12h) / (highest_high_14 - lowest_low_14)
+    # Handle division by zero (when highest_high == lowest_low)
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
     
-    # === 1d Indicators: BB Width percentile (20-period) for squeeze detection ===
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=20, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
+    # === 6h Indicators: EMA(50) for trend filter ===
+    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # === 1d Indicators: Volume Median (20-period) ===
-    vol_median_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).median().values
+    # === 6h Indicators: Volume Median (20-period) ===
+    vol_median_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
     
     # === 6h Indicators: ATR (14-period) for stoploss ===
     high_low = high - low
@@ -54,16 +51,13 @@ def generate_signals(prices):
     atr_14 = pd.Series(true_range).rolling(window=14, min_periods=14).mean().values
     
     # Align all indicators to primary timeframe (6h)
-    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
-    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_1d, bb_width_percentile)
-    vol_median_aligned = align_htf_to_ltf(prices, df_1d, vol_median_20)
-    # ATR is already on primary timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
+    # EMA, volume median, and ATR are already on primary timeframe
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(20, 14)  # BB calculations, ATR
+    warmup = max(50, 20, 14)  # EMA50, volume median, ATR
     
     # Track position state and entry price for ATR stoploss
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,45 +65,34 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or
-            np.isnan(bb_width_percentile_aligned[i]) or np.isnan(vol_median_aligned[i]) or
-            np.isnan(atr_14[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50[i]) or
+            np.isnan(vol_median_20[i]) or np.isnan(atr_14[i])):
             signals[i] = 0.0
             position = 0
             entry_price = 0.0
             continue
         
-        # Current values (aligned)
+        # Current values
         price = close[i]
-        bb_upper = bb_upper_aligned[i]
-        bb_lower = bb_lower_aligned[i]
-        bb_width_percentile = bb_width_percentile_aligned[i]
-        vol_median = vol_median_aligned[i]
+        wr = williams_r_aligned[i]
+        ema = ema_50[i]
+        vol_median = vol_median_20[i]
         atr = atr_14[i]
         
-        # Get current 1d volume for volume spike filter
-        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-        current_vol_1d = vol_1d_aligned[i]
-        
-        # Volume spike filter: current 1d volume > 1.5x median volume
-        volume_spike = current_vol_1d > (vol_median * 1.5)
-        
-        # Squeeze filter: BB width at 20-period low (bottom 20% percentile)
-        squeeze = bb_width_percentile <= 20
+        # Volume spike filter: current 6h volume > 1.5x median volume
+        volume_spike = volume[i] > (vol_median * 1.5)
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit when price reaches or falls below lower BB (mean reversion)
-            # OR ATR stoploss hit (2.0 * ATR below entry)
-            if price <= bb_lower or price <= entry_price - 2.0 * atr:
+            # Exit when Williams %R crosses above -50 (momentum fading) OR ATR stoploss hit
+            if wr > -50 or price <= entry_price - 2.0 * atr:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit when price reaches or rises above upper BB (mean reversion)
-            # OR ATR stoploss hit (2.0 * ATR above entry)
-            if price >= bb_upper or price >= entry_price + 2.0 * atr:
+            # Exit when Williams %R crosses below -50 (momentum fading) OR ATR stoploss hit
+            if wr < -50 or price >= entry_price + 2.0 * atr:
                 exit_signal = True
         
         if exit_signal:
@@ -120,14 +103,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: price breaks above upper BB with volume spike AND squeeze
-            if price > bb_upper and volume_spike and squeeze:
+            # LONG: Williams %R oversold (< -80) AND volume spike AND price above EMA(50) (uptrend filter)
+            if wr < -80 and volume_spike and price > ema:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: price breaks below lower BB with volume spike AND squeeze
-            elif price < bb_lower and volume_spike and squeeze:
+            # SHORT: Williams %R overbought (> -20) AND volume spike AND price below EMA(50) (downtrend filter)
+            elif wr > -20 and volume_spike and price < ema:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -137,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_BollingerSqueeze_Breakout_VolumeSpike1.5x_ATRTrail2.0_v1"
+name = "6h_WilliamsR_VolumeSpike_EMA50Trend_ATRTrail2.0_v1"
 timeframe = "6h"
 leverage = 1.0
