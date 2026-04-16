@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and ATR-based position sizing
-# Long when price > Donchian upper band AND 12h volume > 1.8x 20-period volume SMA
-# Short when price < Donchian lower band AND 12h volume > 1.8x 20-period volume SMA
+# Hypothesis: 4h Donchian(20) breakout with 12h volume spike and 1d ADX regime filter
+# Long when price > Donchian upper band AND 12h volume > 2.0x 20-period volume SMA AND 1d ADX < 25 (range)
+# Short when price < Donchian lower band AND 12h volume > 2.0x 20-period volume SMA AND 1d ADX < 25 (range)
 # Exit on price returning to Donchian middle band or ATR stoploss (2.0 ATR)
 # Uses discrete position sizing (0.25) to limit fee drag
-# Donchian channels provide objective structure that works in trending markets
-# Volume filter reduces false breakouts; works across regimes
+# Donchian channels provide objective structure; volume filter reduces false breakouts
+# ADX < 25 ensures we only trade in ranging markets where mean reversion at channel edges works
 # Target: 75-200 total trades over 4 years (19-50/year)
 
 def generate_signals(prices):
@@ -31,15 +31,50 @@ def generate_signals(prices):
     if len(df_12h) < 30:
         return np.zeros(n)
     
+    # Get 1d data once before loop for ADX regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
     # === 12h Indicator: Volume SMA (20-period) for confirmation ===
     volume_12h = df_12h['volume'].values
     vol_sma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
     vol_sma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_sma_20_12h)
     
+    # === 1d Indicator: ADX (14-period) for regime filter ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])) > 
+                       (np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d), 
+                       np.maximum(high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]]), 0), 0)
+    dm_minus = np.where((np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d) > 
+                        (high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])), 
+                        np.maximum(np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d, 0), 0)
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
     # === 4h Indicator: Donchian Channels (20-period) ===
-    # Upper band = highest high over 20 periods
-    # Lower band = lowest low over 20 periods
-    # Middle band = (upper + lower) / 2
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
@@ -56,7 +91,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(30, 20)  # 12h volume SMA and Donchian need ~30 bars
+    warmup = max(30, 20, 28)  # 12h vol SMA, Donchian, 1d ADX need ~30 bars
     
     # Track position state for exits
     position = 0  # 0: flat, 1: long, -1: short
@@ -73,7 +108,7 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
             np.isnan(donchian_middle[i]) or np.isnan(vol_sma_20_12h_aligned[i]) or 
-            np.isnan(atr_14[i])):
+            np.isnan(adx_1d_aligned[i]) or np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
@@ -83,9 +118,12 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 12h volume > 1.8x 20-period 12h volume SMA
-        vol_threshold = vol_sma_20_12h_aligned[i] * 1.8
+        # Volume filter: current 12h volume > 2.0x 20-period 12h volume SMA
+        vol_threshold = vol_sma_20_12h_aligned[i] * 2.0
         vol_confirm = vol_12h_aligned[i] > vol_threshold
+        
+        # Regime filter: 1d ADX < 25 (ranging market)
+        range_filter = adx_1d_aligned[i] < 25
         
         # Price levels
         price = close[i]
@@ -113,15 +151,15 @@ def generate_signals(prices):
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
             # LONG CONDITIONS
-            # Price > Donchian upper band AND volume confirmation
-            if price > upper and vol_confirm:
+            # Price > Donchian upper band AND volume confirmation AND ranging market
+            if price > upper and vol_confirm and range_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
             # SHORT CONDITIONS
-            # Price < Donchian lower band AND volume confirmation
-            elif price < lower and vol_confirm:
+            # Price < Donchian lower band AND volume confirmation AND ranging market
+            elif price < lower and vol_confirm and range_filter:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -131,6 +169,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_12hVolSpike1.8x_v1"
+name = "4h_Donchian20_12hVolSpike2.0x_1dADX_Range_v1"
 timeframe = "4h"
 leverage = 1.0
