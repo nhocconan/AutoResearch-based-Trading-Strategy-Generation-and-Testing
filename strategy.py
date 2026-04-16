@@ -1,8 +1,4 @@
-# 12h_Pivot_R1_S1_Breakout_Volume_Trend_Filter
-# Hypothesis: 12h timeframe reduces trade frequency to avoid fee drag. Uses weekly pivot R1/S1 levels for structure,
-# volume confirmation to filter false breakouts, and EMA trend filter to align with higher timeframe momentum.
-# Designed to work in both bull and bear markets by requiring volume and trend alignment.
-# Target: 15-30 trades/year (~60-120 total over 4 years) to stay within fee-efficient range.
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -17,25 +13,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Weekly data for pivot points (higher timeframe structure) ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly pivot and R1/S1 levels
-    pivot_1w = (high_1w + low_1w + close_1w) / 3
-    range_hl_1w = high_1w - low_1w
-    r1_1w = pivot_1w + range_hl_1w * 0.382
-    s1_1w = pivot_1w - range_hl_1w * 0.382
-    
-    # === Daily ATR for volatility filter ===
+    # === Daily data for pivot and ATR ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range calculation
+    # Calculate Pivot and R1/S1 levels (using close for pivot)
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_hl = high_1d - low_1d
+    r1 = pivot + range_hl * 0.382
+    s1 = pivot - range_hl * 0.382
+    
+    # === True Range and ATR (14-period) ===
     tr1 = high_1d[1:] - low_1d[1:]
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
@@ -43,19 +33,17 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], tr])
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # === 12h EMA for trend filter ===
-    ema_12h = pd.Series(close).ewm(span=34, min_periods=34, adjust=False).mean().values
+    # === 6h EMA for trend filter (34-period) ===
+    ema_6h = pd.Series(close).ewm(span=34, min_periods=34, adjust=False).mean().values
     
-    # Align weekly R1/S1 to 12h timeframe
-    r1_12h = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_12h = align_htf_to_ltf(prices, df_1w, s1_1w)
-    
-    # Align daily ATR to 12h timeframe
-    atr_14_12h = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Align HTF data to 6h timeframe
+    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
+    atr_14_6h = align_htf_to_ltf(prices, df_1d, atr_14)
     
     # === Volume spike detection (20-period volume MA) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)  # Reduced threshold for more signals
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     
@@ -67,31 +55,31 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or
-            np.isnan(atr_14_12h[i]) or np.isnan(ema_12h[i]) or
+        if (np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or
+            np.isnan(atr_14_6h[i]) or np.isnan(ema_6h[i]) or
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        r1_level = r1_12h[i]
-        s1_level = s1_12h[i]
-        atr_val = atr_14_12h[i]
-        ema_val = ema_12h[i]
+        r1_level = r1_6h[i]
+        s1_level = s1_6h[i]
+        atr_val = atr_14_6h[i]
+        ema_val = ema_6h[i]
         vol_spike = volume_spike[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
             # Exit when price drops below S1 or volatility drops significantly
-            if price < s1_level or (i > 0 and atr_val < atr_14_12h[i-1] * 0.8):
+            if price < s1_level or (i > 0 and atr_val < atr_14_6h[i-1] * 0.7):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
             # Exit when price rises above R1 or volatility drops significantly
-            if price > r1_level or (i > 0 and atr_val < atr_14_12h[i-1] * 0.8):
+            if price > r1_level or (i > 0 and atr_val < atr_14_6h[i-1] * 0.7):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -120,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_R1_S1_Breakout_Volume_Trend_Filter"
-timeframe = "12h"
+name = "6h_Pivot_R1_S1_Breakout_Volume_EMA34"
+timeframe = "6h"
 leverage = 1.0
