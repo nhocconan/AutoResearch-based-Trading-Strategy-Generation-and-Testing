@@ -13,49 +13,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 6h data (primary timeframe) ===
-    df_6h = get_htf_data(prices, '6h')
-    close_6h = df_6h['close'].values
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
+    # === 12h primary data ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # 6h Donchian(15) for breakout detection
-    high_15_6h = pd.Series(high_6h).rolling(window=15, min_periods=15).max().values
-    low_15_6h = pd.Series(low_6h).rolling(window=15, min_periods=15).min().values
-    donchian_upper_6h = align_htf_to_ltf(prices, df_6h, high_15_6h)
-    donchian_lower_6h = align_htf_to_ltf(prices, df_6h, low_15_6h)
+    # 12h Donchian(20) for entry/exit levels
+    high_20_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    low_20_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donchian_upper_12h = align_htf_to_ltf(prices, df_12h, high_20_12h)
+    donchian_lower_12h = align_htf_to_ltf(prices, df_12h, low_20_12h)
     
-    # === 1d data (HTF for pivot levels) ===
+    # === 1w HTF for trend ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    # 1w EMA50 for long-term trend
+    close_1w_series = pd.Series(close_1w)
+    ema_50_1w = close_1w_series.ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # === 1d HTF for regime ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Daily pivot points (standard)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    r1_1d = (2 * pivot_1d) - low_1d
-    s1_1d = (2 * pivot_1d) - high_1d
-    r2_1d = pivot_1d + (high_1d - low_1d)
-    s2_1d = pivot_1d - (high_1d - low_1d)
-    r3_1d = high_1d + 2 * (pivot_1d - low_1d)
-    s3_1d = low_1d - 2 * (high_1d - pivot_1d)
+    # 1d ATR for volatility regime
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = np.inf
+    tr3[0] = np.inf
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Align daily pivot levels to 6t chart
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    
-    # === 1d data for volume confirmation ===
-    vol_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    
-    # === 6h indicators ===
-    # RSI(14) for overbought/oversold
+    # === 12h indicators for entry timing ===
+    # RSI(14)
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -64,9 +58,9 @@ def generate_signals(prices):
     rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
     
-    # Volume ratio (current vs 20-period MA)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma_20
+    # Volume spike detection
+    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    vol_ratio = volume / vol_ma_10
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -81,10 +75,9 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper_6h[i]) or np.isnan(donchian_lower_6h[i]) or 
-            np.isnan(rsi[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
-            np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(donchian_upper_12h[i]) or np.isnan(donchian_lower_12h[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(rsi[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -93,29 +86,24 @@ def generate_signals(prices):
         in_session = (8 <= hour <= 20)
         
         price = close[i]
-        upper_6h = donchian_upper_6h[i]
-        lower_6h = donchian_lower_6h[i]
+        upper_12h = donchian_upper_12h[i]
+        lower_12h = donchian_lower_12h[i]
+        ema_50_1w_val = ema_50_1w_aligned[i]
+        atr_1d_val = atr_1d_aligned[i]
         rsi_val = rsi[i]
         vol_ratio_val = vol_ratio[i]
-        r1 = r1_1d_aligned[i]
-        s1 = s1_1d_aligned[i]
-        r2 = r2_1d_aligned[i]
-        s2 = s2_1d_aligned[i]
-        r3 = r3_1d_aligned[i]
-        s3 = s3_1d_aligned[i]
-        vol_ma_20_1d_val = vol_ma_20_1d_aligned[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price closes below S1 or RSI becomes overbought
-            if (price < s1) or (rsi_val > 70):
+            # Exit when price closes below Donchian lower OR RSI becomes overbought
+            if (price < lower_12h) or (rsi_val > 70):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price closes above R1 or RSI becomes oversold
-            if (price > r1) or (rsi_val < 30):
+            # Exit when price closes above Donchian upper OR RSI becomes oversold
+            if (price > upper_12h) or (rsi_val < 30):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -124,18 +112,18 @@ def generate_signals(prices):
         if position == 0:
             # Only trade during session
             if in_session:
-                # LONG: Price breaks above R1 AND above R2 (strong breakout)
-                # AND RSI not overbought AND volume spike above daily average
-                if (price > r1) and (price > r2) and (rsi_val < 60) and \
-                   (vol_ratio_val > 1.5) and (volume > vol_ma_20_1d_val):
+                # LONG: Price breaks above Donchian upper AND above EMA50 (trend filter) 
+                # AND RSI not overbought AND volume spike AND volatility not too high
+                if (price > upper_12h) and (price > ema_50_1w_val) and (rsi_val < 60) and \
+                   (vol_ratio_val > 2.0) and (atr_1d_val < np.percentile(atr_1d_aligned[:i+1], 80)):
                     signals[i] = 0.25
                     position = 1
                     continue
                 
-                # SHORT: Price breaks below S1 AND below S2 (strong breakdown)
-                # AND RSI not oversold AND volume spike above daily average
-                elif (price < s1) and (price < s2) and (rsi_val > 40) and \
-                     (vol_ratio_val > 1.5) and (volume > vol_ma_20_1d_val):
+                # SHORT: Price breaks below Donchian lower AND below EMA50 (trend filter) 
+                # AND RSI not oversold AND volume spike AND volatility not too high
+                elif (price < lower_12h) and (price < ema_50_1w_val) and (rsi_val > 40) and \
+                     (vol_ratio_val > 2.0) and (atr_1d_val < np.percentile(atr_1d_aligned[:i+1], 80)):
                     signals[i] = -0.25
                     position = -1
                     continue
@@ -150,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Pivot_R1_R2_Breakout_Volume_RSI"
-timeframe = "6h"
+name = "12h_Donchian_Breakout_EMA50_1w_RSI_Volume"
+timeframe = "12h"
 leverage = 1.0
