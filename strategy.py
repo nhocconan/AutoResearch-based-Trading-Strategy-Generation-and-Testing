@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot breakout with 1d volume confirmation and 1w trend filter.
-# Long when price breaks above Camarilla R4 (1d) AND 1d volume > 1.5x 20-period average AND 1w close > 1w EMA50 (bullish weekly trend).
-# Short when price breaks below Camarilla S4 (1d) AND 1d volume > 1.5x 20-period average AND 1w close < 1w EMA50 (bearish weekly trend).
-# Exit when price crosses the Camarilla pivot point (PP) or ATR-based stoploss (2*ATR from entry).
-# Uses discrete position size 0.25. Designed to capture strong breakouts aligned with weekly trend.
+# Hypothesis: 12h Camarilla R1/S1 breakout with 1d volume spike and 1w ADX trend filter.
+# Long when price breaks above 12h Camarilla R1 level AND 1d volume > 1.5x 20-period average AND 1w ADX > 25.
+# Short when price breaks below 12h Camarilla S1 level AND 1d volume > 1.5x 20-period average AND 1w ADX > 25.
+# Exit when price crosses the 12h Camarilla midpoint (R1+S1)/2 or ATR-based stoploss (2*ATR from entry).
+# Uses discrete position size 0.25. Designed to capture breakouts in trending markets (both bull and bear).
 # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag while maintaining edge.
 
 def generate_signals(prices):
@@ -20,63 +20,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Indicators: Camarilla Pivot Levels ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 12h Indicators: Camarilla Pivot Levels (R1, S1) ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = high_1d[0]  # first bar uses current bar's high
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # Camarilla pivot calculation
+    pivot_12h = (high_12h + low_12h + close_12h) / 3
+    range_12h = high_12h - low_12h
+    r1_12h = close_12h + (range_12h * 1.1 / 12)
+    s1_12h = close_12h - (range_12h * 1.1 / 12)
+    mid_12h = (r1_12h + s1_12h) / 2
     
-    # Camarilla calculations
-    PP = (prev_high + prev_low + prev_close) / 3
-    R4 = PP + (prev_high - prev_low) * 1.1 / 2
-    S4 = PP - (prev_high - prev_low) * 1.1 / 2
-    R3 = PP + (prev_high - prev_low) * 1.1 / 4
-    S3 = PP - (prev_high - prev_low) * 1.1 / 4
-    
-    # Align to 6h timeframe
-    PP_aligned = align_htf_to_ltf(prices, df_1d, PP)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Align to 12h timeframe (already aligned, but ensuring proper shift)
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    mid_12h_aligned = align_htf_to_ltf(prices, df_12h, mid_12h)
     
     # === 1d Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    df_1d = get_htf_data(prices, '1d')
     vol_1d = df_1d['volume'].values
     vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     volume_spike = volume > (1.5 * vol_ma_1d_aligned)
     
-    # === 1w Indicators: EMA50 Trend Filter ===
+    # === 1w Indicators: ADX > 25 (trending market filter) ===
     df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    weekly_bullish = close_1w > ema_50_1w_aligned  # requires align_htf_to_ltf on close_1w first
-    # Fix: need to align close_1w first
-    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
-    weekly_bullish = close_1w_aligned > ema_50_1w_aligned
-    weekly_bearish = close_1w_aligned < ema_50_1w_aligned
     
-    # === 6h Indicators: ATR for stoploss ===
-    df_6h = get_htf_data(prices, '6h')
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
+    # True Range
+    tr1 = pd.Series(high_1w).diff()
+    tr2 = pd.Series(low_1w).diff().abs()
+    tr3 = pd.Series(close_1w).shift(1).diff().abs()
+    tr_1w = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1w = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    tr1_6h = pd.Series(high_6h).diff()
-    tr2_6h = pd.Series(low_6h).diff().abs()
-    tr3_6h = pd.Series(close_6h).shift(1).diff().abs()
-    tr_6h = pd.concat([tr1_6h, tr2_6h, tr3_6h], axis=1).max(axis=1)
-    atr_6h_raw = pd.Series(tr_6h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_6h_aligned = align_htf_to_ltf(prices, df_6h, atr_6h_raw)
+    # Directional Movement
+    dm_plus = pd.Series(high_1w).diff()
+    dm_minus = pd.Series(low_1w).diff().abs()
+    dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
+    dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
+    
+    # Smoothed DM and TR
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_smooth = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * (dm_plus_smooth / atr_smooth)
+    di_minus = 100 * (dm_minus_smooth / atr_smooth)
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    trending = adx_aligned > 25
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -84,18 +83,26 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed)
+    # Warmup: ensure all indicators are valid (max 50 periods needed for ADX/ATR)
     warmup = 100
     
     # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
+    # Calculate 12h ATR for stoploss
+    tr1_12h = pd.Series(high_12h).diff()
+    tr2_12h = pd.Series(low_12h).diff().abs()
+    tr3_12h = pd.Series(close_12h).shift(1).diff().abs()
+    tr_12h = pd.concat([tr1_12h, tr2_12h, tr3_12h], axis=1).max(axis=1)
+    atr_12h_raw = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h_raw)
+    
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(PP_aligned[i]) or np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(weekly_bullish[i]) or np.isnan(weekly_bearish[i]) or
-            np.isnan(atr_6h_aligned[i]) or not session_filter[i]):
+        if (np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or np.isnan(mid_12h_aligned[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(trending[i]) or np.isnan(atr_12h_aligned[i]) or
+            not session_filter[i]):
             signals[i] = 0.0
             position = 0
             continue
@@ -103,22 +110,23 @@ def generate_signals(prices):
         # Current values
         price = close[i]
         vol_spike = volume_spike[i]
-        atr_val = atr_6h_aligned[i]
+        is_trending = trending[i]
+        atr_val = atr_12h_aligned[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price crosses below pivot point
-            if price < PP_aligned[i]:
+            # Exit if price crosses below midpoint
+            if price < mid_12h_aligned[i]:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR below entry
             elif price < entry_price - 2.0 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price crosses above pivot point
-            if price > PP_aligned[i]:
+            # Exit if price crosses above midpoint
+            if price > mid_12h_aligned[i]:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR above entry
             elif price > entry_price + 2.0 * atr_val:
@@ -132,14 +140,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Camarilla R4 AND volume spike AND weekly bullish
-            if price > R4_aligned[i] and vol_spike and weekly_bullish[i]:
+            # LONG: Price breaks above Camarilla R1 AND volume spike AND trending market
+            if price > r1_12h_aligned[i] and vol_spike and is_trending:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: Price breaks below Camarilla S4 AND volume spike AND weekly bearish
-            elif price < S4_aligned[i] and vol_spike and weekly_bearish[i]:
+            # SHORT: Price breaks below Camarilla S1 AND volume spike AND trending market
+            elif price < s1_12h_aligned[i] and vol_spike and is_trending:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -149,6 +157,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R4_S4_1dVolumeSpike_1wEMA50_V1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_1dVolumeSpike_1wADX_V1"
+timeframe = "12h"
 leverage = 1.0
