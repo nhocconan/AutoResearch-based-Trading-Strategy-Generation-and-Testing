@@ -13,85 +13,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Daily OHLC for ATR and volume calculation ===
+    # === Daily OHLC for ATR and close ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # === ATR(14) for volatility filter ===
+    # === ATR(14) calculation ===
     tr1 = high_1d[1:] - low_1d[1:]
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
-    
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
+    # === Daily True Range Percentile (20-day) ===
+    tr_pct = pd.Series(tr).rolling(window=20, min_periods=20).rank(pct=True).values
+    
+    # === ATR Percentile aligned to 4h ===
+    atr_pct_4h = align_htf_to_ltf(prices, df_1d, tr_pct)
+    
     # === Volume spike detection (20-period volume MA) ===
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = volume_1d > (2.0 * vol_ma_1d)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
-    # === 12-hour price channel (Donchian-like: 2-period high/low) ===
-    # For 12h timeframe, use 2-period lookback (previous two 12h candles)
-    # We'll approximate using 1d data: 2-period high/low from 1d
-    high_2p = pd.Series(high_1d).rolling(window=2, min_periods=2).max().values
-    low_2p = pd.Series(low_1d).rolling(window=2, min_periods=2).min().values
-    
-    # Align HTF data to 12h timeframe
-    atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
-    volume_spike_12h = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
-    high_2p_12h = align_htf_to_ltf(prices, df_1d, high_2p)
-    low_2p_12h = align_htf_to_ltf(prices, df_1d, low_2p)
+    # === Price position relative to daily range ===
+    # Calculate daily range position: (close - low) / (high - low)
+    daily_range_pos = (close_1d - low_1d) / (high_1d - low_1d + 1e-10)
+    # Align to 4h
+    daily_range_pos_4h = align_htf_to_ltf(prices, df_1d, daily_range_pos)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators have valid data
-    warmup = 50
+    warmup = 100
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_12h[i]) or np.isnan(volume_spike_12h[i]) or
-            np.isnan(high_2p_12h[i]) or np.isnan(low_2p_12h[i])):
+        if (np.isnan(atr_pct_4h[i]) or np.isnan(daily_range_pos_4h[i]) or
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        atr = atr_12h[i]
-        vol_spike = volume_spike_12h[i]
-        high_channel = high_2p_12h[i]
-        low_channel = low_2p_12h[i]
+        atr_pct = atr_pct_4h[i]
+        range_pos = daily_range_pos_4h[i]
+        vol_spike = volume_spike[i]
         
-        # === EXIT LOGIC: Exit when price moves against channel or volatility drops ===
+        # === EXIT LOGIC: Exit when volatility drops or range extreme reached ===
         if position == 1:  # Long position
-            # Exit when price drops below lower channel or volatility drops
-            if price < low_channel or atr < (atr_12h[i-1] * 0.7 if i > 0 else atr):
+            # Exit when volatility drops significantly or price reaches upper range
+            if atr_pct < 0.3 or range_pos > 0.9:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price rises above upper channel or volatility drops
-            if price > high_channel or atr < (atr_12h[i-1] * 0.7 if i > 0 else atr):
+            # Exit when volatility drops significantly or price reaches lower range
+            if atr_pct < 0.3 or range_pos < 0.1:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above upper channel with volume spike
-            if price > high_channel and vol_spike:
+            # LONG: Low volatility + price in lower range + volume spike
+            if atr_pct > 0.7 and range_pos < 0.3 and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Price breaks below lower channel with volume spike
-            elif price < low_channel and vol_spike:
+            # SHORT: Low volatility + price in upper range + volume spike
+            elif atr_pct > 0.7 and range_pos > 0.7 and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -106,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_ChannelBreakout_VolumeSpike_ATRFilter"
-timeframe = "12h"
+name = "4h_ATR_Percentile_Range_Position_Volume"
+timeframe = "4h"
 leverage = 1.0
