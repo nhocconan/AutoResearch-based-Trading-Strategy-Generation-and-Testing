@@ -78,16 +78,16 @@ def generate_signals(prices):
         
         # === STOPLOSS LOGIC ===
         if position == 1:  # Long position
-            # Stop loss: price closes below entry - 2.0 * ATR
-            if price < entry_price - 2.0 * atr:
+            # Stop loss: price closes below entry - 2.5 * ATR
+            if price < entry_price - 2.5 * atr:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Stop loss: price closes above entry + 2.0 * ATR
-            if price > entry_price + 2.0 * atr:
+            # Stop loss: price closes above entry + 2.5 * ATR
+            if price > entry_price + 2.5 * atr:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -113,13 +113,13 @@ def generate_signals(prices):
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
             # LONG: Break above Donchian high with volume, in uptrend (above EMA50)
-            if (price > donch_high and vol_ratio > 2.0 and price > ema_trend):
+            if (price > donch_high and vol_ratio > 1.8 and price > ema_trend):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 continue
             # SHORT: Break below Donchian low with volume, in downtrend (below EMA50)
-            elif (price < donch_low and vol_ratio > 2.0 and price < ema_trend):
+            elif (price < donch_low and vol_ratio > 1.8 and price < ema_trend):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -135,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_1dEMA50_Volume_ATRStop_v1"
+name = "4h_Donchian_1dEMA50_Volume_ATRStop_v2"
 timeframe = "4h"
 leverage = 1.0
