@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h CCI(20) combined with 1d ADX(14) trend filter and volume confirmation.
-# CCI > +100 indicates strong uptrend, CCI < -100 indicates strong downtrend.
-# In trending markets (ADX > 25): follow CCI signals (long >+100, short <-100).
-# In ranging markets (ADX < 20): mean reversion at CCI extremes (>+200 long, <-200 short).
-# Volume confirmation (>1.5x average) filters weak signals. Position size 0.25.
-# Designed to work in bull (trend following) and bear (mean reversion in ranges).
+# Hypothesis: 4h Donchian breakout with 1d EMA trend filter and volume confirmation.
+# Donchian(20) breakout captures momentum; 1d EMA50 filters for trend direction;
+# volume > 1.3x average confirms strength. Short when price breaks below lower band
+# in downtrend; long when breaks above upper band in uptrend. Targets 20-40 trades/year.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,62 +18,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h data (primary timeframe) ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    volume_12h = df_12h['volume'].values
+    # === 4h data (primary timeframe) ===
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
     
-    # === 1d data (higher timeframe for ADX trend filter) ===
+    # === 1d data (higher timeframe for EMA trend filter) ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === 12h CCI(20) ===
-    tp_12h = (high_12h + low_12h + close_12h) / 3.0
-    sma_tp = pd.Series(tp_12h).rolling(window=20, min_periods=20).mean().values
-    mad = pd.Series(tp_12h).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    cci = (tp_12h - sma_tp) / (0.015 * mad)
-    cci = np.where(mad == 0, 0, cci)
-    cci_cci = align_htf_to_ltf(prices, df_12h, cci)
+    # === 4h Donchian channels (20-period) ===
+    highest_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # === 1d ADX(14) for trend filter ===
-    # Calculate +DM, -DM, TR
-    high_diff = np.diff(high_1d, prepend=high_1d[0])
-    low_diff = np.diff(low_1d, prepend=low_1d[0]) * -1  # inverted for calculation
-    plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0)
-    minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0)
+    # === 1d EMA(50) for trend filter ===
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Smoothed values
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
-    
-    # DI and DX
-    plus_di = 100 * plus_dm_smooth / atr
-    minus_di = 100 * minus_dm_smooth / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx = np.where((plus_di + minus_di) == 0, 0, adx)
-    adx_cci = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # === 12h volume ratio for confirmation ===
-    vol_ma_10_12h = pd.Series(volume_12h).rolling(window=10, min_periods=10).mean().values
-    vol_ratio_12h = volume_12h / vol_ma_10_12h
+    # === 4h volume ratio for confirmation ===
+    vol_ma_10_4h = pd.Series(volume_4h).rolling(window=10, min_periods=10).mean().values
+    vol_ratio_4h = volume_4h / vol_ma_10_4h
     
     signals = np.zeros(n)
     
-    # Warmup
-    warmup = 100
+    # Warmup - need enough data for Donchian and EMA
+    warmup = 50
     
     # Track position and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
@@ -83,36 +52,39 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(cci_cci[i]) or 
-            np.isnan(adx_cci[i]) or
-            np.isnan(vol_ratio_12h[i])):
+        if (np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or
+            np.isnan(ema_50_aligned[i]) or
+            np.isnan(vol_ratio_4h[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        cci_val = cci_cci[i]
-        adx_val = adx_cci[i]
-        vol_ratio = vol_ratio_12h[i]
+        upper_band = highest_high[i]
+        lower_band = lowest_low[i]
+        ema50 = ema_50_aligned[i]
+        vol_ratio = vol_ratio_4h[i]
         
         # === STOPLOSS LOGIC ===
         if position == 1:  # Long position
-            atr_12h = np.abs(high_12h - low_12h)
-            atr_ma = pd.Series(atr_12h).rolling(window=14, min_periods=14).mean().values
-            atr_aligned = align_htf_to_ltf(prices, df_12h, atr_ma)
+            # Simple ATR-based stop using 4h range
+            atr_4h = np.abs(high_4h[i] - low_4h[i])
+            atr_ma = pd.Series(atr_4h).rolling(window=14, min_periods=14).mean().values
+            atr_aligned = align_htf_to_ltf(prices, df_4h, atr_ma)
             atr_val = atr_aligned[i]
-            if price < entry_price - 2.5 * atr_val:
+            if price < entry_price - 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            atr_12h = np.abs(high_12h - low_12h)
-            atr_ma = pd.Series(atr_12h).rolling(window=14, min_periods=14).mean().values
-            atr_aligned = align_htf_to_ltf(prices, df_12h, atr_ma)
+            atr_4h = np.abs(high_4h[i] - low_4h[i])
+            atr_ma = pd.Series(atr_4h).rolling(window=14, min_periods=14).mean().values
+            atr_aligned = align_htf_to_ltf(prices, df_4h, atr_ma)
             atr_val = atr_aligned[i]
-            if price > entry_price + 2.5 * atr_val:
+            if price > entry_price + 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -120,16 +92,16 @@ def generate_signals(prices):
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when CCI returns to neutral or trend weakens
-            if cci_val < 0 or adx_val < 20:
+            # Exit when price breaks below lower Donchian band or trend reverses
+            if price < lower_band or price < ema50:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when CCI returns to neutral or trend weakens
-            if cci_val > 0 or adx_val < 20:
+            # Exit when price breaks above upper Donchian band or trend reverses
+            if price > upper_band or price > ema50:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -137,26 +109,18 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            if adx_val > 25:  # Trending market
-                # Follow CCI trend
-                if cci_val > 100 and vol_ratio > 1.5:
+            # Uptrend: price above 1d EMA50
+            if price > ema50:
+                # Long on breakout above upper Donchian band with volume confirmation
+                if price > upper_band and vol_ratio > 1.3:
                     signals[i] = 0.25
                     position = 1
                     entry_price = price
                     continue
-                elif cci_val < -100 and vol_ratio > 1.5:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = price
-                    continue
-            else:  # Ranging market (ADX < 25)
-                # Mean reversion at extreme CCI levels
-                if cci_val < -200 and vol_ratio > 1.5:  # Deep oversold
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = price
-                    continue
-                elif cci_val > 200 and vol_ratio > 1.5:  # Deep overbought
+            # Downtrend: price below 1d EMA50
+            elif price < ema50:
+                # Short on breakdown below lower Donchian band with volume confirmation
+                if price < lower_band and vol_ratio > 1.3:
                     signals[i] = -0.25
                     position = -1
                     entry_price = price
@@ -172,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_CCI_ADX_VolumeFilter_v1"
-timeframe = "12h"
+name = "4h_Donchian_1dEMA50_VolumeFilter_v1"
+timeframe = "4h"
 leverage = 1.0
