@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Bollinger Band squeeze breakout with 1d EMA200 trend filter and volume confirmation
-# Long when price breaks above upper BB after low volatility (BB width < 20th percentile) AND price > 1d EMA200 AND volume > 1.5x 20-period average
-# Short when price breaks below lower BB after low volatility (BB width < 20th percentile) AND price < 1d EMA200 AND volume > 1.5x 20-period average
+# Hypothesis: 1d Camarilla pivot R1/S1 breakout with 1w EMA34 trend filter and volume confirmation
+# Long when price breaks above R1 AND price > 1w EMA34 AND volume > 1.5x 20-period average
+# Short when price breaks below S1 AND price < 1w EMA34 AND volume > 1.5x 20-period average
 # ATR trailing stop (2.0x ATR) to manage risk
-# Bollinger squeeze identifies low volatility breakouts, EMA200 filters for higher-timeframe trend, volume confirms conviction
-# Designed for low trade frequency (target: 75-200 total trades over 4 years) to minimize fee drag
+# Camarilla pivot provides intraday support/resistance levels, 1w EMA34 filters for higher-timeframe trend
+# Designed for low trade frequency (target: 30-100 total trades over 4 years) to minimize fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,49 +20,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d EMA200 (trend filter) ===
+    # === 1w EMA34 (trend filter) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # === 1d Camarilla Pivot Levels (using previous day's OHLC) ===
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # === 4h Bollinger Bands (20, 2) ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    vol_4h = df_4h['volume'].values
-    
-    # Calculate BB
-    sma_20 = pd.Series(close_4h).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_4h).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2.0 * std_20
-    lower_bb = sma_20 - 2.0 * std_20
-    bb_width = (upper_bb - lower_bb) / sma_20  # Normalized width
+    # Calculate Camarilla levels: R1 = close + (high - low) * 1.1/12, S1 = close - (high - low) * 1.1/12
+    camarilla_range = high_1d - low_1d
+    r1 = close_1d + camarilla_range * 1.1 / 12
+    s1 = close_1d - camarilla_range * 1.1 / 12
     
     # Align HTF data
-    sma_20_aligned = align_htf_to_ltf(prices, df_4h, sma_20)
-    upper_bb_aligned = align_htf_to_ltf(prices, df_4h, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_4h, lower_bb)
-    bb_width_aligned = align_htf_to_ltf(prices, df_4h, bb_width)
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Calculate 20th percentile of BB width for squeeze condition (using expanding window to avoid look-ahead)
-    bb_width_percentile_20 = pd.Series(bb_width).expanding(min_periods=20).quantile(0.20).values
-    bb_width_percentile_20_aligned = align_htf_to_ltf(prices, df_4h, bb_width_percentile_20)
+    # === 1d Volume Confirmation (20-period average) ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === 4h Volume Confirmation (20-period average) ===
-    vol_ma_20 = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20)
-    
-    # === 4h ATR for trailing stop (14-period) ===
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    # === 1d ATR for trailing stop (14-period) ===
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     
@@ -77,29 +67,23 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_200_1d_aligned[i]) or 
-            np.isnan(sma_20_aligned[i]) or
-            np.isnan(upper_bb_aligned[i]) or
-            np.isnan(lower_bb_aligned[i]) or
-            np.isnan(bb_width_percentile_20_aligned[i]) or
-            np.isnan(vol_ma_aligned[i]) or
-            np.isnan(atr_aligned[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        sma_20_val = sma_20_aligned[i]
-        upper_bb_val = upper_bb_aligned[i]
-        lower_bb_val = lower_bb_aligned[i]
-        bb_width_val = bb_width_aligned[i]
-        bb_width_percentile_20_val = bb_width_percentile_20_aligned[i]
-        ema_200_val = ema_200_1d_aligned[i]
-        vol_confirm = volume[i] > vol_ma_aligned[i] * 1.5  # 1.5x average volume
-        atr_val = atr_aligned[i]
+        ema_34_val = ema_34_1w_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        vol_ma_val = vol_ma_20[i]
+        atr_val = atr[i]
         
-        # Squeeze condition: low volatility (BB width < 20th percentile)
-        squeeze_condition = bb_width_val < bb_width_percentile_20_val
+        vol_confirm = volume[i] > vol_ma_val * 1.5  # 1.5x average volume
         
         # === TRAILING STOP LOGIC ===
         if position == 1:  # Long position
@@ -124,18 +108,19 @@ def generate_signals(prices):
                 lowest_since_entry = 0.0
                 continue
         
-        # === EXIT LOGIC (BB middle touch) ===
+        # === EXIT LOGIC (Camarilla middle touch) ===
         if position == 1:  # Long position
-            # Exit when price touches or crosses below BB middle (SMA20)
-            if price <= sma_20_val:
+            # Exit when price touches or crosses below Camarilla middle (close_1d)
+            if price <= close_1d[i // 1440 * 1440 + 1439 if i >= 1440 else close_1d[0]]:  # Use previous day's close
+                # Simplified: exit at 1d EMA34 as proxy for middle
                 signals[i] = 0.0
                 position = 0
                 highest_since_entry = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price touches or crosses above BB middle (SMA20)
-            if price >= sma_20_val:
+            # Exit when price touches or crosses above Camarilla middle (close_1d)
+            if price >= close_1d[i // 1440 * 1440 + 1439 if i >= 1440 else close_1d[0]]:
                 signals[i] = 0.0
                 position = 0
                 lowest_since_entry = 0.0
@@ -143,15 +128,15 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Long when: price breaks above upper BB AND squeeze condition AND price > 1d EMA200 AND volume confirmation
-            if price > upper_bb_val and squeeze_condition and price > ema_200_val and vol_confirm:
+            # Long when: price breaks above R1 AND price > 1w EMA34 AND volume confirmation
+            if price > r1_val and price > ema_34_val and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 highest_since_entry = price
                 continue
-            # Short when: price breaks below lower BB AND squeeze condition AND price < 1d EMA200 AND volume confirmation
-            elif price < lower_bb_val and squeeze_condition and price < ema_200_val and vol_confirm:
+            # Short when: price breaks below S1 AND price < 1w EMA34 AND volume confirmation
+            elif price < s1_val and price < ema_34_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -168,6 +153,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_BB_Squeeze_1dEMA200_VolumeConfirm_ATRTrail"
-timeframe = "4h"
+name = "1d_Camarilla_R1S1_1wEMA34_VolumeConfirm_ATRTrail"
+timeframe = "1d"
 leverage = 1.0
