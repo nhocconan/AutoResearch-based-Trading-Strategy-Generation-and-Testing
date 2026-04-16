@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w volume spike and ATR regime filter
-# Long when price breaks above upper Donchian channel AND 1w volume > 2.0x 20-period volume SMA AND ATR(14) > ATR(50)
-# Short when price breaks below lower Donchian channel AND 1w volume > 2.0x 20-period volume SMA AND ATR(14) > ATR(50)
-# Uses Donchian channels from 1d timeframe for structure, 1w volume confirmation for validity, and ATR expansion filter
-# Works in bull (breakouts above upper channel) and bear (breakdowns below lower channel) via symmetric logic
-# Discrete sizing 0.25 limits drawdown; targets 20-40 trades/year to avoid fee drag
+# Hypothesis: 6h Elder Ray Index with 1d ADX regime filter and volume confirmation
+# Bull Power = High - EMA(13); Bear Power = EMA(13) - Low
+# Long when Bull Power > 0 AND Bear Power rising (less negative) AND 1d ADX > 25 (trending) AND volume > 1.5x 20-period volume SMA
+# Short when Bear Power < 0 AND Bull Power falling (less positive) AND 1d ADX > 25 AND volume > 1.5x 20-period volume SMA
+# Uses 1d ADX for regime filter (only trade in trending markets) and volume confirmation for validity
+# Works in bull (strong Bull Power) and bear (strong Bear Power) via symmetric logic
+# Discrete sizing 0.25 targets 12-30 trades/year to avoid fee drag
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 80:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,50 +25,64 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data once before loop for Donchian channels, volume, and ATR
+    # Get 1d data once before loop for Elder Ray, ADX, and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Get 1w data once before loop for volume confirmation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 60:
-        return np.zeros(n)
+    # === 1d Indicator: EMA(13) for Elder Ray ===
+    close_1d = df_1d['close'].values
+    ema_13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # === 1d Indicator: Donchian Channel (20-period) ===
+    # === 1d Indicator: Elder Ray Index ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    bull_power = high_1d - ema_13
+    bear_power = ema_13 - low_1d
     
-    # Upper and lower Donchian channels
-    upper_channel = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_channel = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_channel)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_channel)
-    
-    # === 1w Indicator: Volume SMA (20-period) for confirmation ===
-    volume_1w = df_1w['volume'].values
-    vol_sma_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    vol_sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_sma_20_1w)
-    
-    # === 1d Indicator: ATR (14-period and 50-period) for volatility regime filter ===
+    # === 1d Indicator: ADX (14-period) for regime filter ===
     # True Range calculation
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
     tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    close_1d = df_1d['close'].values
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    # Directional Movement
+    up_move = high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])
+    down_move = np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d
     
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    atr_50_aligned = align_htf_to_ltf(prices, df_1d, atr_50)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di_14 = 100 * plus_dm_14 / tr_14
+    minus_di_14 = 100 * minus_dm_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # === 1d Indicator: Volume SMA (20-period) for confirmation ===
+    volume_1d = df_1d['volume'].values
+    vol_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all 1d indicators to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    vol_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_20_1d)
+    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+    ema_13_aligned = align_htf_to_ltf(prices, df_1d, ema_13)  # for reference
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 80  # Need 50 for ATR, 20 for Donchian and volume SMA, extra buffer
+    warmup = 100  # Need 13+14+14 for EMA/ADX, 20 for volume SMA, extra buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -76,37 +91,32 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or
-            np.isnan(vol_sma_20_1w_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
-            np.isnan(atr_50_aligned[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Current 1w volume (aligned)
-        vol_1w_series = df_1w['volume'].values
-        vol_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_1w_series)
-        if np.isnan(vol_1w_aligned[i]):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_sma_20_1d_aligned[i]) or 
+            np.isnan(vol_1d_aligned[i])):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 1w volume > 2.0x 20-period 1w volume SMA
-        vol_threshold = vol_sma_20_1w_aligned[i] * 2.0
-        vol_confirm = vol_1w_aligned[i] > vol_threshold
+        # Volume filter: current 1d volume > 1.5x 20-period 1d volume SMA
+        vol_threshold = vol_sma_20_1d_aligned[i] * 1.5
+        vol_confirm = vol_1d_aligned[i] > vol_threshold
         
-        # Volatility filter: ATR(14) > ATR(50) - ensures we're in expanding volatility regime
-        vol_expansion = atr_14_aligned[i] > atr_50_aligned[i]
+        # Regime filter: ADX > 25 (trending market)
+        trending = adx_aligned[i] > 25.0
         
         # Price levels
         price = close[i]
         
         # === LONG CONDITIONS ===
-        # Price breaks above upper Donchian channel AND volume confirmation AND volatility expansion
-        if (price > upper_aligned[i]) and vol_confirm and vol_expansion:
+        # Bull Power > 0 (strong buying pressure) AND Bear Power rising (less negative) AND trending AND volume confirmation
+        bull_rising = bear_power_aligned[i] > bear_power_aligned[i-1]  # Bear Power becoming less negative
+        if (bull_power_aligned[i] > 0) and bull_rising and trending and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # Price breaks below lower Donchian channel AND volume confirmation AND volatility expansion
-        elif (price < lower_aligned[i]) and vol_confirm and vol_expansion:
+        # Bear Power < 0 (strong selling pressure) AND Bull Power falling (less positive) AND trending AND volume confirmation
+        bull_falling = bull_power_aligned[i] < bull_power_aligned[i-1]  # Bull Power becoming less positive
+        if (bear_power_aligned[i] < 0) and bull_falling and trending and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -114,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_Volume2.0x_ATRFilter_v1"
-timeframe = "1d"
+name = "6h_ElderRay_1dADX_VolumeFilter_v1"
+timeframe = "6h"
 leverage = 1.0
