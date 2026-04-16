@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot breakout with 12h volume confirmation and 1d ADX trend filter
-# Long when price breaks above R3 with 12h volume > 1.5x 20-median AND 1d ADX > 25 (trending)
-# Short when price breaks below S3 with 12h volume > 1.5x 20-median AND 1d ADX > 25
-# Exit when price reverts to pivot point (PP) or ATR stop (2.0)
-# Uses discrete position size 0.25 to balance capture and fee drag. Target: 60-120 total trades over 4 years.
+# Hypothesis: 4h Donchian(20) breakout with 1h volume confirmation and 1d choppiness regime filter
+# Long when price breaks above 20-period high with 1h volume > 1.5x 20-median AND 1d CHOP > 61.8 (range) → mean reversion exit at mid-channel
+# Short when price breaks below 20-period low with 1h volume > 1.5x 20-median AND 1d CHOP > 61.8 (range) → mean reversion exit at mid-channel
+# Exit when price reverts to mid-channel ( (upper+lower)/2 ) or ATR stop (2.0)
+# Uses discrete position size 0.25 to balance capture and fee drag. Target: 100-200 total trades over 4 years.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 80:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,80 +23,67 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data once before loop for pivot points and ADX
+    # Get 1d data once before loop for choppiness index
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d Indicators: Camarilla Pivots ===
+    # === 1d Indicators: Choppiness Index (CHOP) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each day
-    # PP = (H + L + C) / 3
-    # R3 = PP + (H - L) * 1.1 / 2
-    # S3 = PP - (H - L) * 1.1 / 2
-    pp_1d = (high_1d + low_1d + close_1d) / 3.0
-    r3_1d = pp_1d + (high_1d - low_1d) * 1.1 / 2.0
-    s3_1d = pp_1d - (high_1d - low_1d) * 1.1 / 2.0
-    
-    # Align Camarilla levels to 6h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    
-    # === 1d Indicators: ADX (trend filter) ===
-    # TR calculation
+    # True Range
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
     tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
     tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # +DM and -DM
-    up_move = high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])
-    down_move = np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d
+    # Sum of TR over 14 periods
+    tr_sum_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Highest high and lowest low over 14 periods
+    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # Smoothed TR, +DM, -DM (14-period)
-    tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    # Chop = 100 * log10(sum(tr14) / (hh14 - ll14)) / log10(14)
+    # Avoid division by zero
+    range_14 = hh_14 - ll_14
+    chop_1d = np.where(
+        range_14 > 0,
+        100 * np.log10(tr_sum_14 / range_14) / np.log10(14),
+        50.0  # neutral when range=0
+    )
     
-    # +DI and -DI
-    plus_di = 100 * plus_dm_14 / tr_14
-    minus_di = 100 * minus_dm_14 / tr_14
+    # Align CHOP to 4h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Get 12h data once before loop for volume confirmation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 1h data once before loop for volume confirmation
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 20:
         return np.zeros(n)
     
-    # === 12h Indicators: Volume median ===
-    volume_12h = df_12h['volume'].values
-    vol_median_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).median().values
-    vol_median_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_median_20_12h)
+    # === 1h Indicators: Volume median ===
+    volume_1h = df_1h['volume'].values
+    vol_median_20_1h = pd.Series(volume_1h).rolling(window=20, min_periods=20).median().values
+    vol_median_20_1h_aligned = align_htf_to_ltf(prices, df_1h, vol_median_20_1h)
     
-    # ATR for stoploss (14-period) on 6h
-    tr1_6h = high - low
-    tr2_6h = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3_6h = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr_6h = np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))
-    atr_14_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
+    # ATR for stoploss (14-period) on 4h
+    tr1_4h = high - low
+    tr2_4h = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    tr3_4h = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
+    atr_14_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
+    
+    # Donchian channels (20-period) on 4h
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    mid_channel = (highest_20 + lowest_20) / 2.0
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(30, 20, 14)  # 1d pivots/ADX, 12h volume median
+    warmup = max(30, 20, 14)  # 1d chop, 1h volume median, 4h Donchian/ATR
     
     # Track position state for exits
     position = 0  # 0: flat, 1: long, -1: short
@@ -111,40 +98,40 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_median_20_12h_aligned[i]) or 
-            np.isnan(atr_14_6h[i])):
+        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or np.isnan(mid_channel[i]) or 
+            np.isnan(atr_14_4h[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(vol_median_20_1h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Current 12h volume (aligned)
-        vol_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_12h)
-        if np.isnan(vol_12h_aligned[i]):
+        # Current 1h volume (aligned)
+        vol_1h_aligned = align_htf_to_ltf(prices, df_1h, volume_1h)
+        if np.isnan(vol_1h_aligned[i]):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 12h volume > 1.5x 20-period 12h volume median
-        vol_threshold = vol_median_20_12h_aligned[i] * 1.5
-        vol_confirm = vol_12h_aligned[i] > vol_threshold
+        # Volume filter: current 1h volume > 1.5x 20-period 1h volume median
+        vol_threshold = vol_median_20_1h_aligned[i] * 1.5
+        vol_confirm = vol_1h_aligned[i] > vol_threshold
         
-        # Trend filter: 1d ADX > 25 (trending market)
-        trending = adx_aligned[i] > 25.0
+        # Regime filter: 1d CHOP > 61.8 (range-bound market) → mean reversion
+        ranging = chop_aligned[i] > 61.8
         
         # Price levels
         price = close[i]
-        pp_level = pp_aligned[i]
-        r3_level = r3_aligned[i]
-        s3_level = s3_aligned[i]
+        upper = highest_20[i]
+        lower = lowest_20[i]
+        mid = mid_channel[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         if position == 1:  # long position
-            # Exit when price returns to pivot point or ATR stoploss
-            if price <= pp_level or price <= entry_price - 2.0 * atr_14_6h[i]:
+            # Exit when price returns to mid-channel or ATR stoploss
+            if price <= mid or price <= entry_price - 2.0 * atr_14_4h[i]:
                 exit_signal = True
         elif position == -1:  # short position
-            # Exit when price returns to pivot point or ATR stoploss
-            if price >= pp_level or price >= entry_price + 2.0 * atr_14_6h[i]:
+            # Exit when price returns to mid-channel or ATR stoploss
+            if price >= mid or price >= entry_price + 2.0 * atr_14_4h[i]:
                 exit_signal = True
         
         if exit_signal:
@@ -154,17 +141,17 @@ def generate_signals(prices):
             continue
         
         # === ENTRY LOGIC (only when flat) ===
-        if position == 0:
+        if position == 0 and ranging:
             # LONG CONDITIONS
-            # Price breaks above R3 AND volume confirmation AND trending market
-            if price > r3_level and vol_confirm and trending:
+            # Price breaks above 20-period high AND volume confirmation AND ranging market
+            if price > upper and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
             # SHORT CONDITIONS
-            # Price breaks below S3 AND volume confirmation AND trending market
-            elif price < s3_level and vol_confirm and trending:
+            # Price breaks below 20-period low AND volume confirmation AND ranging market
+            elif price < lower and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -174,6 +161,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3S3_12hVol_1dADX_v1"
-timeframe = "6h"
+name = "4h_Donchian20_1hVol_1dChop_v1"
+timeframe = "4h"
 leverage = 1.0
