@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d Camarilla pivot levels with volume confirmation.
-# Long when price breaks above R4 with volume > 1.5x 20-period average.
-# Short when price breaks below S4 with volume > 1.5x 20-period average.
-# Exit when price returns to the 1d VWAP (mean reversion to daily fair value).
-# Uses discrete position size 0.25. Camarilla levels provide institutional support/resistance,
-# volume confirms institutional participation, VWAP exit provides mean reversion edge.
-# Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 12h strategy using 1d Williams %R mean reversion with 1d volume spike and ADX trend filter.
+# Long when Williams %R < -80 (oversold), volume > 1.5x 20-period average, and ADX > 25 (trending).
+# Short when Williams %R > -20 (overbought), volume > 1.5x 20-period average, and ADX > 25.
+# Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts).
+# Uses discrete position size 0.25. Williams %R identifies extremes, volume confirms participation,
+# ADX ensures we trade with momentum, not against it. Target: 50-150 total trades over 4 years (12-37/year).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,9 +20,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once before loop for Camarilla pivots and VWAP
+    # Get 1d data once before loop for Williams %R, volume, and ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -31,81 +30,106 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # === 1d Indicators: Camarilla Pivot Levels (R1-R4, S1-S4) and VWAP ===
-    # Pivot point (PP)
-    pp = (high_1d + low_1d + close_1d) / 3.0
+    # === 1d Indicators: Williams %R (14-period) ===
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = np.zeros_like(close_1d)
+    for i in range(len(close_1d)):
+        if i < 13 or highest_high[i] == lowest_low[i]:
+            williams_r[i] = -50.0  # neutral
+        else:
+            williams_r[i] = (highest_high[i] - close_1d[i]) / (highest_high[i] - lowest_low[i]) * -100
     
-    # Range
-    range_1d = high_1d - low_1d
+    # Williams %R signals: 1 for oversold (< -80), -1 for overbought (> -20), 0 otherwise
+    williams_signal = np.zeros_like(williams_r)
+    williams_signal[williams_r < -80] = 1   # oversold -> long signal
+    williams_signal[williams_r > -20] = -1  # overbought -> short signal
     
-    # Camarilla levels
-    r1 = pp + (range_1d * 1.0 / 12)
-    r2 = pp + (range_1d * 2.0 / 12)
-    r3 = pp + (range_1d * 3.0 / 12)
-    r4 = pp + (range_1d * 4.0 / 12)
-    s1 = pp - (range_1d * 1.0 / 12)
-    s2 = pp - (range_1d * 2.0 / 12)
-    s3 = pp - (range_1d * 3.0 / 12)
-    s4 = pp - (range_1d * 4.0 / 12)
+    # === 1d Indicators: Volume Spike (20-period average) ===
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike = np.zeros_like(volume_1d)
+    volume_spike = volume_1d > (1.5 * vol_ma_20_1d)  # boolean array
     
-    # 1d VWAP (for exit)
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
-    vp_1d = typical_price_1d * volume_1d
-    cum_vp_1d = np.cumsum(vp_1d)
-    cum_vol_1d = np.cumsum(volume_1d)
-    vwap_1d = np.divide(cum_vp_1d, cum_vol_1d, out=np.zeros_like(cum_vp_1d), where=cum_vol_1d!=0)
+    # === 1d Indicators: ADX (14-period) for trend strength ===
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Align 1d indicators to 6h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    # +DM and -DM
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Get 6h data for volume MA (volume confirmation)
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
-        return np.zeros(n)
+    # Smoothed TR, +DM, -DM
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
     
-    volume_6h = df_6h['volume'].values
+    # +DI and -DI
+    plus_di = np.zeros_like(close_1d)
+    minus_di = np.zeros_like(close_1d)
+    dx = np.zeros_like(close_1d)
+    for i in range(len(close_1d)):
+        if atr[i] > 0:
+            plus_di[i] = (plus_dm_smooth[i] / atr[i]) * 100
+            minus_di[i] = (minus_dm_smooth[i] / atr[i]) * 100
+            dx[i] = (np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])) * 100
+        else:
+            plus_di[i] = 0
+            minus_di[i] = 0
+            dx[i] = 0
     
-    # Volume moving average (20-period) on 6h
-    vol_ma_20_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_20_6h)
+    # ADX: smoothed DX
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_filter = adx > 25  # trending market
+    
+    # Align all 1d indicators to 12h timeframe
+    williams_signal_aligned = align_htf_to_ltf(prices, df_1d, williams_signal)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
+    adx_filter_aligned = align_htf_to_ltf(prices, df_1d, adx_filter.astype(float))
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 50
+    warmup = 100
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(vwap_aligned[i]) or np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(williams_signal_aligned[i]) or 
+            np.isnan(volume_spike_aligned[i]) or 
+            np.isnan(adx_filter_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values
-        r4_val = r4_aligned[i]
-        s4_val = s4_aligned[i]
-        vwap_val = vwap_aligned[i]
-        vol_ma_val = vol_ma_aligned[i]
+        williams_sig = williams_signal_aligned[i]
+        vol_spike = volume_spike_aligned[i] > 0.5  # convert back to boolean
+        adx_filt = adx_filter_aligned[i] > 0.5      # convert back to boolean
         price = close[i]
-        vol = volume[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price returns to 1d VWAP (mean reversion)
-            if price <= vwap_val:
+            # Exit if Williams %R crosses above -50 (no longer oversold)
+            if williams_sig != 1:  # not oversold anymore
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price returns to 1d VWAP (mean reversion)
-            if price >= vwap_val:
+            # Exit if Williams %R crosses below -50 (no longer overbought)
+            if williams_sig != -1:  # not overbought anymore
                 exit_signal = True
         
         if exit_signal:
@@ -115,16 +139,11 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Volume filter: volume > 1.5x 20-period average (6h)
-            vol_filter = vol > 1.5 * vol_ma_val
-            
-            # LONG: price breaks above R4 with volume confirmation
-            if price > r4_val and vol_filter:
+            # All filters must align: signal, volume spike, and trend
+            if williams_sig == 1 and vol_spike and adx_filt:
                 signals[i] = 0.25
                 position = 1
-            
-            # SHORT: price breaks below S4 with volume confirmation
-            elif price < s4_val and vol_filter:
+            elif williams_sig == -1 and vol_spike and adx_filt:
                 signals[i] = -0.25
                 position = -1
         
@@ -133,6 +152,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1dCamarillaR4S4_VolumeConfirmation_VWAPExit_V1"
-timeframe = "6h"
+name = "12h_1dWilliamsR_VolumeSpike_ADXFilter_V1"
+timeframe = "12h"
 leverage = 1.0
