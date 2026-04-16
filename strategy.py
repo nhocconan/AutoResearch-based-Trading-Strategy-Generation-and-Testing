@@ -13,21 +13,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h data for primary trend ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # === 1w data for primary trend ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 12h ATR (14-period) for volatility filter
-    tr_12h = np.maximum(high_12h - low_12h,
-                        np.maximum(np.abs(high_12h - np.roll(close_12h, 1)),
-                                   np.abs(low_12h - np.roll(close_12h, 1))))
-    tr_12h[0] = high_12h[0] - low_12h[0]
-    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
+    # Calculate 1w ATR (14-period) for volatility filter
+    tr_1w = np.maximum(high_1w - low_1w,
+                       np.maximum(np.abs(high_1w - np.roll(close_1w, 1)),
+                                  np.abs(low_1w - np.roll(close_1w, 1))))
+    tr_1w[0] = high_1w[0] - low_1w[0]
+    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
     
-    # Align 12h data to primary timeframe (4h)
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
+    # Align 1w data to daily timeframe
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
     
     # === 1d data for pivot points ===
     df_1d = get_htf_data(prices, '1d')
@@ -41,10 +41,10 @@ def generate_signals(prices):
     r1_1d = pivot_1d + range_1d
     s1_1d = pivot_1d - range_1d
     
-    # Align 1d data to primary timeframe (4h)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align 1d data to daily timeframe (no shift needed as both are daily)
+    pivot_1d_aligned = pivot_1d.copy()
+    r1_1d_aligned = r1_1d.copy()
+    s1_1d_aligned = s1_1d.copy()
     
     # Volume spike detection (20-period volume MA)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -60,7 +60,7 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_12h_aligned[i]) or np.isnan(pivot_1d_aligned[i]) or 
+        if (np.isnan(atr_1w_aligned[i]) or np.isnan(pivot_1d_aligned[i]) or 
             np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
@@ -71,7 +71,7 @@ def generate_signals(prices):
         pivot_level = pivot_1d_aligned[i]
         r1_level = r1_1d_aligned[i]
         s1_level = s1_1d_aligned[i]
-        atr = atr_12h_aligned[i]
+        atr = atr_1w_aligned[i]
         vol_spike = volume_spike[i]
         
         # === EXIT LOGIC ===
@@ -113,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Pivot_R1_S1_Breakout_Volume_ATRFilter_12hTrend"
-timeframe = "4h"
+name = "1d_Pivot_R1_S1_Breakout_Volume_ATRFilter_1wTrend"
+timeframe = "1d"
 leverage = 1.0
