@@ -1,3 +1,9 @@
+# 6h Candlestick Body Momentum with 1d Trend Filter
+# Hypothesis: Strong directional candles (large body, small wicks) on 6h timeframe
+# capture institutional momentum. In bull/bear markets, these candles often signal
+# continuation when aligned with 1d trend. Low-frequency trading (~25 trades/year)
+# reduces fee drag. Uses body-to-range ratio and EMA trend filter.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,103 +11,83 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
+    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data for pivot points (HTF = 1d) ===
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    
+    # Calculate 1d EMA34 for trend
     close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate daily pivot points: P, R1, S1
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r1_1d = pivot_1d + range_1d
-    s1_1d = pivot_1d - range_1d
+    # Calculate 6h candlestick body strength
+    body = np.abs(close - open_price)
+    range_hl = high - low
+    # Avoid division by zero
+    body_ratio = np.where(range_hl > 0, body / range_hl, 0)
     
-    # Calculate daily ATR (14-period) for volatility filter
-    tr_1d = np.maximum(high_1d - low_1d,
-                       np.maximum(np.abs(high_1d - np.roll(close_1d, 1)),
-                                  np.abs(low_1d - np.roll(close_1d, 1))))
-    tr_1d[0] = high_1d[0] - low_1d[0]
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    
-    # Align 1d data to primary timeframe (1d)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Weekly EMA34 for trend filter (HTF = 1w)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Volume spike detection (20-period volume MA)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Smooth body ratio to reduce noise
+    body_ratio_smooth = pd.Series(body_ratio).ewm(span=3, adjust=False).values
     
     signals = np.zeros(n)
-    
-    # Warmup: ensure all indicators have valid data
-    warmup = 100
-    
-    # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
+    # Warmup period
+    warmup = 40
+    
     for i in range(warmup, n):
-        # Skip if any required data is NaN
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
-            np.isnan(atr_1d_aligned[i]) or np.isnan(ema_1w_aligned[i]) or np.isnan(volume_spike[i])):
+        # Skip if EMA data not available
+        if np.isnan(ema_1d_aligned[i]):
             signals[i] = 0.0
             position = 0
             continue
         
-        price = close[i]
-        pivot_level = pivot_1d_aligned[i]
-        r1_level = r1_1d_aligned[i]
-        s1_level = s1_1d_aligned[i]
-        atr = atr_1d_aligned[i]
-        ema_trend = ema_1w_aligned[i]
-        vol_spike = volume_spike[i]
-        
-        # === EXIT LOGIC ===
-        if position == 1:  # Long position
-            # Exit when price returns to daily pivot level (mean reversion)
-            if price <= pivot_level:
+        # Exit conditions: weak candle or trend change
+        if position == 1:  # Long
+            if body_ratio_smooth[i] < 0.3 or close[i] < ema_1d_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+                continue
+        elif position == -1:  # Short
+            if body_ratio_smooth[i] < 0.3 or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
         
-        elif position == -1:  # Short position
-            # Exit when price returns to daily pivot level (mean reversion)
-            if price >= pivot_level:
-                signals[i] = 0.0
-                position = 0
-                continue
-        
-        # === ENTRY LOGIC (only when flat) ===
+        # Entry conditions
         if position == 0:
-            # LONG: Price breaks above R1 with volume spike, volatility filter, and weekly uptrend
-            if price > r1_level and vol_spike and atr > 0 and price > ema_trend:
+            # Strong bullish candle: close near high, open near low, large body
+            is_bullish = close[i] > open_price[i]
+            body_near_high = (high[i] - close[i]) < (0.15 * range_hl[i])
+            body_near_low = (open_price[i] - low[i]) < (0.15 * range_hl[i]) if is_bullish else False
+            strong_bull = is_bullish and body_near_high and body_ratio_smooth[i] > 0.6
+            
+            # Strong bearish candle: open near high, close near low, large body
+            is_bearish = close[i] < open_price[i]
+            body_near_low_bear = (close[i] - low[i]) < (0.15 * range_hl[i])
+            body_near_high_bear = (open_price[i] - high[i]) > (-0.15 * range_hl[i])
+            strong_bear = is_bearish and body_near_low_bear and body_near_high_bear and body_ratio_smooth[i] > 0.6
+            
+            # Enter long on strong bullish candle in uptrend
+            if strong_bull and close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
                 continue
-            
-            # SHORT: Price breaks below S1 with volume spike, volatility filter, and weekly downtrend
-            elif price < s1_level and vol_spike and atr > 0 and price < ema_trend:
+            # Enter short on strong bearish candle in downtrend
+            elif strong_bear and close[i] < ema_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Hold current position
+        # Hold position
         if position == 1:
             signals[i] = 0.25
         elif position == -1:
@@ -111,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Pivot_R1_S1_Breakout_Volume_EMA34Trend_1w_1d"
-timeframe = "1d"
+name = "6h_CandleBodyMomentum_1dEMA34Trend"
+timeframe = "6h"
 leverage = 1.0
