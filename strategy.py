@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI(14) mean reversion with 4h EMA(50) trend filter and 1d volume spike filter.
-# Long when RSI < 30, price > 4h EMA50, and 1d volume > 1.8x 20-period average.
-# Short when RSI > 70, price < 4h EMA50, and 1d volume > 1.8x 20-period average.
-# Exit when RSI crosses 50 (mean reversion completion).
-# Uses discrete position size 0.20. Volume confirmation reduces false signals, 4h EMA ensures trend alignment.
-# Target: 80-160 total trades over 4 years (20-40/year) to balance opportunity and fee drag.
+# Hypothesis: 6h Camarilla pivot breakout with 1d volume spike and 1w ADX trend filter.
+# Long when price breaks above 6h Camarilla R4 AND 1d volume > 2.0x 20-period average AND 1w ADX > 25.
+# Short when price breaks below 6h Camarilla S4 AND 1d volume > 2.0x 20-period average AND 1w ADX > 25.
+# Exit when price returns to 6h Camarilla midpoint (PP).
+# Uses discrete position size 0.25. Volume confirmation reduces false signals, 1w ADX ensures strong trending regime.
+# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,16 +20,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data once before loop for EMA calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 6h data once before loop for Camarilla calculation
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 10:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
     
-    # === 4h Indicators: EMA(50) for trend filter ===
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # === 6h Indicators: Camarilla levels (based on previous 6h bar) ===
+    # Calculate using previous bar's OHLC (shifted by 1 to avoid look-ahead)
+    prev_high = np.roll(high_6h, 1)
+    prev_low = np.roll(low_6h, 1)
+    prev_close = np.roll(close_6h, 1)
+    prev_high[0] = high_6h[0]  # first bar uses current values
+    prev_low[0] = low_6h[0]
+    prev_close[0] = close_6h[0]
+    
+    rang = prev_high - prev_low
+    camarilla_pp = prev_close
+    camarilla_r4 = prev_close + rang * 1.1 / 2
+    camarilla_s4 = prev_close - rang * 1.1 / 2
+    
+    # Align Camarilla levels to 6h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_6h, camarilla_pp)
+    r4_aligned = align_htf_to_ltf(prices, df_6h, camarilla_r4)
+    s4_aligned = align_htf_to_ltf(prices, df_6h, camarilla_s4)
     
     # Get 1d data once before loop for volume filter
     df_1d = get_htf_data(prices, '1d')
@@ -40,20 +57,51 @@ def generate_signals(prices):
     
     # === 1d Indicators: Volume spike filter ===
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
-    # === 1h Indicators: RSI(14) for mean reversion signal ===
-    # RSI calculation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Get 1w data once before loop for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
+        return np.zeros(n)
     
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.where(np.isnan(rsi), 50, rsi)  # Handle division by zero
+    # === 1w Indicators: ADX(14) for trend filter ===
+    # True Range
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Directional Movement
+    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w),
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)),
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
+    
+    # ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    dx = np.where(np.isnan(dx), 0, dx)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align ADX to 1w timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     signals = np.zeros(n)
     
@@ -66,33 +114,39 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or np.isnan(rsi[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(vol_ma_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             position = 0
             entry_price = 0.0
             continue
         
         # Current values
-        ema_50_val = ema_50_4h_aligned[i]
-        vol_ma_val = vol_ma_20_aligned[i]
-        rsi_val = rsi[i]
+        pp_val = pp_aligned[i]
+        r4_val = r4_aligned[i]
+        s4_val = s4_aligned[i]
+        vol_ma_val = vol_ma_aligned[i]
+        adx_val = adx_aligned[i]
         price = close[i]
         vol = volume[i]
         
-        # Volume filter: volume > 1.8x 20-period average (using 1d volume MA)
-        vol_filter = vol > 1.8 * vol_ma_val if vol_ma_val > 0 else False
+        # Volume filter: volume > 2.0x 20-period average (using 1d volume MA)
+        vol_filter = vol > 2.0 * vol_ma_val if vol_ma_val > 0 else False
+        
+        # Trend filter: 1w ADX > 25 (strong trending regime)
+        trend_filter = adx_val > 25
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if RSI crosses above 50 (mean reversion complete)
-            if rsi_val >= 50:
+            # Exit if price returns to Camarilla pivot point
+            if price <= pp_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if RSI crosses below 50 (mean reversion complete)
-            if rsi_val <= 50:
+            # Exit if price returns to Camarilla pivot point
+            if price >= pp_val:
                 exit_signal = True
         
         if exit_signal:
@@ -103,23 +157,23 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: RSI < 30, price > 4h EMA50 (uptrend), and volume spike
-            if rsi_val < 30 and price > ema_50_val and vol_filter:
-                signals[i] = 0.20
+            # LONG: price breaks above Camarilla R4 with volume and trend confirmation
+            if price > r4_val and vol_filter and trend_filter:
+                signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: RSI > 70, price < 4h EMA50 (downtrend), and volume spike
-            elif rsi_val > 70 and price < ema_50_val and vol_filter:
-                signals[i] = -0.20
+            # SHORT: price breaks below Camarilla S4 with volume and trend confirmation
+            elif price < s4_val and vol_filter and trend_filter:
+                signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         else:
-            signals[i] = position * 0.20
+            signals[i] = position * 0.25
     
     return signals
 
-name = "1h_RSI14_MeanRev_4hEMA50_TrendFilter_1dVolumeSpike_V1"
-timeframe = "1h"
+name = "6h_Camarilla_R4_S4_1dVolumeSpike_1wADXTrend_V1"
+timeframe = "6h"
 leverage = 1.0
