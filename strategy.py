@@ -13,46 +13,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h data (primary) ===
+    # === 4h data (primary) ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    volume_4h = df_4h['volume'].values
+    
+    # === 12h data (HTF for trend) ===
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
-    volume_12h = df_12h['volume'].values
     
-    # === 1d data (HTF for trend) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === 12h EMA for trend direction (21 period) ===
+    ema_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # === 1d EMA for trend direction (21 period) ===
-    ema_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # === 4h ATR for volatility and stop (14 period) ===
+    tr_4h = np.maximum(high_4h - low_4h, 
+                       np.maximum(np.abs(high_4h - np.roll(close_4h, 1)), 
+                                  np.abs(low_4h - np.roll(close_4h, 1))))
+    tr_4h[0] = high_4h[0] - low_4h[0]
+    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
+    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
     
-    # === 12h ATR for volatility and stop (14 period) ===
-    tr_12h = np.maximum(high_12h - low_12h, 
-                       np.maximum(np.abs(high_12h - np.roll(close_12h, 1)), 
-                                  np.abs(low_12h - np.roll(close_12h, 1))))
-    tr_12h[0] = high_12h[0] - low_12h[0]
-    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
+    # === 4h volume ratio for confirmation ===
+    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_4h = volume_4h / vol_ma_20_4h
+    vol_ratio_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ratio_4h)
     
-    # === 12h volume ratio for confirmation ===
-    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_12h = volume_12h / vol_ma_20_12h
-    vol_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio_12h)
-    
-    # === 12h Donchian channels (20 period) ===
-    highest_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    highest_20_aligned = align_htf_to_ltf(prices, df_12h, highest_20)
-    lowest_20_aligned = align_htf_to_ltf(prices, df_12h, lowest_20)
+    # === 4h Donchian channels (15 period for more signals) ===
+    highest_15 = pd.Series(high_4h).rolling(window=15, min_periods=15).max().values
+    lowest_15 = pd.Series(low_4h).rolling(window=15, min_periods=15).min().values
+    highest_15_aligned = align_htf_to_ltf(prices, df_4h, highest_15)
+    lowest_15_aligned = align_htf_to_ltf(prices, df_4h, lowest_15)
     
     signals = np.zeros(n)
     
     # Warmup: enough for EMA and ATR
-    warmup = 50
+    warmup = 30
     
     # Track position and entry price
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,45 +60,45 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(atr_12h_aligned[i]) or 
-            np.isnan(vol_ratio_12h_aligned[i]) or np.isnan(highest_20_aligned[i]) or 
-            np.isnan(lowest_20_aligned[i])):
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(atr_4h_aligned[i]) or 
+            np.isnan(vol_ratio_4h_aligned[i]) or np.isnan(highest_15_aligned[i]) or 
+            np.isnan(lowest_15_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        ema_trend = ema_1d_aligned[i]
-        atr_val = atr_12h_aligned[i]
-        vol_ratio_val = vol_ratio_12h_aligned[i]
-        upper_channel = highest_20_aligned[i]
-        lower_channel = lowest_20_aligned[i]
+        ema_trend = ema_12h_aligned[i]
+        atr_val = atr_4h_aligned[i]
+        vol_ratio_val = vol_ratio_4h_aligned[i]
+        upper_channel = highest_15_aligned[i]
+        lower_channel = lowest_15_aligned[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit: close below Donchian lower or 2x ATR stop
-            if price < lower_channel or price < entry_price - 2.0 * atr_val:
+            # Exit: close below Donchian lower or 1.5x ATR stop
+            if price < lower_channel or price < entry_price - 1.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit: close above Donchian upper or 2x ATR stop
-            if price > upper_channel or price > entry_price + 2.0 * atr_val:
+            # Exit: close above Donchian upper or 1.5x ATR stop
+            if price > upper_channel or price > entry_price + 1.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Trend filter: price above/below 1d EMA with volume
-            if price > ema_trend and vol_ratio_val > 1.3:
+            # Trend filter: price above/below 12h EMA with volume
+            if price > ema_trend and vol_ratio_val > 1.2:
                 # LONG: price above trend with volume
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 continue
-            elif price < ema_trend and vol_ratio_val > 1.3:
+            elif price < ema_trend and vol_ratio_val > 1.2:
                 # SHORT: price below trend with volume
                 signals[i] = -0.25
                 position = -1
@@ -115,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_EMA_Trend_Volume"
-timeframe = "12h"
+name = "4h_12hEMA_Donchian_Volume"
+timeframe = "4h"
 leverage = 1.0
