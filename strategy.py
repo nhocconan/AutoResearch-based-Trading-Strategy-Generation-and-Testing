@@ -13,62 +13,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 6h data (primary) ===
-    df_6h = get_htf_data(prices, '6h')
-    close_6h = df_6h['close'].values
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    volume_6h = df_6h['volume'].values
+    # === 4h data (primary) ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    volume_4h = df_4h['volume'].values
     
-    # === 12h data (HTF for trend) ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    volume_12h = df_12h['volume'].values
-    
-    # === 1d data (HTF for context) ===
+    # === 1d data (HTF for trend and context) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # === 6h ATR(14) for volatility and stoploss ===
-    tr1 = high_6h - low_6h
-    tr2 = np.abs(high_6h - np.roll(close_6h, 1))
-    tr3 = np.abs(low_6h - np.roll(close_6h, 1))
+    # === 4h ATR(14) for volatility and stoploss ===
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = 0
-    atr_14_6h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_6h_aligned = align_htf_to_ltf(prices, df_6h, atr_14_6h)
+    atr_14_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_14_4h)
     
-    # === 12h EMA34 for trend filter ===
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # === 1d EMA34 for trend filter ===
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === 12h volume ratio for confirmation ===
-    vol_ma_10_12h = pd.Series(volume_12h).rolling(window=10, min_periods=10).mean().values
-    vol_ratio_12h = volume_12h / vol_ma_10_12h
-    vol_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio_12h)
+    # === 4h volume ratio for confirmation ===
+    vol_ma_10_4h = pd.Series(volume_4h).rolling(window=10, min_periods=10).mean().values
+    vol_ratio_4h = volume_4h / vol_ma_10_4h
     
-    # === 1d Camarilla pivot levels ===
-    # Camarilla: Range = (H-L), Pivot = (H+L+C)/3
-    # R4 = C + (H-L)*1.500, R3 = C + (H-L)*1.250, R2 = C + (H-L)*1.160, R1 = C + (H-L)*1.083
-    # S1 = C - (H-L)*1.083, S2 = C - (H-L)*1.160, S3 = C - (H-L)*1.250, S4 = C - (H-L)*1.500
-    range_1d = high_1d - low_1d
-    close_1d_prev = np.roll(close_1d, 1)
-    close_1d_prev[0] = close_1d[0]  # avoid NaN on first bar
-    
-    camarilla_r4 = close_1d_prev + range_1d * 1.500
-    camarilla_r3 = close_1d_prev + range_1d * 1.250
-    camarilla_s3 = close_1d_prev - range_1d * 1.250
-    camarilla_s4 = close_1d_prev - range_1d * 1.500
-    
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # === 1d Donchian(20) for breakout levels ===
+    donch_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
+    donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
     
     signals = np.zeros(n)
     
@@ -81,25 +61,21 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_34_12h_aligned[i]) or 
-            np.isnan(atr_14_6h_aligned[i]) or
-            np.isnan(vol_ratio_12h_aligned[i]) or
-            np.isnan(camarilla_r4_aligned[i]) or
-            np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(camarilla_s4_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(atr_14_4h_aligned[i]) or
+            np.isnan(vol_ratio_4h[i]) or
+            np.isnan(donch_high_1d_aligned[i]) or
+            np.isnan(donch_low_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        ema_trend_12h = ema_34_12h_aligned[i]
-        atr = atr_14_6h_aligned[i]
-        vol_ratio = vol_ratio_12h_aligned[i]
-        r4 = camarilla_r4_aligned[i]
-        r3 = camarilla_r3_aligned[i]
-        s3 = camarilla_s3_aligned[i]
-        s4 = camarilla_s4_aligned[i]
+        ema_trend_1d = ema_34_1d_aligned[i]
+        atr = atr_14_4h_aligned[i]
+        vol_ratio = vol_ratio_4h[i]
+        donch_high = donch_high_1d_aligned[i]
+        donch_low = donch_low_1d_aligned[i]
         
         # === STOPLOSS LOGIC ===
         if position == 1:  # Long position
@@ -120,16 +96,16 @@ def generate_signals(prices):
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit: price closes below S3 or trend reverses
-            if price < s3 or price < ema_trend_12h:
+            # Exit: price closes below Donchian low or trend reverses
+            if price < donch_low or price < ema_trend_1d:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit: price closes above R3 or trend reverses
-            if price > r3 or price > ema_trend_12h:
+            # Exit: price closes above Donchian high or trend reverses
+            if price > donch_high or price > ema_trend_1d:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -137,16 +113,16 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Break above R3 with volume, in uptrend (above EMA34_12h)
-            if (price > r3 and vol_ratio > 1.5 and 
-                price > ema_trend_12h):
+            # LONG: Break above 1d Donchian high with volume, in uptrend (above EMA34_1d)
+            if (price > donch_high and vol_ratio > 1.5 and 
+                price > ema_trend_1d):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 continue
-            # SHORT: Break below S3 with volume, in downtrend (below EMA34_12h)
-            elif (price < s3 and vol_ratio > 1.5 and 
-                  price < ema_trend_12h):
+            # SHORT: Break below 1d Donchian low with volume, in downtrend (below EMA34_1d)
+            elif (price < donch_low and vol_ratio > 1.5 and 
+                  price < ema_trend_1d):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -162,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Breakout_Volume_EMA34_12hFilter"
-timeframe = "6h"
+name = "4h_Donchian_1dEMA34_Volume_Breakout_v1"
+timeframe = "4h"
 leverage = 1.0
