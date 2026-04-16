@@ -13,57 +13,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h data (primary) ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    volume_12h = df_12h['volume'].values
+    # === 4h data (primary) ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    volume_4h = df_4h['volume'].values
     
     # === 1d data (HTF for pivot and trend) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
-    low_12h = df_1d['low'].values  # Note: This is intentional for pivot calculation
+    low_1d = df_1d['low'].values
     
-    # === 12h Donchian channel (15-period) ===
-    donchian_high = np.zeros_like(close_12h)
-    donchian_low = np.zeros_like(close_12h)
-    for i in range(len(close_12h)):
-        if i < 15:
-            donchian_high[i] = np.max(high_12h[:i+1])
-            donchian_low[i] = np.min(low_12h[:i+1])
+    # === 1d Donchian channel (20-period) ===
+    donchian_high_1d = np.zeros_like(close_1d)
+    donchian_low_1d = np.zeros_like(close_1d)
+    for i in range(len(close_1d)):
+        if i < 20:
+            donchian_high_1d[i] = np.max(high_1d[:i+1])
+            donchian_low_1d[i] = np.min(low_1d[:i+1])
         else:
-            donchian_high[i] = np.max(high_12h[i-14:i+1])
-            donchian_low[i] = np.min(low_12h[i-14:i+1])
+            donchian_high_1d[i] = np.max(high_1d[i-19:i+1])
+            donchian_low_1d[i] = np.min(low_1d[i-19:i+1])
     
     # === 1d daily pivot points (standard calculation) ===
     pivot_1d = np.zeros_like(close_1d)
     r1_1d = np.zeros_like(close_1d)
     s1_1d = np.zeros_like(close_1d)
-    
     for i in range(1, len(close_1d)):
-        pp = (high_1d[i-1] + low_12h[i-1] + close_1d[i-1]) / 3.0
+        pp = (high_1d[i-1] + low_1d[i-1] + close_1d[i-1]) / 3.0
         pivot_1d[i] = pp
-        r1_1d[i] = 2 * pp - low_12h[i-1]
+        r1_1d[i] = 2 * pp - low_1d[i-1]
         s1_1d[i] = 2 * pp - high_1d[i-1]
     
-    # === 12h volume ratio for confirmation ===
-    vol_ma_10_12h = pd.Series(volume_12h).rolling(window=10, min_periods=10).mean().values
-    vol_ratio_12h = volume_12h / vol_ma_10_12h
+    # === 4h volume ratio for confirmation ===
+    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_4h = volume_4h / vol_ma_20_4h
     
-    # Align all HTF data to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    # Align all HTF data to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_1d)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_1d)
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    vol_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio_12h)
+    vol_ratio_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ratio_4h)
     
     signals = np.zeros(n)
     
     # Warmup: enough for Donchian and pivots
-    warmup = 20
+    warmup = 30
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
@@ -75,7 +74,7 @@ def generate_signals(prices):
             np.isnan(pivot_1d_aligned[i]) or 
             np.isnan(r1_1d_aligned[i]) or 
             np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(vol_ratio_12h_aligned[i])):
+            np.isnan(vol_ratio_4h_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -86,32 +85,32 @@ def generate_signals(prices):
         pt = pivot_1d_aligned[i]
         r1 = r1_1d_aligned[i]
         s1 = s1_1d_aligned[i]
-        vol_ratio = vol_ratio_12h_aligned[i]
+        vol_ratio = vol_ratio_4h_aligned[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit: price closes below S1
-            if price < s1:
+            # Exit: price closes below daily pivot
+            if price < pt:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit: price closes above R1
-            if price > r1:
+            # Exit: price closes above daily pivot
+            if price > pt:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Donchian breakout above R1 with volume
-            if price > r1 and price > dh and vol_ratio > 2.0:
+            # LONG: price breaks above 1d Donchian high AND above R1 with volume confirmation
+            if price > dh and price > r1 and vol_ratio > 2.0:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # SHORT: Donchian breakout below S1 with volume
-            elif price < s1 and price < dl and vol_ratio > 2.0:
+            # SHORT: price breaks below 1d Donchian low AND below S1 with volume confirmation
+            elif price < dl and price < s1 and vol_ratio > 2.0:
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -126,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Pivot_R1S1_Volume"
-timeframe = "12h"
+name = "4h_Donchian_Pivot_R1S1_Volume"
+timeframe = "4h"
 leverage = 1.0
