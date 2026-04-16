@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA trend filter and volume confirmation
-# Long when price > upper Donchian(20) AND 12h EMA50 > EMA200 (bullish trend) AND 12h volume > 1.8x 20-period volume SMA
-# Short when price < lower Donchian(20) AND 12h EMA50 < EMA200 (bearish trend) AND 12h volume > 1.8x 20-period volume SMA
-# Exit on opposite Donchian touch or ATR-based stoploss (2.0 ATR)
-# Uses price structure for breakouts, trend filter for direction, volume for conviction
+# Hypothesis: 4h Camarilla pivot breakout with 12h EMA trend filter and volume confirmation
+# Long when price > R3 AND 12h EMA50 > EMA200 AND 12h volume > 2.0x 20-period volume SMA
+# Short when price < S3 AND 12h EMA50 < EMA200 AND 12h volume > 2.0x 20-period volume SMA
+# Exit on price returning to pivot point (PP) or ATR stoploss (1.5 ATR)
+# Uses proven Camarilla structure, trend filter for direction, volume for conviction
 # Discrete sizing 0.25 targets 20-30 trades/year to minimize fee drag
 
 def generate_signals(prices):
@@ -41,11 +41,28 @@ def generate_signals(prices):
     vol_sma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
     vol_sma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_sma_20_12h)
     
-    # === 4h Indicator: Donchian Channel (20-period) for breakout signals ===
-    # Upper band = highest high over 20 periods
-    # Lower band = lowest low over 20 periods
-    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === 4h Indicator: Camarilla Pivot Levels from previous day ===
+    # Use daily OHLC from previous completed day to calculate today's Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate Camarilla levels from previous day's OHLC
+    # PP = (H + L + C) / 3
+    # R3 = PP + (H - L) * 1.1 / 2
+    # S3 = PP - (H - L) * 1.1 / 2
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    pp_1d = (high_1d + low_1d + close_1d) / 3.0
+    r3_1d = pp_1d + (high_1d - low_1d) * 1.1 / 2.0
+    s3_1d = pp_1d - (high_1d - low_1d) * 1.1 / 2.0
+    
+    # Align daily Camarilla levels to 4h timeframe (completed bar delay)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
     # ATR for stoploss (14-period)
     tr1 = high - low
@@ -57,7 +74,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 200  # Need 200 for EMA200
+    warmup = 200  # Need 200 for EMA200 and daily data alignment
     
     # Track position state for exits
     position = 0  # 0: flat, 1: long, -1: short
@@ -73,8 +90,8 @@ def generate_signals(prices):
         
         # Skip if any required data is NaN
         if (np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or 
-            np.isnan(vol_sma_20_12h_aligned[i]) or np.isnan(highest_high_20[i]) or 
-            np.isnan(lowest_low_20[i]) or np.isnan(atr_14[i])):
+            np.isnan(vol_sma_20_12h_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(pp_aligned[i]) or np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
@@ -84,8 +101,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 12h volume > 1.8x 20-period 12h volume SMA
-        vol_threshold = vol_sma_20_12h_aligned[i] * 1.8
+        # Volume filter: current 12h volume > 2.0x 20-period 12h volume SMA
+        vol_threshold = vol_sma_20_12h_aligned[i] * 2.0
         vol_confirm = vol_12h_aligned[i] > vol_threshold
         
         # Trend filter: EMA50 > EMA200 for bullish, EMA50 < EMA200 for bearish
@@ -94,18 +111,19 @@ def generate_signals(prices):
         
         # Price levels
         price = close[i]
-        upper_donchian = highest_high_20[i]
-        lower_donchian = lowest_low_20[i]
+        r3 = r3_aligned[i]
+        s3 = s3_aligned[i]
+        pp = pp_aligned[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         if position == 1:  # long position
-            # Exit on lower Donchian touch or ATR stoploss
-            if price <= lower_donchian or price <= entry_price - 2.0 * atr_14[i]:
+            # Exit on price returning to pivot point or ATR stoploss
+            if price <= pp or price <= entry_price - 1.5 * atr_14[i]:
                 exit_signal = True
         elif position == -1:  # short position
-            # Exit on upper Donchian touch or ATR stoploss
-            if price >= upper_donchian or price >= entry_price + 2.0 * atr_14[i]:
+            # Exit on price returning to pivot point or ATR stoploss
+            if price >= pp or price >= entry_price + 1.5 * atr_14[i]:
                 exit_signal = True
         
         if exit_signal:
@@ -117,15 +135,15 @@ def generate_signals(prices):
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
             # LONG CONDITIONS
-            # Price > upper Donchian AND bullish trend AND volume confirmation
-            if price > upper_donchian and bullish_trend and vol_confirm:
+            # Price > R3 AND bullish trend AND volume confirmation
+            if price > r3 and bullish_trend and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
             # SHORT CONDITIONS
-            # Price < lower Donchian AND bearish trend AND volume confirmation
-            elif price < lower_donchian and bearish_trend and vol_confirm:
+            # Price < S3 AND bearish trend AND volume confirmation
+            elif price < s3 and bearish_trend and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -135,6 +153,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_12hEMATrend_Volume1.8x_v1"
+name = "4h_CamarillaR3S3_12hEMATrend_Volume2.0x_v1"
 timeframe = "4h"
 leverage = 1.0
