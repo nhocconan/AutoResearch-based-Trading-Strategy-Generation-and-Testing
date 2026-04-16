@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Donchian breakout (20) for direction and 1d EMA50 for trend filter.
-# Enter long when price breaks above 4h Donchian upper AND close > 1d EMA50 AND volume > 1.5x 20-period average.
-# Enter short when price breaks below 4h Donchian lower AND close < 1d EMA50 AND volume > 1.5x 20-period average.
-# Exit when price returns to 4h Donchian midpoint.
-# Uses session filter (08-20 UTC) to avoid low-liquidity hours.
-# Discrete position size 0.20 to minimize fee churn. Target: 60-150 total trades over 4 years (15-37/year).
+# Hypothesis: 6h Williams %R with 1d Elder Ray (Bull/Bear Power) and volume confirmation.
+# Long when Williams %R < -80 (oversold) AND Bear Power < 0 (bearish momentum weakening) AND volume > 1.5x 20-period average.
+# Short when Williams %R > -20 (overbought) AND Bull Power < 0 (bullish momentum weakening) AND volume > 1.5x 20-period average.
+# Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts).
+# Uses discrete position size 0.25. Williams %R identifies reversals in bear market rallies, Elder Ray confirms momentum shift.
+# Volume filter reduces false signals. Target: 50-150 total trades over 4 years (12-37/year).
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,43 +20,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session hours (08-20 UTC) to avoid look-ahead and TypeError
-    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
-    
-    # Get 1d data once before loop for EMA50 trend filter
+    # Get 1d data once before loop for Elder Ray (Bull/Bear Power)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 13:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === 1d Indicators: EMA50 for trend filter ===
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # === 1d Indicators: Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13) ===
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high_1d - ema_13_1d  # Bull Power: High - EMA13
+    bear_power = low_1d - ema_13_1d   # Bear Power: Low - EMA13
     
-    # Get 4h data for Donchian channels and volume
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Align Elder Ray to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    
+    # Get 6h data for Williams %R and volume
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 14:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    volume_6h = df_6h['volume'].values
     
-    # Donchian Channel (20-period) on 4h
-    upper_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    midpoint_20 = (upper_20 + lower_20) / 2.0
+    # Williams %R (14-period) on 6h: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_6h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_6h).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close_6h) / (highest_high - lowest_low) * -100
+    # Handle division by zero (when highest_high == lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Align Donchian levels to 4h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_4h, upper_20)
-    lower_aligned = align_htf_to_ltf(prices, df_4h, lower_20)
-    midpoint_aligned = align_htf_to_ltf(prices, df_4h, midpoint_20)
+    # Align Williams %R to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_6h, williams_r)
     
-    # Volume moving average (20-period) on 4h
-    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
+    # Volume moving average (20-period) on 6h
+    vol_ma_20_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_20_6h)
     
     signals = np.zeros(n)
     
@@ -68,27 +72,18 @@ def generate_signals(prices):
     entry_price = 0.0
     
     for i in range(warmup, n):
-        # Session filter: only trade between 08:00 and 20:00 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            position = 0
-            entry_price = 0.0
-            continue
-        
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(midpoint_aligned[i]) or np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             position = 0
             entry_price = 0.0
             continue
         
         # Current values
-        ema_50_val = ema_50_aligned[i]
-        upper_val = upper_aligned[i]
-        lower_val = lower_aligned[i]
-        midpoint_val = midpoint_aligned[i]
+        williams_r_val = williams_r_aligned[i]
+        bull_power_val = bull_power_aligned[i]
+        bear_power_val = bear_power_aligned[i]
         vol_ma_val = vol_ma_aligned[i]
         price = close[i]
         vol = volume[i]
@@ -97,13 +92,13 @@ def generate_signals(prices):
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price returns to midpoint
-            if price <= midpoint_val:
+            # Exit if Williams %R crosses above -50 (momentum weakening)
+            if williams_r_val > -50:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price returns to midpoint
-            if price >= midpoint_val:
+            # Exit if Williams %R crosses below -50 (momentum weakening)
+            if williams_r_val < -50:
                 exit_signal = True
         
         if exit_signal:
@@ -117,27 +112,23 @@ def generate_signals(prices):
             # Volume filter: volume > 1.5x 20-period average
             vol_filter = vol > 1.5 * vol_ma_val
             
-            # Trend filter: price relative to 1d EMA50
-            trend_filter_long = price > ema_50_val
-            trend_filter_short = price < ema_50_val
-            
-            # LONG: price breaks above Donchian upper with volume and trend confirmation
-            if price > upper_val and vol_filter and trend_filter_long:
-                signals[i] = 0.20
+            # LONG: Williams %R oversold (< -80) AND Bear Power < 0 (bearish momentum weakening) AND volume confirmation
+            if williams_r_val < -80 and bear_power_val < 0 and vol_filter:
+                signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: price breaks below Donchian lower with volume and trend confirmation
-            elif price < lower_val and vol_filter and trend_filter_short:
-                signals[i] = -0.20
+            # SHORT: Williams %R overbought (> -20) AND Bull Power < 0 (bullish momentum weakening) AND volume confirmation
+            elif williams_r_val > -20 and bull_power_val < 0 and vol_filter:
+                signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         else:
-            signals[i] = position * 0.20
+            signals[i] = position * 0.25
     
     return signals
 
-name = "1h_Donchian20_1dEMA50_Volume_SessionFilter_V1"
-timeframe = "1h"
+name = "6h_WilliamsR_1dElderRay_VolumeFilter_V1"
+timeframe = "6h"
 leverage = 1.0
