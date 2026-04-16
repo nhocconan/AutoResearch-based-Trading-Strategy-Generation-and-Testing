@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h RSI(14) with 1d EMA trend filter and volume confirmation.
-# Long when RSI(14) crosses above 30 AND price > 1d EMA100 AND 1d volume > 1.2x 30-period average.
-# Short when RSI(14) crosses below 70 AND price < 1d EMA100 AND 1d volume > 1.2x 30-period average.
-# Exit on opposite RSI cross (above 70 for long, below 30 for short) or ATR-based stoploss (1.5*ATR).
-# Uses discrete position size 0.25. Works in both bull and bear markets by requiring
-# volume confirmation and trend alignment via 1d EMA100. Target: 60-120 total trades over 4 years (15-30/year).
+# Hypothesis: 4h Bollinger Band squeeze breakout with 1d ADX trend filter and volume confirmation.
+# Long when price breaks above upper Bollinger Band AND ADX(14) > 25 AND volume > 1.5x 20-period average.
+# Short when price breaks below lower Bollinger Band AND ADX(14) > 25 AND volume > 1.5x 20-period average.
+# Exit on ATR-based stoploss (2*ATR from entry) or opposite Bollinger Band break.
+# Uses discrete position size 0.25. Works in trending markets by requiring ADX > 25 and volume confirmation.
+# Target: 75-200 total trades over 4 years (19-50/year).
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,34 +20,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h Indicators: RSI(14) ===
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
-    rsi_prev = np.roll(rsi, 1)
-    rsi_prev[0] = np.nan
+    # === 4h Indicators: Bollinger Bands (20, 2) ===
+    ma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_band = ma_20 + (2 * std_20)
+    lower_band = ma_20 - (2 * std_20)
     
-    # === 1d Indicators: EMA100 and Volume Spike ===
+    # === 1d Indicators: ADX (14-period) ===
     df_1d = get_htf_data(prices, '1d')
-    ema_100_1d = pd.Series(df_1d['close']).ewm(span=100, adjust=False, min_periods=100).mean().values
-    ema_100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_100_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
+    # True Range
+    tr1 = pd.Series(high_1d).diff()
+    tr2 = pd.Series(low_1d).diff().abs()
+    tr3 = pd.Series(close_1d).shift(1).diff().abs()
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    # Directional Movement
+    up_move = pd.Series(high_1d).diff()
+    down_move = pd.Series(low_1d).diff().abs()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * (plus_dm_14 / tr_14)
+    minus_di = 100 * (minus_dm_14 / tr_14)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    adx_14_1d = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # === 1d Volume Spike ===
     vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=30, min_periods=30).mean().values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    volume_spike = volume > (1.2 * vol_ma_1d_aligned)
+    volume_spike = volume > (1.5 * vol_ma_1d_aligned)
     
-    # === 12h ATR for stoploss ===
+    # === 4h ATR for stoploss ===
     tr1 = pd.Series(high).diff()
     tr2 = pd.Series(low).diff().abs()
     tr3 = pd.Series(close).shift(1).diff().abs()
-    tr_12h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_12h_raw = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    tr_4h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_4h_raw = pd.Series(tr_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -55,8 +78,8 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 100 periods needed for EMA100)
-    warmup = 120
+    # Warmup: ensure all indicators are valid (max 50 periods needed for ADX)
+    warmup = 60
     
     # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,34 +87,35 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(rsi[i]) or np.isnan(rsi_prev[i]) or np.isnan(ema_100_1d_aligned[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(atr_12h_raw[i]) or not session_filter[i]):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(adx_14_1d[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(atr_4h_raw[i]) or not session_filter[i]):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values
         price = close[i]
+        adx_val = adx_14_1d[i]
         vol_spike = volume_spike[i]
-        atr_val = atr_12h_raw[i]
+        atr_val = atr_4h_raw[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if RSI crosses above 70 (overbought)
-            if rsi[i] > 70 and rsi_prev[i] <= 70:
+            # Exit if price breaks below lower Bollinger Band
+            if price < lower_band[i]:
                 exit_signal = True
-            # ATR-based stoploss: 1.5*ATR below entry
-            elif price < entry_price - 1.5 * atr_val:
+            # ATR-based stoploss: 2*ATR below entry
+            elif price < entry_price - 2.0 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if RSI crosses below 30 (oversold)
-            if rsi[i] < 30 and rsi_prev[i] >= 30:
+            # Exit if price breaks above upper Bollinger Band
+            if price > upper_band[i]:
                 exit_signal = True
-            # ATR-based stoploss: 1.5*ATR above entry
-            elif price > entry_price + 1.5 * atr_val:
+            # ATR-based stoploss: 2*ATR above entry
+            elif price > entry_price + 2.0 * atr_val:
                 exit_signal = True
         
         if exit_signal:
@@ -102,16 +126,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: RSI crosses above 30 AND price > 1d EMA100 AND volume spike
-            if (rsi[i] > 30 and rsi_prev[i] <= 30 and 
-                price > ema_100_1d_aligned[i] and vol_spike):
+            # LONG: Price breaks above upper Bollinger Band AND ADX > 25 AND volume spike
+            if (price > upper_band[i] and adx_val > 25 and vol_spike):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: RSI crosses below 70 AND price < 1d EMA100 AND volume spike
-            elif (rsi[i] < 70 and rsi_prev[i] >= 70 and 
-                  price < ema_100_1d_aligned[i] and vol_spike):
+            # SHORT: Price breaks below lower Bollinger Band AND ADX > 25 AND volume spike
+            elif (price < lower_band[i] and adx_val > 25 and vol_spike):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -121,6 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_RSI14_1dEMA100_VolumeSpike_V1"
-timeframe = "12h"
+name = "4h_BollingerBreakout_1dADX_VolumeSpike_V1"
+timeframe = "4h"
 leverage = 1.0
