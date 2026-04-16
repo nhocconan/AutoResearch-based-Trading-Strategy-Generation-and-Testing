@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Bollinger Band width percentile + 1d RSI mean reversion + volume confirmation
-# Long when BB width < 20th percentile AND RSI < 30 AND volume > 1.5x 12h average
-# Short when BB width < 20th percentile AND RSI > 70 AND volume > 1.5x 12h average
-# ATR trailing stop (1.5x ATR) to manage risk
-# Bollinger squeeze identifies low volatility periods preceding breakouts, RSI captures overextended moves, volume confirms conviction
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+# Hypothesis: 4h Donchian(20) breakout + 12h volume confirmation + 1d ADX(14) > 25 trend filter
+# Long when price breaks above Donchian upper band AND 12h volume > 1.3x 20-period average AND 1d ADX > 25
+# Short when price breaks below Donchian lower band AND 12h volume > 1.3x 20-period average AND 1d ADX > 25
+# ATR trailing stop (2.0x ATR) to manage risk
+# Donchian provides clear trend-following structure, volume confirms conviction, ADX filters for trending markets
+# Target: 100-200 total trades over 4 years (25-50/year) to balance opportunity and fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,56 +20,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h Bollinger Bands (20-period, 2 std dev) ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # === 4h Donchian(20) channels ===
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Calculate Bollinger Bands
-    ma_20 = pd.Series(close_12h).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_12h).rolling(window=20, min_periods=20).std().values
-    upper_bb = ma_20 + 2 * std_20
-    lower_bb = ma_20 - 2 * std_20
-    bb_width = upper_bb - lower_bb
+    # Calculate Donchian channels
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # BB width percentile (20-period lookback)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=20, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
-    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_12h, bb_width_percentile)
-    
-    # === 1d RSI (14-period) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    
-    # Calculate RSI
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
     
     # === 12h Volume Confirmation (average volume) ===
+    df_12h = get_htf_data(prices, '12h')
     volume_12h = df_12h['volume'].values
-    vol_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values  # 20 periods average
     vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
     
-    # === 12h ATR for trailing stop (14-period) ===
-    tr1_12h = high_12h - low_12h
-    tr2_12h = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3_12h = np.abs(low_12h - np.roll(close_12h, 1))
-    tr2_12h[0] = tr1_12h[0]
-    tr3_12h[0] = tr1_12h[0]
-    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
-    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
+    # === 1d ADX trend filter (14-period) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d_arr = df_1d['high'].values
+    low_1d_arr = df_1d['low'].values
+    close_1d_arr = df_1d['close'].values
+    
+    # True Range
+    tr1 = high_1d_arr - low_1d_arr
+    tr2 = np.abs(high_1d_arr - np.roll(close_1d_arr, 1))
+    tr3 = np.abs(low_1d_arr - np.roll(close_1d_arr, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d_arr - np.roll(high_1d_arr, 1)) > (np.roll(low_1d_arr, 1) - low_1d_arr), 
+                       np.maximum(high_1d_arr - np.roll(high_1d_arr, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d_arr, 1) - low_1d_arr) > (high_1d_arr - np.roll(high_1d_arr, 1)), 
+                        np.maximum(np.roll(low_1d_arr, 1) - low_1d_arr, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    # DI values
+    di_plus = 100 * dm_plus_14 / tr14
+    di_minus = 100 * dm_minus_14 / tr14
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    dx[np.isnan(dx)] = 0
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # === 4h ATR for trailing stop (14-period) ===
+    high_4h_arr = df_4h['high'].values
+    low_4h_arr = df_4h['low'].values
+    close_4h_arr = df_4h['close'].values
+    
+    tr1_4h = high_4h_arr - low_4h_arr
+    tr2_4h = np.abs(high_4h_arr - np.roll(close_4h_arr, 1))
+    tr3_4h = np.abs(low_4h_arr - np.roll(close_4h_arr, 1))
+    tr2_4h[0] = tr1_4h[0]
+    tr3_4h[0] = tr1_4h[0]
+    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
+    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
+    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
     
     signals = np.zeros(n)
     
@@ -84,33 +102,35 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(bb_width_percentile_aligned[i]) or 
-            np.isnan(rsi_aligned[i]) or
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or
             np.isnan(vol_ma_12h_aligned[i]) or
-            np.isnan(atr_12h_aligned[i])):
+            np.isnan(adx_aligned[i]) or
+            np.isnan(atr_4h_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        bb_width_pct = bb_width_percentile_aligned[i]
-        rsi_val = rsi_aligned[i]
+        upper_band = donchian_high_aligned[i]
+        lower_band = donchian_low_aligned[i]
         vol_ma_val = vol_ma_12h_aligned[i]
-        atr_val = atr_12h_aligned[i]
+        adx_val = adx_aligned[i]
+        atr_val = atr_4h_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x 12h average volume
-        vol_confirm = volume[i] > vol_ma_val * 1.5
+        # Volume confirmation: current volume > 1.3x 12h average volume
+        vol_confirm = volume[i] > vol_ma_val * 1.3
         
-        # Squeeze condition: BB width < 20th percentile (low volatility)
-        squeeze_condition = bb_width_pct < 20
+        # ADX filter: trending market (ADX > 25)
+        trend_filter = adx_val > 25
         
         # === TRAILING STOP LOGIC ===
         if position == 1:  # Long position
             # Update highest price since entry
             if price > highest_since_entry:
                 highest_since_entry = price
-            # Trail stop: exit if price drops 1.5*ATR from highest
-            if atr_val > 0 and price < highest_since_entry - 1.5 * atr_val:
+            # Trail stop: exit if price drops 2.0*ATR from highest
+            if atr_val > 0 and price < highest_since_entry - 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 highest_since_entry = 0.0
@@ -120,8 +140,8 @@ def generate_signals(prices):
             # Update lowest price since entry
             if price < lowest_since_entry or lowest_since_entry == 0:
                 lowest_since_entry = price
-            # Trail stop: exit if price rises 1.5*ATR from lowest
-            if atr_val > 0 and price > lowest_since_entry + 1.5 * atr_val:
+            # Trail stop: exit if price rises 2.0*ATR from lowest
+            if atr_val > 0 and price > lowest_since_entry + 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 lowest_since_entry = 0.0
@@ -129,15 +149,15 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Long when: squeeze AND RSI < 30 (oversold) AND volume confirmation
-            if squeeze_condition and rsi_val < 30 and vol_confirm:
+            # Long when: price breaks above upper band AND volume confirmation AND trend filter
+            if price > upper_band and vol_confirm and trend_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 highest_since_entry = price
                 continue
-            # Short when: squeeze AND RSI > 70 (overbought) AND volume confirmation
-            elif squeeze_condition and rsi_val > 70 and vol_confirm:
+            # Short when: price breaks below lower band AND volume confirmation AND trend filter
+            elif price < lower_band and vol_confirm and trend_filter:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -154,6 +174,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_BBWidthPercentile20_RSI30_70_Volume1.5x_ATRTrail_1.5x"
-timeframe = "12h"
+name = "4h_Donchian20_12hVolume1.3x_1dADX25_4hATRTrail_2.0x"
+timeframe = "4h"
 leverage = 1.0
