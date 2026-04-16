@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Donchian breakout (20-period) with 1d ADX filter (>25) and volume confirmation (1.5x).
-# Long when price breaks above 4h Donchian upper, 1d ADX > 25, and 1h volume > 1.5x 20-bar median volume.
-# Short when price breaks below 4h Donchian lower, 1d ADX > 25, and 1h volume > 1.5x 20-bar median volume.
-# Exit when price returns to 4h Donchian middle (mean of upper/lower).
-# Uses discrete position size 0.20. Target: 60-150 total trades over 4 years (15-37/year).
-# Works in both bull and bear markets by using 1d ADX as a trend filter to avoid ranging markets and Donchian for breakouts.
+# Hypothesis: 6h strategy using 6h Supertrend (ATR=10, mult=3.0) with 1w ADX regime filter and volume confirmation.
+# Long when Supertrend gives buy signal, 1w ADX > 25 (trending market), and 6h volume > 1.5x 20-period median volume.
+# Short when Supertrend gives sell signal, 1w ADX > 25, and same volume condition.
+# Uses discrete position size 0.25. Target: 50-150 total trades over 4 years (12-37/year).
+# Supertrend avoids whipsaws in ranging markets, ADX ensures we only trade in trending conditions (works in both bull/bear trends),
+# volume confirmation adds conviction to breakouts.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,108 +20,127 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data once before loop for Donchian channels
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get 6h data once before loop for Supertrend and volume
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 50:
         return np.zeros(n)
     
-    # === 4h Indicators: Donchian Channels (20-period) ===
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # === 6h Indicators: Supertrend (ATR=10, mult=3.0) and volume median ===
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    vol_6h = df_6h['volume'].values
     
-    # Calculate 4h Donchian upper (20-period high)
-    donchian_upper_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    # Calculate 4h Donchian lower (20-period low)
-    donchian_lower_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    # Calculate 4h Donchian middle (mean of upper/lower)
-    donchian_middle_4h = (donchian_upper_4h + donchian_lower_4h) / 2.0
+    # Calculate ATR(10)
+    tr1 = pd.Series(high_6h - low_6h)
+    tr2 = pd.Series(np.abs(high_6h - np.roll(close_6h, 1)))
+    tr3 = pd.Series(np.abs(low_6h - np.roll(close_6h, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_10 = tr.rolling(window=10, min_periods=10).mean().values
     
-    # Get 1d data for trend filter (ADX)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Calculate Supertrend
+    hl2 = (high_6h + low_6h) / 2
+    upperband = hl2 + (3.0 * atr_10)
+    lowerband = hl2 - (3.0 * atr_10)
+    
+    supertrend = np.zeros_like(close_6h)
+    direction = np.ones_like(close_6h)  # 1 for uptrend, -1 for downtrend
+    
+    supertrend[0] = upperband[0]
+    direction[0] = 1
+    
+    for i in range(1, len(close_6h)):
+        if close_6h[i] > upperband[i-1]:
+            direction[i] = 1
+        elif close_6h[i] < lowerband[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+            if direction[i] == 1 and lowerband[i] < lowerband[i-1]:
+                lowerband[i] = lowerband[i-1]
+            if direction[i] == -1 and upperband[i] > upperband[i-1]:
+                upperband[i] = upperband[i-1]
+        
+        supertrend[i] = upperband[i] if direction[i] == 1 else lowerband[i]
+    
+    # Supertrend signal: 1 for buy (close > supertrend), -1 for sell (close < supertrend)
+    supertrend_signal = np.where(close_6h > supertrend, 1, -1)
+    
+    # Calculate 6h volume median (20-period)
+    vol_median_20 = pd.Series(vol_6h).rolling(window=20, min_periods=20).median().values
+    
+    # Get 1w data for ADX regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # === 1d Indicators: ADX (14-period) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 1w Indicators: ADX(14) for trend strength ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate ADX components
+    plus_dm = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    minus_dm = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    # Pad to same length
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
     
     # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
+    tr1_w = high_1w - low_1w
+    tr2_w = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3_w = np.abs(low_1w - np.roll(close_1w, 1))
+    tr_w = np.maximum(np.maximum(tr1_w, tr2_w), tr3_w)
+    tr_w[0] = tr1_w[0]  # First TR is just high-low
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Smoothed values
+    atr_1w = pd.Series(tr_w).rolling(window=14, min_periods=14).mean().values
+    plus_di_1w = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_1w
+    minus_di_1w = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_1w
+    dx_1w = 100 * np.abs(plus_di_1w - minus_di_1w) / (plus_di_1w + minus_di_1w)
+    adx_1w = pd.Series(dx_1w).rolling(window=14, min_periods=14).mean().values
     
-    # Smoothed TR, DM+, DM- (Wilder's smoothing = EMA with alpha=1/period)
-    atr_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_14 / atr_1d
-    di_minus = 100 * dm_minus_14 / atr_1d
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Get 1h data for volume filter
-    vol_median_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
-    
-    # Align all indicators to primary timeframe (1h)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper_4h)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower_4h)
-    donchian_middle_aligned = align_htf_to_ltf(prices, df_4h, donchian_middle_4h)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Align all indicators to primary timeframe (6h)
+    supertrend_signal_aligned = align_htf_to_ltf(prices, df_6h, supertrend_signal)
+    vol_median_aligned = align_htf_to_ltf(prices, df_6h, vol_median_20)
+    vol_6h_aligned = align_htf_to_ltf(prices, df_6h, vol_6h)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(20, 14, 20)  # Donchian(20), ADX(14), volume median(20)
+    warmup = max(20, 10, 14, 14)  # volume median(20), ATR(10), ADX components
     
     # Track position state for exits
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(donchian_middle_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
-            np.isnan(vol_median_20[i])):
+        if (np.isnan(supertrend_signal_aligned[i]) or 
+            np.isnan(vol_median_aligned[i]) or 
+            np.isnan(vol_6h_aligned[i]) or 
+            np.isnan(adx_1w_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values (aligned)
-        upper = donchian_upper_aligned[i]
-        lower = donchian_lower_aligned[i]
-        middle = donchian_middle_aligned[i]
-        adx = adx_1d_aligned[i]
-        vol_median = vol_median_20[i]
-        price = close[i]
-        vol = volume[i]
-        
-        # Volume spike filter: current 1h volume > 1.5x median volume
-        volume_spike = vol > (vol_median * 1.5)
+        st_signal = supertrend_signal_aligned[i]
+        vol_median = vol_median_aligned[i]
+        vol_6h = vol_6h_aligned[i]
+        adx_1w = adx_1w_aligned[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         if position == 1:  # long position
-            # Exit when price returns to Donchian middle
-            if price <= middle:
+            # Exit when Supertrend flips to sell signal
+            if st_signal == -1:
                 exit_signal = True
         elif position == -1:  # short position
-            # Exit when price returns to Donchian middle
-            if price >= middle:
+            # Exit when Supertrend flips to buy signal
+            if st_signal == 1:
                 exit_signal = True
         
         if exit_signal:
@@ -131,26 +150,28 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Trend filter: 1d ADX > 25 (strong trend)
-            strong_trend = adx > 25
+            # Volume spike filter: current 6h volume > 1.5x median volume
+            volume_spike = vol_6h > (vol_median * 1.5)
+            # Regime filter: 1w ADX > 25 (trending market)
+            trending_market = adx_1w > 25
             
             # LONG CONDITIONS
-            # Price breaks above 4h Donchian upper, strong trend, and volume spike
-            if price > upper and strong_trend and volume_spike:
-                signals[i] = 0.20
+            # Supertrend buy signal, trending market, and volume spike
+            if st_signal == 1 and trending_market and volume_spike:
+                signals[i] = 0.25
                 position = 1
             
             # SHORT CONDITIONS
-            # Price breaks below 4h Donchian lower, strong trend, and volume spike
-            elif price < lower and strong_trend and volume_spike:
-                signals[i] = -0.20
+            # Supertrend sell signal, trending market, and volume spike
+            elif st_signal == -1 and trending_market and volume_spike:
+                signals[i] = -0.25
                 position = -1
         
         else:
-            signals[i] = position * 0.20  # maintain position
+            signals[i] = position * 0.25  # maintain position
     
     return signals
 
-name = "1h_Donchian20_4hUpperLower_1dADX25_1hVolumeSpike1.5x_v1"
-timeframe = "1h"
+name = "6h_Supertrend_ADX1w_VolumeSpike1.5x_v1"
+timeframe = "6h"
 leverage = 1.0
