@@ -3,16 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and ATR trailing stop.
-# Long when price breaks above Donchian high AND 12h volume > 1.5x 30-period average.
-# Short when price breaks below Donchian low AND 12h volume > 1.5x 30-period average.
-# Exit on ATR trailing stop (3*ATR from extreme) or opposite Donchian break.
-# Uses discrete position size 0.25. Volume confirmation and ATR trailing reduce whipsaws.
-# Target: 75-150 total trades over 4 years (19-38/year) to avoid fee drag.
+# Hypothesis: 1h Camarilla R1/S1 breakout with 4h volume confirmation and ATR stoploss.
+# Long when price breaks above Camarilla R1 AND 4h volume > 1.5x 20-period average.
+# Short when price breaks below Camarilla S1 AND 4h volume > 1.5x 20-period average.
+# Exit on ATR-based stoploss (2*ATR from entry) or opposite Camarilla break.
+# Uses discrete position size 0.20. Session filter (08-20 UTC) to reduce noise.
+# Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
+# Works in both bull and bear markets by requiring volume confirmation and using
+# symmetric Camarilla levels derived from prior 4h session.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,23 +22,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Indicators: Donchian Channel (20-period) ===
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === 4h Indicators: Camarilla Pivot Points (R1, S1) ===
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # === 12h Indicators: Volume Spike (volume > 1.5x 30-period average) ===
-    df_12h = get_htf_data(prices, '12h')
-    vol_12h = df_12h['volume'].values
-    vol_ma_12h = pd.Series(vol_12h).rolling(window=30, min_periods=30).mean().values
-    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
-    volume_spike = volume > (1.5 * vol_ma_12h_aligned)
+    # Calculate prior 4h bar's Camarilla levels
+    # R1 = close + 1.1*(high-low)/12
+    # S1 = close - 1.1*(high-low)/12
+    hl_range_4h = high_4h - low_4h
+    r1_4h = close_4h + (1.1 * hl_range_4h / 12)
+    s1_4h = close_4h - (1.1 * hl_range_4h / 12)
     
-    # === 4h ATR for trailing stop ===
-    tr1 = pd.Series(high).diff()
-    tr2 = pd.Series(low).diff().abs()
-    tr3 = pd.Series(close).shift(1).diff().abs()
-    tr_4h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    # Align to 1h timeframe (completed 4h bar only)
+    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
+    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
+    
+    # === 4h Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    vol_4h = df_4h['volume'].values
+    vol_ma_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
+    volume_spike_4h = vol_4h > (1.5 * vol_ma_4h_aligned)
+    volume_spike_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_spike_4h)
+    
+    # === 4h ATR for stoploss ===
+    tr1_4h = pd.Series(high_4h).diff()
+    tr2_4h = pd.Series(low_4h).diff().abs()
+    tr3_4h = pd.Series(close_4h).shift(1).diff().abs()
+    tr_4h = pd.concat([tr1_4h, tr2_4h, tr3_4h], axis=1).max(axis=1)
     atr_4h_raw = pd.Series(tr_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h_raw)
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -44,83 +60,73 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 30 periods needed for 12h vol MA)
-    warmup = 60
+    # Warmup: ensure all indicators are valid (max 20 periods needed for 4h)
+    warmup = 50
     
-    # Track position state and extreme price for trailing stop
+    # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
-    long_extreme = 0.0
-    short_extreme = 0.0
+    entry_price = 0.0
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or np.isnan(volume_spike[i]) or
-            np.isnan(atr_4h_raw[i]) or not session_filter[i]):
+        if (np.isnan(r1_4h_aligned[i]) or np.isnan(s1_4h_aligned[i]) or 
+            np.isnan(volume_spike_4h_aligned[i]) or np.isnan(atr_4h_aligned[i]) or
+            not session_filter[i]):
             signals[i] = 0.0
             position = 0
-            long_extreme = 0.0
-            short_extreme = 0.0
             continue
         
         # Current values
         price = close[i]
-        vol_spike = volume_spike[i]
-        atr_val = atr_4h_raw[i]
+        vol_spike = volume_spike_4h_aligned[i]
+        atr_val = atr_4h_aligned[i]
+        r1 = r1_4h_aligned[i]
+        s1 = s1_4h_aligned[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Update long extreme
-            if price > long_extreme:
-                long_extreme = price
-            # Exit if price breaks below Donchian low (opposite breakout)
-            if price < low_roll[i]:
+            # Exit if price breaks below Camarilla S1 (opposite breakout)
+            if price < s1:
                 exit_signal = True
-            # ATR trailing stop: 3*ATR below long extreme
-            elif price < long_extreme - 3.0 * atr_val:
+            # ATR-based stoploss: 2*ATR below entry
+            elif price < entry_price - 2.0 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Update short extreme (lowest price)
-            if short_extreme == 0.0 or price < short_extreme:
-                short_extreme = price
-            # Exit if price breaks above Donchian high (opposite breakout)
-            if price > high_roll[i]:
+            # Exit if price breaks above Camarilla R1 (opposite breakout)
+            if price > r1:
                 exit_signal = True
-            # ATR trailing stop: 3*ATR above short extreme
-            elif price > short_extreme + 3.0 * atr_val:
+            # ATR-based stoploss: 2*ATR above entry
+            elif price > entry_price + 2.0 * atr_val:
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
-            long_extreme = 0.0
-            short_extreme = 0.0
+            entry_price = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Donchian high AND volume spike
-            if price > high_roll[i] and vol_spike:
-                signals[i] = 0.25
+            # LONG: Price breaks above Camarilla R1 AND volume spike
+            if price > r1 and vol_spike:
+                signals[i] = 0.20
                 position = 1
-                long_extreme = price
-                short_extreme = 0.0
+                entry_price = price
             
-            # SHORT: Price breaks below Donchian low AND volume spike
-            elif price < low_roll[i] and vol_spike:
-                signals[i] = -0.25
+            # SHORT: Price breaks below Camarilla S1 AND volume spike
+            elif price < s1 and vol_spike:
+                signals[i] = -0.20
                 position = -1
-                short_extreme = price
-                long_extreme = 0.0
+                entry_price = price
         
         else:
-            # Maintain position
-            signals[i] = position * 0.25
+            signals[i] = position * 0.20
     
     return signals
 
-name = "4h_Donchian20_12hVolumeSpike_ATRTrail_V1"
-timeframe = "4h"
+name = "1h_Camarilla_R1S1_4hVolumeSpike_ATRStop_V1"
+timeframe = "1h"
 leverage = 1.0
