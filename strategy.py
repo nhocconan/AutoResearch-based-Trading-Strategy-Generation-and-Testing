@@ -13,28 +13,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 6h data (primary) ===
-    df_6h = get_htf_data(prices, '6h')
-    close_6h = df_6h['close'].values
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    volume_6h = df_6h['volume'].values
+    # === 4h data (primary) ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    volume_4h = df_4h['volume'].values
     
-    # === 12h data (HTF for trend filter) ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    
-    # === 1d data (HTF for volatility filter) ===
+    # === 1d data (HTF for trend and volatility filters) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # === 12h EMA34 (trend filter) ===
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # === 1d EMA34 (trend filter) ===
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # === 1d ATR(14) for volatility filter ===
     tr1 = high_1d - low_1d
@@ -45,9 +39,9 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # === 6h Donchian channel (20-period) ===
-    donch_high = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    # === 4h Donchian channel (20-period) ===
+    donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
     # Shift by 1 to avoid look-ahead (use previous bar's channel)
     donch_high = np.roll(donch_high, 1)
@@ -55,9 +49,9 @@ def generate_signals(prices):
     donch_high[0] = np.nan
     donch_low[0] = np.nan
     
-    # === 6h volume ratio for confirmation ===
-    vol_ma_10_6h = pd.Series(volume_6h).rolling(window=10, min_periods=10).mean().values
-    vol_ratio_6h = volume_6h / vol_ma_10_6h
+    # === 4h volume ratio for confirmation ===
+    vol_ma_10_4h = pd.Series(volume_4h).rolling(window=10, min_periods=10).mean().values
+    vol_ratio_4h = volume_4h / vol_ma_10_4h
     
     signals = np.zeros(n)
     
@@ -72,9 +66,9 @@ def generate_signals(prices):
         # Skip if any data is NaN
         if (np.isnan(donch_high[i]) or 
             np.isnan(donch_low[i]) or 
-            np.isnan(ema_34_12h_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(atr_14_1d_aligned[i]) or
-            np.isnan(vol_ratio_6h[i])):
+            np.isnan(vol_ratio_4h[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -82,9 +76,9 @@ def generate_signals(prices):
         price = close[i]
         upper = donch_high[i]
         lower = donch_low[i]
-        ema_trend = ema_34_12h_aligned[i]
+        ema_trend = ema_34_1d_aligned[i]
         atr = atr_14_1d_aligned[i]
-        vol_ratio = vol_ratio_6h[i]
+        vol_ratio = vol_ratio_4h[i]
         
         # === STOPLOSS LOGIC ===
         if position == 1:  # Long position
@@ -149,6 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian_12hEMA34_Volume_VolatilityFilter"
-timeframe = "6h"
+name = "4h_Donchian_1dEMA34_Volume_VolatilityFilter"
+timeframe = "4h"
 leverage = 1.0
