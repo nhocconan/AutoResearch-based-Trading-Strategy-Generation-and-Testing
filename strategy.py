@@ -13,20 +13,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 6h data (primary timeframe) ===
-    df_6h = get_htf_data(prices, '6h')
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
-    volume_6h = df_6h['volume'].values
+    # === 4h data (primary timeframe) ===
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
     
-    # Calculate ATR on 6h
-    tr_6h = np.maximum(high_6h - low_6h,
-                       np.maximum(np.abs(high_6h - np.roll(close_6h, 1)),
-                                  np.abs(low_6h - np.roll(close_6h, 1))))
-    tr_6h[0] = high_6h[0] - low_6h[0]
-    atr_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
-    atr_6h_aligned = align_htf_to_ltf(prices, df_6h, atr_6h)
+    # Calculate ATR on 4h
+    tr_4h = np.maximum(high_4h - low_4h,
+                       np.maximum(np.abs(high_4h - np.roll(close_4h, 1)),
+                                  np.abs(low_4h - np.roll(close_4h, 1))))
+    tr_4h[0] = high_4h[0] - low_4h[0]
+    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
+    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
     
     # === 1d data (HTF) ===
     df_1d = get_htf_data(prices, '1d')
@@ -35,79 +35,36 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # === 1d Weekly Pivot Points (based on prior week) ===
-    # For each day, we need the pivot from the previous week
-    # We'll calculate weekly OHLC then derive pivots
-    # Simplified: use daily close to approximate weekly pivot (acceptable for 6h)
-    # Better: calculate actual weekly pivot from prior week's daily data
-    
-    # Calculate weekly high/low/close using 1d data grouped by week
-    # Create a week number for each daily bar
-    days = pd.to_datetime(df_1d.index if hasattr(df_1d, 'index') else range(len(df_1d)))
-    if hasattr(df_1d, 'index'):
-        week_numbers = days.isocalendar().week
-    else:
-        # Fallback: approximate week number
-        week_numbers = (np.arange(len(df_1d)) // 7).astype(int)
-    
-    # Calculate weekly OHLC
-    weekly_high = np.full(len(df_1d), np.nan)
-    weekly_low = np.full(len(df_1d), np.nan)
-    weekly_close = np.full(len(df_1d), np.nan)
-    
-    for week in np.unique(week_numbers[~np.isnan(week_numbers)]):
-        mask = (week_numbers == week)
-        if np.any(mask):
-            weekly_high[mask] = np.max(high_1d[mask])
-            weekly_low[mask] = np.min(low_1d[mask])
-            weekly_close[mask] = close_1d[mask][-1]  # last day of week
-    
-    # Weekly pivot points
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s1 = 2 * weekly_pivot - weekly_high
-    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
-    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
-    weekly_r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
-    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
-    
-    # Align weekly pivots to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
-    weekly_r2_aligned = align_htf_to_ltf(prices, df_1d, weekly_r2)
-    weekly_s2_aligned = align_htf_to_ltf(prices, df_1d, weekly_s2)
-    weekly_r3_aligned = align_htf_to_ltf(prices, df_1d, weekly_r3)
-    weekly_s3_aligned = align_htf_to_ltf(prices, df_1d, weekly_s3)
-    
-    # === 1d ADX for trend strength ===
-    # Calculate +DM, -DM, TR
-    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    plus_dm = np.insert(plus_dm, 0, 0)
-    minus_dm = np.insert(minus_dm, 0, 0)
-    
+    # Calculate ATR on 1d
     tr_1d = np.maximum(high_1d - low_1d,
                        np.maximum(np.abs(high_1d - np.roll(close_1d, 1)),
                                   np.abs(low_1d - np.roll(close_1d, 1))))
     tr_1d[0] = high_1d[0] - low_1d[0]
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Smooth with Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    atr_1d_wilder = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False).mean().values
-    plus_di_1d = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values / atr_1d_wilder
-    minus_di_1d = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values / atr_1d_wilder
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = pd.Series(dx_1d).ewm(alpha=1/14, adjust=False).mean().values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # === 1d Bollinger Bands (20, 2) for volatility regime ===
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_band = sma_20 + (2 * std_20)
+    lower_band = sma_20 - (2 * std_20)
+    bb_width = (upper_band - lower_band) / sma_20
+    bb_width_aligned = align_htf_to_ltf(prices, df_1d, bb_width)
     
-    # === 6h Williams %R for overbought/oversold ===
-    highest_high_14 = pd.Series(high_6h).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_6h).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close_6h) / (highest_high_14 - lowest_low_14)
-    # Handle division by zero
-    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
+    # Percentile of BB width over 50 days for regime detection
+    bb_width_percentile = pd.Series(bb_width_aligned).rolling(window=50, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
+    
+    # === 4h Donchian Channel (20) for breakout signals ===
+    highest_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_upper = highest_20
+    donchian_lower = lowest_20
+    
+    # === 4h Volume spike detection ===
+    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume_4h / vol_ma_20
     
     signals = np.zeros(n)
     
@@ -119,51 +76,46 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_6h_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
-            np.isnan(williams_r[i]) or np.isnan(weekly_r1_aligned[i]) or 
-            np.isnan(weekly_s1_aligned[i]) or np.isnan(weekly_r2_aligned[i]) or 
-            np.isnan(weekly_s2_aligned[i])):
+        if (np.isnan(atr_4h_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(bb_width_percentile[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        price = close_6h[i]
-        adx_val = adx_1d_aligned[i]
-        wr = williams_r[i]
-        weekly_r1 = weekly_r1_aligned[i]
-        weekly_s1 = weekly_s1_aligned[i]
-        weekly_r2 = weekly_r2_aligned[i]
-        weekly_s2 = weekly_s2_aligned[i]
+        price = close_4h[i]
+        atr_4h_val = atr_4h_aligned[i]
+        bb_width_pct = bb_width_percentile[i]
+        vol_ratio_val = vol_ratio[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price crosses below weekly S1 OR Williams %R exits overbought
-            if (price < weekly_s1) or (wr > -20):
+            # Exit when price closes below Donchian lower OR volatility regime shifts to high
+            if (price < donchian_lower[i]) or (bb_width_pct > 80):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price crosses above weekly R1 OR Williams %R exits oversold
-            if (price > weekly_r1) or (wr < -80):
+            # Exit when price closes above Donchian upper OR volatility regime shifts to high
+            if (price > donchian_upper[i]) or (bb_width_pct > 80):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Strong trend filter (ADX > 25)
-            if adx_val > 25:
-                # LONG: Price above weekly R1 AND Williams %R not overbought
-                if (price > weekly_r1) and (wr > -80):
-                    signals[i] = 0.25
-                    position = 1
-                    continue
-                # SHORT: Price below weekly S1 AND Williams %R not oversold
-                elif (price < weekly_s1) and (wr < -20):
-                    signals[i] = -0.25
-                    position = -1
-                    continue
+            # LONG: Price breaks above Donchian upper AND low volatility regime AND volume spike
+            if (price > donchian_upper[i]) and (bb_width_pct < 30) and (vol_ratio_val > 1.5):
+                signals[i] = 0.25
+                position = 1
+                continue
+            
+            # SHORT: Price breaks below Donchian lower AND low volatility regime AND volume spike
+            elif (price < donchian_lower[i]) and (bb_width_pct < 30) and (vol_ratio_val > 1.5):
+                signals[i] = -0.25
+                position = -1
+                continue
         
         # Hold current position
         if position == 1:
@@ -175,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_ADX_WilliamsR"
-timeframe = "6h"
+name = "4h_Donchian_Breakout_LowVol_Volume"
+timeframe = "4h"
 leverage = 1.0
