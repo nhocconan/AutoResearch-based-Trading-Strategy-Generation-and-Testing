@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ATR volatility filter and volume spike confirmation
-# Long when price > Donchian upper band AND 1d ATR ratio > 1.5 (high volatility) AND 1d volume > 1.5x 20-period median
-# Short when price < Donchian lower band AND 1d ATR ratio > 1.5 AND 1d volume > 1.5x 20-period median
+# Hypothesis: 4h Donchian(20) breakout with 1d ATR-based volatility regime filter and volume confirmation
+# Long when price > Donchian upper band AND 1d ATR > 1.5x 20-period median ATR (high volatility regime) AND 1d volume > 1.5x 20-period median volume
+# Short when price < Donchian lower band AND same volatility/volume conditions
 # Exit when price crosses Donchian middle band (mean reversion to equilibrium)
 # Uses discrete position size 0.25 to limit fee drag. Target: 75-200 total trades over 4 years.
 # Combines price channel breakout with volatility expansion and volume confirmation for robustness in all market regimes.
