@@ -13,32 +13,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Daily OHLC for ATR calculation ===
+    # Daily OHLC for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === ATR(14) for volatility measurement ===
+    # Calculate Camarilla pivot levels (R1-S1)
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_hl = high_1d - low_1d
+    r1 = close_1d + range_hl * 1.1 / 12
+    s1 = close_1d - range_hl * 1.1 / 12
+    
+    # ATR for volatility filter (14-period)
     tr1 = high_1d[1:] - low_1d[1:]
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_avg = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
     
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
+    # Align HTF data to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    atr_1d_avg_4h = align_htf_to_ltf(prices, df_1d, atr_1d_avg)
     
-    # Align ATR to 12h timeframe
-    atr_14_12h = align_htf_to_ltf(prices, df_1d, atr_14)
-    atr_50_12h = align_htf_to_ltf(prices, df_1d, atr_50)
-    
-    # === Volatility regime: ATR(14) > ATR(50) indicates high volatility regime ===
-    vol_regime = atr_14_12h > atr_50_12h
-    
-    # === Volume spike detection (20-period volume MA) ===
+    # Volume spike detection (20-period volume MA)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     
@@ -50,41 +53,39 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_12h[i]) or np.isnan(atr_50_12h[i]) or
-            np.isnan(volume_spike[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
+            np.isnan(atr_1d_avg_4h[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        vol_regime_now = vol_regime[i]
+        r1_level = r1_4h[i]
+        s1_level = s1_4h[i]
+        atr_avg = atr_1d_avg_4h[i]
         vol_spike = volume_spike[i]
         
-        # === EXIT LOGIC: Exit when volatility regime ends or volatility drops ===
+        # Exit logic: Exit when price moves against position or volatility drops
         if position == 1:  # Long position
-            # Exit when volatility regime ends or ATR drops significantly
-            if not vol_regime_now or (i > 0 and atr_14_12h[i] < atr_14_12h[i-1] * 0.7):
+            if price < s1_level or atr_avg < (atr_1d_avg_4h[i-1] * 0.6 if i > 0 else atr_avg):
                 signals[i] = 0.0
                 position = 0
                 continue
-        
         elif position == -1:  # Short position
-            # Exit when volatility regime ends or ATR drops significantly
-            if not vol_regime_now or (i > 0 and atr_14_12h[i] < atr_14_12h[i-1] * 0.7):
+            if price > r1_level or atr_avg < (atr_1d_avg_4h[i-1] * 0.6 if i > 0 else atr_avg):
                 signals[i] = 0.0
                 position = 0
                 continue
         
-        # === ENTRY LOGIC (only when flat) ===
+        # Entry logic (only when flat)
         if position == 0:
-            # LONG: High volatility regime with volume spike
-            if vol_regime_now and vol_spike:
+            # LONG: Price breaks above R1 with volume spike and sufficient volatility
+            if price > r1_level and vol_spike and atr_avg > 0:
                 signals[i] = 0.25
                 position = 1
                 continue
-            
-            # SHORT: High volatility regime with volume spike
-            elif vol_regime_now and vol_spike:
+            # SHORT: Price breaks below S1 with volume spike and sufficient volatility
+            elif price < s1_level and vol_spike and atr_avg > 0:
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -99,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Volatility_Regime_Volume_Spike"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_Volume_ATRFilter"
+timeframe = "4h"
 leverage = 1.0
