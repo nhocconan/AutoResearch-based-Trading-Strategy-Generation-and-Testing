@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h volume spike (>2.0x median) and 12h EMA50 trend filter
+# Hypothesis: 4h Donchian(20) breakout with 12h volume spike (>2.0x 20-period median) and 12h EMA50 trend filter
 # Uses volume threshold (2.0x) to balance trade frequency and avoid overtrading
 # Long when price > upper Donchian(20) AND 12h volume > 2.0x 20-period 12h volume median AND close > 12h EMA50
 # Short when price < lower Donchian(20) AND 12h volume > 2.0x 20-period 12h volume median AND close < 12h EMA50
