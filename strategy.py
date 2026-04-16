@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1h volume spike (1.5x median) and 12h EMA50 trend filter.
-# Long when price > upper band, 1h volume > 1.5x median volume, and 12h close > 12h EMA50.
+# Hypothesis: 4h Donchian(20) breakout with 12h ATR-based volume spike filter and 12h EMA50 trend filter.
+# Long when price > upper band, 12h volume > 2.0x median volume, and 12h close > 12h EMA50.
 # Short when price < lower band, same volume condition, and 12h close < 12h EMA50.
 # Exit when price crosses the middle band (mean reversion).
 # Uses discrete position size 0.25. Target: 75-200 total trades over 4 years (19-50/year).
 # Combines price channel breakout with volume confirmation and intermediate trend filter for robustness.
+# Uses 12h data for both volume and trend to reduce noise and avoid overtrading.
 
 def generate_signals(prices):
     n = len(prices)
@@ -35,36 +36,29 @@ def generate_signals(prices):
     lower_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     middle_20 = (upper_20 + lower_20) / 2.0
     
-    # Get 1h data for volume confirmation
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 30:
-        return np.zeros(n)
-    
-    # Get 12h data for trend filter (EMA50)
+    # Get 12h data for volume and trend filters
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 50:
         return np.zeros(n)
     
-    # === 12h Indicators: EMA50 trend filter ===
+    # === 12h Indicators: EMA50 trend filter and volume median ===
     close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    vol_12h = df_12h['volume'].values
     
-    # === 1h Indicators: Volume median for spike detection ===
-    vol_1h = df_1h['volume'].values
-    vol_median_20 = pd.Series(vol_1h).rolling(window=20, min_periods=20).median().values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    vol_median_20 = pd.Series(vol_12h).rolling(window=20, min_periods=20).median().values
     
     # Align all indicators to primary timeframe (4h)
     upper_20_aligned = align_htf_to_ltf(prices, df_4h, upper_20)
     lower_20_aligned = align_htf_to_ltf(prices, df_4h, lower_20)
     middle_20_aligned = align_htf_to_ltf(prices, df_4h, middle_20)
     ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    vol_median_aligned = align_htf_to_ltf(prices, df_1h, vol_median_20)
-    vol_1h_aligned = align_htf_to_ltf(prices, df_1h, vol_1h)
+    vol_median_aligned = align_htf_to_ltf(prices, df_12h, vol_median_20)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(20, 20, 50, 20)  # Donchian(20), 1h volume median(20), 12h EMA50
+    warmup = max(20, 20, 50, 20)  # Donchian(20), 12h volume median(20), 12h EMA50
     
     # Track position state for exits
     position = 0  # 0: flat, 1: long, -1: short
@@ -74,7 +68,7 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
             np.isnan(middle_20_aligned[i]) or np.isnan(vol_median_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_1h_aligned[i])):
+            np.isnan(ema_50_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -84,16 +78,17 @@ def generate_signals(prices):
         middle = middle_20_aligned[i]
         vol_median = vol_median_aligned[i]
         ema_50_12h = ema_50_12h_aligned[i]
-        vol_1h = vol_1h_aligned[i]
         
-        # Get aligned 12h close for proper trend comparison
-        df_12h_close = df_12h['close'].values
-        close_12h_aligned = align_htf_to_ltf(prices, df_12h, df_12h_close)
+        # Get aligned 12h close and volume for proper comparison
+        close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
+        vol_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_12h)
+        
         weekly_trend_up = close_12h_aligned[i] > ema_50_12h  # Using 12h close vs 12h EMA50 for trend
         weekly_trend_down = close_12h_aligned[i] < ema_50_12h
         
         # Price levels
         price = close[i]
+        vol_12h = vol_12h_aligned[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
@@ -114,8 +109,8 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Volume spike filter: current 1h volume > 1.5x median volume
-            volume_spike = vol_1h > (vol_median * 1.5)
+            # Volume spike filter: current 12h volume > 2.0x median volume
+            volume_spike = vol_12h > (vol_median * 2.0)
             
             # LONG CONDITIONS
             # Price breaks above upper Donchian band AND volume spike AND 12h uptrend
@@ -136,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1hVolumeSpike1.5x_12hEMA50_v1"
+name = "4h_Donchian20_12hVolumeSpike2.0x_12hEMA50_v1"
 timeframe = "4h"
 leverage = 1.0
