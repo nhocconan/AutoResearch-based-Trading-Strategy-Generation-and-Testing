@@ -13,82 +13,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Daily ATR for volatility filter ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 12h Donchian Channel (20-period) ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    # Calculate Donchian bands
+    donch_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    
+    # Align to lower timeframe (1h) - wait for 12h bar to close
+    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low)
+    
+    # === 12h Average True Range for volatility filter ===
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
     # True Range calculation
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])  # First value NaN
     
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
     
-    # === 4h EMA Trend Filter (21-period) ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
-    
-    # === Price Momentum (ROC 5-period) ===
-    roc_5 = ((pd.Series(close).pct_change(5) * 100)).values
-    
-    # === Volume Spike Detection (15-period volume MA) ===
-    vol_ma = pd.Series(volume).rolling(window=15, min_periods=15).mean().values
-    volume_spike = volume > (1.8 * vol_ma)  # Strong volume spike
+    # === Volume Spike Detection (20-period volume MA) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)  # Strong volume spike
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators have valid data
-    warmup = 100  # Need ROC(5), EMA21, ATR14
+    warmup = 100  # Need Donchian(20), ATR(14), VolMA(20)
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(roc_5[i]) or np.isnan(ema_21_4h_aligned[i]) or
-            np.isnan(atr_1d_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or
+            np.isnan(atr_12h_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        roc = roc_5[i]
-        ema21 = ema_21_4h_aligned[i]
-        atr = atr_1d_aligned[i]
+        donch_high_val = donch_high_aligned[i]
+        donch_low_val = donch_low_aligned[i]
+        atr = atr_12h_aligned[i]
         vol_spike = volume_spike[i]
         
-        # === EXIT LOGIC: Exit when momentum fades or volatility drops ===
+        # === EXIT LOGIC: Exit when price retrace 50% of ATR from extreme ===
         if position == 1:  # Long position
-            # Exit when momentum turns negative OR volatility drops significantly
-            if roc < 0 or atr < (atr_1d_aligned[i-1] * 0.7 if i > 0 else atr):
+            # Exit when price retraces 50% ATR from Donchian high
+            if price < donch_high_val - 0.5 * atr:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when momentum turns positive OR volatility drops significantly
-            if roc > 0 or atr < (atr_1d_aligned[i-1] * 0.7 if i > 0 else atr):
+            # Exit when price retraces 50% ATR from Donchian low
+            if price > donch_low_val + 0.5 * atr:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Strong positive momentum + price above EMA21 + volume spike
-            if roc > 1.0 and price > ema21 and vol_spike:
+            # LONG: Break above Donchian high + volume spike
+            if price > donch_high_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Strong negative momentum + price below EMA21 + volume spike
-            elif roc < -1.0 and price < ema21 and vol_spike:
+            # SHORT: Break below Donchian low + volume spike
+            elif price < donch_low_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -103,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA21_ROC5_VolumeSpike_ATRFilter"
-timeframe = "4h"
+name = "12h_Donchian20_VolumeSpike_ATRExit"
+timeframe = "12h"
 leverage = 1.0
