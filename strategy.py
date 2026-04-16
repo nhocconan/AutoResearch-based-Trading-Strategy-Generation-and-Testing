@@ -1,3 +1,5 @@
+# Hypothesis: The 12-hour timeframe provides sufficient stability to avoid excessive trading while capturing meaningful price swings. By combining daily EMA trend with 12-hour price action at key pivot levels (R1/S1) and requiring volume confirmation, we aim to capture breakouts with momentum. The strategy is designed to work in both bull and bear markets by aligning entries with the higher timeframe trend (daily EMA34) and using volatility filters to avoid choppy conditions. Targeting 50-150 total trades over 4 years ensures low frequency to minimize fee drag, while the pivot-based structure provides clear entry/exit levels.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,7 +15,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h data for pivot points and volatility (HTF = 12h) ===
+    # === 12h data for pivot points and volatility ===
     df_12h = get_htf_data(prices, '12h')
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
