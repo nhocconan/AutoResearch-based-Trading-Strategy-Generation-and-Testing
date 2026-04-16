@@ -3,10 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction and 1d volume confirmation
-# Long when price breaks above 6h Donchian upper (20) + weekly pivot bias bullish (close > weekly pivot) + 1d volume > 1.3x 20-period avg
-# Short when price breaks below 6h Donchian lower (20) + weekly pivot bias bearish (close < weekly pivot) + 1d volume > 1.3x 20-period avg
-# Weekly pivot bias provides structural filter to avoid counter-trend trades in ranging markets
+# Hypothesis: 6h Elder Ray (Bull Power/Bear Power) with 1d ADX trend filter and 1d volume confirmation
+# Long when Bull Power > 0 (close > EMA13) AND ADX > 25 (trending) AND 1d volume > 1.5x 20-period average
+# Short when Bear Power < 0 (close < EMA13) AND ADX > 25 (trending) AND 1d volume > 1.5x 20-period average
+# Elder Ray measures bull/bear power relative to EMA13, providing clear trend strength signals
+# ADX filter ensures we only trade in trending markets, avoiding whipsaws in ranges
+# Volume confirmation adds conviction to breakouts
 # Discrete position sizing (0.25) to control drawdown. Target: 50-150 total trades over 4 years
 
 def generate_signals(prices):
@@ -23,42 +25,68 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 6h data once before loop for Donchian channels
+    # Get 6h data once before loop for Elder Ray calculation
     df_6h = get_htf_data(prices, '6h')
     if len(df_6h) < 30:
         return np.zeros(n)
     
-    # Get 1w data once before loop for pivot bias
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    # Get 1d data once before loop for volume confirmation
+    # Get 1d data once before loop for ADX and volume filters
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 6h Indicator: Donchian Channels (20-period) ===
+    # === 6h Indicator: Elder Ray (Bull Power / Bear Power) ===
+    close_6h = df_6h['close'].values
     high_6h = df_6h['high'].values
     low_6h = df_6h['low'].values
     
-    donchian_upper = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    # EMA13 for 6h data
+    ema13_6h = pd.Series(close_6h).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Align Donchian levels to 6h timeframe (already aligned, but ensure proper shifting)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_6h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_6h, donchian_lower)
+    # Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power_6h = high_6h - ema13_6h
+    bear_power_6h = low_6h - ema13_6h
     
-    # === 1w Indicator: Weekly Pivot Point for bias ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Align Elder Ray components to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_6h, bull_power_6h)
+    bear_power_aligned = align_htf_to_ltf(prices, df_6h, bear_power_6h)
     
-    # Weekly pivot point
-    weekly_pivot = (high_1w + low_1w + close_1w) / 3.0
+    # === 1d Indicator: ADX (14-period) for trend strength ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align weekly pivot to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    # True Range calculation
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed TR, DM+, DM- (Wilder's smoothing = EMA with alpha=1/period)
+    atr_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / atr_1d
+    di_minus = 100 * dm_minus_smooth / atr_1d
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    dx = np.where((di_plus + di_minus) == 0, 0, dx)
+    adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Align ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     # === 1d Indicator: Volume SMA (20-period) for confirmation ===
     volume_1d = df_1d['volume'].values
@@ -77,49 +105,27 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_sma_20_1d_aligned[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_sma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Weekly pivot bias: bullish if close > pivot, bearish if close < pivot
-        weekly_close_1w = close_1w[-1] if len(close_1w) > 0 else 0  # latest weekly close
-        # Map current price to weekly context - use aligned weekly pivot for bias
-        bullish_bias = close[i] > weekly_pivot_aligned[i]
-        bearish_bias = close[i] < weekly_pivot_aligned[i]
-        
-        # Volume filter: current 1d volume > 1.3x 20-period 1d volume SMA
-        # Need to get 1d volume for current day - use aligned array to check if we have volume data
-        vol_confirm = True  # default to true if we can't verify, will be overridden below
-        
-        # Simple volume confirmation: use the aligned volume SMA directly
-        # We'll check if current 1d volume exceeds threshold by using the aligned arrays
-        # Since we don't have intraday 1d volume, we use the fact that volume tends to persist
-        # and check if the volume environment is elevated
-        vol_threshold = vol_sma_20_1d_aligned[i] * 1.3
-        
-        # Approximate current 1d volume using the fact that 6h bars roll into 1d
-        # We use the current 6h volume as proxy, scaled appropriately
-        # But simpler: just use the volume condition as a regime filter based on recent average
-        # Actually, let's use the 1d volume directly from the aligned daily volume series
-        # We need to get the 1d volume value - we can approximate by using the aligned volume
-        # For now, we'll use a simpler approach: check if volume environment is active
-        
-        # Use the aligned 1d volume series (we need to extract it)
-        # Get 1d OHLCV data
-        df_1d_for_vol = get_htf_data(prices, '1d')  # Already fetched above, but we need volume series
-        if 'volume' in df_1d_for_vol.columns:
-            vol_1d_series = df_1d_for_vol['volume'].values
-            vol_1d_aligned = align_htf_to_ltf(prices, df_1d_for_vol, vol_1d_series)
-            if not np.isnan(vol_1d_aligned[i]):
-                vol_confirm = vol_1d_aligned[i] > vol_threshold
+        # Volume filter: current 1d volume > 1.5x 20-period 1d volume SMA
+        vol_1d_series = df_1d['volume'].values
+        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d_series)
+        vol_confirm = False
+        if not np.isnan(vol_1d_aligned[i]):
+            vol_threshold = vol_sma_20_1d_aligned[i] * 1.5
+            vol_confirm = vol_1d_aligned[i] > vol_threshold
         
         # === LONG CONDITIONS ===
-        if (close[i] > donchian_upper_aligned[i]) and bullish_bias and vol_confirm:
+        # Bull Power > 0 (close > EMA13) AND ADX > 25 (trending) AND volume confirmation
+        if (bull_power_aligned[i] > 0) and (adx_aligned[i] > 25) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        elif (close[i] < donchian_lower_aligned[i]) and bearish_bias and vol_confirm:
+        # Bear Power < 0 (close < EMA13) AND ADX > 25 (trending) AND volume confirmation
+        elif (bear_power_aligned[i] < 0) and (adx_aligned[i] > 25) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -127,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_1wPivotBias_1dVol_Filter_v1"
+name = "6h_ElderRay_1dADX_Volume_Filter_v2"
 timeframe = "6h"
 leverage = 1.0
