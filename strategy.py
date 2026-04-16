@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot H3/L3 breakout with 12h volume spike confirmation and ATR-based position sizing
-# Long when price > Camarilla H3 AND 12h volume > 2.0x 20-period volume SMA
-# Short when price < Camarilla L3 AND 12h volume > 2.0x 20-period volume SMA
-# Exit on price returning to Camarilla pivot point (PP) or ATR stoploss (1.5 ATR)
-# Uses discrete position sizing (0.25) to limit fee drag and Camarilla levels provide objective structure proven in ranging/ bear markets
-# Volume filter reduces false breakouts; pivot points work across regimes
-# H3/L3 levels provide better frequency than R4/S4 while maintaining edge
+# Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and ATR-based position sizing
+# Long when price > Donchian upper band AND 12h volume > 1.8x 20-period volume SMA
+# Short when price < Donchian lower band AND 12h volume > 1.8x 20-period volume SMA
+# Exit on price returning to Donchian middle band or ATR stoploss (2.0 ATR)
+# Uses discrete position sizing (0.25) to limit fee drag
+# Donchian channels provide objective structure that works in trending markets
+# Volume filter reduces false breakouts; works across regimes
+# Target: 75-200 total trades over 4 years (19-50/year)
 
 def generate_signals(prices):
     n = len(prices)
@@ -35,29 +36,15 @@ def generate_signals(prices):
     vol_sma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
     vol_sma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_sma_20_12h)
     
-    # === 4h Indicator: Camarilla Pivot Levels (based on previous day) ===
-    # Camarilla levels calculated from prior day's OHLC
-    # PP = (H + L + C) / 3
-    # H3 = PP + (H - L) * 1.1/2
-    # L3 = PP - (H - L) * 1.1/2
-    # We use 1d data to calculate daily pivots, then align to 4h
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Calculate daily Camarilla levels
-    h_1d = df_1d['high'].values
-    l_1d = df_1d['low'].values
-    c_1d = df_1d['close'].values
-    
-    pp_1d = (h_1d + l_1d + c_1d) / 3.0
-    h3_1d = pp_1d + (h_1d - l_1d) * 1.1 / 2.0
-    l3_1d = pp_1d - (h_1d - l_1d) * 1.1 / 2.0
-    
-    # Align 1d levels to 4h timeframe (wait for completed 1d bar)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    # === 4h Indicator: Donchian Channels (20-period) ===
+    # Upper band = highest high over 20 periods
+    # Lower band = lowest low over 20 periods
+    # Middle band = (upper + lower) / 2
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_middle = (donchian_upper + donchian_lower) / 2.0
     
     # ATR for stoploss (14-period)
     tr1 = high - low
@@ -69,7 +56,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(30, 20)  # 12h volume SMA and 1d data need ~30 bars
+    warmup = max(30, 20)  # 12h volume SMA and Donchian need ~30 bars
     
     # Track position state for exits
     position = 0  # 0: flat, 1: long, -1: short
@@ -84,8 +71,8 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(pp_aligned[i]) or np.isnan(h3_aligned[i]) or 
-            np.isnan(l3_aligned[i]) or np.isnan(vol_sma_20_12h_aligned[i]) or 
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(donchian_middle[i]) or np.isnan(vol_sma_20_12h_aligned[i]) or 
             np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
@@ -96,25 +83,25 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 12h volume > 2.0x 20-period 12h volume SMA
-        vol_threshold = vol_sma_20_12h_aligned[i] * 2.0
+        # Volume filter: current 12h volume > 1.8x 20-period 12h volume SMA
+        vol_threshold = vol_sma_20_12h_aligned[i] * 1.8
         vol_confirm = vol_12h_aligned[i] > vol_threshold
         
         # Price levels
         price = close[i]
-        pp = pp_aligned[i]
-        h3 = h3_aligned[i]
-        l3 = l3_aligned[i]
+        upper = donchian_upper[i]
+        lower = donchian_lower[i]
+        middle = donchian_middle[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         if position == 1:  # long position
-            # Exit on price returning to pivot point or ATR stoploss
-            if price <= pp or price <= entry_price - 1.5 * atr_14[i]:
+            # Exit on price returning to middle band or ATR stoploss
+            if price <= middle or price <= entry_price - 2.0 * atr_14[i]:
                 exit_signal = True
         elif position == -1:  # short position
-            # Exit on price returning to pivot point or ATR stoploss
-            if price >= pp or price >= entry_price + 1.5 * atr_14[i]:
+            # Exit on price returning to middle band or ATR stoploss
+            if price >= middle or price >= entry_price + 2.0 * atr_14[i]:
                 exit_signal = True
         
         if exit_signal:
@@ -126,15 +113,15 @@ def generate_signals(prices):
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
             # LONG CONDITIONS
-            # Price > Camarilla H3 AND volume confirmation
-            if price > h3 and vol_confirm:
+            # Price > Donchian upper band AND volume confirmation
+            if price > upper and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
             # SHORT CONDITIONS
-            # Price < Camarilla L3 AND volume confirmation
-            elif price < l3 and vol_confirm:
+            # Price < Donchian lower band AND volume confirmation
+            elif price < lower and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -144,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_12hVolSpike2.0x_v1"
+name = "4h_Donchian20_12hVolSpike1.8x_v1"
 timeframe = "4h"
 leverage = 1.0
