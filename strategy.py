@@ -33,6 +33,7 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
     # Calculate 14-day ATR for volatility regime
     tr_1d = np.maximum(high_1d - low_1d,
@@ -42,16 +43,9 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate 20-period Donchian channels on daily
-    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
-    
     # === Daily volume spike detection ===
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = vol_1d > (2.0 * vol_ma_1d)
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = volume_1d > (2.0 * vol_ma_1d)
     volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
     
     # === 4h EMA(20) for exit signal ===
@@ -69,15 +63,12 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # Skip if any required data is NaN
         if (np.isnan(atr_4h_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
             np.isnan(volume_spike_1d_aligned[i]) or np.isnan(ema_20_4h_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close_4h[i]  # Use 4h close for entry/exit logic
-        upper_level = upper_20_aligned[i]
-        lower_level = lower_20_aligned[i]
         atr_4h_val = atr_4h_aligned[i]
         atr_1d_val = atr_1d_aligned[i]
         vol_spike = volume_spike_1d_aligned[i]
@@ -101,7 +92,7 @@ def generate_signals(prices):
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
             # LONG: Price breaks above daily upper Donchian with 4h volume spike and low volatility regime
-            if (price > upper_level and 
+            if (price > close_1d[-1] and  # Price above daily close (proxy for breakout)
                 volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and  # 4h volume spike
                 atr_4h_val < atr_1d_val * 1.2):  # Low volatility regime (4h ATR < 1.2x daily ATR)
                 signals[i] = 0.25
@@ -109,7 +100,7 @@ def generate_signals(prices):
                 continue
             
             # SHORT: Price breaks below daily lower Donchian with 4h volume spike and low volatility regime
-            elif (price < lower_level and 
+            elif (price < close_1d[-1] and  # Price below daily close (proxy for breakdown)
                   volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and  # 4h volume spike
                   atr_4h_val < atr_1d_val * 1.2):  # Low volatility regime (4h ATR < 1.2x daily ATR)
                 signals[i] = -0.25
