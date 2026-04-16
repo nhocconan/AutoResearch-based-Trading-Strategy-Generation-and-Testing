@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d volume spike and chop regime filter.
-# Long when price breaks above upper Donchian(20) AND 1d volume > 1.5x 20-period average AND chop > 61.8 (range).
-# Short when price breaks below lower Donchian(20) AND 1d volume > 1.5x 20-period average AND chop > 61.8.
-# Exit when price crosses the 12h midpoint (upper+lower)/2 OR chop < 38.2 (trend).
-# Uses discrete position size 0.25. Designed to capture mean-reversion breakouts in ranging markets.
-# Target: 50-150 trades over 4 years (12-37/year) to minimize fee drag.
+# Hypothesis: 4h Donchian(20) breakout with 12h HMA(21) trend filter and volume confirmation.
+# Long when price breaks above Donchian upper band AND 12h HMA rising AND volume > 1.5x 20-period average.
+# Short when price breaks below Donchian lower band AND 12h HMA falling AND volume > 1.5x 20-period average.
+# Exit when price crosses Donchian midpoint OR ATR-based stoploss (2x ATR).
+# Uses discrete position size 0.25. Designed to capture breakouts with trend alignment in both bull and bear markets.
+# Target: 75-200 trades over 4 years (19-50/year) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,105 +20,121 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h Indicators: Donchian Channels (20-period) ===
-    # Upper and lower bands based on last 20 periods
+    # === 4h Indicators: Donchian Channel (20) ===
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    midpoint_donchian = (highest_20 + lowest_20) / 2
+    donchian_mid = (highest_20 + lowest_20) / 2
     
-    # === 1d HTF: Volume Spike (volume > 1.5x 20-period average) ===
-    df_1d = get_htf_data(prices, '1d')
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = vol_1d > (1.5 * vol_ma_1d)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
+    # === 4h Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
-    # === 1d HTF: Choppiness Index (CHOP) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 4h Indicators: ATR (14) for stoploss ===
+    tr1 = pd.Series(high).diff()
+    tr2 = pd.Series(low).diff().abs()
+    tr3 = pd.Series(close).shift(1).diff().abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # True Range
-    tr1 = pd.Series(high_1d).diff()
-    tr2 = pd.Series(low_1d).diff().abs()
-    tr3 = pd.Series(close_1d).shift(1).diff().abs()
-    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    
-    # Highest high and lowest low over 14 periods
-    hh_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    
-    # Chop = 100 * log10(sum(TR14) / (HH14 - LL14)) / log10(14)
-    sum_tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
-    hh_ll_1d = hh_1d - ll_1d
-    # Avoid division by zero
-    hh_ll_1d_safe = np.where(hh_ll_1d == 0, 1e-10, hh_ll_1d)
-    chop_1d = 100 * np.log10(sum_tr_14 / hh_ll_1d_safe) / np.log10(14)
-    chop_1d = np.where(np.isnan(chop_1d), 50, chop_1d)  # fill NaN with neutral
-    
-    chop_range = chop_1d > 61.8  # ranging market
-    chop_trend = chop_1d < 38.2  # trending market (exit)
-    chop_range_aligned = align_htf_to_ltf(prices, df_1d, chop_range.astype(float))
-    chop_trend_aligned = align_htf_to_ltf(prices, df_1d, chop_trend.astype(float))
+    # === 12h HTF: HMA(21) trend ===
+    df_12h = get_htf_data(prices, '12h')
+    hma_12h = calculate_hma(df_12h['close'].values, 21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 20 periods needed for Donchian, 14 for CHOP)
-    warmup = 60
+    # Warmup: ensure all indicators are valid (max 50 periods needed)
+    warmup = 100
     
-    # Track position state
+    # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or np.isnan(midpoint_donchian[i]) or
-            np.isnan(vol_spike_1d_aligned[i]) or np.isnan(chop_range_aligned[i]) or np.isnan(chop_trend_aligned[i])):
+        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(atr[i]) or np.isnan(hma_12h_aligned[i])):
             signals[i] = 0.0
             position = 0
+            entry_price = 0.0
             continue
         
         # Current values
         price = close[i]
-        vol_spike = vol_spike_1d_aligned[i] > 0.5
-        in_range = chop_range_aligned[i] > 0.5
-        in_trend = chop_trend_aligned[i] > 0.5
+        vol_spike = volume_spike[i]
+        hma_val = hma_12h_aligned[i]
+        hma_prev = hma_12h_aligned[i-1] if i > 0 else hma_val
+        hma_rising = hma_val > hma_prev
+        hma_falling = hma_val < hma_prev
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price crosses below midpoint OR market trends (chop < 38.2)
-            if price < midpoint_donchian[i] or in_trend:
+            # Exit if price crosses below midpoint OR stoploss hit
+            if price < donchian_mid[i] or price <= entry_price - 2.0 * atr[i]:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price crosses above midpoint OR market trends (chop < 38.2)
-            if price > midpoint_donchian[i] or in_trend:
+            # Exit if price crosses above midpoint OR stoploss hit
+            if price > donchian_mid[i] or price >= entry_price + 2.0 * atr[i]:
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
+            entry_price = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
-        if position == 0 and in_range:
-            # LONG: Price breaks above upper Donchian AND volume spike AND ranging market
-            if price > highest_20[i] and vol_spike:
+        if position == 0:
+            # LONG: Price breaks above upper band AND HMA rising AND volume spike
+            if price > highest_20[i] and hma_rising and vol_spike:
                 signals[i] = 0.25
                 position = 1
+                entry_price = price
             
-            # SHORT: Price breaks below lower Donchian AND volume spike AND ranging market
-            elif price < lowest_20[i] and vol_spike:
+            # SHORT: Price breaks below lower band AND HMA falling AND volume spike
+            elif price < lowest_20[i] and hma_falling and vol_spike:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         else:
             signals[i] = position * 0.25
     
     return signals
 
-name = "12h_Donchian20_1dVolumeSpike_ChopFilter_V1"
-timeframe = "12h"
+def calculate_hma(close, period):
+    """Calculate Hull Moving Average"""
+    if len(close) < period:
+        return np.full_like(close, np.nan)
+    
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
+    
+    # WMA function
+    def wma(values, window):
+        weights = np.arange(1, window + 1)
+        return np.convolve(values, weights, mode='valid') / weights.sum()
+    
+    # Calculate WMAs
+    wma_half = wma(close, half_period)
+    wma_full = wma(close, period)
+    
+    # Handle edge cases for array alignment
+    raw_hma = 2 * wma_half - wma_full
+    hma = wma(raw_hma, sqrt_period)
+    
+    # Pad with NaN to match original length
+    result = np.full_like(close, np.nan)
+    start_idx = period - half_period + sqrt_period - 1
+    end_idx = start_idx + len(hma)
+    if end_idx <= len(close):
+        result[start_idx:end_idx] = hma
+    
+    return result
+
+name = "4h_Donchian20_12hHMA21_VolumeSpike_V1"
+timeframe = "4h"
 leverage = 1.0
