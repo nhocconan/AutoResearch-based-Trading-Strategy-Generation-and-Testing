@@ -25,12 +25,12 @@ def generate_signals(prices):
     r1 = pivot + range_hl * 0.382
     s1 = pivot - range_hl * 0.382
     
-    # === 6h EMA for trend filter (34-period) ===
-    ema_6h = pd.Series(close).ewm(span=34, min_periods=34, adjust=False).mean().values
+    # === 4h EMA for trend filter (34-period) ===
+    ema_4h = pd.Series(close).ewm(span=34, min_periods=34, adjust=False).mean().values
     
-    # Align HTF data to 6h timeframe
-    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
+    # Align HTF data to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
     
     # === Volume spike detection (15-period volume MA) ===
     vol_ma = pd.Series(volume).rolling(window=15, min_periods=15).mean().values
@@ -46,16 +46,16 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or
-            np.isnan(ema_6h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
+            np.isnan(ema_4h[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        r1_level = r1_6h[i]
-        s1_level = s1_6h[i]
-        ema_val = ema_6h[i]
+        r1_level = r1_4h[i]
+        s1_level = s1_4h[i]
+        ema_val = ema_4h[i]
         vol_spike = volume_spike[i]
         
         # === EXIT LOGIC ===
@@ -97,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Pivot_R1_S1_Breakout_Volume_EMA34Filter"
-timeframe = "6h"
+name = "4h_Pivot_R1_S1_Breakout_Volume_EMA34Filter"
+timeframe = "4h"
 leverage = 1.0
