@@ -39,8 +39,8 @@ def generate_signals(prices):
     atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
     
     # === 4h volume ratio for confirmation ===
-    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_4h = volume_4h / vol_ma_20_4h
+    vol_ma_15_4h = pd.Series(volume_4h).rolling(window=15, min_periods=15).mean().values
+    vol_ratio_4h = volume_4h / vol_ma_15_4h
     vol_ratio_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ratio_4h)
     
     # === 4h Donchian channels (20 period) ===
@@ -52,7 +52,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: enough for EMA and ATR
-    warmup = 60
+    warmup = 50
     
     # Track position and entry price
     position = 0  # 0: flat, 1: long, -1: short
@@ -92,13 +92,13 @@ def generate_signals(prices):
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
             # Trend filter: price above/below 1d EMA with volume
-            if price > ema_trend and vol_ratio_val > 1.3:
+            if price > ema_trend and vol_ratio_val > 1.5:
                 # LONG: price above trend with volume
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 continue
-            elif price < ema_trend and vol_ratio_val > 1.3:
+            elif price < ema_trend and vol_ratio_val > 1.5:
                 # SHORT: price below trend with volume
                 signals[i] = -0.25
                 position = -1
@@ -115,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_EMA_Trend_Volume"
+name = "4h_Donchian_EMA_Trend_Volume_Filtered"
 timeframe = "4h"
 leverage = 1.0
