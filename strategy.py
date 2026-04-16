@@ -13,33 +13,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily OHLC for Camarilla pivot calculation
+    # === Daily OHLC for Choppiness Index calculation ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels (R1-S1)
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_hl = high_1d - low_1d
-    r1 = close_1d + range_hl * 1.1 / 12
-    s1 = close_1d - range_hl * 1.1 / 12
-    
-    # ATR for volatility filter (14-period)
+    # Calculate True Range for Choppiness Index
     tr1 = high_1d[1:] - low_1d[1:]
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
+    
+    # Calculate ADX-like components for Choppiness Index (14-period)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate +DM and -DM
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
+    
+    # Smoothed DM values
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate DI+ and DI-
+    plus_di = 100 * plus_dm_smooth / atr
+    minus_di = 100 * minus_dm_smooth / atr
+    
+    # Calculate DX and Choppiness Index
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    dx = np.where(np.isnan(dx), 0, dx)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Choppiness Index: higher = ranging, lower = trending
+    # Formula: 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(n)
+    # We'll use a simplified version: inverse of ADX scaled
+    chop = 100 - adx  # Higher values indicate ranging market
+    
+    # === ATR for volatility filter (14-period) ===
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
+    
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_1d_avg = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
     
     # Align HTF data to 4h timeframe
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    chop_4h = align_htf_to_ltf(prices, df_1d, chop)
     atr_1d_avg_4h = align_htf_to_ltf(prices, df_1d, atr_1d_avg)
     
-    # Volume spike detection (20-period volume MA)
+    # === Volume spike detection (20-period volume MA) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
@@ -53,41 +83,72 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
-            np.isnan(atr_1d_avg_4h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(chop_4h[i]) or np.isnan(atr_1d_avg_4h[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        r1_level = r1_4h[i]
-        s1_level = s1_4h[i]
+        chop_val = chop_4h[i]
         atr_avg = atr_1d_avg_4h[i]
         vol_spike = volume_spike[i]
         
-        # Exit logic: Exit when price moves against position or volatility drops
+        # Market regime: Chop > 50 = ranging (mean revert), Chop < 50 = trending
+        # In ranging markets: look for mean reversion at extremes
+        # In trending markets: look for continuation with volume
+        
+        if chop_val > 50:  # Ranging market - mean reversion
+            # Look for price exhaustion at Bollinger Band-like levels using ATR
+            # Calculate dynamic support/resistance using ATR multiples
+            if i >= 20:
+                # Recent high/low for context
+                recent_high = np.max(high[i-20:i+1])
+                recent_low = np.min(low[i-20:i+1])
+                
+                # Long when price is near recent low with volume spike (bounce)
+                if price <= recent_low + 0.5 * atr_avg and vol_spike:
+                    signals[i] = 0.25
+                    position = 1
+                    continue
+                # Short when price is near recent high with volume spike (rejection)
+                elif price >= recent_high - 0.5 * atr_avg and vol_spike:
+                    signals[i] = -0.25
+                    position = -1
+                    continue
+        
+        else:  # Trending market - follow momentum
+            # In trending markets, look for breakouts with volume confirmation
+            if i >= 20:
+                # Donchian-like breakout
+                donch_high = np.max(high[i-20:i])
+                donch_low = np.min(low[i-20:i])
+                
+                # Long breakout with volume
+                if price > donch_high and vol_spike:
+                    signals[i] = 0.25
+                    position = 1
+                    continue
+                # Short breakdown with volume
+                elif price < donch_low and vol_spike:
+                    signals[i] = -0.25
+                    position = -1
+                    continue
+        
+        # Exit conditions: volatility drops or opposing signal
         if position == 1:  # Long position
-            if price < s1_level or atr_avg < (atr_1d_avg_4h[i-1] * 0.6 if i > 0 else atr_avg):
-                signals[i] = 0.0
-                position = 0
-                continue
-        elif position == -1:  # Short position
-            if price > r1_level or atr_avg < (atr_1d_avg_4h[i-1] * 0.6 if i > 0 else atr_avg):
+            # Exit when volatility drops significantly or price reverses
+            if atr_avg < (atr_1d_avg_4h[i-1] * 0.7 if i > 0 else atr_avg) or \
+               (i >= 5 and price < np.mean(close[i-5:i+1])):
                 signals[i] = 0.0
                 position = 0
                 continue
         
-        # Entry logic (only when flat)
-        if position == 0:
-            # LONG: Price breaks above R1 with volume spike and sufficient volatility
-            if price > r1_level and vol_spike and atr_avg > 0:
-                signals[i] = 0.25
-                position = 1
-                continue
-            # SHORT: Price breaks below S1 with volume spike and sufficient volatility
-            elif price < s1_level and vol_spike and atr_avg > 0:
-                signals[i] = -0.25
-                position = -1
+        elif position == -1:  # Short position
+            # Exit when volatility drops significantly or price reverses
+            if atr_avg < (atr_1d_avg_4h[i-1] * 0.7 if i > 0 else atr_avg) or \
+               (i >= 5 and price > np.mean(close[i-5:i+1])):
+                signals[i] = 0.0
+                position = 0
                 continue
         
         # Hold current position
@@ -100,6 +161,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_Volume_ATRFilter"
+name = "4h_Chop_Regime_MeanRev_TrendFollow"
 timeframe = "4h"
 leverage = 1.0
