@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d Supertrend(10,3.0) for HTF trend direction + 6h Donchian(20) breakout with volume confirmation.
-# Long when price > 1d Supertrend AND breaks above 6h Donchian upper(20) with volume spike (>1.8x median volume).
-# Short when price < 1d Supertrend AND breaks below 6h Donchian lower(20) with volume spike.
+# Hypothesis: 6h strategy using 1w Williams Fractal (bearish) for HTF resistance + 6h Donchian(20) breakout with volume confirmation.
+# Short when price < 1w bearish fractal AND breaks below 6h Donchian lower(20) with volume spike (>1.8x median volume).
+# Long when price > 1w bullish fractal AND breaks above 6h Donchian upper(20) with volume spike.
 # Exit via ATR(10) trailing stop: long exits when price < highest high since entry - 2.5*ATR,
 # short exits when price > lowest low since entry + 2.5*ATR.
 # Uses discrete position size 0.25. Volume spike and ATR trailing stop reduce whipsaw and overtrading.
-# Supertrend adapts to volatility, making it effective in both bull and bear markets.
+# Williams Fractal identifies key swing points from weekly structure, effective in both bull and bear markets.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,61 +20,36 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 1d data once before loop for Supertrend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 15:
+    # Get 1w data once before loop for Williams Fractal
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # === 1d Indicators: Supertrend(10,3.0) ===
-    # ATR(10)
-    tr1_1d = pd.Series(high_1d - low_1d)
-    tr2_1d = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
-    tr3_1d = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
-    tr2_1d.iloc[0] = tr1_1d.iloc[0]
-    tr3_1d.iloc[0] = tr1_1d.iloc[0]
-    tr_1d = pd.concat([tr1_1d, tr2_1d, tr3_1d], axis=1).max(axis=1)
-    atr_10_1d = pd.Series(tr_1d).rolling(window=10, min_periods=10).mean().values
+    # === 1w Indicators: Williams Fractal ===
+    # Bearish fractal: high[n-2] < high[n-1] and high[n] < high[n-1] and high[n+1] < high[n-1] and high[n+2] < high[n-1]
+    # Bullish fractal: low[n-2] > low[n-1] and low[n] > low[n-1] and low[n+1] > low[n-1] and low[n+2] > low[n-1]
+    bearish_fractal = np.full(len(high_1w), np.nan)
+    bullish_fractal = np.full(len(low_1w), np.nan)
     
-    # Basic Upperband and Lowerband
-    basic_ub = (high_1d + low_1d) / 2 + 3.0 * atr_10_1d
-    basic_lb = (high_1d + low_1d) / 2 - 3.0 * atr_10_1d
+    for i in range(2, len(high_1w) - 2):
+        if (high_1w[i-2] < high_1w[i-1] and 
+            high_1w[i] < high_1w[i-1] and 
+            high_1w[i+1] < high_1w[i-1] and 
+            high_1w[i+2] < high_1w[i-1]):
+            bearish_fractal[i] = high_1w[i-1]
+        
+        if (low_1w[i-2] > low_1w[i-1] and 
+            low_1w[i] > low_1w[i-1] and 
+            low_1w[i+1] > low_1w[i-1] and 
+            low_1w[i+2] > low_1w[i-1]):
+            bullish_fractal[i] = low_1w[i-1]
     
-    # Final Upperband
-    final_ub = np.zeros(len(close_1d))
-    final_ub[0] = basic_ub[0]
-    for i in range(1, len(close_1d)):
-        if close_1d[i-1] > final_ub[i-1]:
-            final_ub[i] = max(basic_ub[i], final_ub[i-1])
-        else:
-            final_ub[i] = basic_ub[i]
-    
-    # Final Lowerband
-    final_lb = np.zeros(len(close_1d))
-    final_lb[0] = basic_lb[0]
-    for i in range(1, len(close_1d)):
-        if close_1d[i-1] < final_lb[i-1]:
-            final_lb[i] = min(basic_lb[i], final_lb[i-1])
-        else:
-            final_lb[i] = basic_lb[i]
-    
-    # Supertrend
-    supertrend_1d = np.zeros(len(close_1d))
-    supertrend_1d[0] = final_ub[0]
-    for i in range(1, len(close_1d)):
-        if supertrend_1d[i-1] == final_ub[i-1]:
-            if close_1d[i] <= final_ub[i]:
-                supertrend_1d[i] = final_ub[i]
-            else:
-                supertrend_1d[i] = final_lb[i]
-        else:
-            if close_1d[i] >= final_lb[i]:
-                supertrend_1d[i] = final_lb[i]
-            else:
-                supertrend_1d[i] = final_ub[i]
+    # Forward fill to last valid fractal level
+    bearish_fractal = pd.Series(bearish_fractal).ffill().bfill().values
+    bullish_fractal = pd.Series(bullish_fractal).ffill().bfill().values
     
     # Get 6h data for Donchian, volume, and ATR
     df_6h = get_htf_data(prices, '6h')
@@ -104,7 +79,8 @@ def generate_signals(prices):
     atr_10 = pd.Series(tr_6h).rolling(window=10, min_periods=10).mean().values
     
     # Align all indicators to primary timeframe (6h)
-    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend_1d)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bearish_fractar, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bullish_fractal, additional_delay_bars=2)
     donchian_upper_aligned = align_htf_to_ltf(prices, df_6h, donchian_upper_20)
     donchian_lower_aligned = align_htf_to_ltf(prices, df_6h, donchian_lower_20)
     vol_median_aligned = align_htf_to_ltf(prices, df_6h, vol_median_20)
@@ -113,7 +89,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(10, 20, 10)  # Supertrend ATR(10), Donchian(20), ATR(10)
+    warmup = max(2, 20, 10)  # Williams Fractal lookback, Donchian(20), ATR(10)
     
     # Track position state for trailing stops
     position = 0  # 0: flat, 1: long, -1: short
@@ -122,9 +98,9 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(supertrend_aligned[i]) or np.isnan(donchian_upper_aligned[i]) or 
-            np.isnan(donchian_lower_aligned[i]) or np.isnan(vol_median_aligned[i]) or 
-            np.isnan(atr_aligned[i])):
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
+            np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(vol_median_aligned[i]) or np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             position = 0
             highest_since_entry = 0.0
@@ -132,7 +108,8 @@ def generate_signals(prices):
             continue
         
         # Current values (aligned)
-        supertrend_val = supertrend_aligned[i]
+        bearish_fractal_val = bearish_fractal_aligned[i]
+        bullish_fractal_val = bullish_fractal_aligned[i]
         upper = donchian_upper_aligned[i]
         lower = donchian_lower_aligned[i]
         vol_median = vol_median_aligned[i]
@@ -173,15 +150,15 @@ def generate_signals(prices):
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
             # LONG CONDITIONS
-            # Price above 1d Supertrend (uptrend), breakout above Donchian upper, volume spike
-            if price > supertrend_val and price > upper and volume_spike:
+            # Price above 1w bullish fractal (support), breakout above Donchian upper, volume spike
+            if price > bullish_fractal_val and price > upper and volume_spike:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = price  # initialize trailing stop
             
             # SHORT CONDITIONS
-            # Price below 1d Supertrend (downtrend), breakout below Donchian lower, volume spike
-            elif price < supertrend_val and price < lower and volume_spike:
+            # Price below 1w bearish fractal (resistance), breakout below Donchian lower, volume spike
+            elif price < bearish_fractal_val and price < lower and volume_spike:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = price  # initialize trailing stop
@@ -191,6 +168,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1dSupertrend10_3_6hDonchian20_Breakout_VolumeSpike1.8x_ATRTrail2.5_v1"
+name = "6h_1wWilliamsFractal_6hDonchian20_Breakout_VolumeSpike1.8x_ATRTrail2.5_v1"
 timeframe = "6h"
 leverage = 1.0
