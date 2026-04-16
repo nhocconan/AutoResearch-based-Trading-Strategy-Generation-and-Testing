@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot R1/S1 breakout with 1d volume spike filter and 1w choppiness regime filter
-# Long when price breaks above Camarilla R1 AND 1d volume > 1.5x 20-period volume SMA AND 1w CHOP > 61.8 (ranging market for mean reversion to pivot)
-# Short when price breaks below Camarilla S1 AND 1d volume > 1.5x 20-period volume SMA AND 1w CHOP > 61.8
+# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 1w ADX trend filter
+# Long when price breaks above Donchian upper AND 1d volume > 1.3x 20-period volume SMA AND 1w ADX > 25 (trending market)
+# Short when price breaks below Donchian lower AND 1d volume > 1.3x 20-period volume SMA AND 1w ADX > 25
 # Uses discrete position sizing (0.25) to limit drawdown and reduce fee churn
-# Target: 20-50 trades/year on BTC/ETH, works in ranging markets where price respects pivot levels
+# Target: 20-50 trades/year on BTC/ETH, works in trending markets where breakouts sustain
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,7 +23,7 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 4h data once before loop for Camarilla pivots
+    # Get 4h data once before loop for Donchian channels
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 30:
         return np.zeros(n)
@@ -33,32 +33,29 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Get 1w data once before loop for choppiness filter
+    # Get 1w data once before loop for ADX trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 30:
         return np.zeros(n)
     
-    # === 4h Indicator: Camarilla Pivot Levels (R1, S1) ===
+    # === 4h Indicator: Donchian Channels (20-period) ===
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
     
-    # Pivot point = (H + L + C) / 3
-    pivot_4h = (high_4h + low_4h + close_4h) / 3.0
-    # R1 = C + (H - L) * 1.1 / 12
-    r1_4h = close_4h + (high_4h - low_4h) * 1.1 / 12.0
-    # S1 = C - (H - L) * 1.1 / 12
-    s1_4h = close_4h - (high_4h - low_4h) * 1.1 / 12.0
+    # Upper channel = highest high over 20 periods
+    upper_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    # Lower channel = lowest low over 20 periods
+    lower_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
-    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
+    upper_20_aligned = align_htf_to_ltf(prices, df_4h, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_4h, lower_20)
     
     # === 1d Indicator: Volume SMA (20-period) for confirmation ===
     volume_1d = df_1d['volume'].values
     vol_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_20_1d)
     
-    # === 1w Indicator: Choppiness Index (14-period) for regime filter ===
+    # === 1w Indicator: ADX (14-period) for trend filter ===
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
@@ -70,26 +67,38 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First value
     
-    # Sum of TR over 14 periods
-    tr_sum_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Directional Movement
+    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w),
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)),
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
     
-    # Highest high and lowest low over 14 periods
-    hh_14 = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    # Smoothed TR, DM+, DM- (Wilder's smoothing)
+    def wilders_smoothing(values, period):
+        result = np.zeros_like(values)
+        result[period-1] = np.nansum(values[:period])
+        for i in range(period, len(values)):
+            result[i] = result[i-1] - (result[i-1] / period) + values[i]
+        return result
     
-    # Choppiness Index = 100 * log10(sum(tr14) / (hh14 - ll14)) / log10(14)
-    # Avoid division by zero
-    range_14 = hh_14 - ll_14
-    chop_1w = np.where(range_14 > 0, 
-                       100 * np.log10(tr_sum_14 / range_14) / np.log10(14), 
-                       50.0)  # Neutral when range is zero
+    tr_14 = wilders_smoothing(tr, 14)
+    dm_plus_14 = wilders_smoothing(dm_plus, 14)
+    dm_minus_14 = wilders_smoothing(dm_minus, 14)
     
-    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
+    # DI+ and DI-
+    di_plus = np.where(tr_14 != 0, 100 * dm_plus_14 / tr_14, 0)
+    di_minus = np.where(tr_14 != 0, 100 * dm_minus_14 / tr_14, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilders_smoothing(dx, 14)
+    
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 50  # Need 20 for volume SMA, 14 for CHOP
+    warmup = 50  # Need 20 for Donchian, 20 for volume SMA, 28 for ADX (14+14)
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -98,8 +107,8 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(r1_4h_aligned[i]) or np.isnan(s1_4h_aligned[i]) or
-            np.isnan(vol_sma_20_1d_aligned[i]) or np.isnan(chop_1w_aligned[i])):
+        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or
+            np.isnan(vol_sma_20_1d_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -110,21 +119,21 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 1d volume > 1.5x 20-period 1d volume SMA
-        vol_threshold = vol_sma_20_1d_aligned[i] * 1.5
+        # Volume filter: current 1d volume > 1.3x 20-period 1d volume SMA
+        vol_threshold = vol_sma_20_1d_aligned[i] * 1.3
         vol_confirm = vol_1d_aligned[i] > vol_threshold
         
-        # CHOP filter: ranging market (CHOP > 61.8) for mean reversion to pivot
-        chop_ranging = chop_1w_aligned[i] > 61.8
+        # ADX filter: trending market (ADX > 25)
+        trending = adx_aligned[i] > 25.0
         
         # === LONG CONDITIONS ===
-        # Price breaks above Camarilla R1 AND volume confirmation AND ranging market
-        if (close[i] > r1_4h_aligned[i]) and vol_confirm and chop_ranging:
+        # Price breaks above Donchian upper AND volume confirmation AND trending market
+        if (close[i] > upper_20_aligned[i]) and vol_confirm and trending:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # Price breaks below Camarilla S1 AND volume confirmation AND ranging market
-        elif (close[i] < s1_4h_aligned[i]) and vol_confirm and chop_ranging:
+        # Price breaks below Donchian lower AND volume confirmation AND trending market
+        elif (close[i] < lower_20_aligned[i]) and vol_confirm and trending:
             signals[i] = -0.25
         
         else:
@@ -132,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_1dVolSpike_1wCHOP_Filter_v1"
+name = "4h_Donchian20_1dVolConfirm_1wADX_TrendFilter_v1"
 timeframe = "4h"
 leverage = 1.0
