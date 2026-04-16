@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot levels (R1/S1) with volume spike and choppiness regime filter.
-# Long when price breaks above R1 with volume spike in trending regime (CHOP < 38.2).
-# Short when price breaks below S1 with volume spike in trending regime.
-# Uses tight entry conditions to limit trades (target: 20-50/year).
-# Works in both bull and bear markets via regime filter that adapts to market conditions.
-# Position size: 0.25.
+# Hypothesis: 1d CCI(20) with 1w EMA trend filter and volume confirmation.
+# Long when CCI(20) crosses above -100 AND price > 1w EMA50 AND 1d volume > 1.5x 20-period average.
+# Short when CCI(20) crosses below +100 AND price < 1w EMA50 AND 1d volume > 1.5x 20-period average.
+# Exit on opposite CCI cross or ATR-based stoploss (2*ATR from entry).
+# Uses discrete position size 0.25. Weekly trend filter avoids counter-trend trades in strong trends.
+# Target: 30-100 total trades over 4 years (7-25/year).
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,63 +20,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Indicators: Choppiness Index (14-period) ===
-    atr_list = []
-    for i in range(n):
-        tr = max(
-            high[i] - low[i],
-            abs(high[i] - close[i-1]) if i > 0 else 0,
-            abs(low[i] - close[i-1]) if i > 0 else 0
-        )
-        atr_list.append(tr)
+    # === 1d Indicators: CCI(20) ===
+    tp = (high + low + close) / 3.0
+    ma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
+    md_tp = pd.Series(tp).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    cci = (tp - ma_tp) / (0.015 * md_tp)
+    cci_prev = np.roll(cci, 1)
+    cci_prev[0] = np.nan
     
-    atr_14 = pd.Series(atr_list).rolling(window=14, min_periods=14).mean().values
-    sum_tr_14 = pd.Series(atr_list).rolling(window=14, min_periods=14).sum().values
-    max_hh_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_ll_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    chop = 100 * np.log10(sum_tr_14 / (max_hh_14 - min_ll_14)) / np.log10(14)
-    chop = np.where((max_hh_14 - min_ll_14) == 0, 100, chop)
-    
-    # === 1d Indicators: Camarilla Pivot Levels (R1, S1) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Typical price
-    tp_1d = (close_1d + high_1d + low_1d) / 3
-    
-    # Camarilla levels
-    r1_1d = close_1d + 1.1 * (high_1d - low_1d) / 12
-    s1_1d = close_1d - 1.1 * (high_1d - low_1d) / 12
-    
-    # Align to 4h
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # === 1w Indicators: EMA50 ===
+    df_1w = get_htf_data(prices, '1w')
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # === 1d Volume Spike ===
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    volume_spike = volume > (1.5 * vol_ma_1d_aligned)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma_20)
     
-    # === Session filter: 08-20 UTC ===
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # === 1d ATR for stoploss ===
+    tr1 = pd.Series(high).diff()
+    tr2 = pd.Series(low).diff().abs()
+    tr3 = pd.Series(close).shift(1).diff().abs()
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d_raw = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     
-    # Warmup
-    warmup = 50
+    # Warmup: ensure all indicators are valid (max 50 periods needed for EMA50)
+    warmup = 60
     
-    # Track position
-    position = 0
+    # Track position state and entry price for stoploss
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     for i in range(warmup, n):
-        # Skip if any required data is NaN or outside session
-        if (np.isnan(chop[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
-            np.isnan(volume_spike[i]) or not session_filter[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(cci[i]) or np.isnan(cci_prev[i]) or np.isnan(ema_50_1w_aligned[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(atr_1d_raw[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -84,43 +64,54 @@ def generate_signals(prices):
         # Current values
         price = close[i]
         vol_spike = volume_spike[i]
-        chop_val = chop[i]
+        atr_val = atr_1d_raw[i]
         
-        # Regime filter: trending only (CHOP < 38.2)
-        is_trending = chop_val < 38.2
-        
-        # EXIT LOGIC
+        # === EXIT LOGIC ===
         exit_signal = False
-        if position == 1:  # Long
-            # Exit if price breaks below S1
-            if price < s1_1d_aligned[i]:
+        
+        if position == 1:  # Long position
+            # Exit if CCI crosses below +100 (momentum loss)
+            if cci[i] < 100 and cci_prev[i] >= 100:
                 exit_signal = True
-        elif position == -1:  # Short
-            # Exit if price breaks above R1
-            if price > r1_1d_aligned[i]:
+            # ATR-based stoploss: 2*ATR below entry
+            elif price < entry_price - 2.0 * atr_val:
+                exit_signal = True
+        
+        elif position == -1:  # Short position
+            # Exit if CCI crosses above -100 (momentum loss)
+            if cci[i] > -100 and cci_prev[i] <= -100:
+                exit_signal = True
+            # ATR-based stoploss: 2*ATR above entry
+            elif price > entry_price + 2.0 * atr_val:
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
+            entry_price = 0.0
             continue
         
-        # ENTRY LOGIC (only when flat)
+        # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above R1 + volume spike + trending regime
-            if price > r1_1d_aligned[i] and vol_spike and is_trending:
+            # LONG: CCI crosses above -100 AND price > 1w EMA50 AND volume spike
+            if (cci[i] > -100 and cci_prev[i] <= -100 and 
+                price > ema_50_1w_aligned[i] and vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 + volume spike + trending regime
-            elif price < s1_1d_aligned[i] and vol_spike and is_trending:
+                entry_price = price
+            
+            # SHORT: CCI crosses below +100 AND price < 1w EMA50 AND volume spike
+            elif (cci[i] < 100 and cci_prev[i] >= 100 and 
+                  price < ema_50_1w_aligned[i] and vol_spike):
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         else:
             signals[i] = position * 0.25
     
     return signals
 
-name = "4h_Camarilla_R1S1_VolumeSpike_ChopFilter_V1"
-timeframe = "4h"
+name = "1d_CCI20_1wEMA50_VolumeSpike_V1"
+timeframe = "1d"
 leverage = 1.0
