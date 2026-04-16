@@ -13,49 +13,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data (HTF for key levels) ===
+    # === 1d data (HTF for trend and volatility) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === 4h data (HTF for trend filter) ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # === 1w data (HTF for regime) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # === Calculate 1d Camarilla pivot levels ===
-    # Using previous day's OHLC
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d[0] = close_1d[0]
-    prev_high_1d[0] = high_1d[0]
-    prev_low_1d[0] = low_1d[0]
+    # === Calculate ATR(14) on 1d for volatility regime ===
+    tr1 = high_1d[1:] - low_1d[:-1]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    camarilla_base = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
-    camarilla_range = prev_high_1d - prev_low_1d
+    # === Calculate 20-period SMA on 1w for trend regime ===
+    sma_20_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
     
-    # Resistance and Support levels
-    r1 = camarilla_base + camarilla_range * 1.1 / 12
-    s1 = camarilla_base - camarilla_range * 1.1 / 12
-    r2 = camarilla_base + camarilla_range * 1.1 / 6
-    s2 = camarilla_base - camarilla_range * 1.1 / 6
-    r3 = camarilla_base + camarilla_range * 1.1 / 4
-    s3 = camarilla_base - camarilla_range * 1.1 / 4
-    r4 = camarilla_base + camarilla_range * 1.1 / 2
-    s4 = camarilla_base - camarilla_range * 1.1 / 2
+    # === Align HTF indicators to 6h ===
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_20_1w)
     
-    # Align to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # === 4h EMA34 for trend filter ===
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
-    
-    # === Volume confirmation (4h) ===
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma_20
+    # === 6h Bollinger Bands (20, 2) ===
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
     
     signals = np.zeros(n)
     
@@ -67,43 +53,57 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(atr_14_aligned[i]) or np.isnan(sma_20_1w_aligned[i]) or 
+            np.isnan(sma_20[i]) or np.isnan(std_20[i]) or
+            np.isnan(upper_bb[i]) or np.isnan(lower_bb[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
-        ema_34_4h_val = ema_34_4h_aligned[i]
-        vol_ratio_val = vol_ratio[i]
+        atr_val = atr_14_aligned[i]
+        sma_1w_val = sma_20_1w_aligned[i]
+        upper = upper_bb[i]
+        lower = lower_bb[i]
+        
+        # === REGIME FILTER ===
+        # High volatility regime: ATR > 1.5 * ATR_MA (using 50-period MA of ATR)
+        atr_ma_50 = pd.Series(atr_14_aligned).rolling(window=50, min_periods=50).mean().values
+        if np.isnan(atr_ma_50[i]):
+            signals[i] = 0.0
+            position = 0
+            continue
+        high_vol = atr_val > 1.5 * atr_ma_50[i]
+        
+        # Trending regime: price > 1w SMA20
+        uptrend = price > sma_1w_val
+        downtrend = price < sma_1w_val
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price closes below S3 or hits R4 (take profit)
-            if price < s3_val or price > r3_val + (r3_val - s3_val) * 1.5:
+            # Exit when price touches lower BB or volatility drops
+            if price < lower or not high_vol:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price closes above R3 or hits S4 (take profit)
-            if price > r3_val or price < s3_val - (r3_val - s3_val) * 1.5:
+            # Exit when price touches upper BB or volatility drops
+            if price > upper or not high_vol:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
-        if position == 0:
-            # LONG: Price breaks above R3 with volume AND above 4h EMA34 (uptrend)
-            if (price > r3_val) and (price > ema_34_4h_val) and (vol_ratio_val > 1.8):
+        if position == 0 and high_vol:
+            # LONG: In uptrend, price breaks above upper BB
+            if uptrend and price > upper:
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Price breaks below S3 with volume AND below 4h EMA34 (downtrend)
-            elif (price < s3_val) and (price < ema_34_4h_val) and (vol_ratio_val > 1.8):
+            # SHORT: In downtrend, price breaks below lower BB
+            elif downtrend and price < lower:
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -118,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_Volume_EMA34"
-timeframe = "4h"
+name = "6h_Bollinger_Breakout_VolRegime_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
