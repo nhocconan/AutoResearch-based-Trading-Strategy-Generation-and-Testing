@@ -20,13 +20,13 @@ def generate_signals(prices):
     low_4h = df_4h['low'].values
     volume_4h = df_4h['volume'].values
     
-    # === 1d data (HTF for trend filter) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # === 12h data (HTF for trend filter) ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # === 1d EMA34 (trend filter) ===
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # === 12h EMA34 (trend filter) ===
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
     # === 4h Donchian channel (20-period) ===
     donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
@@ -63,7 +63,7 @@ def generate_signals(prices):
         # Skip if any data is NaN
         if (np.isnan(donch_high[i]) or 
             np.isnan(donch_low[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(ema_34_12h_aligned[i]) or 
             np.isnan(vol_ratio_4h[i]) or
             np.isnan(atr_14_4h[i])):
             signals[i] = 0.0
@@ -73,7 +73,7 @@ def generate_signals(prices):
         price = close[i]
         upper = donch_high[i]
         lower = donch_low[i]
-        ema_trend = ema_34_1d_aligned[i]
+        ema_trend = ema_34_12h_aligned[i]
         vol_ratio = vol_ratio_4h[i]
         atr = atr_14_4h[i]
         
@@ -136,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_1dEMA34_Volume_ATRStop_v2"
+name = "4h_Donchian_12hEMA34_Volume_ATRStop_v2"
 timeframe = "4h"
 leverage = 1.0
