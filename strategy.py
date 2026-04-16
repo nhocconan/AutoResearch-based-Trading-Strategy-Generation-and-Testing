@@ -3,120 +3,179 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h 123 Reversal pattern with weekly pivot confirmation
-# Long when 123 Reversal bullish pattern forms AND price above weekly pivot (bullish bias)
-# Short when 123 Reversal bearish pattern forms AND price below weekly pivot (bearish bias)
-# 123 Reversal: Point 1 (swing low/high), Point 2 (retracement), Point 3 (failure to make new low/high)
-# Weekly pivot provides higher timeframe bias to filter counter-trend signals
-# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and fee drag
+# Hypothesis: 12h Camarilla pivot levels (R1/S1) from daily pivots + 12h volume confirmation + 1d ADX trend filter
+# Long when price breaks above R1 AND volume > 1.2x 12h average volume AND 1d ADX > 25
+# Short when price breaks below S1 AND volume > 1.2x 12h average volume AND 1d ADX > 25
+# ATR trailing stop (2.0x ATR) to manage risk
+# Camarilla levels provide clear support/resistance, volume confirms conviction, ADX filters for trending markets
+# Target: 100-200 total trades over 4 years (25-50/year) to balance opportunity and fee drag
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === Weekly Pivot (higher timeframe bias) ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === 1d Camarilla pivot levels (R1, S1) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points: P = (H + L + C)/3
-    pp_1w = (high_1w + low_1w + close_1w) / 3.0
-    r1_1w = 2 * pp_1w - low_1w
-    s1_1w = 2 * pp_1w - high_1w
+    # Calculate pivot point
+    pivot = (high_1d + low_1d + close_1d) / 3
+    # Calculate Camarilla levels
+    camarilla_r1 = pivot + 1.1 * (high_1d - low_1d) / 12
+    camarilla_s1 = pivot - 1.1 * (high_1d - low_1d) / 12
     
-    pp_1w_aligned = align_htf_to_ltf(prices, df_1w, pp_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # === 123 Reversal Pattern Detection ===
-    # Point 1: Swing point (using 5-bar window)
-    # Point 2: Retracement from Point 1
-    # Point 3: Failed attempt to exceed Point 1
+    # === 12h Volume Confirmation (average volume) ===
+    df_12h = get_htf_data(prices, '12h')
+    volume_12h = df_12h['volume'].values
+    vol_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values  # 20 periods average
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
     
-    # Find swing highs and lows
-    window = 5
-    swing_high = np.zeros(n)
-    swing_low = np.zeros(n)
+    # === 1d ADX trend filter (14-period) ===
+    high_1d_arr = df_1d['high'].values
+    low_1d_arr = df_1d['low'].values
+    close_1d_arr = df_1d['close'].values
     
-    for i in range(window, n - window):
-        # Swing high: highest high in window
-        if high[i] == np.max(high[i-window:i+window+1]):
-            swing_high[i] = high[i]
-        # Swing low: lowest low in window
-        if low[i] == np.min(low[i-window:i+window+1]):
-            swing_low[i] = low[i]
+    # True Range
+    tr1 = high_1d_arr - low_1d_arr
+    tr2 = np.abs(high_1d_arr - np.roll(close_1d_arr, 1))
+    tr3 = np.abs(low_1d_arr - np.roll(close_1d_arr, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Initialize pattern tracking arrays
-    bull_123 = np.zeros(n, dtype=bool)  # Bullish 123 reversal
-    bear_123 = np.zeros(n, dtype=bool)  # Bearish 123 reversal
+    # Directional Movement
+    dm_plus = np.where((high_1d_arr - np.roll(high_1d_arr, 1)) > (np.roll(low_1d_arr, 1) - low_1d_arr), 
+                       np.maximum(high_1d_arr - np.roll(high_1d_arr, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d_arr, 1) - low_1d_arr) > (high_1d_arr - np.roll(high_1d_arr, 1)), 
+                        np.maximum(np.roll(low_1d_arr, 1) - low_1d_arr, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Track last swing points
-    last_swing_high = 0
-    last_swing_low = 0
-    last_swing_high_idx = -1
-    last_swing_low_idx = -1
+    # Smoothed values
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
     
-    for i in range(window, n):
-        # Update swing points
-        if swing_high[i] > 0:
-            last_swing_high = swing_high[i]
-            last_swing_high_idx = i
-        if swing_low[i] > 0:
-            last_swing_low = swing_low[i]
-            last_swing_low_idx = i
-        
-        # Bullish 123: After swing low, price rallies (Point 2), then fails to make new low (Point 3)
-        if (last_swing_low_idx > 0 and 
-            i - last_swing_low_idx >= 3 and  # Minimum 3 bars for retracement
-            close[i] > last_swing_low and    # Point 2: rally above Point 1
-            np.min(low[max(0, i-3):i+1]) > last_swing_low):  # Point 3: fails to make new low
-            bull_123[i] = True
-        
-        # Bearish 123: After swing high, price drops (Point 2), then fails to make new high (Point 3)
-        if (last_swing_high_idx > 0 and 
-            i - last_swing_high_idx >= 3 and  # Minimum 3 bars for retracement
-            close[i] < last_swing_high and    # Point 2: drop below Point 1
-            np.max(high[max(0, i-3):i+1]) < last_swing_high):  # Point 3: fails to make new high
-            bear_123[i] = True
+    # DI values
+    di_plus = 100 * dm_plus_14 / tr14
+    di_minus = 100 * dm_minus_14 / tr14
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    dx[np.isnan(dx)] = 0
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # === 12h ATR for trailing stop (14-period) ===
+    high_12h_arr = df_12h['high'].values
+    low_12h_arr = df_12h['low'].values
+    close_12h_arr = df_12h['close'].values
+    
+    tr1_12h = high_12h_arr - low_12h_arr
+    tr2_12h = np.abs(high_12h_arr - np.roll(close_12h_arr, 1))
+    tr3_12h = np.abs(low_12h_arr - np.roll(close_12h_arr, 1))
+    tr2_12h[0] = tr1_12h[0]
+    tr3_12h[0] = tr1_12h[0]
+    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
+    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 100
+    warmup = 50
+    
+    # Track position and entry price for trailing stop
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(pp_1w_aligned[i]) or 
-            np.isnan(r1_1w_aligned[i]) or
-            np.isnan(s1_1w_aligned[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(vol_ma_12h_aligned[i]) or
+            np.isnan(adx_aligned[i]) or
+            np.isnan(atr_12h_aligned[i])):
             signals[i] = 0.0
+            position = 0
             continue
         
         price = close[i]
-        pp_val = pp_1w_aligned[i]
-        r1_val = r1_1w_aligned[i]
-        s1_val = s1_1w_aligned[i]
+        r1_val = camarilla_r1_aligned[i]
+        s1_val = camarilla_s1_aligned[i]
+        vol_ma_val = vol_ma_12h_aligned[i]
+        adx_val = adx_aligned[i]
+        atr_val = atr_12h_aligned[i]
         
-        # Weekly pivot bias: price above PP = bullish, below PP = bearish
-        bullish_bias = price > pp_val
-        bearish_bias = price < pp_val
+        # Volume confirmation: current volume > 1.2x 12h average volume
+        vol_confirm = volume[i] > vol_ma_val * 1.2
         
-        # Entry logic with weekly pivot filter
-        if bull_123[i] and bullish_bias:
+        # ADX filter: trending market (ADX > 25)
+        trend_filter = adx_val > 25
+        
+        # === TRAILING STOP LOGIC ===
+        if position == 1:  # Long position
+            # Update highest price since entry
+            if price > highest_since_entry:
+                highest_since_entry = price
+            # Trail stop: exit if price drops 2.0*ATR from highest
+            if atr_val > 0 and price < highest_since_entry - 2.0 * atr_val:
+                signals[i] = 0.0
+                position = 0
+                highest_since_entry = 0.0
+                continue
+        
+        elif position == -1:  # Short position
+            # Update lowest price since entry
+            if price < lowest_since_entry or lowest_since_entry == 0:
+                lowest_since_entry = price
+            # Trail stop: exit if price rises 2.0*ATR from lowest
+            if atr_val > 0 and price > lowest_since_entry + 2.0 * atr_val:
+                signals[i] = 0.0
+                position = 0
+                lowest_since_entry = 0.0
+                continue
+        
+        # === ENTRY LOGIC (only when flat) ===
+        if position == 0:
+            # Long when: price breaks above R1 AND volume confirmation AND trend filter
+            if price > r1_val and vol_confirm and trend_filter:
+                signals[i] = 0.25
+                position = 1
+                entry_price = price
+                highest_since_entry = price
+                continue
+            # Short when: price breaks below S1 AND volume confirmation AND trend filter
+            elif price < s1_val and vol_confirm and trend_filter:
+                signals[i] = -0.25
+                position = -1
+                entry_price = price
+                lowest_since_entry = price
+                continue
+        
+        # Hold current position
+        if position == 1:
             signals[i] = 0.25
-        elif bear_123[i] and bearish_bias:
+        elif position == -1:
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "6h_123Reversal_WeeklyPivotBias"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_1dADX25_12hVolume1.2x_ATRTrail_2.0x"
+timeframe = "12h"
 leverage = 1.0
