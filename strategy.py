@@ -13,14 +13,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data (primary timeframe) ===
+    # === 1d data ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # 1d Donchian(20) for entry/exit levels
+    # 1d Donchian(20) for breakout levels
     high_20_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     low_20_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     donchian_upper_1d = align_htf_to_ltf(prices, df_1d, high_20_1d)
@@ -44,7 +44,7 @@ def generate_signals(prices):
     ema_34_1w = close_1w_series.ewm(span=34, min_periods=34, adjust=False).mean().values
     ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # === 1d indicators for entry timing ===
+    # === 1d indicators ===
     # RSI(14)
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
