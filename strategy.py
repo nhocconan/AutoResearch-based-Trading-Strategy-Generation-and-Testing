@@ -13,27 +13,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h data (primary) ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    volume_4h = df_4h['volume'].values
+    # === 12h data (primary) ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    volume_12h = df_12h['volume'].values
     
-    # === 1d data (HTF for Donchian and ATR) ===
+    # === 1d data (HTF for ATR and Donchian) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
+    low_12h = df_1d['low'].values  # Note: variable name reused for low_1d
     low_1d = df_1d['low'].values
     
-    # === Donchian channel (20-period) on daily ===
-    donchian_upper = np.zeros_like(close_1d)
-    donchian_lower = np.zeros_like(close_1d)
-    for i in range(20, len(close_1d)):
-        donchian_upper[i] = np.max(high_1d[i-20:i])
-        donchian_lower[i] = np.min(low_1d[i-20:i])
-    
-    # === ATR (14-period) on daily ===
+    # === ATR (14-period) on 1d for volatility filter ===
     tr1 = high_1d[1:] - low_1d[1:]
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
@@ -41,22 +35,40 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], tr])
     
     atr = np.full_like(tr, np.nan)
-    for i in range(14, len(tr)):
-        atr[i] = np.nanmean(tr[i-14:i])
+    if len(tr) >= 14:
+        atr[13] = np.nanmean(tr[1:15])
+        for i in range(15, len(tr)):
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
-    # === Volume ratio (20-period) on 4h ===
-    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_4h = volume_4h / vol_ma_20_4h
+    # === Donchian channel (20-period) on 1d for breakout levels ===
+    def rolling_max(arr, window):
+        res = np.full_like(arr, np.nan)
+        for i in range(window-1, len(arr)):
+            res[i] = np.nanmax(arr[i-window+1:i+1])
+        return res
     
-    # Align all HTF data to 4h timeframe
+    def rolling_min(arr, window):
+        res = np.full_like(arr, np.nan)
+        for i in range(window-1, len(arr)):
+            res[i] = np.nanmin(arr[i-window+1:i+1])
+        return res
+    
+    donchian_upper = rolling_max(high_1d, 20)
+    donchian_lower = rolling_min(low_1d, 20)
+    
+    # === 12h volume ratio for confirmation ===
+    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_12h = volume_12h / vol_ma_20_12h
+    
+    # Align all HTF data to 12h timeframe
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
     donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
-    vol_ratio_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ratio_4h)
+    vol_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio_12h)
     
     signals = np.zeros(n)
     
-    # Warmup: enough for Donchian and ATR calculations
+    # Warmup: enough for ATR and Donchian calculations
     warmup = 50
     
     # Track position
@@ -64,43 +76,44 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(donchian_upper_aligned[i]) or 
+        if (np.isnan(atr_aligned[i]) or 
+            np.isnan(donchian_upper_aligned[i]) or 
             np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(atr_aligned[i]) or 
-            np.isnan(vol_ratio_4h_aligned[i])):
+            np.isnan(vol_ratio_12h_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
+        atr_val = atr_aligned[i]
         upper = donchian_upper_aligned[i]
         lower = donchian_lower_aligned[i]
-        atr_val = atr_aligned[i]
-        vol_ratio = vol_ratio_4h_aligned[i]
+        vol_ratio = vol_ratio_12h_aligned[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit: price closes below lower band OR 2x ATR stoploss
-            if price < lower or price <= close[i-1] - 2.0 * atr_val:
+            # Exit: price closes below Donchian lower (trend reversal) OR 2x ATR trailing stop
+            if price < lower or price < (high[i] - 2 * atr_val):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit: price closes above upper band OR 2x ATR stoploss
-            if price > upper or price >= close[i-1] + 2.0 * atr_val:
+            # Exit: price closes above Donchian upper (trend reversal) OR 2x ATR trailing stop
+            if price > upper or price > (low[i] + 2 * atr_val):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Break above upper band with volume confirmation
+            # Breakout with volume confirmation
+            # LONG: Break above upper Donchian with volume
             if price > upper and vol_ratio > 1.3:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # SHORT: Break below lower band with volume confirmation
+            # SHORT: Break below lower Donchian with volume
             elif price < lower and vol_ratio > 1.3:
                 signals[i] = -0.25
                 position = -1
@@ -116,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_20_Breakout_Volume_ATR"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_Volume_ATRExit"
+timeframe = "12h"
 leverage = 1.0
