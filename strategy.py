@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI(14) with 4h trend filter (HMA21) and 1d volume confirmation.
-# Long when: RSI(14) < 30 (oversold) AND price > 4h HMA21 (uptrend) AND 1d volume > 1.2x 20-period average.
-# Short when: RSI(14) > 70 (overbought) AND price < 4h HMA21 (downtrend) AND 1d volume > 1.2x 20-period average.
-# Exit on RSI mean reversion (RSI > 50 for long, RSI < 50 for short) or opposite signal.
-# Uses discrete position size 0.20. Designed for 1h timeframe with HTF filters to reduce noise and overtrading.
-# Target: 60-150 total trades over 4 years (15-37/year).
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h EMA34 trend filter and 1d volume spike.
+# Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
+# Long when Bull Power > 0 AND price > 12h EMA34 AND 1d volume > 1.5x 20-period average.
+# Short when Bear Power < 0 AND price < 12h EMA34 AND 1d volume > 1.5x 20-period average.
+# Exit on opposite Elder Ray signal or ATR-based stop (2*ATR from entry).
+# Uses discrete position size 0.25. Works in trending markets by requiring volume confirmation
+# and trend alignment. Target: 50-150 total trades over 4 years (12-37/year).
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,34 +21,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1h Indicators: RSI(14) ===
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # Neutral RSI when no loss
+    # === 6h Indicators: Elder Ray (EMA13) ===
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # === 4h Indicators: HMA21 for trend ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    # HMA: WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-    half_len = 21 // 2
-    sqrt_len = int(np.sqrt(21))
-    wma_half = pd.Series(close_4h).ewm(span=half_len, adjust=False, min_periods=half_len).mean()
-    wma_full = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean()
-    raw_hma = 2 * wma_half - wma_full
-    hma_4h = pd.Series(raw_hma).ewm(span=sqrt_len, adjust=False, min_periods=sqrt_len).mean().values
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    # === 6h ATR for stoploss ===
+    tr1 = pd.Series(high).diff()
+    tr2 = pd.Series(low).diff().abs()
+    tr3 = pd.Series(close).shift(1).diff().abs()
+    tr_6h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_6h_raw = pd.Series(tr_6h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # === 1d Indicators: Volume Spike (volume > 1.2x 20-period average) ===
+    # === 12h HTF: EMA34 trend filter ===
+    df_12h = get_htf_data(prices, '12h')
+    ema34_12h = pd.Series(df_12h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    
+    # === 1d HTF: Volume Spike (volume > 1.5x 20-period average) ===
     df_1d = get_htf_data(prices, '1d')
     vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    volume_spike = volume > (1.2 * vol_ma_1d_aligned)
+    volume_spike = volume > (1.5 * vol_ma_1d_aligned)
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -55,61 +51,73 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 21 periods for HMA, 14 for RSI, 20 for volume MA)
+    # Warmup: ensure all indicators are valid (max 34 periods needed for EMA34)
     warmup = 50
     
-    # Track position state
+    # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(rsi[i]) or np.isnan(hma_4h_aligned[i]) or np.isnan(volume_spike[i]) or
-            not session_filter[i]):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(atr_6h_raw[i]) or
+            np.isnan(ema34_12h_aligned[i]) or np.isnan(volume_spike[i]) or not session_filter[i]):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values
         price = close[i]
-        rsi_val = rsi[i]
-        hma_val = hma_4h_aligned[i]
+        bull = bull_power[i]
+        bear = bear_power[i]
+        ema34 = ema34_12h_aligned[i]
         vol_spike = volume_spike[i]
+        atr_val = atr_6h_raw[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if RSI reverts above 50 (mean reversion)
-            if rsi_val > 50:
+            # Exit if Bear Power becomes negative (opposite Elder Ray signal)
+            if bear < 0:
+                exit_signal = True
+            # ATR-based stoploss: 2*ATR below entry
+            elif price < entry_price - 2.0 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if RSI reverts below 50 (mean reversion)
-            if rsi_val < 50:
+            # Exit if Bull Power becomes positive (opposite Elder Ray signal)
+            if bull > 0:
+                exit_signal = True
+            # ATR-based stoploss: 2*ATR above entry
+            elif price > entry_price + 2.0 * atr_val:
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
+            entry_price = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: RSI < 30 (oversold) AND price > 4h HMA21 (uptrend) AND volume spike
-            if rsi_val < 30 and price > hma_val and vol_spike:
-                signals[i] = 0.20
+            # LONG: Bull Power > 0 AND price > 12h EMA34 AND volume spike
+            if bull > 0 and price > ema34 and vol_spike:
+                signals[i] = 0.25
                 position = 1
+                entry_price = price
             
-            # SHORT: RSI > 70 (overbought) AND price < 4h HMA21 (downtrend) AND volume spike
-            elif rsi_val > 70 and price < hma_val and vol_spike:
-                signals[i] = -0.20
+            # SHORT: Bear Power < 0 AND price < 12h EMA34 AND volume spike
+            elif bear < 0 and price < ema34 and vol_spike:
+                signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         else:
-            signals[i] = position * 0.20
+            signals[i] = position * 0.25
     
     return signals
 
-name = "1h_RSI14_4hHMA21_1dVolume_V1"
-timeframe = "1h"
+name = "6h_ElderRay_12hEMA34_1dVolumeSpike_V1"
+timeframe = "6h"
 leverage = 1.0
