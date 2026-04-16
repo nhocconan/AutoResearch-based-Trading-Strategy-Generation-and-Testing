@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_EMA_Trend
-Hypothesis: Elder Ray Index (bull/bear power) combined with EMA trend filter captures
-strong momentum moves while avoiding whipsaws. Works in both bull and bear markets
-by requiring alignment between Elder Ray signal and EMA direction.
-Uses 6h for execution, 12h for EMA trend filter to reduce noise.
-Target: 50-150 trades over 4 years (12-37/year) with disciplined entries.
+1d_Pivot_R1S1_Breakout_Volume_Trend
+Hypothesis: On daily timeframe, Camarilla pivot levels R1/S1 act as significant support/resistance.
+Breakouts above R1 or below S1 with volume confirmation and trend filter (price > EMA50) capture momentum.
+Works in bull/bear markets by requiring both breakout and trend alignment, avoiding false breakouts in sideways markets.
+Target: 20-50 trades over 4 years (5-12/year) with disciplined entries.
+Uses 1d for execution, 1d for pivots and EMA trend filter (self-contained).
 """
 
 import numpy as np
@@ -20,92 +20,109 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === 6h data (primary) ===
-    df_6h = get_htf_data(prices, '6h')
-    close_6h = df_6h['close'].values
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
+    # === 1d data (primary and HTF) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # === 12h data (HTF for EMA trend filter) ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # === Camarilla pivot levels (using previous day's OHLC) ===
+    camarilla_r1 = np.zeros_like(close_1d)
+    camarilla_s1 = np.zeros_like(close_1d)
+    camarilla_r3 = np.zeros_like(close_1d)
+    camarilla_s3 = np.zeros_like(close_1d)
     
-    # === Elder Ray Index (13-period) ===
-    # Bull Power = High - EMA(13)
-    # Bear Power = Low - EMA(13)
-    ema13 = pd.Series(close_6h).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high_6h - ema13
-    bear_power = low_6h - ema13
+    for i in range(1, len(close_1d)):
+        # Use previous day's OHLC to calculate today's levels
+        h = high_1d[i-1]
+        l = low_1d[i-1]
+        c = close_1d[i-1]
+        camarilla_r1[i] = c + ((h - l) * 1.1 / 12)
+        camarilla_s1[i] = c - ((h - l) * 1.1 / 12)
+        camarilla_r3[i] = c + ((h - l) * 1.1 / 4)
+        camarilla_s3[i] = c - ((h - l) * 1.1 / 4)
     
-    # === EMA trend filter (21-period on 12h) ===
-    ema21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # === EMA50 for trend filter ===
+    close_series = pd.Series(close_1d)
+    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align all HTF data to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_6h, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_6h, bear_power)
-    ema21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema21_12h)
+    # === Volume ratio for confirmation ===
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume_1d / vol_ma_20
+    
+    # Align all data to 1d timeframe (no alignment needed as primary is 1d)
+    camarilla_r1_aligned = camarilla_r1
+    camarilla_s1_aligned = camarilla_s1
+    camarilla_r3_aligned = camarilla_r3
+    camarilla_s3_aligned = camarilla_s3
+    ema50_aligned = ema50
+    vol_ratio_aligned = vol_ratio
     
     signals = np.zeros(n)
     
-    # Warmup: enough for EMA calculations
-    warmup = 30
+    # Warmup: enough for EMA50 and volume MA
+    warmup = 50
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or 
-            np.isnan(ema21_12h_aligned[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(ema50_aligned[i]) or 
+            np.isnan(vol_ratio_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        bull = bull_power_aligned[i]
-        bear = bear_power_aligned[i]
-        ema21 = ema21_12h_aligned[i]
+        r1 = camarilla_r1_aligned[i]
+        s1 = camarilla_s1_aligned[i]
+        ema50_val = ema50_aligned[i]
+        vol_ratio_val = vol_ratio_aligned[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit: Bear power becomes positive (selling pressure) OR price closes below EMA
-            if bear > 0 or price < ema21:
+            # Exit: price closes below EMA50 (trend reversal) OR reaches R3 (profit target)
+            if price < ema50_val or price > r3:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit: Bull power becomes negative (buying pressure) OR price closes above EMA
-            if bull < 0 or price > ema21:
+            # Exit: price closes above EMA50 (trend reversal) OR reaches S3 (profit target)
+            if price > ema50_val or price < s3:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Bull power positive (buying pressure) AND price above EMA (uptrend)
-            if bull > 0 and price > ema21:
-                signals[i] = 0.25
+            # LONG: Break above R1 with volume and above EMA50 (uptrend)
+            if price > r1 and vol_ratio_val > 1.5 and price > ema50_val:
+                signals[i] = 0.30
                 position = 1
                 continue
-            # SHORT: Bear power negative (selling pressure) AND price below EMA (downtrend)
-            elif bear < 0 and price < ema21:
-                signals[i] = -0.25
+            # SHORT: Break below S1 with volume and below EMA50 (downtrend)
+            elif price < s1 and vol_ratio_val > 1.5 and price < ema50_val:
+                signals[i] = -0.30
                 position = -1
                 continue
         
         # Hold current position
         if position == 1:
-            signals[i] = 0.25
+            signals[i] = 0.30
         elif position == -1:
-            signals[i] = -0.25
+            signals[i] = -0.30
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "6h_ElderRay_EMA_Trend"
-timeframe = "6h"
+name = "1d_Pivot_R1S1_Breakout_Volume_Trend"
+timeframe = "1d"
 leverage = 1.0
