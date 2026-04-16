@@ -3,32 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d timeframe with 1-week RSI divergence + volume confirmation + 1-week ADX trend filter.
-# Weekly RSI divergence identifies potential reversals with momentum exhaustion.
-# Volume surge confirms institutional participation in the reversal.
-# Weekly ADX > 25 ensures trades occur in trending markets, avoiding chop.
-# Works in bull/bear by catching reversals from overextended moves.
-# Target: 30-100 total trades over 4 years (7-25/year). Size: 0.25.
-
-def calculate_rsi(close, period=14):
-    """Calculate RSI with proper Wilder's smoothing"""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[period-1] = np.mean(gain[:period])
-    avg_loss[period-1] = np.mean(loss[:period])
-    
-    for i in range(period, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+# Hypothesis: 12h timeframe with daily Donchian(20) breakout + volume confirmation + daily ADX(14) trend filter.
+# Daily Donchian(20) identifies 20-day price extremes. Breakout captures momentum.
+# Volume surge confirms institutional participation in the breakout.
+# Daily ADX > 25 ensures trades occur in trending markets, avoiding chop.
+# Works in bull/bear by following strong trends from price extremes.
+# Target: 50-150 total trades over 4 years (12-37/year). Size: 0.25.
 
 def generate_signals(prices):
     n = len(prices)
@@ -39,30 +19,39 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # === Weekly RSI (14) for momentum/divergence ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    rsi_14 = calculate_rsi(close_1w, 14)
-    rsi_14_w = align_htf_to_ltf(prices, df_1w, rsi_14)
+    # === Daily Donchian Channel (20) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # === Weekly ADX (14) for trend strength ===
-    # Calculate True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[0], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate Donchian bands
+    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Directional Movement
-    up_move = np.concatenate([[0], np.diff(high)])
-    down_move = np.concatenate([[0], -np.diff(low)])
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
+    
+    # === Daily ADX (14) for trend strength ===
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close, 1))  # Note: using close from prices for continuity
+    tr3 = np.abs(low_1d - np.roll(close, 1))
+    tr1[0] = tr2[0] = tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Calculate +DM and -DM
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    up_move[0] = down_move[0] = 0
     
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Wilder's smoothing for TR and DM
+    # Wilder's smoothing
     def wilders_smoothing(data, period):
         alpha = 1.0 / period
         result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
         result[period-1] = np.nansum(data[:period])
         for i in range(period, len(data)):
             result[i] = result[i-1] - (result[i-1] / period) + data[i]
@@ -78,13 +67,12 @@ def generate_signals(prices):
     
     dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
     adx_14 = wilders_smoothing(dx, 14)
-    adx_1w = align_htf_to_ltf(prices, df_1w, adx_14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
     
     # === Daily volume for surge confirmation ===
-    df_1d = get_htf_data(prices, '1d')
     volume_1d = df_1d['volume'].values
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_a = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     
@@ -96,46 +84,40 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(rsi_14_w[i]) or 
-            np.isnan(adx_1w[i]) or
-            np.isnan(vol_ma_20_a[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or 
+            np.isnan(donchian_lower_aligned[i]) or
+            np.isnan(adx_1d_aligned[i]) or
+            np.isnan(vol_ma_20_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
         
-        # Get current daily volume
-        df_1d_current = get_htf_data(prices, '1d')
-        vol_1d_current = df_1d_current['volume'].values
-        vol_1d_a = align_htf_to_ltf(prices, df_1d_current, vol_1d_current)
-        
-        # Volume surge: current 1d volume > 1.5x 20-period average
-        vol_surge = vol_1d_a[i] > vol_ma_20_a[i] * 1.5
+        # Volume surge: current 1d volume > 1.3x 20-period average
+        vol_1d_current = volume_1d[i]  # Already daily volume
+        vol_surge = vol_1d_current > vol_ma_20_aligned[i] * 1.3
         
         # Trend filter: ADX > 25 indicates trending market
-        trending = adx_1w[i] > 25.0
-        
-        # RSI levels
-        rsi = rsi_14_w[i]
+        trending = adx_1d_aligned[i] > 25.0
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Bullish divergence: RSI < 30 (oversold) + volume surge + trending
-            if rsi < 30 and vol_surge and trending:
+            # Long: Price breaks above daily Donchian upper + volume surge + trending
+            if price > donchian_upper_aligned[i] and vol_surge and trending:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Bearish divergence: RSI > 70 (overbought) + volume surge + trending
-            elif rsi > 70 and vol_surge and trending:
+            # Short: Price breaks below daily Donchian lower + volume surge + trending
+            elif price < donchian_lower_aligned[i] and vol_surge and trending:
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic: reverse signal on opposite RSI extreme
+        # Exit logic: reverse signal on opposite breakout
         elif position == 1:
-            # Exit long if RSI > 70 (overbought)
-            if rsi > 70:
+            # Exit long if price breaks below daily Donchian lower
+            if price < donchian_lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -143,8 +125,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short if RSI < 30 (oversold)
-            if rsi < 30:
+            # Exit short if price breaks above daily Donchian upper
+            if price > donchian_upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -153,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyRSI_Divergence_Volume1.5x_ADX25"
-timeframe = "1d"
+name = "12h_Donchian20_1dVolume1.3x_1dADX25_TrendFilter"
+timeframe = "12h"
 leverage = 1.0
