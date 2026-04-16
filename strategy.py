@@ -35,14 +35,13 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_1d_avg = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
     
-    # === 4h EMA for trend filter (34-period) ===
-    ema_4h = pd.Series(close).ewm(span=34, min_periods=34, adjust=False).mean().values
+    # === 6h EMA for trend filter (34-period) ===
+    ema_6h = pd.Series(close).ewm(span=34, min_periods=34, adjust=False).mean().values
     
-    # Align HTF data to 4h timeframe
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    atr_1d_avg_4h = align_htf_to_ltf(prices, df_1d, atr_1d_avg)
-    ema_4h_aligned = ema_4h  # Already on 4h timeframe
+    # Align HTF data to 6h timeframe
+    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
+    atr_1d_avg_6h = align_htf_to_ltf(prices, df_1d, atr_1d_avg)
     
     # === Volume spike detection (20-period volume MA) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,31 +57,31 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
-            np.isnan(atr_1d_avg_4h[i]) or np.isnan(ema_4h_aligned[i]) or
+        if (np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or
+            np.isnan(atr_1d_avg_6h[i]) or np.isnan(ema_6h[i]) or
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        r1_level = r1_4h[i]
-        s1_level = s1_4h[i]
-        atr_avg = atr_1d_avg_4h[i]
-        ema_val = ema_4h_aligned[i]
+        r1_level = r1_6h[i]
+        s1_level = s1_6h[i]
+        atr_avg = atr_1d_avg_6h[i]
+        ema_val = ema_6h[i]
         vol_spike = volume_spike[i]
         
         # === EXIT LOGIC: Exit when price moves against position or volatility drops ===
         if position == 1:  # Long position
             # Exit when price drops below S1 or volatility drops significantly
-            if price < s1_level or atr_avg < (atr_1d_avg_4h[i-1] * 0.7 if i > 0 else atr_avg):
+            if price < s1_level or atr_avg < (atr_1d_avg_6h[i-1] * 0.7 if i > 0 else atr_avg):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
             # Exit when price rises above R1 or volatility drops significantly
-            if price > r1_level or atr_avg < (atr_1d_avg_4h[i-1] * 0.7 if i > 0 else atr_avg):
+            if price > r1_level or atr_avg < (atr_1d_avg_6h[i-1] * 0.7 if i > 0 else atr_avg):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -111,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_FibPivot_R1S1_EMA34_VolumeSpike_ATRFilter"
-timeframe = "4h"
+name = "6h_FibPivot_R1S1_EMA34_VolumeSpike_ATRFilter"
+timeframe = "6h"
 leverage = 1.0
