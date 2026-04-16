@@ -25,7 +25,6 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
     
     # === 4h ATR(14) for volatility and stoploss ===
     tr1 = high_4h - low_4h
@@ -50,6 +49,21 @@ def generate_signals(prices):
     vol_ma_10_4h = pd.Series(volume_4h).rolling(window=10, min_periods=10).mean().values
     vol_ratio_4h = volume_4h / vol_ma_10_4h
     
+    # === 1d ADX(14) for trend strength filter ===
+    # Calculate ADX for 1d data
+    tr1d = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), np.abs(low_1d - np.roll(close_1d, 1))))
+    tr1d[0] = 0
+    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    tr14 = pd.Series(tr1d).rolling(window=14, min_periods=14).sum().values
+    plus_dm14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
+    minus_dm14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
+    plus_di = 100 * plus_dm14 / tr14
+    minus_di = 100 * minus_dm14 / tr14
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
     signals = np.zeros(n)
     
     # Warmup
@@ -65,7 +79,8 @@ def generate_signals(prices):
             np.isnan(atr_14_4h_aligned[i]) or
             np.isnan(vol_ratio_4h[i]) or
             np.isnan(donch_high_4h_aligned[i]) or
-            np.isnan(donch_low_4h_aligned[i])):
+            np.isnan(donch_low_4h_aligned[i]) or
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -76,6 +91,7 @@ def generate_signals(prices):
         vol_ratio = vol_ratio_4h[i]
         donch_high = donch_high_4h_aligned[i]
         donch_low = donch_low_4h_aligned[i]
+        adx_val = adx_aligned[i]
         
         # === STOPLOSS LOGIC ===
         if position == 1:  # Long position
@@ -113,14 +129,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Break above Donchian high with volume, in uptrend (above EMA50)
-            if (price > donch_high and vol_ratio > 1.8 and price > ema_trend):
+            # LONG: Break above Donchian high with volume, in uptrend (above EMA50) and strong trend (ADX > 25)
+            if (price > donch_high and vol_ratio > 1.8 and price > ema_trend and adx_val > 25):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 continue
-            # SHORT: Break below Donchian low with volume, in downtrend (below EMA50)
-            elif (price < donch_low and vol_ratio > 1.8 and price < ema_trend):
+            # SHORT: Break below Donchian low with volume, in downtrend (below EMA50) and strong trend (ADX > 25)
+            elif (price < donch_low and vol_ratio > 1.8 and price < ema_trend and adx_val > 25):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -136,6 +152,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_1dEMA50_Volume_ATRStop_v1"
+name = "4h_Donchian_1dEMA50_ADX25_Volume_ATRStop_v1"
 timeframe = "4h"
 leverage = 1.0
