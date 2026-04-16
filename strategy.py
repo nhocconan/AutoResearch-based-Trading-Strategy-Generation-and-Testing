@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Bollinger Band squeeze breakout with 1d ADX trend filter and volume confirmation.
-# Long when price breaks above upper Bollinger Band AND ADX(14) > 25 AND volume > 1.5x 20-period average.
-# Short when price breaks below lower Bollinger Band AND ADX(14) > 25 AND volume > 1.5x 20-period average.
-# Exit on ATR-based stoploss (2*ATR from entry) or opposite Bollinger Band break.
-# Uses discrete position size 0.25. Works in trending markets by requiring ADX > 25 and volume confirmation.
-# Target: 75-200 total trades over 4 years (19-50/year).
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA200 trend filter and volume confirmation.
+# Long when price breaks above Donchian upper band AND price > 1w EMA200 AND volume > 1.8x 20-day average.
+# Short when price breaks below Donchian lower band AND price < 1w EMA200 AND volume > 1.8x 20-day average.
+# Exit on opposite Donchian break or ATR-based stop (1.5*ATR from entry).
+# Uses discrete position size 0.30. Target: 40-80 total trades over 4 years (10-20/year).
+# Works in both bull and bear markets by requiring volume confirmation and trend alignment via 1w EMA200.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,102 +20,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Indicators: Bollinger Bands (20, 2) ===
-    ma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_band = ma_20 + (2 * std_20)
-    lower_band = ma_20 - (2 * std_20)
+    # === 1d Indicators: Donchian(20) channels ===
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 1d Indicators: ADX (14-period) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 1w Indicators: EMA200 and Volume MA ===
+    df_1w = get_htf_data(prices, '1w')
+    ema_200_1w = pd.Series(df_1w['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # True Range
-    tr1 = pd.Series(high_1d).diff()
-    tr2 = pd.Series(low_1d).diff().abs()
-    tr3 = pd.Series(close_1d).shift(1).diff().abs()
-    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    vol_1w = df_1w['volume'].values
+    vol_ma_1w = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
+    volume_spike = volume > (1.8 * vol_ma_1w_aligned)
     
-    # Directional Movement
-    up_move = pd.Series(high_1d).diff()
-    down_move = pd.Series(low_1d).diff().abs()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    tr_14 = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * (plus_dm_14 / tr_14)
-    minus_di = 100 * (minus_dm_14 / tr_14)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    adx_14_1d = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # === 1d Volume Spike ===
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    volume_spike = volume > (1.5 * vol_ma_1d_aligned)
-    
-    # === 4h ATR for stoploss ===
+    # === 1d ATR for stoploss ===
     tr1 = pd.Series(high).diff()
     tr2 = pd.Series(low).diff().abs()
     tr3 = pd.Series(close).shift(1).diff().abs()
-    tr_4h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_4h_raw = pd.Series(tr_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d_raw = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed for ADX)
-    warmup = 60
+    # Warmup: ensure all indicators are valid (max 200 periods needed for EMA200)
+    warmup = 220
     
     # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     for i in range(warmup, n):
-        # Skip if any required data is NaN or outside session
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(adx_14_1d[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(atr_4h_raw[i]) or not session_filter[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_200_1w_aligned[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(atr_1d_raw[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values
         price = close[i]
-        adx_val = adx_14_1d[i]
         vol_spike = volume_spike[i]
-        atr_val = atr_4h_raw[i]
+        atr_val = atr_1d_raw[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price breaks below lower Bollinger Band
-            if price < lower_band[i]:
+            # Exit if price breaks below Donchian lower band
+            if price < lowest_low[i]:
                 exit_signal = True
-            # ATR-based stoploss: 2*ATR below entry
-            elif price < entry_price - 2.0 * atr_val:
+            # ATR-based stoploss: 1.5*ATR below entry
+            elif price < entry_price - 1.5 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price breaks above upper Bollinger Band
-            if price > upper_band[i]:
+            # Exit if price breaks above Donchian upper band
+            if price > highest_high[i]:
                 exit_signal = True
-            # ATR-based stoploss: 2*ATR above entry
-            elif price > entry_price + 2.0 * atr_val:
+            # ATR-based stoploss: 1.5*ATR above entry
+            elif price > entry_price + 1.5 * atr_val:
                 exit_signal = True
         
         if exit_signal:
@@ -126,23 +90,25 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above upper Bollinger Band AND ADX > 25 AND volume spike
-            if (price > upper_band[i] and adx_val > 25 and vol_spike):
-                signals[i] = 0.25
+            # LONG: Price breaks above Donchian upper band AND price > 1w EMA200 AND volume spike
+            if (price > highest_high[i] and 
+                price > ema_200_1w_aligned[i] and vol_spike):
+                signals[i] = 0.30
                 position = 1
                 entry_price = price
             
-            # SHORT: Price breaks below lower Bollinger Band AND ADX > 25 AND volume spike
-            elif (price < lower_band[i] and adx_val > 25 and vol_spike):
-                signals[i] = -0.25
+            # SHORT: Price breaks below Donchian lower band AND price < 1w EMA200 AND volume spike
+            elif (price < lowest_low[i] and 
+                  price < ema_200_1w_aligned[i] and vol_spike):
+                signals[i] = -0.30
                 position = -1
                 entry_price = price
         
         else:
-            signals[i] = position * 0.25
+            signals[i] = position * 0.30
     
     return signals
 
-name = "4h_BollingerBreakout_1dADX_VolumeSpike_V1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA200_VolumeSpike_V1"
+timeframe = "1d"
 leverage = 1.0
