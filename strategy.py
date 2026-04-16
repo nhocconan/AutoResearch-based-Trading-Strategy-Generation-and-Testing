@@ -13,53 +13,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data (HTF for key levels) ===
+    # === Daily data for 1d ATR and volume ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # === 12h data (HTF for trend filter) ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # === Weekly data for trend filter ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # === Calculate 1d Camarilla pivot levels ===
-    # Using previous day's OHLC
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d[0] = close_1d[0]
-    prev_high_1d[0] = high_1d[0]
-    prev_low_1d[0] = low_1d[0]
+    # === Calculate 14-day ATR on daily data ===
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First day
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Camarilla formula
-    camarilla_base = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
-    camarilla_range = prev_high_1d - prev_low_1d
+    # === Calculate 50-period EMA on weekly close ===
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Resistance and Support levels
-    r3 = camarilla_base + camarilla_range * 1.1 / 4
-    s3 = camarilla_base - camarilla_range * 1.1 / 4
-    r4 = camarilla_base + camarilla_range * 1.1 / 2
-    s4 = camarilla_base - camarilla_range * 1.1 / 2
+    # === Align ATR and EMA to daily timeframe ===
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Align to 4h timeframe
-    camarilla_base_aligned = align_htf_to_ltf(prices, df_1d, camarilla_base)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # === 12h EMA34 for trend filter ===
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
-    
-    # === Volume confirmation (4h) ===
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma_20
+    # === Daily volume ratio (volume / 20-day average) ===
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_1d = volume_1d / vol_ma_20
+    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
     signals = np.zeros(n)
     
-    # Warmup
+    # Warmup - need enough data for ATR and EMA
     warmup = 100
     
     # Track position
@@ -67,46 +56,42 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(atr_14_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(vol_ratio_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
-        r4_val = r4_aligned[i]
-        s4_val = s4_aligned[i]
-        ema_34_12h_val = ema_34_12h_aligned[i]
-        vol_ratio_val = vol_ratio[i]
+        atr_val = atr_14_aligned[i]
+        ema_50_1w_val = ema_50_1w_aligned[i]
+        vol_ratio_val = vol_ratio_aligned[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price closes below S3 or hits R4 (take profit)
-            if price < s3_val or price > r4_val:
+            # Exit when price closes below EMA50 weekly (trend change) or ATR-based stop
+            if price < ema_50_1w_val or price < close[i-1] - 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price closes above R3 or hits S4 (take profit)
-            if price > r3_val or price < s4_val:
+            # Exit when price closes above EMA50 weekly (trend change) or ATR-based stop
+            if price > ema_50_1w_val or price > close[i-1] + 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above R3 with volume AND above 12h EMA34 (uptrend)
-            if (price > r3_val) and (price > ema_34_12h_val) and (vol_ratio_val > 1.5):
+            # LONG: Price above weekly EMA50 (uptrend) + volume spike + momentum
+            if (price > ema_50_1w_val) and (vol_ratio_val > 2.0) and (close[i] > close[i-1]):
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Price breaks below S3 with volume AND below 12h EMA34 (downtrend)
-            elif (price < s3_val) and (price < ema_34_12h_val) and (vol_ratio_val > 1.5):
+            # SHORT: Price below weekly EMA50 (downtrend) + volume spike + momentum
+            elif (price < ema_50_1w_val) and (vol_ratio_val > 2.0) and (close[i] < close[i-1]):
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -121,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_Volume_EMA34"
-timeframe = "4h"
+name = "1d_EMA50_Trend_VolumeSpike_ATRStop"
+timeframe = "1d"
 leverage = 1.0
