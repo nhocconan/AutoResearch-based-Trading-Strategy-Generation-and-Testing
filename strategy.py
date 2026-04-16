@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w volume spike and 1w ADX trend filter.
-# Long when price breaks above upper Donchian channel (20-period high) AND volume > 1.5x 10-period 1w average AND 1w ADX > 20.
-# Short when price breaks below lower Donchian channel (20-period low) AND volume > 1.5x 10-period 1w average AND 1w ADX > 20.
-# Exit when price crosses the Donchian midpoint (upper+lower)/2.
-# Uses discrete position size 0.25. Designed to capture breakouts in trending markets (both bull and bear).
-# Target: 50-90 total trades over 4 years (12-22/year) to minimize fee drag while maintaining edge.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d volume spike and 12h ADX trend filter.
+# Long when Bull Power > 0 AND volume > 1.5x 20-period 1d average AND 12h ADX > 25.
+# Short when Bear Power < 0 AND volume > 1.5x 20-period 1d average AND 12h ADX > 25.
+# Exit when Bull/Bear Power crosses zero.
+# Uses discrete position size 0.25. Designed to capture institutional buying/selling pressure
+# in trending markets, effective in both bull and bear regimes via ADX filter.
+# Target: 60-100 total trades over 4 years (15-25/year) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,68 +21,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Indicators: Donchian Channel (20-period) ===
-    # Upper channel: highest high of last 20 periods
-    # Lower channel: lowest low of last 20 periods
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper_channel = high_series.rolling(window=20, min_periods=20).max().values
-    lower_channel = low_series.rolling(window=20, min_periods=20).min().values
-    midpoint = (upper_channel + lower_channel) / 2
+    # === 6h Indicators: Elder Ray (Bull/Bear Power) ===
+    # Bull Power = High - EMA13(Close)
+    # Bear Power = Low - EMA13(Close)
+    close_s = pd.Series(close)
+    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # === 1w Indicators: Volume Spike (volume > 1.5x 10-period average) ===
-    df_1w = get_htf_data(prices, '1w')
-    vol_1w = df_1w['volume'].values
-    vol_ma_1w = pd.Series(vol_1w).rolling(window=10, min_periods=10).mean().values
-    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
-    volume_spike = volume > (1.5 * vol_ma_1w_aligned)
+    # === 1d Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    df_1d = get_htf_data(prices, '1d')
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    volume_spike = volume > (1.5 * vol_ma_1d_aligned)
     
-    # === 1w Indicators: ADX > 20 (trending market filter) ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === 12h Indicators: ADX > 25 (trending market filter) ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
     # True Range
-    tr1 = pd.Series(high_1w).diff()
-    tr2 = pd.Series(low_1w).diff().abs()
-    tr3 = pd.Series(close_1w).shift(1).diff().abs()
-    tr_1w = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1w = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    tr1 = pd.Series(high_12h).diff()
+    tr2 = pd.Series(low_12h).diff().abs()
+    tr3 = pd.Series(close_12h).shift(1).diff().abs()
+    tr_12h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_12h = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # Directional Movement
-    dm_plus = pd.Series(high_1w).diff()
-    dm_minus = pd.Series(low_1w).diff().abs()
+    dm_plus = pd.Series(high_12h).diff()
+    dm_minus = pd.Series(low_12h).diff().abs()
     dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
     dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
     
     # Smoothed DM and TR
     dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_smooth = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_smooth = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # Directional Indicators
     di_plus = 100 * (dm_plus_smooth / atr_smooth)
     di_minus = 100 * (dm_minus_smooth / atr_smooth)
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    trending = adx_aligned > 20
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    trending = adx_aligned > 25
     
-    # Session filter: 08-20 UTC
+    # Session filter: 08-20 UTC (avoid low-volume Asian session)
     hours = prices.index.hour
     session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 30 periods needed)
-    warmup = 40
+    # Warmup: ensure all indicators are valid (max 50 periods needed)
+    warmup = 100
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or np.isnan(midpoint[i]) or
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
             np.isnan(volume_spike[i]) or np.isnan(trending[i]) or
             not session_filter[i]):
             signals[i] = 0.0
@@ -89,7 +90,8 @@ def generate_signals(prices):
             continue
         
         # Current values
-        price = close[i]
+        bull = bull_power[i]
+        bear = bear_power[i]
         vol_spike = volume_spike[i]
         is_trending = trending[i]
         
@@ -97,13 +99,13 @@ def generate_signals(prices):
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price crosses below midpoint
-            if price < midpoint[i]:
+            # Exit if Bull Power crosses below zero (buying pressure fading)
+            if bull <= 0:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price crosses above midpoint
-            if price > midpoint[i]:
+            # Exit if Bear Power crosses above zero (selling pressure fading)
+            if bear >= 0:
                 exit_signal = True
         
         if exit_signal:
@@ -113,13 +115,13 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above upper Donchian AND volume spike AND trending market
-            if price > upper_channel[i] and vol_spike and is_trending:
+            # LONG: Bull Power > 0 (buying pressure) AND volume spike AND trending market
+            if bull > 0 and vol_spike and is_trending:
                 signals[i] = 0.25
                 position = 1
             
-            # SHORT: Price breaks below lower Donchian AND volume spike AND trending market
-            elif price < lower_channel[i] and vol_spike and is_trending:
+            # SHORT: Bear Power < 0 (selling pressure) AND volume spike AND trending market
+            elif bear < 0 and vol_spike and is_trending:
                 signals[i] = -0.25
                 position = -1
         
@@ -128,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wVolumeSpike_1wADX20_V1"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_1dVolumeSpike_12hADX_V1"
+timeframe = "6h"
 leverage = 1.0
