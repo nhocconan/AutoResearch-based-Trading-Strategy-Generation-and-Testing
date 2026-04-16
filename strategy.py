@@ -1,7 +1,4 @@
-# Hypothesis: 4h Bollinger Band reversal with volume confirmation and daily trend filter
-# In bull markets, buy BB lower band bounce; in bear markets, sell BB upper band rejection
-# Volume confirms momentum, daily trend prevents counter-trend trades
-# Target: 20-40 trades/year to minimize fee drag
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -16,38 +13,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h data (primary) ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    volume_4h = df_4h['volume'].values
+    # === 6h data (primary) ===
+    df_6h = get_htf_data(prices, '6h')
+    close_6h = df_6h['close'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    volume_6h = df_6h['volume'].values
     
-    # === 1d data (HTF for trend filter) ===
+    # === 1d data (HTF for trend) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # === 4h Bollinger Bands (20, 2.0) ===
-    sma_20 = pd.Series(close_4h).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_4h).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2.0 * std_20
-    lower_bb = sma_20 - 2.0 * std_20
-    upper_bb_aligned = align_htf_to_ltf(prices, df_4h, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_4h, lower_bb)
+    # === 1d Williams Alligator (Jaws, Teeth, Lips) ===
+    # Jaws: SMA(13) of median price, shifted 8 bars forward
+    median_price_1d = (high_1d + low_1d) / 2
+    jaws = pd.Series(median_price_1d).rolling(window=13, min_periods=13).mean().shift(8).values
+    # Teeth: SMA(8) of median price, shifted 5 bars forward
+    teeth = pd.Series(median_price_1d).rolling(window=8, min_periods=8).mean().shift(5).values
+    # Lips: SMA(5) of median price, shifted 3 bars forward
+    lips = pd.Series(median_price_1d).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # === 1d EMA (50) for trend filter ===
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align Alligator components with proper delay for forward shifts
+    jaws_aligned = align_htf_to_ltf(prices, df_1d, jaws)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
-    # === 4h volume ratio (20) ===
-    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume_4h / vol_ma_20
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_4h, vol_ratio)
+    # === 6h Williams %R for momentum (14 period) ===
+    highest_high_14 = pd.Series(high_6h).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_6h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close_6h) / (highest_high_14 - lowest_low_14)
+    williams_r_aligned = align_htf_to_ltf(prices, df_6h, williams_r)
+    
+    # === 6h volume ratio for confirmation ===
+    vol_ma_10_6h = pd.Series(volume_6h).rolling(window=10, min_periods=10).mean().values
+    vol_ratio_6h = volume_6h / vol_ma_10_6h
+    vol_ratio_6h_aligned = align_htf_to_ltf(prices, df_6h, vol_ratio_6h)
     
     signals = np.zeros(n)
     
-    # Warmup: enough for BB and EMA
-    warmup = 60
+    # Warmup: enough for Alligator and Williams %R
+    warmup = 30
     
     # Track position and entry price
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,43 +62,48 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ratio_aligned[i])):
+        if (np.isnan(jaws_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(williams_r_aligned[i]) or 
+            np.isnan(vol_ratio_6h_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        upper = upper_bb_aligned[i]
-        lower = lower_bb_aligned[i]
-        ema_trend = ema_50_1d_aligned[i]
-        vol_ratio_val = vol_ratio_aligned[i]
+        jaw = jaws_aligned[i]
+        tooth = teeth_aligned[i]
+        lip = lips_aligned[i]
+        wr = williams_r_aligned[i]
+        vol_ratio = vol_ratio_6h_aligned[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit: price touches or crosses upper BB or 2% trailing stop
-            if price >= upper or price < entry_price * 0.98:
+            # Exit: Williams %R overbought or Alligator lines cross bearish
+            if wr > -20 or (jaw < tooth < lip):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit: price touches or crosses lower BB or 2% trailing stop
-            if price <= lower or price > entry_price * 1.02:
+            # Exit: Williams %R oversold or Alligator lines cross bullish
+            if wr < -80 or (jaw > tooth > lip):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Long: price at/below lower BB, below daily EMA (bearish bias), strong volume
-            if price <= lower and price < ema_trend and vol_ratio_val > 1.5:
+            # Alligator alignment: bullish (jaw > tooth > lip) or bearish (jaw < tooth < lip)
+            # Williams %R: not extreme (> -80 and < -20) to avoid chop
+            # Volume confirmation: above average
+            if jaw > tooth > lip and wr > -80 and wr < -20 and vol_ratio > 1.2:
+                # LONG: Alligator bullish, Williams not oversold, volume confirmation
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 continue
-            # Short: price at/above upper BB, above daily EMA (bullish bias), strong volume
-            elif price >= upper and price > ema_trend and vol_ratio_val > 1.5:
+            elif jaw < tooth < lip and wr > -80 and wr < -20 and vol_ratio > 1.2:
+                # SHORT: Alligator bearish, Williams not overbought, volume confirmation
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -107,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_BB_Reversal_Trend_Volume"
-timeframe = "4h"
+name = "6h_Alligator_WilliamsR_Volume"
+timeframe = "6h"
 leverage = 1.0
