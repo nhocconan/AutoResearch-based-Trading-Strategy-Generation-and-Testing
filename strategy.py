@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h volume spike (1.8x median) and 1d chop regime filter (CHOP > 61.8 = range)
-# Long when price > Donchian upper(20) AND 12h volume > 1.8x 30-period median AND 1d CHOP > 61.8
-# Short when price < Donchian lower(20) AND 12h volume > 1.8x 30-period median AND 1d CHOP > 61.8
+# Hypothesis: 4h Donchian(20) breakout with 12h volume spike (2.0x median) and 1d chop regime filter (CHOP > 61.8 = range)
+# Long when price > Donchian upper(20) AND 12h volume > 2.0x 30-period median AND 1d CHOP > 61.8
+# Short when price < Donchian lower(20) AND 12h volume > 2.0x 30-period median AND 1d CHOP > 61.8
 # Exit when price crosses Donchian midpoint (mean reversion to equilibrium)
 # Uses discrete position size 0.25 to limit fee drag. Target: 75-200 total trades over 4 years.
+# Tightened volume threshold from 1.8x to 2.0x to reduce trade frequency and avoid overtrading.
 # Combines price channel breakout with volume confirmation and range regime filter for robustness in bull/bear markets.
 
 def generate_signals(prices):
@@ -115,8 +116,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 12h volume > 1.8x 30-period 12h volume median
-        vol_threshold = vol_median_30_12h_aligned[i] * 1.8
+        # Volume filter: current 12h volume > 2.0x 30-period 12h volume median
+        vol_threshold = vol_median_30_12h_aligned[i] * 2.0
         vol_confirm = vol_12h_aligned[i] > vol_threshold
         
         # Regime filter: 1d CHOP > 61.8 (range-bound market)
@@ -166,6 +167,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_12hVolume1.8x_1dChop61.8_v1"
+name = "4h_Donchian20_12hVolume2.0x_1dChop61.8_v1"
 timeframe = "4h"
 leverage = 1.0
