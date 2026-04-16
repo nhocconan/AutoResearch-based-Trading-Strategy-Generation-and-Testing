@@ -20,6 +20,14 @@ def generate_signals(prices):
     close_4h = df_4h['close'].values
     volume_4h = df_4h['volume'].values
     
+    # Calculate ATR on 4h
+    tr_4h = np.maximum(high_4h - low_4h,
+                       np.maximum(np.abs(high_4h - np.roll(close_4h, 1)),
+                                  np.abs(low_4h - np.roll(close_4h, 1))))
+    tr_4h[0] = high_4h[0] - low_4h[0]
+    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
+    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    
     # === 1d data (HTF) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
@@ -27,13 +35,23 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # === 4h ATR for volatility and stop sizing ===
-    tr_4h = np.maximum(high_4h - low_4h,
-                       np.maximum(np.abs(high_4h - np.roll(close_4h, 1)),
-                                  np.abs(low_4h - np.roll(close_4h, 1))))
-    tr_4h[0] = high_4h[0] - low_4h[0]
-    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    # Calculate ATR on 1d
+    tr_1d = np.maximum(high_1d - low_1d,
+                       np.maximum(np.abs(high_1d - np.roll(close_1d, 1)),
+                                  np.abs(low_1d - np.roll(close_1d, 1))))
+    tr_1d[0] = high_1d[0] - low_1d[0]
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # === 4h Donchian Channel (15) for breakout signals ===
+    highest_15 = pd.Series(high_4h).rolling(window=15, min_periods=15).max().values
+    lowest_15 = pd.Series(low_4h).rolling(window=15, min_periods=15).min().values
+    donchian_upper = highest_15
+    donchian_lower = lowest_15
+    
+    # === 4h Volume spike detection ===
+    vol_ma_10 = pd.Series(volume_4h).rolling(window=10, min_periods=10).mean().values
+    vol_ratio = volume_4h / vol_ma_10
     
     # === 1d Bollinger Bands (20, 2) for volatility regime ===
     sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
@@ -43,34 +61,24 @@ def generate_signals(prices):
     bb_width = (upper_band - lower_band) / sma_20
     bb_width_aligned = align_htf_to_ltf(prices, df_1d, bb_width)
     
-    # Percentile of BB width over 50 days for regime detection
-    bb_width_percentile = pd.Series(bb_width_aligned).rolling(window=50, min_periods=20).apply(
+    # Percentile of BB width over 30 days for regime detection
+    bb_width_percentile = pd.Series(bb_width_aligned).rolling(window=30, min_periods=10).apply(
         lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
     ).values
-    
-    # === 4h Donchian Channel (20) for breakout signals ===
-    highest_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_upper = highest_20
-    donchian_lower = lowest_20
-    
-    # === 4h Volume spike detection ===
-    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume_4h / vol_ma_20
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators have valid data
-    warmup = 100
+    warmup = 60
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_4h_aligned[i]) or np.isnan(bb_width_percentile[i]) or 
-            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(atr_4h_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(bb_width_percentile[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -83,14 +91,14 @@ def generate_signals(prices):
         # === EXIT LOGIC ===
         if position == 1:  # Long position
             # Exit when price closes below Donchian lower OR volatility regime shifts to high
-            if (price < donchian_lower[i]) or (bb_width_pct > 80):
+            if (price < donchian_lower[i]) or (bb_width_pct > 70):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
             # Exit when price closes above Donchian upper OR volatility regime shifts to high
-            if (price > donchian_upper[i]) or (bb_width_pct > 80):
+            if (price > donchian_upper[i]) or (bb_width_pct > 70):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -98,13 +106,13 @@ def generate_signals(prices):
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
             # LONG: Price breaks above Donchian upper AND low volatility regime AND volume spike
-            if (price > donchian_upper[i]) and (bb_width_pct < 30) and (vol_ratio_val > 1.5):
+            if (price > donchian_upper[i]) and (bb_width_pct < 40) and (vol_ratio_val > 1.8):
                 signals[i] = 0.25
                 position = 1
                 continue
             
             # SHORT: Price breaks below Donchian lower AND low volatility regime AND volume spike
-            elif (price < donchian_lower[i]) and (bb_width_pct < 30) and (vol_ratio_val > 1.5):
+            elif (price < donchian_lower[i]) and (bb_width_pct < 40) and (vol_ratio_val > 1.8):
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -119,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_LowVol_Volume"
+name = "4h_Donchian_Breakout_LowVol_Volume_v2"
 timeframe = "4h"
 leverage = 1.0
