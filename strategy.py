@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
-"""
-1D_3ATR_Channel_Breakout_TrendFilter
-Hypothesis: On daily timeframe, a 3ATR channel breakout with ADX trend filter captures momentum in both bull and bear markets.
-Breakouts above upper channel (mean + 3*ATR) go long, below lower channel (mean - 3*ATR) go short, only when ADX > 25.
-Uses weekly timeframe for higher-timeframe trend confirmation to avoid counter-trend trades.
-Target: 15-30 trades per year (~60-120 total over 4 years) with disciplined entries.
-"""
+# 12h_1w_Donchian_Breakout_Trend_1wMA
+# Hypothesis: On the 12h timeframe, weekly Donchian channel breakouts (20-period) in the direction of the 1-week EMA trend, with volume confirmation, capture major trends while avoiding whipsaws. The weekly trend filter ensures we only trade in the direction of the higher-timeframe momentum, reducing false signals during corrections. This approach works in both bull and bear markets by capturing sustained moves and exiting when the trend weakens. Target: 50-150 total trades over 4 years (12-37/year) with disciplined entries.
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -20,120 +15,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Daily ATR (14-period) for channel width ===
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])
+    # === 12h data (primary) ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    volume_12h = df_12h['volume'].values
     
-    # Wilder's smoothing for ATR
-    def wilders_smoothing(x, period):
-        result = np.full_like(x, np.nan)
-        if len(x) >= period:
-            result[period-1] = np.nanmean(x[1:period])
-            for i in range(period, len(x)):
-                result[i] = result[i-1] - (result[i-1]/period) + x[i]
-        return result
-    
-    atr = wilders_smoothing(tr, 14)
-    
-    # === Daily SMA(20) as mean for channel ===
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    
-    # === Upper and Lower Channels (SMA ± 3*ATR) ===
-    upper_channel = sma_20 + (3.0 * atr)
-    lower_channel = sma_20 - (3.0 * atr)
-    
-    # === Daily ADX(14) for trend filter ===
-    # Directional Movement
-    up_move = high[1:] - high[:-1]
-    down_move = low[:-1] - low[1:]
-    dm_plus = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    dm_minus = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
-    
-    # Smoothed DM and ATR
-    atr_smooth = wilders_smoothing(tr, 14)  # Already calculated above
-    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
-    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr_smooth != 0, 100 * dm_plus_smooth / atr_smooth, 0)
-    di_minus = np.where(atr_smooth != 0, 100 * dm_minus_smooth / atr_smooth, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilders_smoothing(dx, 14)
-    
-    # === Weekly trend filter (higher timeframe) ===
+    # === 1w data (HTF for Donchian and EMA trend) ===
     df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    # Weekly EMA(20) for trend direction
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    volume_1w = df_1w['volume'].values
     
-    # Align daily indicators to daily timeframe (no alignment needed as already daily)
-    # But we'll keep the pattern for consistency
-    upper_channel_aligned = upper_channel
-    lower_channel_aligned = lower_channel
-    adx_aligned = adx
+    # === 1w Donchian channel (20-period) ===
+    donchian_high = np.full_like(close_1w, np.nan)
+    donchian_low = np.full_like(close_1w, np.nan)
+    for i in range(20, len(close_1w)):
+        donchian_high[i] = np.max(high_1w[i-20:i])
+        donchian_low[i] = np.min(low_1w[i-20:i])
+    
+    # === 1w EMA (34-period) for trend filter ===
+    ema_34 = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # === 12h volume ratio for confirmation ===
+    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_12h = volume_12h / vol_ma_20_12h
+    
+    # Align all 1w data to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34)
+    vol_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio_12h)
     
     signals = np.zeros(n)
     
-    # Warmup: enough for ATR, SMA, ADX calculations
-    warmup = 40
+    # Warmup: enough for Donchian and EMA calculations
+    warmup = 50
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(upper_channel_aligned[i]) or 
-            np.isnan(lower_channel_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or 
-            np.isnan(ema_20_1w_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or 
+            np.isnan(vol_ratio_12h_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        upper = upper_channel_aligned[i]
-        lower = lower_channel_aligned[i]
-        adx_val = adx_aligned[i]
-        weekly_ema = ema_20_1w_aligned[i]
+        upper = donchian_high_aligned[i]
+        lower = donchian_low_aligned[i]
+        ema_trend = ema_34_aligned[i]
+        vol_ratio = vol_ratio_12h_aligned[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit: price closes below SMA(20) OR weekly trend turns bearish
-            if price < sma_20[i] or price < weekly_ema:
+            # Exit: price closes below weekly EMA (trend change) OR touches opposite Donchian band
+            if price < ema_trend or price < lower:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit: price closes above SMA(20) OR weekly trend turns bullish
-            if price > sma_20[i] or price > weekly_ema:
+            # Exit: price closes above weekly EMA (trend change) OR touches opposite Donchian band
+            if price > ema_trend or price > upper:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Only take trades when ADX indicates trending market
-            if adx_val > 25:
-                # LONG: Break above upper channel with weekly uptrend confirmation
-                if price > upper and price > weekly_ema:
-                    signals[i] = 0.25
-                    position = 1
-                    continue
-                # SHORT: Break below lower channel with weekly downtrend confirmation
-                elif price < lower and price < weekly_ema:
-                    signals[i] = -0.25
-                    position = -1
-                    continue
+            # LONG: Break above upper Donchian band with volume, in uptrend (price > weekly EMA)
+            if price > upper and vol_ratio > 1.5 and price > ema_trend:
+                signals[i] = 0.25
+                position = 1
+                continue
+            # SHORT: Break below lower Donchian band with volume, in downtrend (price < weekly EMA)
+            elif price < lower and vol_ratio > 1.5 and price < ema_trend:
+                signals[i] = -0.25
+                position = -1
+                continue
         
         # Hold current position
         if position == 1:
@@ -145,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_3ATR_Channel_Breakout_TrendFilter"
-timeframe = "1d"
+name = "12h_1w_Donchian_Breakout_Trend_1wMA"
+timeframe = "12h"
 leverage = 1.0
