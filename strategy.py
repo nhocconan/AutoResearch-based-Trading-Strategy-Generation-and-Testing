@@ -1,15 +1,13 @@
-# 4h_Camarilla_R4_S4_12hEMA20_Volume1.3x_ATRTrail_2.5x
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R4/S4 breakout with 1d volume confirmation and 12h EMA20 trend filter
-# Long when price closes above Camarilla R4 AND price > 12h EMA20 AND volume > 1.3x 1d average volume
-# Short when price closes below Camarilla S4 AND price < 12h EMA20 AND volume > 1.3x 1d average volume
+# Hypothesis: 4h Donchian breakout with 1d volume confirmation and 12h EMA20 trend filter
+# Long when price closes above Donchian upper band (20-period) AND price > 12h EMA20 AND volume > 1.3x 1d average volume
+# Short when price closes below Donchian lower band (20-period) AND price < 12h EMA20 AND volume > 1.3x 1d average volume
 # ATR trailing stop (2.5x ATR) to manage risk
-# Camarilla R4/S4 levels from daily pivot provide strong institutional breakout levels
+# Donchian channels provide clear breakout levels that work in both trending and ranging markets
 # EMA20 filter ensures alignment with short-term trend
 # Volume confirmation adds conviction to breakouts
 # Target: 80-160 total trades over 4 years (20-40/year) to balance opportunity and fee drag
@@ -30,26 +28,15 @@ def generate_signals(prices):
     ema_20 = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
     ema_20_aligned = align_htf_to_ltf(prices, df_12h, ema_20)
     
-    # === 1d Camarilla levels (from previous day) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 4h Donchian channels (20-period) ===
+    # Use pandas rolling for Donchian calculation
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Calculate pivot points from previous day
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    
-    # Camarilla levels (focus on R4/S4 for strong breakouts)
-    r4 = close_1d + (range_1d * 1.1 / 2.0)
-    s4 = close_1d - (range_1d * 1.1 / 2.0)
-    
-    # Align Camarilla levels to 4h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # === 1d Volume Confirmation ===
-    vol_ma_1d = pd.Series(volume).rolling(window=24, min_periods=24).mean().values  # 24 periods of 1h = 1d (4h data)
+    # === 1d Volume Confirmation (4h data: 6 periods = 1 day) ===
+    vol_ma_1d = pd.Series(volume).rolling(window=6, min_periods=6).mean().values  # 6 periods of 4h = 1d
     
     # === 4h ATR for trailing stop (14-period) ===
     tr1 = high - low
@@ -74,8 +61,8 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # Skip if any data is NaN
         if (np.isnan(ema_20_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or
-            np.isnan(s4_aligned[i]) or
+            np.isnan(donchian_upper[i]) or
+            np.isnan(donchian_lower[i]) or
             np.isnan(vol_ma_1d[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
@@ -84,8 +71,8 @@ def generate_signals(prices):
         
         price = close[i]
         ema_val = ema_20_aligned[i]
-        r4_val = r4_aligned[i]
-        s4_val = s4_aligned[i]
+        upper = donchian_upper[i]
+        lower = donchian_lower[i]
         vol_confirm = volume[i] > vol_ma_1d[i] * 1.3  # 1.3x average volume for confirmation
         atr_val = atr[i]
         
@@ -114,15 +101,15 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Long when: price closes above Camarilla R4 AND price > EMA20 AND volume confirmation
-            if price > r4_val and price > ema_val and vol_confirm:
+            # Long when: price closes above Donchian upper AND price > EMA20 AND volume confirmation
+            if price > upper and price > ema_val and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 highest_since_entry = price
                 continue
-            # Short when: price closes below Camarilla S4 AND price < EMA20 AND volume confirmation
-            elif price < s4_val and price < ema_val and vol_confirm:
+            # Short when: price closes below Donchian lower AND price < EMA20 AND volume confirmation
+            elif price < lower and price < ema_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -139,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R4_S4_12hEMA20_Volume1.3x_ATRTrail_2.5x"
+name = "4h_Donchian20_12hEMA20_Volume1.3x_ATRTrail_2.5x"
 timeframe = "4h"
 leverage = 1.0
