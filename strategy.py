@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w HMA21 trend filter and volume confirmation
-# Long when price breaks above Donchian(20) high AND price > 1w HMA21 AND volume > 1.5x 20-period average
-# Short when price breaks below Donchian(20) low AND price < 1w HMA21 AND volume > 1.5x 20-period average
+# Hypothesis: 12h Williams %R with 1d EMA34 trend filter and volume confirmation
+# Long when %R crosses above -80 (oversold bounce) AND price > 1d EMA34 AND volume > 1.3x 20-period average
+# Short when %R crosses below -20 (overbought rejection) AND price < 1d EMA34 AND volume > 1.3x 20-period average
 # ATR-based trailing stop (2.5x ATR) to manage risk and reduce whipsaws
-# Designed for low trade frequency (target: 30-100 total trades over 4 years) to minimize fee drag
-# Donchian channels provide clear structure, HMA21 filters trend direction, volume confirms breakout strength
+# Williams %R is a momentum oscillator that works well in ranging markets (common in 2025 BTC/ETH)
+# Designed for low trade frequency (target: 50-150 total trades over 4 years) to minimize fee drag
+# Uses 1d HTF for EMA trend filter and 12h for Williams %R calculation and volume confirmation
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,34 +21,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Donchian(20) ===
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # === 12h Williams %R (14-period) ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # === 1w HMA21 (trend filter) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # Hull Moving Average calculation
-    half_len = 21 // 2
-    sqrt_len = int(np.sqrt(21))
-    wma_half = pd.Series(close_1w).ewm(span=half_len, adjust=False, min_periods=half_len).mean().values
-    wma_full = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    raw_hma = 2 * wma_half - wma_full
-    hma_21 = pd.Series(raw_hma).ewm(span=sqrt_len, adjust=False, min_periods=sqrt_len).mean().values
-    hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
+    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_12h) / (highest_high - lowest_low)
+    williams_r[highest_high == lowest_low] = -50  # avoid division by zero
+    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
     
-    # === 1d ATR(14) for trailing stop ===
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # === 1d EMA34 (trend filter) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # === 12h Volume Confirmation (20-period average) ===
+    vol_ma_20 = pd.Series(df_12h['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
+    
+    # === 12h ATR for trailing stop (14-period) ===
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # === 1d Volume Confirmation (20-period average) ===
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
     
     signals = np.zeros(n)
     
@@ -62,21 +66,19 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or
-            np.isnan(hma_21_aligned[i]) or
-            np.isnan(atr[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(vol_ma_aligned[i]) or
+            np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        donch_high = highest_high[i]
-        donch_low = lowest_low[i]
-        hma_val = hma_21_aligned[i]
-        atr_val = atr[i]
-        vol_confirm = volume[i] > vol_ma_20[i] * 1.5  # 1.5x average volume
+        williams_r_val = williams_r_aligned[i]
+        ema_34_val = ema_34_1d_aligned[i]
+        vol_confirm = volume[i] > vol_ma_aligned[i] * 1.3  # 1.3x average volume
+        atr_val = atr_aligned[i]
         
         # === TRAILING STOP LOGIC ===
         if position == 1:  # Long position
@@ -101,18 +103,18 @@ def generate_signals(prices):
                 lowest_since_entry = 0.0
                 continue
         
-        # === EXIT LOGIC (Donchian opposite break) ===
+        # === EXIT LOGIC (Williams %R reversal) ===
         if position == 1:  # Long position
-            # Exit when price breaks below Donchian low
-            if price < donch_low:
+            # Exit when %R crosses below -50 (momentum loss)
+            if williams_r_val < -50:
                 signals[i] = 0.0
                 position = 0
                 highest_since_entry = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price breaks above Donchian high
-            if price > donch_high:
+            # Exit when %R crosses above -50 (momentum loss)
+            if williams_r_val > -50:
                 signals[i] = 0.0
                 position = 0
                 lowest_since_entry = 0.0
@@ -120,15 +122,15 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Long when: price breaks above Donchian high AND price > 1w HMA21 AND volume confirmation
-            if price > donch_high and price > hma_val and vol_confirm:
+            # Long when: %R crosses above -80 (from below) AND price > 1d EMA34 AND volume confirmation
+            if williams_r_val > -80 and williams_r_aligned[i-1] <= -80 and price > ema_34_val and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 highest_since_entry = price
                 continue
-            # Short when: price breaks below Donchian low AND price < 1w HMA21 AND volume confirmation
-            elif price < donch_low and price < hma_val and vol_confirm:
+            # Short when: %R crosses below -20 (from above) AND price < 1d EMA34 AND volume confirmation
+            elif williams_r_val < -20 and williams_r_aligned[i-1] >= -20 and price < ema_34_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -145,6 +147,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wHMA21_VolumeConfirm_ATRTrail"
-timeframe = "1d"
+name = "12h_WilliamsR_1dEMA34_VolumeConfirm_ATRTrail"
+timeframe = "12h"
 leverage = 1.0
