@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI(14) mean reversion with 4h EMA50 trend filter and volume confirmation
-# Long when RSI < 30 (oversold) + price > 4h EMA50 (uptrend) + volume > 1.5x 20-period avg
-# Short when RSI > 70 (overbought) + price < 4h EMA50 (downtrend) + volume > 1.5x 20-period avg
-# Uses session filter (08-20 UTC) to reduce noise and discrete position sizing (0.20)
-# 4h EMA50 provides strong trend filter reducing whipsaws in both bull and bear markets
-# Volume confirmation targets ~20-40 trades/year on 1h to avoid overtrading
-# RSI mean reversion works in ranging markets while trend filter avoids counter-trend trades
+# Hypothesis: 6h Donchian(20) breakout with 1w EMA200 trend filter and volume confirmation
+# Long when price breaks above Donchian upper band (20-period high) + 1w EMA200 uptrend + volume > 1.8x 20-period avg
+# Short when price breaks below Donchian lower band (20-period low) + 1w EMA200 downtrend + volume > 1.8x 20-period avg
+# Uses discrete position sizing (0.25) to control drawdown and minimize fee drag.
+# 1w EMA200 provides strong long-term trend filter reducing whipsaws in both bull and bear markets.
+# Volume threshold (1.8x) targets ~12-25 trades/year on 6h timeframe to avoid overtrading.
+# Donchian channels provide clear structure-based breakout levels that work in ranging and trending markets.
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,26 +25,21 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 4h HTF data once before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1w HTF data once before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
         return np.zeros(n)
     
-    # === 4h Indicator: EMA50 ===
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # === 1w Indicator: EMA200 ===
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # === 1h Indicators ===
-    # RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # === 6h Donchian Channel (20-period) ===
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,7 +47,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(50, 14, 20) + 5  # EMA50 + RSI(14) + volume(20) + buffer
+    warmup = max(200, 20) + 5  # EMA200 + Donchian(20) + volume(20) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -61,35 +56,35 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi_values[i]) or
-            np.isnan(vol_sma_20[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
+            np.isnan(ema_200_1w_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
+        # Volume filter: current volume > 1.8x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.8)
         
         # === LONG CONDITIONS ===
-        # 1. RSI < 30 (oversold)
-        # 2. Price > 4h EMA50 (uptrend)
+        # 1. Price breaks above Donchian upper band (close > upper)
+        # 2. 1w EMA200 uptrend (close > EMA200)
         # 3. Volume confirmation
-        if (rsi_values[i] < 30) and \
-           (close[i] > ema_50_4h_aligned[i]) and vol_confirm:
-            signals[i] = 0.20
+        if (close[i] > donchian_upper[i]) and \
+           (close[i] > ema_200_1w_aligned[i]) and vol_confirm:
+            signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. RSI > 70 (overbought)
-        # 2. Price < 4h EMA50 (downtrend)
+        # 1. Price breaks below Donchian lower band (close < lower)
+        # 2. 1w EMA200 downtrend (close < EMA200)
         # 3. Volume confirmation
-        elif (rsi_values[i] > 70) and \
-             (close[i] < ema_50_4h_aligned[i]) and vol_confirm:
-            signals[i] = -0.20
+        elif (close[i] < donchian_lower[i]) and \
+             (close[i] < ema_200_1w_aligned[i]) and vol_confirm:
+            signals[i] = -0.25
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "1h_RSI14_4hEMA50_Volume_Filter_v1"
-timeframe = "1h"
+name = "6h_Donchian20_1wEMA200_Volume_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
