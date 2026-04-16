@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,135 +13,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h data (primary) ===
+    # === 4h data (trend direction) ===
     df_4h = get_htf_data(prices, '4h')
     close_4h = df_4h['close'].values
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
-    volume_4h = df_4h['volume'].values
     
-    # === 12h data (HTF) ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # === 1d data (support/resistance levels) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # === 4h Donchian channel (20-period) ===
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # === 4h EMA200 for long-term trend ===
+    ema200_4h = pd.Series(close_4h).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
     
-    # === 4h 20-period EMA for trend filter ===
-    ema_20 = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # === 1d Donchian channels (20-period) for support/resistance ===
+    # Upper band: highest high of last 20 days
+    # Lower band: lowest low of last 20 days
+    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # === 12h RSI (14-period) for momentum filter ===
-    delta = pd.Series(close_12h).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_12h = 100 - (100 / (1 + rs))
+    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
     
-    # === 4h volume ratio (20-period) ===
-    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume_4h / vol_ma_20
-    
-    # === 4h ATR (14-period) for stop loss ===
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Align HTF indicators to 4h timeframe
-    ema_20_aligned = align_htf_to_ltf(prices, df_4h, ema_20)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_4h, vol_ratio)
-    atr_aligned = align_htf_to_ltf(prices, df_4h, atr)
+    # === 1h volume filter ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma_20
     
     signals = np.zeros(n)
     
-    # Track position and entry price for stop loss
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
+    # Warmup
+    warmup = 200
     
-    # Warmup: enough for Donchian, EMA, RSI calculations
-    warmup = 60
+    # Track position
+    position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
-        # Skip if any data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_20_aligned[i]) or 
-            np.isnan(rsi_12h_aligned[i]) or 
-            np.isnan(vol_ratio_aligned[i]) or 
-            np.isnan(atr_aligned[i])):
-            signals[i] = 0.0
-            position = 0
-            continue
-        
         price = close[i]
-        upper = donchian_high_aligned[i]
-        lower = donchian_low_aligned[i]
-        ema = ema_20_aligned[i]
-        rsi = rsi_12h_aligned[i]
-        vol = vol_ratio_aligned[i]
-        atr_val = atr_aligned[i]
+        ema200 = ema200_4h_aligned[i]
+        upper = upper_20_aligned[i]
+        lower = lower_20_aligned[i]
+        vol = vol_ratio[i]
         
-        # === STOP LOSS LOGIC ===
-        if position == 1:  # Long position
-            if price < entry_price - 2.0 * atr_val:
-                signals[i] = 0.0
-                position = 0
-                continue
-        elif position == -1:  # Short position
-            if price > entry_price + 2.0 * atr_val:
-                signals[i] = 0.0
-                position = 0
-                continue
+        # Skip if any data is NaN
+        if np.isnan(ema200) or np.isnan(upper) or np.isnan(lower) or np.isnan(vol):
+            signals[i] = 0.0
+            continue
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit: price closes below EMA OR RSI > 70 (overbought)
-            if price < ema or rsi > 70:
+            # Exit: price closes below EMA200 OR below lower Donchian band
+            if price < ema200 or price < lower:
                 signals[i] = 0.0
                 position = 0
                 continue
+        
         elif position == -1:  # Short position
-            # Exit: price closes above EMA OR RSI < 30 (oversold)
-            if price > ema or rsi < 30:
+            # Exit: price closes above EMA200 OR above upper Donchian band
+            if price > ema200 or price > upper:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Donchian high + EMA uptrend + RSI not overbought + volume
-            if price > upper and price > ema and rsi < 70 and vol > 1.3:
-                signals[i] = 0.25
+            # LONG: Price above EMA200 (uptrend) and breaks above upper Donchian band with volume
+            if price > ema200 and price > upper and vol > 1.5:
+                signals[i] = 0.20
                 position = 1
-                entry_price = price
                 continue
-            # SHORT: Price breaks below Donchian low + EMA downtrend + RSI not oversold + volume
-            elif price < lower and price < ema and rsi > 30 and vol > 1.3:
-                signals[i] = -0.25
+            # SHORT: Price below EMA200 (downtrend) and breaks below lower Donchian band with volume
+            elif price < ema200 and price < lower and vol > 1.5:
+                signals[i] = -0.20
                 position = -1
-                entry_price = price
                 continue
         
         # Hold current position
         if position == 1:
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif position == -1:
-            signals[i] = -0.25
+            signals[i] = -0.20
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian_EMA_RSI_Volume"
-timeframe = "4h"
+name = "1h_EMA200_Donchian20_Volume_Breakout"
+timeframe = "1h"
 leverage = 1.0
