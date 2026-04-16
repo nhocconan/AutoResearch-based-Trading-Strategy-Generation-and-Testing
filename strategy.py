@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h breakout strategy using 4h Donchian channels for direction and 1d volatility regime filter
-# 4h Donchian(20) provides adaptive support/resistance based on recent volatility
-# 1d ATR ratio (ATR10/ATR30) identifies high volatility regimes where breakouts are more reliable
-# Volume confirmation (>1.3x 20-period average) ensures participation
-# Session filter (08-20 UTC) reduces noise during low-liquidity hours
-# Trailing stop (2.0x ATR) manages risk while allowing trends to develop
-# Position size: 0.20 (20% of capital) to control drawdown
-# Target: 60-120 total trades over 4 years (15-30/year) to minimize fee drag
+# Hypothesis: 6h Ichimoku Cloud with 1d TK Cross and Volume Confirmation
+# Ichimoku provides dynamic support/resistance via cloud (Senkou Span A/B) and momentum via TK Cross.
+# Using 1d timeframe for Ichimoku calculation reduces noise and provides stronger trend context.
+# TK Cross (Tenkan/Kijun cross) on 1d acts as momentum filter for 6h entries.
+# Volume confirmation (>1.3x 20-period average) ensures breakouts have participation.
+# This combination adapts to both trending and ranging markets with controlled trade frequency.
+# Target: 80-160 total trades over 4 years (20-40/year) to balance opportunity and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,166 +21,172 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h data (for Donchian channels) ===
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
-    
-    # === 1d data (for volatility regime filter) ===
+    # === 1d data for Ichimoku calculation (HTF) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === 4h Donchian Channel (20) ===
-    high_roll_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    low_roll_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_upper = align_htf_to_ltf(prices, df_4h, high_roll_4h)
-    donchian_lower = align_htf_to_ltf(prices, df_4h, low_roll_4h)
+    # === Ichimoku Components (1d) ===
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    # === 1d ATR Ratio (ATR10/ATR30) for volatility regime ===
-    # Calculate ATR for 1d timeframe
-    tr1_1d = high_1d - low_1d
-    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
-    tr_1d[0] = high_1d[0] - low_1d[0]
-    atr_10_1d = pd.Series(tr_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
-    atr_30_1d = pd.Series(tr_1d).ewm(span=30, adjust=False, min_periods=30).mean().values
-    atr_ratio_1d = atr_10_1d / (atr_30_1d + 1e-10)  # Avoid division by zero
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
     
-    # === 4h Volume Confirmation (20-period average) ===
-    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
     
-    # === 4h ATR (10) for trailing stop ===
-    tr1_4h = high_4h - low_4h
-    tr2_4h = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3_4h = np.abs(low_4h - np.roll(close_4h, 1))
-    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
-    tr_4h[0] = high_4h[0] - low_4h[0]
-    atr_4h = pd.Series(tr_4h).ewm(span=10, adjust=False, min_periods=10).mean().values
-    atr_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (period52_high + period52_low) / 2
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    
+    # === 6h Volume Confirmation (20-period average) ===
+    df_6h = get_htf_data(prices, '6h')
+    volume_6h = df_6h['volume'].values
+    vol_ma_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_20)
     
     signals = np.zeros(n)
     
     # Warmup
     warmup = 100
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour  # Already datetime64[ms], .hour works directly
-    
-    # Track position and entry price for stoploss
+    # Track position
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_since_entry = 0.0  # For long trailing stop
-    lowest_since_entry = 0.0   # For short trailing stop
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or
-            np.isnan(atr_ratio_aligned[i]) or
-            np.isnan(vol_ma_aligned[i]) or
-            np.isnan(atr_aligned[i])):
+        if (np.isnan(tenkan_aligned[i]) or 
+            np.isnan(kijun_aligned[i]) or
+            np.isnan(span_a_aligned[i]) or
+            np.isnan(span_b_aligned[i]) or
+            np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             position = 0
-            continue
-        
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        if not in_session:
-            signals[i] = 0.0
-            position = 0
-            entry_price = 0.0
-            highest_since_entry = 0.0
-            lowest_since_entry = 0.0
             continue
         
         price = close[i]
-        upper = donchian_upper[i]
-        lower = donchian_lower[i]
-        vol_confirm = volume[i] > vol_ma_aligned[i] * 1.3  # 1.3x average volume for confirmation
-        atr_val = atr_aligned[i]
-        vol_regime = atr_ratio_aligned[i] > 0.8  # High volatility regime (ATR10 > 0.8 * ATR30)
+        tenkan = tenkan_aligned[i]
+        kijun = kijun_aligned[i]
+        span_a = span_a_aligned[i]
+        span_b = span_b_aligned[i]
+        vol_confirm = volume[i] > vol_ma_aligned[i] * 1.3  # 1.3x average volume
         
-        # === TRAILING STOP LOGIC ===
+        # Determine cloud top and bottom
+        cloud_top = max(span_a, span_b)
+        cloud_bottom = min(span_a, span_b)
+        
+        # === TRAILING STOP LOGIC (ATR-based) ===
+        # Calculate ATR from 6h data for trailing stop
+        if i >= warmup:  # Ensure we have enough data for ATR
+            # Simplified ATR calculation using recent 6h data
+            atr_period = 14
+            if i >= atr_period:
+                tr_list = []
+                for j in range(max(warmup, i-atr_period+1), i+1):
+                    if j < len(prices):
+                        tr1 = prices['high'].iloc[j] - prices['low'].iloc[j]
+                        tr2 = abs(prices['high'].iloc[j] - prices['close'].iloc[j-1]) if j > 0 else tr1
+                        tr3 = abs(prices['low'].iloc[j] - prices['close'].iloc[j-1]) if j > 0 else tr1
+                        tr_list.append(max(tr1, tr2, tr3))
+                if tr_list:
+                    atr_val = np.mean(tr_list)
+                else:
+                    atr_val = 0.0
+            else:
+                atr_val = 0.0
+        else:
+            atr_val = 0.0
+        
+        # Track extreme price for trailing stop
+        if not hasattr(generate_signals, 'extreme_price'):
+            generate_signals.extreme_price = 0.0
+        
         if position == 1:  # Long position
-            # Update highest price since entry
-            if price > highest_since_entry:
-                highest_since_entry = price
-            # Trail stop: exit if price drops 2.0*ATR from high
-            if price < highest_since_entry - 2.0 * atr_val:
+            # Update extreme price (highest since entry)
+            if price > generate_signals.extreme_price:
+                generate_signals.extreme_price = price
+            # Trail stop: exit if price drops 2.0*ATR from extreme
+            if atr_val > 0 and price < generate_signals.extreme_price - 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
-                highest_since_entry = 0.0
+                generate_signals.extreme_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Update lowest price since entry
-            if price < lowest_since_entry:
-                lowest_since_entry = price
-            # Trail stop: exit if price rises 2.0*ATR from low
-            if price > lowest_since_entry + 2.0 * atr_val:
+            # Update extreme price (lowest since entry)
+            if price < generate_signals.extreme_price or generate_signals.extreme_price == 0:
+                generate_signals.extreme_price = price
+            # Trail stop: exit if price rises 2.0*ATR from extreme
+            if atr_val > 0 and price > generate_signals.extreme_price + 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
-                lowest_since_entry = 0.0
+                generate_signals.extreme_price = 0.0
                 continue
         
-        # === EXIT LOGIC (Donchian reversal) ===
+        # === EXIT LOGIC (TK Cross reversal) ===
         if position == 1:  # Long position
-            # Exit when price breaks below lower Donchian channel
-            if price < lower:
+            # Exit when Tenkan crosses below Kijun (bearish TK cross)
+            if tenkan < kijun:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
-                highest_since_entry = 0.0
+                generate_signals.extreme_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price breaks above upper Donchian channel
-            if price > upper:
+            # Exit when Tenkan crosses above Kijun (bullish TK cross)
+            if tenkan > kijun:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
-                lowest_since_entry = 0.0
+                generate_signals.extreme_price = 0.0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
-        if position == 0 and in_session:
-            # Require volume confirmation and high volatility regime
-            if vol_confirm and vol_regime:
-                # Long when price breaks above upper channel
-                if price > upper:
-                    signals[i] = 0.20
-                    position = 1
-                    entry_price = price
-                    highest_since_entry = price
-                    continue
-                # Short when price breaks below lower channel
-                elif price < lower:
-                    signals[i] = -0.20
-                    position = -1
-                    entry_price = price
-                    lowest_since_entry = price
-                    continue
+        if position == 0:
+            # Bullish TK Cross: Tenkan crosses above Kijun
+            bullish_tk = tenkan > kijun and tenkan_aligned[i-1] <= kijun_aligned[i-1] if i > 0 else False
+            # Bearish TK Cross: Tenkan crosses below Kijun
+            bearish_tk = tenkan < kijun and tenkan_aligned[i-1] >= kijun_aligned[i-1] if i > 0 else False
+            
+            # Long when: Bullish TK Cross AND price above cloud AND volume confirmation
+            if bullish_tk and price > cloud_top and vol_confirm:
+                signals[i] = 0.25
+                position = 1
+                generate_signals.extreme_price = price
+                continue
+            # Short when: Bearish TK Cross AND price below cloud AND volume confirmation
+            elif bearish_tk and price < cloud_bottom and vol_confirm:
+                signals[i] = -0.25
+                position = -1
+                generate_signals.extreme_price = price
+                continue
         
         # Hold current position
         if position == 1:
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif position == -1:
-            signals[i] = -0.20
+            signals[i] = -0.25
         else:
             signals[i] = 0.0
     
+    # Reset class attribute for next call
+    if hasattr(generate_signals, 'extreme_price'):
+        delattr(generate_signals, 'extreme_price')
+    
     return signals
 
-name = "1h_Donchian20_1dATRRatio_VolumeConfirm_SessionFilter"
-timeframe = "1h"
+name = "6h_Ichimoku_TKCross_1d_VolumeConfirm_ATRTrail"
+timeframe = "6h"
 leverage = 1.0
