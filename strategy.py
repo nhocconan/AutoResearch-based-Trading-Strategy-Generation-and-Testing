@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Supertrend for trend direction and 1d RSI(2) for mean reversion timing.
-# Long when 4h Supertrend is bullish AND 1d RSI(2) < 10 (oversold) AND price > 1h EMA(50) (pullback entry).
-# Short when 4h Supertrend is bearish AND 1d RSI(2) > 90 (overbought) AND price < 1h EMA(50) (pullback entry).
-# Exit when 1d RSI(2) crosses 50 (mean reversion complete) or Supertrend flips.
-# Uses discrete position size 0.20. Session filter: 08-20 UTC to avoid low-volume hours.
-# Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag.
+# Hypothesis: 6h strategy using weekly Camarilla pivot levels (R3/S3, R4/S4) with 1d ADX filter and volume confirmation.
+# Long when price breaks above weekly R4 with 1d ADX > 25 and volume > 2.0x 20-period average.
+# Short when price breaks below weekly S4 with 1d ADX > 25 and volume > 2.0x 20-period average.
+# Exit when price returns to weekly pivot point (PP) or opposite Camarilla level (R3/S3).
+# Uses discrete position size 0.25. Weekly Camarilla provides structure from higher timeframe, 6h provides entry timing.
+# Target: 75-200 total trades over 4 years (19-50/year) to balance edge and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,79 +20,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data once before loop for Supertrend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get weekly data once before loop for Camarilla levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # === 4h Indicators: Supertrend (ATR=10, mult=3.0) ===
+    # === Weekly Indicators: Camarilla Pivot Levels (based on prior week) ===
+    # Calculate using prior week's high, low, close (shift by 1 to use completed week only)
+    phigh = np.roll(high_1w, 1)
+    plow = np.roll(low_1w, 1)
+    pclose = np.roll(close_1w, 1)
+    phigh[0] = np.nan
+    plow[0] = np.nan
+    pclose[0] = np.nan
+    
+    # Weekly pivot point (PP)
+    pp = (phigh + plow + pclose) / 3.0
+    # Weekly Camarilla levels
+    rang = phigh - plow
+    r3 = pp + rang * 1.1 / 2.0  # R3 = PP + (High-Low)*1.1/2
+    s3 = pp - rang * 1.1 / 2.0  # S3 = PP - (High-Low)*1.1/2
+    r4 = pp + rang * 1.1        # R4 = PP + (High-Low)*1.1
+    s4 = pp - rang * 1.1        # S4 = PP - (High-Low)*1.1
+    
+    # Align weekly Camarilla levels to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
+    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
+    
+    # Get daily data once before loop for ADX filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # === Daily Indicators: ADX (14) for trend strength filter ===
     # True Range
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr1[0] = 0
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # ATR(10)
-    atr = pd.Series(tr).ewm(alpha=1/10, adjust=False, min_periods=10).mean().values
+    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Supertrend calculation
-    hl2 = (high_4h + low_4h) / 2.0
-    upper = hl2 + 3.0 * atr
-    lower = hl2 - 3.0 * atr
+    # Smoothed TR, +DM, -DM (using Wilder's smoothing)
+    tr_smooth = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    supertrend = np.zeros_like(close_4h)
-    direction = np.ones_like(close_4h)  # 1 for uptrend, -1 for downtrend
+    # Plus Directional Indicator (+DI) and Minus Directional Indicator (-DI)
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
     
-    supertrend[0] = upper[0]
-    direction[0] = 1
+    # Directional Index (DX) and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    for i in range(1, len(close_4h)):
-        if close_4h[i] > supertrend[i-1]:
-            direction[i] = 1
-        elif close_4h[i] < supertrend[i-1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
-        
-        if direction[i] == 1:
-            supertrend[i] = max(lower[i], supertrend[i-1])
-        else:
-            supertrend[i] = min(upper[i], supertrend[i-1])
+    # Align daily ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Align 4h Supertrend direction to 1h timeframe
-    supertrend_dir_aligned = align_htf_to_ltf(prices, df_4h, direction)
-    
-    # Get 1d data once before loop for RSI(2)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    
-    # === 1d Indicators: RSI(2) for mean reversion timing ===
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    
-    # Wilder's smoothing for RSI
-    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Align 1d RSI(2) to 1h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    
-    # 1h EMA(50) for pullback entry timing
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Volume moving average (20-period) on 6h
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
@@ -103,43 +109,39 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Pre-compute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    
     for i in range(warmup, n):
-        # Session filter: only trade between 08:00 and 20:00 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            position = 0
-            entry_price = 0.0
-            continue
-        
         # Skip if any required data is NaN
-        if (np.isnan(supertrend_dir_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(ema_50[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(pp_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             position = 0
             entry_price = 0.0
             continue
         
         # Current values
-        std = supertrend_dir_aligned[i]
-        rsi_val = rsi_aligned[i]
+        r3 = r3_aligned[i]
+        s3 = s3_aligned[i]
+        r4 = r4_aligned[i]
+        s4 = s4_aligned[i]
+        pp_val = pp_aligned[i]
+        adx_val = adx_aligned[i]
         price = close[i]
-        ema = ema_50[i]
+        vol = volume[i]
+        vol_ma = vol_ma_20[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if RSI(2) crosses above 50 (mean reversion) or Supertrend turns bearish
-            if rsi_val >= 50 or std == -1:
+            # Exit if price returns to weekly pivot point or drops to S3
+            if price <= pp_val or price <= s3:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if RSI(2) crosses below 50 (mean reversion) or Supertrend turns bullish
-            if rsi_val <= 50 or std == 1:
+            # Exit if price returns to weekly pivot point or rises to R3
+            if price >= pp_val or price >= r3:
                 exit_signal = True
         
         if exit_signal:
@@ -150,23 +152,29 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: 4h Supertrend bullish AND 1d RSI(2) < 10 (oversold) AND price > 1h EMA(50)
-            if (std == 1) and (rsi_val < 10) and (price > ema):
-                signals[i] = 0.20
+            # Trend filter: only trade when ADX > 25 (strong trend)
+            trend_filter = adx_val > 25
+            
+            # Volume filter: volume > 2.0x 20-period average
+            vol_filter = vol > 2.0 * vol_ma
+            
+            # LONG: Price breaks above weekly R4 with trend and volume confirmation
+            if (price > r4) and trend_filter and vol_filter:
+                signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: 4h Supertrend bearish AND 1d RSI(2) > 90 (overbought) AND price < 1h EMA(50)
-            elif (std == -1) and (rsi_val > 90) and (price < ema):
-                signals[i] = -0.20
+            # SHORT: Price breaks below weekly S4 with trend and volume confirmation
+            elif (price < s4) and trend_filter and vol_filter:
+                signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         else:
-            signals[i] = position * 0.20
+            signals[i] = position * 0.25
     
     return signals
 
-name = "1h_4hSupertrend_1dRSI2_EMA50_Pullback_V1"
-timeframe = "1h"
+name = "6h_1wCamarillaR3S3R4S4_1dADX_VolumeConfirmation_V1"
+timeframe = "6h"
 leverage = 1.0
