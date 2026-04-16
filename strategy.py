@@ -6,7 +6,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Hypothesis: 1d Camarilla pivot (R1/S1) breakout with 1d volume spike and 1w ADX trend filter.
 # Long when price breaks above Camarilla R1 AND volume > 2.0x 20-period average AND 1w ADX > 25.
 # Short when price breaks below Camarilla S1 AND volume > 2.0x 20-period average AND 1w ADX > 25.
-# Exit when price returns to Camarilla pivot point (PP) or ATR(10) < ATR(30) (contracting volatility).
+# Exit when price returns to Camarilla pivot point (PP).
 # Uses discrete position size 0.25. Camarilla levels provide intraday support/resistance, volume confirmation reduces false signals,
 # and 1w ADX ensures we only trade in trending regimes. Target: 50-120 total trades over 4 years (12-30/year).
 
@@ -128,12 +128,12 @@ def generate_signals(prices):
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price returns to pivot point or ATR contracts (simplified: price < PP)
+            # Exit if price returns to pivot point
             if price <= pp_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price returns to pivot point or ATR contracts (simplified: price > PP)
+            # Exit if price returns to pivot point
             if price >= pp_val:
                 exit_signal = True
         
