@@ -13,20 +13,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h data (primary timeframe) ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    # === 4h data (primary timeframe) ===
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
     
-    # Calculate ATR on 12h (14-period)
-    tr_12h = np.maximum(high_12h - low_12h,
-                        np.maximum(np.abs(high_12h - np.roll(close_12h, 1)),
-                                   np.abs(low_12h - np.roll(close_12h, 1))))
-    tr_12h[0] = high_12h[0] - low_12h[0]
-    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
+    # Calculate ATR on 4h
+    tr_4h = np.maximum(high_4h - low_4h,
+                       np.maximum(np.abs(high_4h - np.roll(close_4h, 1)),
+                                  np.abs(low_4h - np.roll(close_4h, 1))))
+    tr_4h[0] = high_4h[0] - low_4h[0]
+    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
+    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
     
     # === 1d data (HTF) ===
     df_1d = get_htf_data(prices, '1d')
@@ -35,7 +35,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate ATR on 1d (14-period)
+    # Calculate ATR on 1d
     tr_1d = np.maximum(high_1d - low_1d,
                        np.maximum(np.abs(high_1d - np.roll(close_1d, 1)),
                                   np.abs(low_1d - np.roll(close_1d, 1))))
@@ -56,15 +56,15 @@ def generate_signals(prices):
         lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
     ).values
     
-    # === 12h Donchian Channel (20) for breakout signals ===
-    highest_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # === 4h Donchian Channel (20) for breakout signals ===
+    highest_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     donchian_upper = highest_20
     donchian_lower = lowest_20
     
-    # === 12h Volume spike detection ===
-    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume_12h / vol_ma_20
+    # === 4h Volume spike detection ===
+    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume_4h / vol_ma_20
     
     signals = np.zeros(n)
     
@@ -76,15 +76,15 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_12h_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+        if (np.isnan(atr_4h_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
             np.isnan(bb_width_percentile[i]) or np.isnan(donchian_upper[i]) or 
             np.isnan(donchian_lower[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        price = close_12h[i]
-        atr_12h_val = atr_12h_aligned[i]
+        price = close_4h[i]
+        atr_4h_val = atr_4h_aligned[i]
         bb_width_pct = bb_width_percentile[i]
         vol_ratio_val = vol_ratio[i]
         
@@ -127,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_LowVol_Volume"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_LowVol_Volume"
+timeframe = "4h"
 leverage = 1.0
