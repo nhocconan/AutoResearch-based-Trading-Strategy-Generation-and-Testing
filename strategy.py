@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 1d ADX regime filter.
-# Long when price > 4h Donchian upper band, 1d volume > 1.5x its 20-period median, and 1d ADX > 25 (trending).
-# Short when price < 4h Donchian lower band, same volume condition, and 1d ADX > 25.
-# Exit when price crosses 4h Donchian middle band.
+# Hypothesis: 4h Donchian(20) breakout with 4h ATR-based volume confirmation and 1d EMA50 trend filter.
+# Long when price > upper band, 4h ATR(14) > 1.5x its 20-period median (volatility expansion), and daily close > daily EMA50.
+# Short when price < lower band, same volatility expansion condition, and daily close < daily EMA50.
+# Exit when price crosses middle band (mean reversion).
 # Uses discrete position size 0.25. Target: 75-200 total trades over 4 years (19-50/year).
-# Combines price channel breakout with volume confirmation and trend regime filter for robustness in both bull and bear markets.
+# Combines price channel breakout with volatility expansion filter and daily trend filter for robustness.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,12 +20,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian channels (primary timeframe)
+    # Get 4h data once before loop for Donchian levels and ATR calculation
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 30:
         return np.zeros(n)
     
-    # === 4h Indicators: Donchian channels (20-period) ===
+    # === 4h Indicators: Donchian channels (20-period) and ATR(14) ===
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
@@ -35,59 +35,39 @@ def generate_signals(prices):
     donchian_lower_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     donchian_middle_20 = (donchian_upper_20 + donchian_lower_20) / 2.0
     
-    # Get 1d data for volume and ADX filters
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    
-    # === 1d Indicators: Volume and ADX ===
-    vol_1d = df_1d['volume'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Volume median for confirmation filter
-    vol_median_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).median().values
-    
-    # ADX(14) calculation for trend regime filter
-    # True Range
-    tr1 = pd.Series(high_1d - low_1d)
-    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
-    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
+    # ATR(14) calculation
+    tr1 = pd.Series(high_4h - low_4h)
+    tr2 = pd.Series(np.abs(high_4h - np.roll(close_4h, 1)))
+    tr3 = pd.Series(np.abs(low_4h - np.roll(close_4h, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr_14 = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Directional Movement
-    up_move = pd.Series(high_1d - np.roll(high_1d, 1))
-    down_move = pd.Series(np.roll(low_1d, 1) - low_1d)
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # ATR median for volatility expansion filter
+    atr_median_20 = pd.Series(atr_14).rolling(window=20, min_periods=20).median().values
     
-    # Smoothed DM and TR
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_smooth = pd.Series(atr_14).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Get daily data for trend filter (EMA50)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / atr_smooth
-    minus_di = 100 * minus_dm_smooth / atr_smooth
+    # === Daily Indicators: EMA50 trend filter ===
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # ADX
-    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
-    dx = np.where(np.isnan(dx), 0, dx)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align all indicators to primary timeframe (15m)
+    # Align all indicators to primary timeframe
     donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper_20)
     donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower_20)
     donchian_middle_aligned = align_htf_to_ltf(prices, df_4h, donchian_middle_20)
-    vol_median_aligned = align_htf_to_ltf(prices, df_1d, vol_median_20)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    atr_median_aligned = align_htf_to_ltf(prices, df_4h, atr_median_20)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Align 4h ATR for volatility confirmation
+    atr_14_aligned = align_htf_to_ltf(prices, df_4h, atr_14)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(30, 20, 14)  # 4h Donchian, 1d volume median, 1d ADX
+    warmup = max(30, 20, 50)  # 4h Donchian, 4h ATR median, daily EMA50
     
     # Track position state for exits
     position = 0  # 0: flat, 1: long, -1: short
@@ -96,8 +76,8 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # Skip if any required data is NaN
         if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(donchian_middle_aligned[i]) or np.isnan(vol_median_aligned[i]) or 
-            np.isnan(adx_aligned[i])):
+            np.isnan(donchian_middle_aligned[i]) or np.isnan(atr_median_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_14_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -105,12 +85,18 @@ def generate_signals(prices):
         upper = donchian_upper_aligned[i]
         lower = donchian_lower_aligned[i]
         middle = donchian_middle_aligned[i]
-        vol_median = vol_median_aligned[i]
-        adx_val = adx_aligned[i]
+        atr_median = atr_median_aligned[i]
+        daily_ema50 = ema_50_1d_aligned[i]
+        atr_14 = atr_14_aligned[i]
+        
+        # Get aligned daily close for proper trend comparison
+        df_1d_close = df_1d['close'].values
+        daily_close_aligned = align_htf_to_ltf(prices, df_1d, df_1d_close)
+        daily_trend_up = daily_close_aligned[i] > daily_ema50
+        daily_trend_down = daily_close_aligned[i] < daily_ema50
         
         # Price levels
         price = close[i]
-        vol_current = volume[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
@@ -131,21 +117,19 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Volume confirmation: current volume > 1.5x its 20-period median
-            vol_confirmation = vol_current > (vol_median * 1.5)
-            # Trend regime filter: ADX > 25 indicates trending market
-            trending_regime = adx_val > 25
+            # Volatility expansion filter: current 4h ATR(14) > 1.5x its 20-period median
+            vol_expansion = atr_14 > (atr_median * 1.5)
             
             # LONG CONDITIONS
-            # Price breaks above Donchian upper band AND volume confirmation AND trending regime
-            if price > upper and vol_confirmation and trending_regime:
+            # Price breaks above Donchian upper band AND volatility expansion AND daily uptrend
+            if price > upper and vol_expansion and daily_trend_up:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
             # SHORT CONDITIONS
-            # Price breaks below Donchian lower band AND volume confirmation AND trending regime
-            elif price < lower and vol_confirmation and trending_regime:
+            # Price breaks below Donchian lower band AND volatility expansion AND daily downtrend
+            elif price < lower and vol_expansion and daily_trend_down:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -155,6 +139,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dVolumeConfirm_1dADX25_v1"
+name = "4h_Donchian20_4hATRVoltExp1.5x_1dEMA50_v1"
 timeframe = "4h"
 leverage = 1.0
