@@ -13,73 +13,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h data (HTF for trend and structure) ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    volume_4h = df_4h['volume'].values
+    # === 6h data (primary) ===
+    df_6h = get_htf_data(prices, '6h')
+    close_6h = df_6h['close'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    volume_6h = df_6h['volume'].values
     
-    # === 1d data (HTF for regime filter) ===
+    # === 1d data (HTF for trend filter) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # === 4h EMA50 (trend filter) ===
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # === Weekly data (HTF for market regime) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # === 4h ATR(14) for volatility filter ===
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    # === 1d EMA34 (trend filter) ===
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # === 1d ATR(14) for volatility filter ===
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = 0
-    atr_14_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_14_4h)
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # === 4h Donchian channel (20-period) ===
-    donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # === 1d Volume ratio for confirmation ===
+    vol_ma_20_1d = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_1d = volume_6h / vol_ma_20_1d
+    
+    # === Weekly ADX(14) for regime filter ===
+    # Calculate directional movement
+    up_move = np.diff(high_1w, prepend=high_1w[0])
+    down_move = np.diff(low_1w, prepend=low_1w[0])
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # True range
+    tr1_w = high_1w - low_1w
+    tr2_w = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3_w = np.abs(low_1w - np.roll(close_1w, 1))
+    tr_w = np.maximum(tr1_w, np.maximum(tr2_w, tr3_w))
+    tr_w[0] = 0
+    
+    # Smoothed values
+    atr_14_w = pd.Series(tr_w).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_di_14_w = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_14_w
+    minus_di_14_w = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_14_w
+    dx_14_w = 100 * np.abs(plus_di_14_w - minus_di_14_w) / (plus_di_14_w + minus_di_14_w)
+    dx_14_w[np.isnan(dx_14_w)] = 0
+    adx_14_w = pd.Series(dx_14_w).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_14_w_aligned = align_htf_to_ltf(prices, df_1w, adx_14_w)
+    
+    # === 6h Donchian channel (20-period) ===
+    donch_high = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
     
     # Shift by 1 to avoid look-ahead (use previous bar's channel)
     donch_high = np.roll(donch_high, 1)
     donch_low = np.roll(donch_low, 1)
     donch_high[0] = np.nan
     donch_low[0] = np.nan
-    
-    # === 4h volume ratio for confirmation ===
-    vol_ma_15_4h = pd.Series(volume_4h).rolling(window=15, min_periods=15).mean().values
-    vol_ratio_4h = volume_4h / vol_ma_15_4h
-    
-    # === 1d ADX(14) for regime filter (trending vs ranging) ===
-    # Calculate +DM, -DM, TR
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    tr_dm = np.maximum(tr1[1:], np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), np.abs(low_1d[1:] - close_1d[:-1])))
-    tr_dm = np.concatenate([[0], tr_dm])
-    
-    # Smooth with Wilder's smoothing (alpha = 1/period)
-    def wilder_smooth(data, period):
-        result = np.zeros_like(data)
-        alpha = 1.0 / period
-        result[period-1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-        return result
-    
-    atr_14_dm = wilder_smooth(tr_dm, 14)
-    plus_di_14 = 100 * wilder_smooth(plus_dm, 14) / atr_14_dm
-    minus_di_14 = 100 * wilder_smooth(minus_dm, 14) / atr_14_dm
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
-    adx_14 = wilder_smooth(dx, 14)
-    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
-    
-    # === 1h session filter (08-20 UTC) ===
-    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     
@@ -91,39 +92,24 @@ def generate_signals(prices):
     entry_price = 0.0
     
     for i in range(warmup, n):
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-            else:
-                signals[i] = 0.0
-            continue
-        
         # Skip if any data is NaN
         if (np.isnan(donch_high[i]) or 
             np.isnan(donch_low[i]) or 
-            np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(atr_14_4h_aligned[i]) or
-            np.isnan(vol_ratio_4h[i]) or
-            np.isnan(adx_14_aligned[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-            else:
-                signals[i] = 0.0
+            np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(atr_14_1d_aligned[i]) or
+            np.isnan(vol_ratio_1d[i]) or
+            np.isnan(adx_14_w_aligned[i])):
+            signals[i] = 0.0
+            position = 0
             continue
         
         price = close[i]
         upper = donch_high[i]
         lower = donch_low[i]
-        ema_trend = ema_50_4h_aligned[i]
-        atr = atr_14_4h_aligned[i]
-        vol_ratio = vol_ratio_4h[i]
-        adx = adx_14_aligned[i]
+        ema_trend = ema_34_1d_aligned[i]
+        atr = atr_14_1d_aligned[i]
+        vol_ratio = vol_ratio_1d[i]
+        adx = adx_14_w_aligned[i]
         
         # === STOPLOSS LOGIC ===
         if position == 1:  # Long position
@@ -144,7 +130,7 @@ def generate_signals(prices):
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit: price closes below Donchian lower OR trend reverses (below EMA50)
+            # Exit: price closes below Donchian lower OR trend reverses (below EMA34)
             if price < lower or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
@@ -152,7 +138,7 @@ def generate_signals(prices):
                 continue
         
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper OR trend reverses (above EMA50)
+            # Exit: price closes above Donchian upper OR trend reverses (above EMA34)
             if price > upper or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
@@ -163,29 +149,29 @@ def generate_signals(prices):
         if position == 0:
             # Only trade in trending markets (ADX > 25)
             if adx > 25:
-                # LONG: Break above Donchian upper with volume, in uptrend (above EMA50)
-                if (price > upper and vol_ratio > 1.8 and price > ema_trend):
-                    signals[i] = 0.20
+                # LONG: Break above Donchian upper with volume, in uptrend (above EMA34)
+                if (price > upper and vol_ratio > 1.5 and price > ema_trend):
+                    signals[i] = 0.25
                     position = 1
                     entry_price = price
                     continue
-                # SHORT: Break below Donchian lower with volume, in downtrend (below EMA50)
-                elif (price < lower and vol_ratio > 1.8 and price < ema_trend):
-                    signals[i] = -0.20
+                # SHORT: Break below Donchian lower with volume, in downtrend (below EMA34)
+                elif (price < lower and vol_ratio > 1.5 and price < ema_trend):
+                    signals[i] = -0.25
                     position = -1
                     entry_price = price
                     continue
         
         # Hold current position
         if position == 1:
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif position == -1:
-            signals[i] = -0.20
+            signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1h_4hDonchian_ADX25_VolumeFilter"
-timeframe = "1h"
+name = "6h_Donchian_1dEMA34_Volume_ADXFilter"
+timeframe = "6h"
 leverage = 1.0
