@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h volume spike and 1d ADX trend filter.
-# Long when price breaks above R3 AND volume > 1.5x 20-period 4h average AND 1d ADX > 25 (trending market).
-# Short when price breaks below S3 AND volume > 1.5x 20-period 4h average AND 1d ADX > 25.
-# Exit when price crosses the 1h midpoint (R3+S3)/2.
-# Uses discrete position size 0.20. Designed to capture breakouts in trending markets (both bull and bear).
-# Target: 80-120 total trades over 4 years (20-30/year) to minimize fee drag while maintaining edge.
+# Hypothesis: 1h EMA crossover with 4h volume filter and 1d trend filter (ADX > 25).
+# Long when fast EMA crosses above slow EMA AND 4h volume > 1.8x 20-period average AND 1d ADX > 25.
+# Short when fast EMA crosses below slow EMA AND 4h volume > 1.8x 20-period average AND 1d ADX > 25.
+# Exit when fast EMA crosses back through slow EMA.
+# Uses discrete position size 0.20. Designed to capture momentum in trending markets with volume confirmation.
+# Target: 50-120 total trades over 4 years (12-30/year) to minimize fee drag while maintaining edge.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,28 +20,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1h Indicators: Camarilla R3/S3 levels (from previous bar) ===
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # === 1h Indicators: EMA Crossover (fast=9, slow=21) ===
+    close_s = pd.Series(close)
+    ema_fast = close_s.ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema_slow = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
-    
-    # Camarilla R3 and S3 levels
-    R3 = pivot + (range_hl * 1.1 / 4)  # R3 = pivot + range*1.1/4
-    S3 = pivot - (range_hl * 1.1 / 4)  # S3 = pivot - range*1.1/4
-    midpoint = (R3 + S3) / 2  # Exit level
-    
-    # === 4h Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    # === 4h Indicators: Volume Spike (volume > 1.8x 20-period average) ===
     df_4h = get_htf_data(prices, '4h')
     vol_4h = df_4h['volume'].values
     vol_ma_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
     vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
-    volume_spike = volume > (1.5 * vol_ma_4h_aligned)
+    volume_spike = volume > (1.8 * vol_ma_4h_aligned)
     
     # === 1d Indicators: ADX > 25 (trending market filter) ===
     df_1d = get_htf_data(prices, '1d')
@@ -81,7 +70,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed for ADX/ATR)
+    # Warmup: ensure all indicators are valid (max 50 periods needed for ADX/ATR/EMA)
     warmup = 100
     
     # Track position state
@@ -89,9 +78,8 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(R3[i]) or np.isnan(S3[i]) or np.isnan(midpoint[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(trending[i]) or
-            not session_filter[i]):
+        if (np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or np.isnan(volume_spike[i]) or
+            np.isnan(trending[i]) or not session_filter[i]):
             signals[i] = 0.0
             position = 0
             continue
@@ -105,13 +93,13 @@ def generate_signals(prices):
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price crosses below midpoint
-            if price < midpoint[i]:
+            # Exit if fast EMA crosses below slow EMA
+            if ema_fast[i] < ema_slow[i]:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price crosses above midpoint
-            if price > midpoint[i]:
+            # Exit if fast EMA crosses above slow EMA
+            if ema_fast[i] > ema_slow[i]:
                 exit_signal = True
         
         if exit_signal:
@@ -121,13 +109,13 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above R3 AND volume spike AND trending market
-            if price > R3[i] and vol_spike and is_trending:
+            # LONG: Fast EMA crosses above slow EMA AND volume spike AND trending market
+            if ema_fast[i] > ema_slow[i] and ema_fast[i-1] <= ema_slow[i-1] and vol_spike and is_trending:
                 signals[i] = 0.20
                 position = 1
             
-            # SHORT: Price breaks below S3 AND volume spike AND trending market
-            elif price < S3[i] and vol_spike and is_trending:
+            # SHORT: Fast EMA crosses below slow EMA AND volume spike AND trending market
+            elif ema_fast[i] < ema_slow[i] and ema_fast[i-1] >= ema_slow[i-1] and vol_spike and is_trending:
                 signals[i] = -0.20
                 position = -1
         
@@ -136,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_Camarilla_R3_S3_Breakout_Volume_4h_ADX1d_V1"
+name = "1h_EMA9_21_Crossover_Volume4h_ADX1d_V1"
 timeframe = "1h"
 leverage = 1.0
