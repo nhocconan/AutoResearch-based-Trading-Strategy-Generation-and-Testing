@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Donchian(20) breakout with 1w ADX trend filter and volume confirmation.
-# Long when price breaks above 1d Donchian(20) upper band AND 1w ADX > 25 AND 4h volume > 1.5x 20-period average.
-# Short when price breaks below 1d Donchian(20) lower band AND 1w ADX > 25 AND 4h volume > 1.5x 20-period average.
+# Hypothesis: 4h strategy using 1d Donchian(20) breakout with 1w Vortex trend filter and volume confirmation.
+# Long when price breaks above 1d Donchian(20) upper band AND 1w VI+ > VI- AND 4h volume > 1.5x 20-period average.
+# Short when price breaks below 1d Donchian(20) lower band AND 1w VI- > VI+ AND 4h volume > 1.5x 20-period average.
 # Exit when price crosses the 1d Donchian middle band (20-period average).
-# Uses discrete position size 0.25. Donchian channels provide clear trend structure, ADX filters for trending markets only.
+# Uses discrete position size 0.25. Donchian channels provide clear trend structure, Vortex filters for trending markets only.
 # Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
 # Target: 75-200 trades over 4 years (19-50/year) to avoid fee drag.
 
@@ -30,7 +30,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Get 1w data once before loop for ADX
+    # Get 1w data once before loop for Vortex
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 30:
         return np.zeros(n)
@@ -51,7 +51,7 @@ def generate_signals(prices):
     donchian_lower_20_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     donchian_middle_20_1d = (donchian_upper_20_1d + donchian_lower_20_1d) / 2.0
     
-    # === 1w Indicators: ADX (14) ===
+    # === 1w Indicators: Vortex (14) ===
     # True Range
     tr1 = high_1w - low_1w
     tr2 = np.abs(high_1w - np.roll(close_1w, 1))
@@ -61,27 +61,20 @@ def generate_signals(prices):
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Directional Movement
-    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), 
-                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), 
-                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Vortex Indicator
+    vm_plus = np.abs(high_1w - np.roll(low_1w, 1))
+    vm_minus = np.abs(low_1w - np.roll(high_1w, 1))
+    vm_plus[0] = 0
+    vm_minus[0] = 0
     
-    # Smoothed TR, DM+, DM- (Wilder's smoothing)
+    # Smoothed TR, VM+, VM- (Wilder's smoothing)
     atr_14_1w = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_plus_14_1w = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_14_1w = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    vm_plus_14_1w = pd.Series(vm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    vm_minus_14_1w = pd.Series(vm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Directional Indicators
-    di_plus_14_1w = 100 * dm_plus_14_1w / atr_14_1w
-    di_minus_14_1w = 100 * dm_minus_14_1w / atr_14_1w
-    
-    # DX and ADX
-    dx_14_1w = 100 * np.abs(di_plus_14_1w - di_minus_14_1w) / (di_plus_14_1w + di_minus_14_1w)
-    dx_14_1w[di_plus_14_1w + di_minus_14_1w == 0] = 0
-    adx_14_1w = pd.Series(dx_14_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # VI+ and VI-
+    vi_plus_14_1w = vm_plus_14_1w / atr_14_1w
+    vi_minus_14_1w = vm_minus_14_1w / atr_14_1w
     
     # === 4h Indicators: Volume average ===
     vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
@@ -90,7 +83,8 @@ def generate_signals(prices):
     donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper_20_1d)
     donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower_20_1d)
     donchian_middle_aligned = align_htf_to_ltf(prices, df_1d, donchian_middle_20_1d)
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx_14_1w)
+    vi_plus_aligned = align_htf_to_ltf(prices, df_1w, vi_plus_14_1w)
+    vi_minus_aligned = align_htf_to_ltf(prices, df_1w, vi_minus_14_1w)
     vol_ma_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
     
     signals = np.zeros(n)
@@ -104,7 +98,8 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # Skip if any required data is NaN
         if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(donchian_middle_aligned[i]) or np.isnan(adx_aligned[i]) or np.isnan(vol_ma_aligned[i])):
+            np.isnan(donchian_middle_aligned[i]) or np.isnan(vi_plus_aligned[i]) or 
+            np.isnan(vi_minus_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -113,7 +108,8 @@ def generate_signals(prices):
         donchian_upper = donchian_upper_aligned[i]
         donchian_lower = donchian_lower_aligned[i]
         donchian_middle = donchian_middle_aligned[i]
-        adx = adx_aligned[i]
+        vi_plus = vi_plus_aligned[i]
+        vi_minus = vi_minus_aligned[i]
         vol_ma = vol_ma_aligned[i]
         price = close[i]
         vol = volume[i]
@@ -140,13 +136,13 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Donchian upper AND ADX > 25 AND 4h volume > 1.5x 20-period avg
-            if (price > donchian_upper) and (adx > 25) and (vol_4h_current > 1.5 * vol_ma):
+            # LONG: Price breaks above Donchian upper AND VI+ > VI- AND 4h volume > 1.5x 20-period avg
+            if (price > donchian_upper) and (vi_plus > vi_minus) and (vol_4h_current > 1.5 * vol_ma):
                 signals[i] = 0.25
                 position = 1
             
-            # SHORT: Price breaks below Donchian lower AND ADX > 25 AND 4h volume > 1.5x 20-period avg
-            elif (price < donchian_lower) and (adx > 25) and (vol_4h_current > 1.5 * vol_ma):
+            # SHORT: Price breaks below Donchian lower AND VI- > VI+ AND 4h volume > 1.5x 20-period avg
+            elif (price < donchian_lower) and (vi_minus > vi_plus) and (vol_4h_current > 1.5 * vol_ma):
                 signals[i] = -0.25
                 position = -1
         
@@ -155,6 +151,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dDonchian20_1wADX_VolumeConfirmation_V1"
+name = "4h_1dDonchian20_1wVortex_VolumeConfirmation_V1"
 timeframe = "4h"
 leverage = 1.0
