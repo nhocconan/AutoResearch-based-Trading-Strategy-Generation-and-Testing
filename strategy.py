@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA(34) trend filter and volume confirmation.
-# Long when price breaks above Donchian upper AND 1d EMA34 slope > 0 (uptrend) AND volume > 1.5x 20-period average.
-# Short when price breaks below Donchian lower AND 1d EMA34 slope < 0 (downtrend) AND volume > 1.5x 20-period average.
-# Exit when price crosses Donchian middle (20-period average of high/low).
-# Uses discrete position size 0.25. Designed to capture strong trends with trend filter reducing whipsaw.
-# Target: 75-200 trades over 4 years (19-50/year) to balance opportunity and fee drag.
+# Hypothesis: 4h Donchian(20) breakout with 1d ADX(14) trend filter and volume confirmation.
+# Long when price breaks above Donchian upper AND 1d ADX > 25 (trending) AND volume > 1.5x 20-period average.
+# Short when price breaks below Donchian lower AND 1d ADX > 25 (trending) AND volume > 1.5x 20-period average.
+# Exit when price crosses Donchian middle (20-period average of high/low) OR volume drops below average.
+# Uses discrete position size 0.25. Designed to capture strong trends in both bull and bear markets.
+# Target: 100-200 trades over 4 years (25-50/year) to balance opportunity and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -33,22 +33,46 @@ def generate_signals(prices):
     
     # Get 1d data once before loop for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:  # Need enough for EMA calculation
+    if len(df_1d) < 30:  # Need enough for ADX calculation
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === 1d Indicators: EMA(34) for trend filter ===
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    # Slope of EMA: positive = uptrend, negative = downtrend
-    ema_slope = np.diff(ema_34, prepend=ema_34[0])
+    # === 1d Indicators: ADX(14) for trend filter ===
+    # True Range
+    tr1 = pd.Series(high_1d).diff()
+    tr2 = pd.Series(low_1d).diff().abs()
+    tr3 = pd.Series(close_1d).shift(1).diff().abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     
-    # Align 1d EMA slope to 4h timeframe
-    ema_slope_aligned = align_htf_to_ltf(prices, df_1d, ema_slope)
+    # Directional Movement
+    up_move = pd.Series(high_1d).diff()
+    down_move = -pd.Series(low_1d).diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed DM
+    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / atr
+    minus_di = 100 * minus_dm_smooth / atr
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    adx_values = adx.values
+    
+    # Align 1d ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 34 periods needed for EMA, 20 for Donchian/volume MA)
+    # Warmup: ensure all indicators are valid (max 34 periods needed for ADX, 20 for Donchian/volume MA)
     warmup = 40
     
     # Track position state
@@ -57,27 +81,27 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # Skip if any required data is NaN
         if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(middle[i]) or
-            np.isnan(ema_slope_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values
         price = close[i]
-        ema_slope_val = ema_slope_aligned[i]
+        adx_val = adx_aligned[i]
         vol_spike = volume_spike[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price crosses below Donchian middle
-            if price < middle[i]:
+            # Exit if price crosses below Donchian middle OR volume spike ends
+            if price < middle[i] or not vol_spike:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price crosses above Donchian middle
-            if price > middle[i]:
+            # Exit if price crosses above Donchian middle OR volume spike ends
+            if price > middle[i] or not vol_spike:
                 exit_signal = True
         
         if exit_signal:
@@ -87,13 +111,13 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Donchian upper AND 1d EMA34 slope > 0 (uptrend) AND volume spike
-            if price > upper[i] and ema_slope_val > 0 and vol_spike:
+            # LONG: Price breaks above Donchian upper AND 1d ADX > 25 (trend) AND volume spike
+            if price > upper[i] and adx_val > 25 and vol_spike:
                 signals[i] = 0.25
                 position = 1
             
-            # SHORT: Price breaks below Donchian lower AND 1d EMA34 slope < 0 (downtrend) AND volume spike
-            elif price < lower[i] and ema_slope_val < 0 and vol_spike:
+            # SHORT: Price breaks below Donchian lower AND 1d ADX > 25 (trend) AND volume spike
+            elif price < lower[i] and adx_val > 25 and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
@@ -102,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA34Slope_VolumeSpike_V1"
+name = "4h_Donchian20_1dADX25_VolumeSpike_V1"
 timeframe = "4h"
 leverage = 1.0
