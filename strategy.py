@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R1/S1 breakout with 1d volume spike and 1w ADX trend filter.
-# Long when price breaks above 12h Camarilla R1 level AND 1d volume > 1.5x 20-period average AND 1w ADX > 25.
-# Short when price breaks below 12h Camarilla S1 level AND 1d volume > 1.5x 20-period average AND 1w ADX > 25.
-# Exit when price crosses the 12h Camarilla midpoint (R1+S1)/2 or ATR-based stoploss (2*ATR from entry).
-# Uses discrete position size 0.25. Designed to capture breakouts in trending markets (both bull and bear).
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag while maintaining edge.
+# Hypothesis: 4h Bollinger Band breakout with 12h volume spike and 1d ADX regime filter.
+# Long when price closes above upper BB(20,2) AND volume > 1.5x 20-period 12h average AND 1d ADX > 25 (strong trend).
+# Short when price closes below lower BB(20,2) AND volume > 1.5x 20-period 12h average AND 1d ADX > 25.
+# Exit when price crosses the 20-period 4h SMA or ATR-based stoploss (2.5*ATR from entry).
+# Uses discrete position size 0.30. Designed to capture strong breakouts in trending markets while avoiding chop.
+# Target: 80-150 total trades over 4 years (20-38/year) to balance edge and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,88 +20,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h Indicators: Camarilla Pivot Levels (R1, S1) ===
+    # === 4h Indicators: Bollinger Bands (20,2) and SMA ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    # 20-period SMA
+    sma_20_4h = pd.Series(close_4h).rolling(window=20, min_periods=20).mean().values
+    # 20-period standard deviation
+    std_20_4h = pd.Series(close_4h).rolling(window=20, min_periods=20).std().values
+    # Upper and lower Bollinger Bands
+    bb_upper_4h = sma_20_4h + (2 * std_20_4h)
+    bb_lower_4h = sma_20_4h - (2 * std_20_4h)
+    
+    # Align to 4h timeframe (primary)
+    sma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, sma_20_4h)
+    bb_upper_4h_aligned = align_htf_to_ltf(prices, df_4h, bb_upper_4h)
+    bb_lower_4h_aligned = align_htf_to_ltf(prices, df_4h, bb_lower_4h)
+    
+    # === 12h Indicators: Volume Spike (volume > 1.5x 20-period average) ===
     df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    vol_12h = df_12h['volume'].values
+    vol_ma_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
+    volume_spike = volume > (1.5 * vol_ma_12h_aligned)
     
-    # Camarilla pivot calculation
-    pivot_12h = (high_12h + low_12h + close_12h) / 3
-    range_12h = high_12h - low_12h
-    r1_12h = close_12h + (range_12h * 1.1 / 12)
-    s1_12h = close_12h - (range_12h * 1.1 / 12)
-    mid_12h = (r1_12h + s1_12h) / 2
-    
-    # Align to 12h timeframe (already aligned, but ensuring proper shift)
-    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
-    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
-    mid_12h_aligned = align_htf_to_ltf(prices, df_12h, mid_12h)
-    
-    # === 1d Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    # === 1d Indicators: ADX > 25 (strong trending market filter) ===
     df_1d = get_htf_data(prices, '1d')
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    volume_spike = volume > (1.5 * vol_ma_1d_aligned)
-    
-    # === 1w Indicators: ADX > 25 (trending market filter) ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range
-    tr1 = pd.Series(high_1w).diff()
-    tr2 = pd.Series(low_1w).diff().abs()
-    tr3 = pd.Series(close_1w).shift(1).diff().abs()
-    tr_1w = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1w = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    tr1 = pd.Series(high_1d).diff()
+    tr2 = pd.Series(low_1d).diff().abs()
+    tr3 = pd.Series(close_1d).shift(1).diff().abs()
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # Directional Movement
-    dm_plus = pd.Series(high_1w).diff()
-    dm_minus = pd.Series(low_1w).diff().abs()
+    dm_plus = pd.Series(high_1d).diff()
+    dm_minus = pd.Series(low_1d).diff().abs()
     dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
     dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
     
     # Smoothed DM and TR
     dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_smooth = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_smooth = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # Directional Indicators
     di_plus = 100 * (dm_plus_smooth / atr_smooth)
     di_minus = 100 * (dm_minus_smooth / atr_smooth)
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    trending = adx_aligned > 25
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    strong_trend = adx_aligned > 25
     
-    # Session filter: 08-20 UTC
+    # Session filter: 08-20 UTC (avoid low-volume Asian session)
     hours = prices.index.hour
     session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed for ADX/ATR)
+    # Warmup: ensure all indicators are valid (max 50 periods needed for ADX/ATR/BB)
     warmup = 100
     
     # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    atr_4h = None
     
-    # Calculate 12h ATR for stoploss
-    tr1_12h = pd.Series(high_12h).diff()
-    tr2_12h = pd.Series(low_12h).diff().abs()
-    tr3_12h = pd.Series(close_12h).shift(1).diff().abs()
-    tr_12h = pd.concat([tr1_12h, tr2_12h, tr3_12h], axis=1).max(axis=1)
-    atr_12h_raw = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h_raw)
+    # Calculate 4h ATR for stoploss
+    tr1_4h = pd.Series(high_4h).diff()
+    tr2_4h = pd.Series(low_4h).diff().abs()
+    tr3_4h = pd.Series(close_4h).shift(1).diff().abs()
+    tr_4h = pd.concat([tr1_4h, tr2_4h, tr3_4h], axis=1).max(axis=1)
+    atr_4h_raw = pd.Series(tr_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h_raw)
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or np.isnan(mid_12h_aligned[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(trending[i]) or np.isnan(atr_12h_aligned[i]) or
+        if (np.isnan(sma_20_4h_aligned[i]) or np.isnan(bb_upper_4h_aligned[i]) or np.isnan(bb_lower_4h_aligned[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(strong_trend[i]) or np.isnan(atr_4h_aligned[i]) or
             not session_filter[i]):
             signals[i] = 0.0
             position = 0
@@ -110,26 +112,27 @@ def generate_signals(prices):
         # Current values
         price = close[i]
         vol_spike = volume_spike[i]
-        is_trending = trending[i]
-        atr_val = atr_12h_aligned[i]
+        is_strong_trend = strong_trend[i]
+        atr_val = atr_4h_aligned[i]
+        sma_val = sma_20_4h_aligned[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price crosses below midpoint
-            if price < mid_12h_aligned[i]:
+            # Exit if price crosses below 20-period SMA
+            if price < sma_val:
                 exit_signal = True
-            # ATR-based stoploss: 2*ATR below entry
-            elif price < entry_price - 2.0 * atr_val:
+            # ATR-based stoploss: 2.5*ATR below entry
+            elif price < entry_price - 2.5 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price crosses above midpoint
-            if price > mid_12h_aligned[i]:
+            # Exit if price crosses above 20-period SMA
+            if price > sma_val:
                 exit_signal = True
-            # ATR-based stoploss: 2*ATR above entry
-            elif price > entry_price + 2.0 * atr_val:
+            # ATR-based stoploss: 2.5*ATR above entry
+            elif price > entry_price + 2.5 * atr_val:
                 exit_signal = True
         
         if exit_signal:
@@ -140,23 +143,23 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Camarilla R1 AND volume spike AND trending market
-            if price > r1_12h_aligned[i] and vol_spike and is_trending:
-                signals[i] = 0.25
+            # LONG: Price closes above upper BB AND volume spike AND strong trend
+            if price > bb_upper_4h_aligned[i] and vol_spike and is_strong_trend:
+                signals[i] = 0.30
                 position = 1
                 entry_price = price
             
-            # SHORT: Price breaks below Camarilla S1 AND volume spike AND trending market
-            elif price < s1_12h_aligned[i] and vol_spike and is_trending:
-                signals[i] = -0.25
+            # SHORT: Price closes below lower BB AND volume spike AND strong trend
+            elif price < bb_lower_4h_aligned[i] and vol_spike and is_strong_trend:
+                signals[i] = -0.30
                 position = -1
                 entry_price = price
         
         else:
-            signals[i] = position * 0.25
+            signals[i] = position * 0.30
     
     return signals
 
-name = "12h_Camarilla_R1_S1_1dVolumeSpike_1wADX_V1"
-timeframe = "12h"
+name = "4h_BB20_12hVolumeSpike_1dADX25_V1"
+timeframe = "4h"
 leverage = 1.0
