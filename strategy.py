@@ -3,13 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d volume spike and 1w ADX trend filter.
-# Long when price breaks above 12h Camarilla R3 AND 1d volume > 2.0x 20-period average AND 1w ADX > 25.
-# Short when price breaks below 12h Camarilla S3 AND 1d volume > 2.0x 20-period average AND 1w ADX > 25.
-# Exit when price returns to 12h Camarilla pivot point (PP).
-# Uses discrete position size 0.30. Volume confirmation reduces false signals, 1w ADX ensures strong trending regime.
-# Target: 80-120 total trades over 4 years (20-30/year) to balance opportunity and fee drag.
-# Works in both bull (trend continuation) and bear (strong downtrends captured by shorts).
+# Hypothesis: 4h Donchian(20) breakout with 12h volume spike and 12h ADX > 25 trend filter.
+# Uses discrete position size 0.25. Volume confirmation reduces false signals, 12h ADX ensures strong trending regime.
+# Exit on Donchian middle retest. Designed for fewer trades (~100 total over 4 years) to minimize fee drag.
+# Works in bull/bear: ADX filter ensures we only trade strong trends, volume confirms conviction.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,98 +18,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data once before loop for Camarilla calculation
+    # Get 4h data once before loop for Donchian calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    # === 4h Indicators: Donchian channels (20-period) ===
+    upper_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    middle_20 = (upper_20 + lower_20) / 2.0
+    
+    # Align Donchian levels to 4h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_4h, upper_20)
+    lower_aligned = align_htf_to_ltf(prices, df_4h, lower_20)
+    middle_aligned = align_htf_to_ltf(prices, df_4h, middle_20)
+    
+    # Get 12h data once before loop for volume and ADX filters
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    if len(df_12h) < 20:
         return np.zeros(n)
     
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # === 12h Indicators: Camarilla pivot levels (using previous bar) ===
-    # Camarilla formulas based on previous 12h bar
-    pp = (high_12h + low_12h + close_12h) / 3.0
-    r1 = pp + (high_12h - low_12h) * 1.1 / 12
-    s1 = pp - (high_12h - low_12h) * 1.1 / 12
-    r2 = pp + (high_12h - low_12h) * 1.1 / 6
-    s2 = pp - (high_12h - low_12h) * 1.1 / 6
-    r3 = pp + (high_12h - low_12h) * 1.1 / 4
-    s3 = pp - (high_12h - low_12h) * 1.1 / 4
-    r4 = pp + (high_12h - low_12h) * 1.1 / 2
-    s4 = pp - (high_12h - low_12h) * 1.1 / 2
+    # === 12h Indicators: Volume spike filter ===
+    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
     
-    # Shift by 1 to use previous bar levels (no look-ahead)
-    pp = np.roll(pp, 1)
-    r1 = np.roll(r1, 1)
-    s1 = np.roll(s1, 1)
-    r2 = np.roll(r2, 1)
-    s2 = np.roll(s2, 1)
-    r3 = np.roll(r3, 1)
-    s3 = np.roll(s3, 1)
-    r4 = np.roll(r4, 1)
-    s4 = np.roll(s4, 1)
-    pp[0] = r1[0] = s1[0] = r2[0] = s2[0] = r3[0] = s3[0] = r4[0] = s4[0] = np.nan
-    
-    # Align Camarilla levels to 12h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_12h, pp)
-    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
-    
-    # Get 1d data once before loop for volume filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    volume_1d = df_1d['volume'].values
-    
-    # === 1d Indicators: Volume spike filter ===
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
-    
-    # Get 1w data once before loop for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # === 1w Indicators: ADX(30) for strong trend filter ===
+    # === 12h Indicators: ADX(14) for trend filter ===
     # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
     tr1[0] = 0
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
     # Directional Movement
-    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w),
-                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)),
-                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h),
+                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)),
+                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
     dm_plus[0] = 0
     dm_minus[0] = 0
     
     # Smoothed values
-    tr_30 = pd.Series(tr).ewm(span=30, adjust=False, min_periods=30).mean().values
-    dm_plus_30 = pd.Series(dm_plus).ewm(span=30, adjust=False, min_periods=30).mean().values
-    dm_minus_30 = pd.Series(dm_minus).ewm(span=30, adjust=False, min_periods=30).mean().values
+    tr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     # Directional Indicators
-    di_plus = 100 * dm_plus_30 / tr_30
-    di_minus = 100 * dm_minus_30 / tr_30
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
     
     # ADX
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     dx = np.where(np.isnan(dx), 0, dx)
-    adx = pd.Series(dx).ewm(span=30, adjust=False, min_periods=30).mean().values
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align ADX to 1w timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
     signals = np.zeros(n)
     
@@ -125,7 +96,7 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(middle_aligned[i]) or 
             np.isnan(vol_ma_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             position = 0
@@ -133,31 +104,31 @@ def generate_signals(prices):
             continue
         
         # Current values
-        pp_val = pp_aligned[i]
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
+        upper_val = upper_aligned[i]
+        lower_val = lower_aligned[i]
+        middle_val = middle_aligned[i]
         vol_ma_val = vol_ma_aligned[i]
         adx_val = adx_aligned[i]
         price = close[i]
         vol = volume[i]
         
-        # Volume filter: volume > 2.0x 20-period average (using 1d volume MA)
-        vol_filter = vol > 2.0 * vol_ma_val if vol_ma_val > 0 else False
+        # Volume filter: volume > 1.5x 20-period average (using 12h volume MA)
+        vol_filter = vol > 1.5 * vol_ma_val if vol_ma_val > 0 else False
         
-        # Trend filter: 1w ADX > 25 (strong trending regime)
+        # Trend filter: 12h ADX > 25 (strong trending regime)
         trend_filter = adx_val > 25
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price returns to Camarilla pivot point
-            if price <= pp_val:
+            # Exit if price returns to Donchian middle
+            if price <= middle_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price returns to Camarilla pivot point
-            if price >= pp_val:
+            # Exit if price returns to Donchian middle
+            if price >= middle_val:
                 exit_signal = True
         
         if exit_signal:
@@ -168,23 +139,23 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: price breaks above Camarilla R3 with volume and trend confirmation
-            if price > r3_val and vol_filter and trend_filter:
-                signals[i] = 0.30
+            # LONG: price breaks above Donchian upper with volume and trend confirmation
+            if price > upper_val and vol_filter and trend_filter:
+                signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: price breaks below Camarilla S3 with volume and trend confirmation
-            elif price < s3_val and vol_filter and trend_filter:
-                signals[i] = -0.30
+            # SHORT: price breaks below Donchian lower with volume and trend confirmation
+            elif price < lower_val and vol_filter and trend_filter:
+                signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         else:
-            signals[i] = position * 0.30
+            signals[i] = position * 0.25
     
     return signals
 
-name = "12h_CamarillaR3S3_1dVolumeSpike_1wADXTrend_V1"
-timeframe = "12h"
+name = "4h_Donchian20_12hVolumeSpike_12hADX25Trend_V1"
+timeframe = "4h"
 leverage = 1.0
