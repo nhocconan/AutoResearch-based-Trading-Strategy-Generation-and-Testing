@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ATR-based volatility filter and ATR trailing stop
+# Hypothesis: 4h Donchian(20) breakout with 1d ATR volatility filter and ATR trailing stop
 # Uses 4h primary timeframe with 1d HTF for volatility regime detection (low volatility = contraction before expansion).
 # Donchian(20) breakout captures medium-term momentum with clear structure.
 # Volatility filter: 1d ATR(14) < 0.5x 50-period median ATR identifies low-volatility regimes prone to breakouts.
