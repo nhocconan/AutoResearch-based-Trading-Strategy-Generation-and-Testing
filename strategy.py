@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above Donchian upper band (20-period high) + 1d EMA34 uptrend + volume > 1.5x 20-period avg
-# Short when price breaks below Donchian lower band (20-period low) + 1d EMA34 downtrend + volume > 1.5x 20-period avg
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above Donchian upper band (20-period high) + 1d EMA34 uptrend + volume > 1.8x 20-period avg
+# Short when price breaks below Donchian lower band (20-period low) + 1d EMA34 downtrend + volume > 1.8x 20-period avg
 # Uses discrete position sizing (0.25) to control drawdown and minimize fee drag.
 # 1d EMA34 provides strong trend filter reducing whipsaws in both bull and bear markets.
-# Volume threshold (1.5x) targets ~25-35 trades/year on 12h timeframe to avoid overtrading.
+# Volume threshold (1.8x) targets ~25-35 trades/year on 4h timeframe to avoid overtrading.
 # Donchian channels provide clear structure-based breakout levels that work in ranging and trending markets.
 
 def generate_signals(prices):
@@ -35,7 +35,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === 12h Donchian Channel (20-period) ===
+    # === 4h Donchian Channel (20-period) ===
     # Upper band = highest high of last 20 periods
     # Lower band = lowest low of last 20 periods
     # Using rolling window with min_periods to avoid look-ahead
@@ -64,8 +64,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
+        # Volume filter: current volume > 1.8x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.8)
         
         # === LONG CONDITIONS ===
         # 1. Price breaks above Donchian upper band (close > upper)
@@ -88,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dEMA34_Volume_Filter_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA34_Volume_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
