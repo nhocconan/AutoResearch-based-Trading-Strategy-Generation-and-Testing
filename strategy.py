@@ -103,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA21_ROC5_VolumeSpike_ATRFilter"
-timeframe = "12h"
+name = "4h_EMA21_ROC5_VolumeSpike_ATRFilter"
+timeframe = "4h"
 leverage = 1.0
