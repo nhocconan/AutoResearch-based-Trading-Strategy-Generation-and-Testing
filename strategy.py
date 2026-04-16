@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R (14) with 1d EMA50 trend filter and volume confirmation.
-# Long when %R crosses above -80 (oversold recovery) AND price > 1d EMA50 AND 6h volume > 1.5x 20-period average.
-# Short when %R crosses below -20 (overbought rejection) AND price < 1d EMA50 AND 6h volume > 1.5x 20-period average.
-# Exit on opposite %R cross (%R < -80 for longs, %R > -20 for shorts) or ATR-based stoploss (2*ATR).
-# Uses discrete position size 0.25. Works in bull/bear by requiring volume and trend alignment.
+# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and ATR stoploss.
+# Long when price breaks above Camarilla R1 AND 1d volume > 1.3x 20-period average.
+# Short when price breaks below Camarilla S1 AND 1d volume > 1.3x 20-period average.
+# Exit on ATR-based stoploss (2*ATR from entry) or opposite Camarilla level.
+# Uses discrete position size 0.25. Works in both bull and bear markets by requiring
+# volume confirmation and using symmetric breakout levels from 1d pivots.
 # Target: 50-150 total trades over 4 years (12-37/year).
 
 def generate_signals(prices):
@@ -20,30 +21,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 6h Indicators: Williams %R (14) ===
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    # Avoid division by zero
-    denom = highest_high - lowest_low
-    denom = np.where(denom == 0, 1e-10, denom)
-    willr = -100 * (highest_high - close) / denom
+    # === 12h Indicators: Camarilla Pivot Levels from prior 12h bar ===
+    # Calculate pivot from previous 12h bar (HLC of prior bar)
+    prev_high = pd.Series(high).shift(1)
+    prev_low = pd.Series(low).shift(1)
+    prev_close = pd.Series(close).shift(1)
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    r1 = pivot + (range_hl * 1.1 / 12)
+    s1 = pivot - (range_hl * 1.1 / 12)
     
-    # === 6h ATR for stoploss ===
+    # === 1d Indicators: Volume Spike (volume > 1.3x 20-period average) ===
+    df_1d = get_htf_data(prices, '1d')
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    volume_spike = volume > (1.3 * vol_ma_1d_aligned)
+    
+    # === 12h ATR for stoploss ===
     tr1 = pd.Series(high).diff()
     tr2 = pd.Series(low).diff().abs()
     tr3 = pd.Series(close).shift(1).diff().abs()
-    tr_6h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_6h_raw = pd.Series(tr_6h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # === 1d Indicators: EMA50 ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # === 6h Volume Spike: volume > 1.5x 20-period average ===
-    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma_6h)
+    tr_12h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_12h_raw = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -51,8 +51,8 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed for EMA50)
-    warmup = 60
+    # Warmup: ensure all indicators are valid (max 20 periods + 1 for shift)
+    warmup = 50
     
     # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,33 +60,31 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(willr[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i]) or
-            np.isnan(atr_6h_raw[i]) or not session_filter[i]):
+        if (np.isnan(pivot[i]) or np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(volume_spike[i]) or
+            np.isnan(atr_12h_raw[i]) or not session_filter[i]):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values
         price = close[i]
-        willr_val = willr[i]
-        ema_50 = ema_50_1d_aligned[i]
         vol_spike = volume_spike[i]
-        atr_val = atr_6h_raw[i]
+        atr_val = atr_12h_raw[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if %R crosses below -80 (return to oversold)
-            if willr_val < -80:
+            # Exit if price breaks below S1 (opposite level)
+            if price < s1[i]:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR below entry
             elif price < entry_price - 2.0 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if %R crosses above -20 (return to overbought)
-            if willr_val > -20:
+            # Exit if price breaks above R1 (opposite level)
+            if price > r1[i]:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR above entry
             elif price > entry_price + 2.0 * atr_val:
@@ -100,14 +98,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: %R crosses above -80 (from below) AND price > 1d EMA50 AND volume spike
-            if willr_val > -80 and willr[i-1] <= -80 and price > ema_50 and vol_spike:
+            # LONG: Price breaks above R1 AND volume spike
+            if price > r1[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: %R crosses below -20 (from above) AND price < 1d EMA50 AND volume spike
-            elif willr_val < -20 and willr[i-1] >= -20 and price < ema_50 and vol_spike:
+            # SHORT: Price breaks below S1 AND volume spike
+            elif price < s1[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -117,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR14_1dEMA50_VolumeSpike_V1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_1dVolumeSpike_ATRStop_V1"
+timeframe = "12h"
 leverage = 1.0
