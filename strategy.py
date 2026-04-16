@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h trend direction + 1h session-specific mean reversion entries.
-# Uses 4h EMA(50) for trend filter (bullish when close > EMA, bearish when close < EMA).
-# Enters on 1h during 08-20 UTC: long on RSI(14) < 30 pullback in bullish 4h trend,
-# short on RSI(14) > 70 rally in bearish 4h trend.
-# Exits on RSI crossing 50 (mean reversion completion) or 4h trend reversal.
-# Discrete size 0.20. Target: 60-150 total trades over 4 years (15-37/year).
-# Designed to work in both bull (buy dips) and bear (sell rallies) markets.
+# Hypothesis: 6h Donchian(20) breakout with 1w volume spike and 1w ADX trend filter.
+# Long when price breaks above 20-period 6h high AND volume > 1.5x 20-period 1w average AND 1w ADX > 25 (strong trending market).
+# Short when price breaks below 20-period 6h low AND volume > 1.5x 20-period 1w average AND 1w ADX > 25.
+# Exit when price crosses the 6h midpoint (upper+lower)/2 or ATR-based stoploss (2*ATR from entry).
+# Uses discrete position size 0.25. Designed to capture major breakouts in strong trending markets.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag while maintaining edge.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,23 +18,61 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === 4h Indicators: EMA(50) for trend direction ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    bullish_4h = close_4h > ema_4h  # 4h bullish when close > EMA50
-    bullish_4h_aligned = align_htf_to_ltf(prices, df_4h, bullish_4h.astype(float))
+    # === 6h Indicators: Donchian Channel (20-period) ===
+    df_6h = get_htf_data(prices, '6h')
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
     
-    # === 1h Indicators: RSI(14) for mean reversion entries ===
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Donchian upper and lower bands (20-period)
+    dc_upper_6h = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    dc_lower_6h = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    dc_mid_6h = (dc_upper_6h + dc_lower_6h) / 2
+    
+    # Align to 6h timeframe
+    dc_upper_6h_aligned = align_htf_to_ltf(prices, df_6h, dc_upper_6h)
+    dc_lower_6h_aligned = align_htf_to_ltf(prices, df_6h, dc_lower_6h)
+    dc_mid_6h_aligned = align_htf_to_ltf(prices, df_6h, dc_mid_6h)
+    
+    # === 1w Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    df_1w = get_htf_data(prices, '1w')
+    vol_1w = df_1w['volume'].values
+    vol_ma_1w = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
+    volume_spike = volume > (1.5 * vol_ma_1w_aligned)
+    
+    # === 1w Indicators: ADX > 25 (strong trending market filter) ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # True Range
+    tr1 = pd.Series(high_1w).diff()
+    tr2 = pd.Series(low_1w).diff().abs()
+    tr3 = pd.Series(close_1w).shift(1).diff().abs()
+    tr_1w = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1w = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Movement
+    dm_plus = pd.Series(high_1w).diff()
+    dm_minus = pd.Series(low_1w).diff().abs()
+    dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
+    dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
+    
+    # Smoothed DM and TR
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_smooth = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * (dm_plus_smooth / atr_smooth)
+    di_minus = 100 * (dm_minus_smooth / atr_smooth)
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    strong_trend = adx_aligned > 25
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -43,58 +80,80 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure RSI and EMA are valid
-    warmup = 50
+    # Warmup: ensure all indicators are valid (max 50 periods needed for ADX/ATR)
+    warmup = 100
     
-    # Track position state
+    # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    
+    # Calculate 6h ATR for stoploss
+    tr1_6h = pd.Series(high_6h).diff()
+    tr2_6h = pd.Series(low_6h).diff().abs()
+    tr3_6h = pd.Series(close_6h).shift(1).diff().abs()
+    tr_6h = pd.concat([tr1_6h, tr2_6h, tr3_6h], axis=1).max(axis=1)
+    atr_6h_raw = pd.Series(tr_6h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_6h_aligned = align_htf_to_ltf(prices, df_6h, atr_6h_raw)
     
     for i in range(warmup, n):
-        # Skip if outside session or missing data
-        if not session_filter[i] or np.isnan(rsi[i]) or np.isnan(ema_4h_aligned[i]) or np.isnan(bullish_4h_aligned[i]):
+        # Skip if any required data is NaN or outside session
+        if (np.isnan(dc_upper_6h_aligned[i]) or np.isnan(dc_lower_6h_aligned[i]) or np.isnan(dc_mid_6h_aligned[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(strong_trend[i]) or np.isnan(atr_6h_aligned[i]) or
+            not session_filter[i]):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values
-        rsi_val = rsi[i]
-        is_bullish_4h = bullish_4h_aligned[i] > 0.5
+        price = close[i]
+        vol_spike = volume_spike[i]
+        is_strong_trend = strong_trend[i]
+        atr_val = atr_6h_aligned[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if RSI crosses above 50 (mean reversion complete) OR 4h trend turns bearish
-            if rsi_val > 50 or not is_bullish_4h:
+            # Exit if price crosses below midpoint
+            if price < dc_mid_6h_aligned[i]:
+                exit_signal = True
+            # ATR-based stoploss: 2*ATR below entry
+            elif price < entry_price - 2.0 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if RSI crosses below 50 (mean reversion complete) OR 4h trend turns bullish
-            if rsi_val < 50 or is_bullish_4h:
+            # Exit if price crosses above midpoint
+            if price > dc_mid_6h_aligned[i]:
+                exit_signal = True
+            # ATR-based stoploss: 2*ATR above entry
+            elif price > entry_price + 2.0 * atr_val:
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
+            entry_price = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: RSI < 30 (oversold) in bullish 4h trend
-            if rsi_val < 30 and is_bullish_4h:
-                signals[i] = 0.20
+            # LONG: Price breaks above Donchian upper AND volume spike AND strong trending market
+            if price > dc_upper_6h_aligned[i] and vol_spike and is_strong_trend:
+                signals[i] = 0.25
                 position = 1
+                entry_price = price
             
-            # SHORT: RSI > 70 (overbought) in bearish 4h trend
-            elif rsi_val > 70 and not is_bullish_4h:
-                signals[i] = -0.20
+            # SHORT: Price breaks below Donchian lower AND volume spike AND strong trending market
+            elif price < dc_lower_6h_aligned[i] and vol_spike and is_strong_trend:
+                signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         else:
-            signals[i] = position * 0.20
+            signals[i] = position * 0.25
     
     return signals
 
-name = "4h_EMA50_1hRSI_MeanReversion_Session_V1"
-timeframe = "1h"
+name = "6h_Donchian20_1wVolumeSpike_1wADX_V1"
+timeframe = "6h"
 leverage = 1.0
