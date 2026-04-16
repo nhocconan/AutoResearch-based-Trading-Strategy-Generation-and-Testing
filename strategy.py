@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12h Donchian(20) breakout with 12h ADX(14) trend filter and volume confirmation.
-# Long when price breaks above 12h Donchian(20) upper band AND 12h ADX > 25 AND 4h volume > 1.5x 20-period average.
-# Short when price breaks below 12h Donchian(20) lower band AND 12h ADX > 25 AND 4h volume > 1.5x 20-period average.
-# Exit when price crosses the 12h Donchian middle band (20-period average).
-# Uses discrete position size 0.25. Donchian channels provide clear trend structure, ADX filters for trending markets only.
-# Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
-# Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
+# Hypothesis: 1h strategy using 4h Donchian(20) breakout with 1d ADX(14) trend filter and volume confirmation.
+# Long when price breaks above 4h Donchian(20) upper band AND 1d ADX > 25 AND 1h volume > 1.5x 20-period average.
+# Short when price breaks below 4h Donchian(20) lower band AND 1d ADX > 25 AND 1h volume > 1.5x 20-period average.
+# Exit when price crosses the 4h Donchian middle band (20-period average).
+# Uses discrete position size 0.20. 4h/1d filters provide signal direction, 1h provides entry timing.
+# Target: 60-150 total trades over 4 years (15-37/year) to avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,65 +20,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data once before loop for Donchian channels and ADX
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 4h data once before loop for Donchian channels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # === 12h Indicators: Donchian Channels (20) ===
-    donchian_upper_20_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_lower_20_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donchian_middle_20_12h = (donchian_upper_20_12h + donchian_lower_20_12h) / 2.0
+    # Get 1d data once before loop for ADX
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # === 12h Indicators: ADX (14) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # === 4h Indicators: Donchian Channels (20) ===
+    donchian_upper_20_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_lower_20_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_middle_20_4h = (donchian_upper_20_4h + donchian_lower_20_4h) / 2.0
+    
+    # === 1d Indicators: ADX (14) ===
     # True Range
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr1[0] = 0
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
     # Directional Movement
-    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
-                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)), 
-                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
     dm_plus[0] = 0
     dm_minus[0] = 0
     
     # Smoothed TR, DM+, DM- (Wilder's smoothing)
-    atr_14_12h = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_plus_14_12h = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_14_12h = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_14_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_plus_14_1d = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_14_1d = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # DI+ and DI-
-    di_plus_14_12h = 100 * dm_plus_14_12h / atr_14_12h
-    di_minus_14_12h = 100 * dm_minus_14_12h / atr_14_12h
+    di_plus_14_1d = 100 * dm_plus_14_1d / atr_14_1d
+    di_minus_14_1d = 100 * dm_minus_14_1d / atr_14_1d
     
     # DX and ADX
-    dx = 100 * np.abs(di_plus_14_12h - di_minus_14_12h) / (di_plus_14_12h + di_minus_14_12h)
+    dx = 100 * np.abs(di_plus_14_1d - di_minus_14_1d) / (di_plus_14_1d + di_minus_14_1d)
     dx = np.where(np.isnan(dx), 0, dx)
-    adx_14_12h = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_14_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Align all indicators to primary timeframe (4h)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper_20_12h)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower_20_12h)
-    donchian_middle_aligned = align_htf_to_ltf(prices, df_12h, donchian_middle_20_12h)
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx_14_12h)
-    
-    # === 4h Indicators: Volume average ===
-    vol_ma_20_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align all indicators to primary timeframe (1h)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper_20_4h)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower_20_4h)
+    donchian_middle_aligned = align_htf_to_ltf(prices, df_4h, donchian_middle_20_4h)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_14_1d)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 60
+    warmup = 100
     
     # Track position state
     position = 0
@@ -99,7 +104,9 @@ def generate_signals(prices):
         adx = adx_aligned[i]
         price = close[i]
         vol = volume[i]
-        vol_ma = vol_ma_20_4h[i]
+        
+        # Get 1h volume average aligned
+        vol_ma_20_1h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         
         # === EXIT LOGIC ===
         exit_signal = False
@@ -119,21 +126,21 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Donchian upper AND ADX > 25 AND 4h volume > 1.5x 20-period avg
-            if (price > donchian_upper) and (adx > 25) and (vol > 1.5 * vol_ma):
-                signals[i] = 0.25
+            # LONG: Price breaks above Donchian upper AND ADX > 25 AND volume > 1.5x 20-period avg
+            if (price > donchian_upper) and (adx > 25) and (vol > 1.5 * vol_ma_20_1h[i]):
+                signals[i] = 0.20
                 position = 1
             
-            # SHORT: Price breaks below Donchian lower AND ADX > 25 AND 4h volume > 1.5x 20-period avg
-            elif (price < donchian_lower) and (adx > 25) and (vol > 1.5 * vol_ma):
-                signals[i] = -0.25
+            # SHORT: Price breaks below Donchian lower AND ADX > 25 AND volume > 1.5x 20-period avg
+            elif (price < donchian_lower) and (adx > 25) and (vol > 1.5 * vol_ma_20_1h[i]):
+                signals[i] = -0.20
                 position = -1
         
         else:
-            signals[i] = position * 0.25
+            signals[i] = position * 0.20
     
     return signals
 
-name = "4h_12hDonchian20_12hADX_VolumeConfirmation_V1"
-timeframe = "4h"
+name = "1h_4hDonchian20_1dADX_VolumeConfirmation_V1"
+timeframe = "1h"
 leverage = 1.0
