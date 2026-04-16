@@ -26,7 +26,7 @@ def generate_signals(prices):
     donchian_upper_1d = align_htf_to_ltf(prices, df_1d, high_20_1d)
     donchian_lower_1d = align_htf_to_ltf(prices, df_1d, low_20_1d)
     
-    # 1d ATR for volatility filter
+    # 1d ATR for volatility filter and stop
     tr1 = np.abs(high_1d - low_1d)
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
