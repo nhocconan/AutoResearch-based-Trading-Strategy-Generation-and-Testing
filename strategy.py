@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -33,14 +33,14 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], tr])
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # === 1d EMA for trend filter (34-period) ===
-    ema_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    # === 4h EMA for trend filter (34-period) ===
+    ema_4h = pd.Series(close).ewm(span=34, min_periods=34, adjust=False).mean().values
     
-    # Align HTF data to 1d timeframe
-    r1_1d = align_htf_to_ltf(prices, df_1d, r1)
-    s1_1d = align_htf_to_ltf(prices, df_1d, s1)
-    atr_14_1d = align_htf_to_ltf(prices, df_1d, atr_14)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Align HTF data to 12h timeframe
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    atr_14_12h = align_htf_to_ltf(prices, df_1d, atr_14)
+    ema_4h_12h = align_htf_to_ltf(prices, df_1d, ema_4h)  # Align EMA4h to 12h
     
     # === Volume spike detection (20-period volume MA) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,38 +49,38 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators have valid data
-    warmup = 50
+    warmup = 200
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_1d[i]) or np.isnan(s1_1d[i]) or
-            np.isnan(atr_14_1d[i]) or np.isnan(ema_1d_aligned[i]) or
+        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or
+            np.isnan(atr_14_12h[i]) or np.isnan(ema_4h_12h[i]) or
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        r1_level = r1_1d[i]
-        s1_level = s1_1d[i]
-        atr_val = atr_14_1d[i]
-        ema_val = ema_1d_aligned[i]
+        r1_level = r1_12h[i]
+        s1_level = s1_12h[i]
+        atr_val = atr_14_12h[i]
+        ema_val = ema_4h_12h[i]
         vol_spike = volume_spike[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
             # Exit when price drops below S1 or volatility drops significantly
-            if price < s1_level or (i > 0 and atr_val < atr_14_1d[i-1] * 0.7):
+            if price < s1_level or (i > 0 and atr_val < atr_14_12h[i-1] * 0.7):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
             # Exit when price rises above R1 or volatility drops significantly
-            if price > r1_level or (i > 0 and atr_val < atr_14_1d[i-1] * 0.7):
+            if price > r1_level or (i > 0 and atr_val < atr_14_12h[i-1] * 0.7):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -109,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Pivot_R1S1_EMA34_VolumeSpike"
-timeframe = "1d"
+name = "12h_Pivot_R1S1_EMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
