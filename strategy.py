@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with volume confirmation and 1d ADX trend filter.
-# Camarilla levels (R1, R2, S1, S2) from prior day provide precise support/resistance.
-# Breakout above R1 with volume > 2x average = long, breakdown below S1 with volume = short.
-# 1d ADX > 25 filters for trending markets, avoiding whipsaws in ranges.
-# Position size 0.25 for risk control. Stop loss at 1.5x ATR.
-# Designed to work in bull (breakout continuations) and bear (breakdown continuations).
+# Hypothesis: 1d Donchian breakout with 1w EMA trend filter and volume confirmation.
+# Uses weekly EMA for trend direction and daily Donchian(20) breakouts for entries.
+# Volume > 1.5x average confirms breakout strength.
+# Designed to capture trends in both bull and bear markets with low trade frequency.
+# Target: 7-25 trades per year to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,66 +19,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h data (primary timeframe) ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    volume_4h = df_4h['volume'].values
+    # === 1d data (primary timeframe) ===
+    # === 1w data (higher timeframe for trend filter) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # === 1d data (higher timeframe for Camarilla pivot and ADX) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 20-period EMA on weekly close for trend filter
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # === 1d Camarilla Pivot Levels ===
-    # Calculate pivot point and ranges from previous day
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_hl = high_1d - low_1d
+    # === Daily Donchian(20) channels ===
+    # Use previous day's high/low to avoid look-ahead
+    high_shift = np.roll(high, 1)
+    low_shift = np.roll(low, 1)
+    high_shift[0] = high[0]  # first bar uses its own value
+    low_shift[0] = low[0]
     
-    # Camarilla levels: R4 = close + range * 1.5, R3 = close + range * 1.25, etc.
-    # We use R1, R2, S1, S2 for breakouts
-    r1 = close_1d + range_hl * 1.1 / 12
-    r2 = close_1d + range_hl * 1.1 / 6
-    s1 = close_1d - range_hl * 1.1 / 12
-    s2 = close_1d - range_hl * 1.1 / 6
+    # Calculate rolling max/min of previous day's high/low
+    donch_high = pd.Series(high_shift).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_shift).rolling(window=20, min_periods=20).min().values
     
-    # Align Camarilla levels to 4h timeframe (use previous day's levels)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    
-    # === 1d ADX (14) for trend filter ===
-    # Calculate True Range
-    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
-    tr2 = abs(pd.Series(high_1d).shift(1) - pd.Series(close_1d).shift(1))
-    tr3 = abs(pd.Series(low_1d).shift(1) - pd.Series(close_1d).shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr.rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate Directional Movement
-    up_move = pd.Series(high_1d).diff()
-    down_move = -pd.Series(low_1d).diff()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smooth DM and TR
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_1d
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_1d
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # === 4h volume ratio for confirmation ===
-    vol_ma_10_4h = pd.Series(volume_4h).rolling(window=10, min_periods=10).mean().values
-    vol_ratio_4h = volume_4h / vol_ma_10_4h
+    # === Volume confirmation ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma_20
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 100
+    warmup = 50
     
     # Track position and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
@@ -87,56 +54,30 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or
-            np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ratio_4h[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        r1_val = r1_aligned[i]
-        r2_val = r2_aligned[i]
-        s1_val = s1_aligned[i]
-        s2_val = s2_aligned[i]
-        adx_val = adx_aligned[i]
-        vol_ratio = vol_ratio_4h[i]
+        upper = donch_high[i]
+        lower = donch_low[i]
+        ema_trend = ema_20_1w_aligned[i]
+        vol = vol_ratio[i]
         
         # === STOPLOSS LOGIC ===
         if position == 1:  # Long position
-            atr_4h = np.abs(high_4h - low_4h)
-            atr_ma = pd.Series(atr_4h).rolling(window=14, min_periods=14).mean().values
-            atr_aligned = align_htf_to_ltf(prices, df_4h, atr_ma)
-            atr_val = atr_aligned[i]
-            if price < entry_price - 1.5 * atr_val:
+            # Exit if price closes below Donchian low
+            if price < lower:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            atr_4h = np.abs(high_4h - low_4h)
-            atr_ma = pd.Series(atr_4h).rolling(window=14, min_periods=14).mean().values
-            atr_aligned = align_htf_to_ltf(prices, df_4h, atr_ma)
-            atr_val = atr_aligned[i]
-            if price > entry_price + 1.5 * atr_val:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-                continue
-        
-        # === EXIT LOGIC ===
-        if position == 1:  # Long position
-            # Exit when price breaks below S1 or trend weakens
-            if price < s1_val or adx_val < 20:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-                continue
-        
-        elif position == -1:  # Short position
-            # Exit when price breaks above R1 or trend weakens
-            if price > r1_val or adx_val < 20:
+            # Exit if price closes above Donchian high
+            if price > upper:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -144,16 +85,16 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Require trending market (ADX > 25)
-            if adx_val > 25:
-                # Breakout above R1 with volume confirmation
-                if price > r1_val and vol_ratio > 2.0:
+            # Require volume confirmation
+            if vol > 1.5:
+                # Long when price breaks above Donchian high AND above weekly EMA
+                if price > upper and price > ema_trend:
                     signals[i] = 0.25
                     position = 1
                     entry_price = price
                     continue
-                # Breakdown below S1 with volume confirmation
-                elif price < s1_val and vol_ratio > 2.0:
+                # Short when price breaks below Donchian low AND below weekly EMA
+                elif price < lower and price < ema_trend:
                     signals[i] = -0.25
                     position = -1
                     entry_price = price
@@ -169,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_Volume_ADXFilter_v1"
-timeframe = "4h"
+name = "1d_Donchian20_20EMA1w_VolumeFilter_v1"
+timeframe = "1d"
 leverage = 1.0
