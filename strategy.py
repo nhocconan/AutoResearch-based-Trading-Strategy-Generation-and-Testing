@@ -3,6 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 4h Donchian breakout with 1d EMA trend filter and volume confirmation.
+# Uses 1d Donchian channels for entry/exit to reduce false signals, with volume >1.5x average.
+# Position size 0.25 for lower drawdown. Designed to work in both bull (breakouts) and bear (trend filters).
+# Expects ~25-35 trades/year to avoid fee drag.
+
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
@@ -13,14 +18,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h data (primary) ===
+    # === 4h data (primary timeframe) ===
     df_4h = get_htf_data(prices, '4h')
     close_4h = df_4h['close'].values
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
     volume_4h = df_4h['volume'].values
     
-    # === 1d data (HTF for trend and context) ===
+    # === 1d data (higher timeframe for trend and levels) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
