@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Daily data for pivot points and volatility ===
+    # === Daily data for pivot points ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -32,7 +32,7 @@ def generate_signals(prices):
     tr_1d[0] = high_1d[0] - low_1d[0]
     atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     
-    # Align daily data to 1d timeframe (since we're using 1d as primary)
+    # Align daily data to 12h timeframe (using 1d as HTF)
     pivot_1d = align_htf_to_ltf(prices, df_1d, pivot)
     r1_1d = align_htf_to_ltf(prices, df_1d, r1)
     s1_1d = align_htf_to_ltf(prices, df_1d, s1)
@@ -44,7 +44,7 @@ def generate_signals(prices):
     ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Volume spike detection (20-period volume MA on 1d)
+    # Volume spike detection (20-period volume MA on 12h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
@@ -111,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Pivot_R1_S1_Breakout_Volume_EMA34Trend"
-timeframe = "1d"
+name = "12h_Pivot_R1_S1_Breakout_Volume_EMA34Trend"
+timeframe = "12h"
 leverage = 1.0
