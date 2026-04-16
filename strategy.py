@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,93 +13,99 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h data (primary) ===
+    # === 4h data (primary) ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    volume_4h = df_4h['volume'].values
+    
+    # === 12h data (HTF for trend) ===
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
-    volume_12h = df_12h['volume'].values
     
-    # === 1d data (HTF for trend and pivots) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === 12h Donchian Channel (20-period) ===
+    # Upper band: 20-period high
+    highest_high_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    # Lower band: 20-period low
+    lowest_low_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Middle line: (upper + lower) / 2
+    middle_line = (highest_high_20 + lowest_low_20) / 2
     
-    # === 12h EMA(34) for trend ===
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Align Donchian bands with proper delay (wait for 12h bar to close)
+    upper_12h_aligned = align_htf_to_ltf(prices, df_12h, highest_high_20)
+    lower_12h_aligned = align_htf_to_ltf(prices, df_12h, lowest_low_20)
+    middle_12h_aligned = align_htf_to_ltf(prices, df_12h, middle_line)
     
-    # === 1d Fibonacci Pivot Points (R1, S1) ===
-    # Pivot = (H + L + C)/3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    # Range = H - L
-    range_1d = high_1d - low_1d
-    # R1 = Pivot + 0.382 * Range
-    r1_1d = pivot_1d + 0.382 * range_1d
-    # S1 = Pivot - 0.382 * Range
-    s1_1d = pivot_1d - 0.382 * range_1d
+    # === 4h volume ratio for confirmation ===
+    vol_ma_10_4h = pd.Series(volume_4h).rolling(window=10, min_periods=10).mean().values
+    vol_ratio_4h = volume_4h / vol_ma_10_4h
+    vol_ratio_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ratio_4h)
     
-    # Align pivot levels
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # === 12h volume ratio for confirmation ===
-    vol_ma_10_12h = pd.Series(volume_12h).rolling(window=10, min_periods=10).mean().values
-    vol_ratio_12h = volume_12h / vol_ma_10_12h
-    vol_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio_12h)
+    # === 12h ATR for stop loss (14-period) ===
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
     
     signals = np.zeros(n)
     
-    # Warmup: enough for EMA(34) and volume MA(10)
+    # Warmup: enough for Donchian and ATR
     warmup = 40
     
-    # Track position
+    # Track position and entry price
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(vol_ratio_12h_aligned[i])):
+        if (np.isnan(upper_12h_aligned[i]) or np.isnan(lower_12h_aligned[i]) or 
+            np.isnan(middle_12h_aligned[i]) or np.isnan(vol_ratio_4h_aligned[i]) or 
+            np.isnan(atr_12h_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        ema = ema_34_12h_aligned[i]
-        pivot = pivot_aligned[i]
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
-        vol_ratio = vol_ratio_12h_aligned[i]
+        upper = upper_12h_aligned[i]
+        lower = lower_12h_aligned[i]
+        middle = middle_12h_aligned[i]
+        vol_ratio = vol_ratio_4h_aligned[i]
+        atr = atr_12h_aligned[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit: price closes below S1 or EMA turns bearish
-            if price < s1 or close[i] < ema:
+            # Exit: price closes below middle line or stop loss hit
+            if price < middle or price < entry_price - 2.0 * atr:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit: price closes above R1 or EMA turns bullish
-            if price > r1 or close[i] > ema:
+            # Exit: price closes above middle line or stop loss hit
+            if price > middle or price > entry_price + 2.0 * atr:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: price breaks above R1 with volume confirmation and EMA bullish
-            if price > r1 and vol_ratio > 1.5 and close[i] > ema:
+            # LONG: price breaks above upper Donchian band with volume confirmation
+            if price > upper and vol_ratio > 1.5:
                 signals[i] = 0.25
                 position = 1
+                entry_price = price
                 continue
-            # SHORT: price breaks below S1 with volume confirmation and EMA bearish
-            elif price < s1 and vol_ratio > 1.5 and close[i] < ema:
+            # SHORT: price breaks below lower Donchian band with volume confirmation
+            elif price < lower and vol_ratio > 1.5:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
                 continue
         
         # Hold current position
@@ -112,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_FibPivot_R1S1_EMA34_VolumeBreakout"
-timeframe = "12h"
+name = "4h_Donchian_20_12h_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
