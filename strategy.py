@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Williams %R(14) for HTF mean-reversion bias + 4h Donchian(20) breakout with volume confirmation.
+# Hypothesis: 4h strategy combining 1d Williams %R(14) for HTF mean-reversion bias with 4h Donchian(20) breakout and volume confirmation.
 # Long when 1d Williams %R < -80 (oversold) AND price breaks above 4h Donchian upper band with volume spike (>1.8x median volume).
 # Short when 1d Williams %R > -20 (overbought) AND price breaks below 4h Donchian lower band with volume spike.
 # Exit via ATR(10) trailing stop: long exits when price < highest high since entry - 2.5*ATR,
