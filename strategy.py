@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-# Long when price breaks above Donchian(20) high AND price > 1d EMA50 (uptrend) AND volume > 1.5x 20-period average.
-# Short when price breaks below Donchian(20) low AND price < 1d EMA50 (downtrend) AND volume > 1.5x 20-period average.
-# Uses ATR-based stoploss (signal→0 when price moves against position by 2*ATR).
-# Designed to capture strong trending moves in both bull and bear markets with tight entry conditions.
-# Target: 75-200 trades over 4 years (19-50/year) to balance opportunity and fee drag.
+# Hypothesis: 6h Camarilla pivot breakout with 1d volume confirmation and ADX trend filter.
+# Long when price breaks above R4 with 1d volume > 1.5x 20-period average AND 1d ADX > 25 (trending up).
+# Short when price breaks below S4 with 1d volume > 1.5x 20-period average AND 1d ADX > 25 (trending down).
+# Uses discrete position size 0.25. Camarilla R4/S4 are strong breakout levels, volume confirms participation,
+# ADX ensures we only trade in trending markets to avoid false breakouts in ranging conditions.
+# Designed to work in both bull (buy breakouts) and bear (sell breakdowns) markets.
+# Target: 60-120 trades over 4 years (15-30/year) to balance opportunity and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,103 +21,113 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Indicators: Donchian Channel (20-period) ===
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_high = highest_high
-    donchian_low = lowest_low
+    # === 6h Indicators: Camarilla Pivot Levels (based on prior 6h bar) ===
+    # Calculate pivot from previous bar to avoid look-ahead
+    pivot = (np.roll(high, 1) + np.roll(low, 1) + np.roll(close, 1)) / 3.0
+    range_val = np.roll(high, 1) - np.roll(low, 1)
+    r4 = pivot + (range_val * 1.1)
+    s4 = pivot - (range_val * 1.1)
     
-    # === 4h Indicators: ATR (14-period) for stoploss ===
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr2.iloc[0] = tr1.iloc[0]  # First bar: no previous close
-    tr3.iloc[0] = tr1.iloc[0]
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
-    
-    # === 4h Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    # === 6h Indicators: Volume Spike (volume > 1.5x 20-period average) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
     # Get 1d data once before loop for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need enough for EMA50 calculation
+    if len(df_1d) < 35:  # Need enough for ADX calculation
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === 1d Indicators: EMA50 for trend filter ===
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # === 1d Indicators: ADX (14-period) for trend filter ===
+    # True Range
+    tr1 = np.abs(np.roll(high_1d, 1) - np.roll(low_1d, 1))
+    tr2 = np.abs(np.roll(high_1d, 1) - np.roll(close_1d, 1))
+    tr3 = np.abs(np.roll(low_1d, 1) - np.roll(close_1d, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align 1d EMA50 to 4h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Directional Movement
+    up_move = np.roll(high_1d, 1) - high_1d
+    down_move = low_1d - np.roll(low_1d, 1)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed DM
+    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / atr
+    minus_di = 100 * minus_dm_smooth / atr
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Align 1d ADX to 6h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed for EMA, 20 for Donchian/volume MA)
-    warmup = 60
+    # Warmup: ensure all indicators are valid (max 34 periods needed for ADX, 20 for volume MA)
+    warmup = 40
     
-    # Track position state and entry price for stoploss
+    # Track position state
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(atr[i]) or np.isnan(ema_50_1d_aligned[i]) or
+        if (np.isnan(r4[i]) or np.isnan(s4[i]) or np.isnan(adx_1d_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             position = 0
-            entry_price = 0.0
             continue
         
         # Current values
         price = close[i]
-        dch_high = donchian_high[i]
-        dch_low = donchian_low[i]
-        atr_val = atr[i]
-        ema_1d = ema_50_1d_aligned[i]
+        r4_level = r4[i]
+        s4_level = s4[i]
+        adx_1d = adx_1d_aligned[i]
         vol_spike = volume_spike[i]
         
-        # === UPDATE STOPLOSS AND CHECK EXIT ===
+        # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Stoploss: price drops below entry_price - 2*ATR
-            if price < entry_price - 2.0 * atr_val:
+            # Exit if price falls below pivot (mean reversion) or volume spike ends
+            if price < pivot[i] or not vol_spike:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Stoploss: price rises above entry_price + 2*ATR
-            if price > entry_price + 2.0 * atr_val:
+            # Exit if price rises above pivot (mean reversion) or volume spike ends
+            if price > pivot[i] or not vol_spike:
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
-            entry_price = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Donchian high AND price > 1d EMA50 AND volume spike
-            if price > dch_high and price > ema_1d and vol_spike:
+            # LONG: Price breaks above R4 AND 1d volume spike AND 1d ADX > 25 (strong uptrend)
+            if price > r4_level and vol_spike and adx_1d > 25:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
             
-            # SHORT: Price breaks below Donchian low AND price < 1d EMA50 AND volume spike
-            elif price < dch_low and price < ema_1d and vol_spike:
+            # SHORT: Price breaks below S4 AND 1d volume spike AND 1d ADX > 25 (strong downtrend)
+            elif price < s4_level and vol_spike and adx_1d > 25:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
         
         else:
             signals[i] = position * 0.25
     
     return signals
 
-name = "4h_Donchian20_1dEMA50_VolumeSpike_ATRStop_V1"
-timeframe = "4h"
+name = "6h_CamarillaR4S4_Breakout_1dVolumeSpike_ADXFilter_V1"
+timeframe = "6h"
 leverage = 1.0
