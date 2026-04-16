@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,49 +13,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h data (primary) ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    volume_4h = df_4h['volume'].values
+    # Load weekly data once
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # === 1d data (HTF for EMA) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Weekly EMA 34
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # === 1d EMA34 (trend filter) ===
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Daily Donchian channel (20-period)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Donchian channel (20-period) ===
-    donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    
-    # Shift by 1 to avoid look-ahead (use previous bar's channel)
+    # Shift to avoid look-ahead
     donch_high = np.roll(donch_high, 1)
     donch_low = np.roll(donch_low, 1)
     donch_high[0] = np.nan
     donch_low[0] = np.nan
     
-    # === 4h volume ratio for confirmation ===
-    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_4h = volume_4h / vol_ma_20_4h
+    # Daily volume ratio for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma_20
     
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
     
     # Warmup
-    warmup = 50
-    
-    # Track position
-    position = 0  # 0: flat, 1: long, -1: short
+    warmup = 100
     
     for i in range(warmup, n):
         # Skip if any data is NaN
         if (np.isnan(donch_high[i]) or 
             np.isnan(donch_low[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_ratio_4h[i])):
+            np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -63,33 +54,31 @@ def generate_signals(prices):
         price = close[i]
         upper = donch_high[i]
         lower = donch_low[i]
-        ema_trend = ema_34_1d_aligned[i]
-        vol_ratio = vol_ratio_4h[i]
+        ema_trend = ema_34_1w_aligned[i]
+        vol_ratio_val = vol_ratio[i]
         
-        # === EXIT LOGIC ===
+        # Exit conditions
         if position == 1:  # Long position
-            # Exit: price closes below Donchian lower OR trend reverses
             if price < lower or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper OR trend reverses
             if price > upper or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
                 continue
         
-        # === ENTRY LOGIC (only when flat) ===
+        # Entry conditions (only when flat)
         if position == 0:
-            # LONG: Break above Donchian upper with volume, in uptrend
-            if price > upper and vol_ratio > 1.5 and price > ema_trend:
+            # LONG: Break above Donchian upper with volume, in uptrend (weekly EMA)
+            if price > upper and vol_ratio_val > 1.5 and price > ema_trend:
                 signals[i] = 0.25
                 position = 1
                 continue
             # SHORT: Break below Donchian lower with volume, in downtrend
-            elif price < lower and vol_ratio > 1.5 and price < ema_trend:
+            elif price < lower and vol_ratio_val > 1.5 and price < ema_trend:
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -104,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_1dEMA34_Trend_Volume"
-timeframe = "4h"
+name = "1d_Donchian_1wEMA34_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
