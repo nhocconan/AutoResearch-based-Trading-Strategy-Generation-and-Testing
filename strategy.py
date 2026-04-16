@@ -13,42 +13,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Weekly data for primary trend (1w) ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === 6h price channel (Donchian 20) ===
+    df_6h = get_htf_data(prices, '6h')
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
     
-    # Calculate weekly ATR (14-period) for volatility filter
-    tr_1w = np.maximum(high_1w - low_1w,
-                       np.maximum(np.abs(high_1w - np.roll(close_1w, 1)),
-                                  np.abs(low_1w - np.roll(close_1w, 1))))
-    tr_1w[0] = high_1w[0] - low_1w[0]
-    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
+    # Calculate 6-period ATR for volatility filter (6h timeframe)
+    tr_6h = np.maximum(high_6h - low_6h,
+                       np.maximum(np.abs(high_6h - np.roll(close_6h, 1)),
+                                  np.abs(low_6h - np.roll(close_6h, 1))))
+    tr_6h[0] = high_6h[0] - low_6h[0]
+    atr_6h = pd.Series(tr_6h).rolling(window=6, min_periods=6).mean().values
     
-    # Align weekly data to daily timeframe
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    # Align 6h data to primary timeframe (6h)
+    atr_6h_aligned = align_htf_to_ltf(prices, df_6h, atr_6h)
     
-    # === Daily data for pivot points ===
+    # === Daily Donchian channel (20-period) for trend filter ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate daily pivot points: P, R1, S1
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r1_1d = pivot_1d + range_1d
-    s1_1d = pivot_1d - range_1d
+    # Calculate 20-period Donchian channels on daily
+    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align daily data to daily timeframe (no shift needed for same timeframe)
-    pivot_1d_aligned = pivot_1d  # Already aligned to daily
-    r1_1d_aligned = r1_1d
-    s1_1d_aligned = s1_1d
+    # Align daily Donchian to 6h timeframe
+    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
     
-    # Volume spike detection (20-period volume MA)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # === Daily volume spike detection ===
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = vol_1d > (2.0 * vol_ma_1d)
+    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
     
     signals = np.zeros(n)
     
@@ -60,45 +58,49 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_1w_aligned[i]) or np.isnan(pivot_1d_aligned[i]) or 
-            np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(atr_6h_aligned[i]) or np.isnan(upper_20_aligned[i]) or 
+            np.isnan(lower_20_aligned[i]) or np.isnan(volume_spike_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        price = close[i]
-        pivot_level = pivot_1d_aligned[i]
-        r1_level = r1_1d_aligned[i]
-        s1_level = s1_1d_aligned[i]
-        atr = atr_1w_aligned[i]
-        vol_spike = volume_spike[i]
+        price_6h = close_6h[i // 4]  # 4x 6h bars in 1d, but we need current 6h close
+        # Actually, we need the current 6h close price - use the 6h aligned close
+        close_6h_aligned = align_htf_to_ltf(prices, df_6h, close_6h)
+        price = close_6h_aligned[i]
+        
+        upper_level = upper_20_aligned[i]
+        lower_level = lower_20_aligned[i]
+        atr = atr_6h_aligned[i]
+        vol_spike = volume_spike_1d_aligned[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price returns to daily pivot level (mean reversion)
-            if price <= pivot_level:
+            # Exit when price returns to midpoint of daily channel (mean reversion)
+            midpoint = (upper_level + lower_level) / 2
+            if price <= midpoint:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price returns to daily pivot level (mean reversion)
-            if price >= pivot_level:
+            # Exit when price returns to midpoint of daily channel (mean reversion)
+            midpoint = (upper_level + lower_level) / 2
+            if price >= midpoint:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above R1 with volume spike and volatility filter
-            if price > r1_level and vol_spike and atr > 0:
+            # LONG: Price breaks above upper Donchian with volume spike and volatility filter
+            if price > upper_level and vol_spike and atr > 0:
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Price breaks below S1 with volume spike and volatility filter
-            elif price < s1_level and vol_spike and atr > 0:
+            # SHORT: Price breaks below lower Donchian with volume spike and volatility filter
+            elif price < lower_level and vol_spike and atr > 0:
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -113,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Pivot_R1_S1_Breakout_Volume_ATRFilter_1wTrend"
-timeframe = "1d"
+name = "6h_Donchian20_1dChannel_VolumeSpike_ATRFilter"
+timeframe = "6h"
 leverage = 1.0
