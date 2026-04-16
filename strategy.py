@@ -3,11 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike confirmation and ATR trailing stop.
-# Volume spike: current 1d volume > 1.8x 20-period median volume (stricter than before).
-# ATR trailing stop: 2.5x ATR for wider stop to reduce whipsaws.
-# Discrete position size: 0.25. Target: 75-200 total trades over 4 years (19-50/year).
-# Donchian breakouts capture momentum; volume confirmation filters false breakouts;
+# Hypothesis: 4h strategy using 4h Donchian(20) breakout with 1d volume spike confirmation and ATR-based stoploss.
+# Long when price breaks above 20-period Donchian high and 1d volume > 1.5x 20-period median volume.
+# Short when price breaks below 20-period Donchian low and same volume condition.
+# Exit via ATR(14) trailing stop: long exits when price < highest high since entry - 2.0*ATR,
+# short exits when price > lowest low since entry + 2.0*ATR.
+# Uses discrete position size 0.25. Target: 75-200 total trades over 4 years (19-50/year).
+# Donchian breakouts capture strong momentum moves; volume confirmation filters false breakouts;
 # ATR trailing stop adapts to volatility and reduces whipsaws in ranging markets.
 
 def generate_signals(prices):
@@ -58,9 +60,6 @@ def generate_signals(prices):
     atr_aligned = align_htf_to_ltf(prices, df_4h, atr_14)
     vol_median_aligned = align_htf_to_ltf(prices, df_1d, vol_median_20)
     
-    # Get 1d volume aligned
-    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-    
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
@@ -74,7 +73,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # Skip if any required data is NaN
         if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(atr_aligned[i]) or np.isnan(vol_median_aligned[i]) or np.isnan(vol_1d_aligned[i])):
+            np.isnan(atr_aligned[i]) or np.isnan(vol_median_aligned[i])):
             signals[i] = 0.0
             position = 0
             highest_since_entry = 0.0
@@ -87,10 +86,15 @@ def generate_signals(prices):
         atr = atr_aligned[i]
         vol_median = vol_median_aligned[i]
         price = close[i]
+        
+        # Get current 1d volume for volume spike filter
+        df_1d = get_htf_data(prices, '1d')
+        vol_1d = df_1d['volume'].values
+        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
         current_vol_1d = vol_1d_aligned[i]
         
-        # Volume spike filter: current 1d volume > 1.8x median volume (stricter)
-        volume_spike = current_vol_1d > (vol_median * 1.8)
+        # Volume spike filter: current 1d volume > 1.5x median volume
+        volume_spike = current_vol_1d > (vol_median * 1.5)
         
         # === EXIT LOGIC (trailing stop) ===
         exit_signal = False
@@ -98,15 +102,15 @@ def generate_signals(prices):
             # Update highest high since entry
             if price > highest_since_entry:
                 highest_since_entry = price
-            # Exit when price drops below highest high - 2.5*ATR
-            if price < highest_since_entry - 2.5 * atr:
+            # Exit when price drops below highest high - 2.0*ATR
+            if price < highest_since_entry - 2.0 * atr:
                 exit_signal = True
         elif position == -1:  # short position
             # Update lowest low since entry
             if price < lowest_since_entry:
                 lowest_since_entry = price
-            # Exit when price rises above lowest low + 2.5*ATR
-            if price > lowest_since_entry + 2.5 * atr:
+            # Exit when price rises above lowest low + 2.0*ATR
+            if price > lowest_since_entry + 2.0 * atr:
                 exit_signal = True
         
         if exit_signal:
@@ -137,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dVolumeSpike1.8x_ATRTrail2.5_v1"
+name = "4h_Donchian20_1dVolumeSpike1.5x_ATRTrail2.0_v1"
 timeframe = "4h"
 leverage = 1.0
