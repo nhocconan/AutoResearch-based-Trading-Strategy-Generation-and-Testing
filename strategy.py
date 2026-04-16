@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams %R reversal with 1w volume spike and 1w ADX trend filter.
-# Long when Williams %R(14) crosses above -80 (oversold bounce) AND volume > 1.5x 20-period 1w average AND 1w ADX > 20 (trending market).
-# Short when Williams %R(14) crosses below -20 (overbought rejection) AND volume > 1.5x 20-period 1w average AND 1w ADX > 20.
-# Exit when Williams %R crosses above -20 (for longs) or below -80 (for shorts) or ATR-based stoploss (2*ATR from entry).
-# Uses discrete position size 0.25. Designed to capture mean reversals within strong trends.
-# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag while maintaining edge.
-# Works in both bull and bear markets by requiring trend (ADX>20) and volume confirmation for reversal signals.
+# Hypothesis: 6h Bollinger Band squeeze breakout with 1d volume spike and 1d ADX trend filter.
+# Long when price breaks above upper BB(20,2) AND volume > 1.8x 20-period 1d average AND 1d ADX > 20 (emerging trend).
+# Short when price breaks below lower BB(20,2) AND volume > 1.8x 20-period 1d average AND 1d ADX > 20.
+# Exit when price crosses the 6h BB midpoint or ATR-based stoploss (2*ATR from entry).
+# Uses discrete position size 0.25. Designed to capture volatility expansion after low-volatility periods.
+# Target: 60-120 total trades over 4 years (15-30/year) to balance edge and fee drag.
+# Works in both bull and bear markets by requiring volatility expansion (BB squeeze breakout) with volume and trend confirmation.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,48 +21,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Indicators: Williams %R (14-period) ===
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # === 6h Indicators: Bollinger Bands (20,2) ===
+    bb_period = 20
+    bb_std = 2.0
+    sma_6h = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_6h = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    bb_upper = sma_6h + (bb_std * std_6h)
+    bb_lower = sma_6h - (bb_std * std_6h)
+    bb_mid = sma_6h
     
-    # === 1w Indicators: Volume Spike (volume > 1.5x 20-period average) ===
-    df_1w = get_htf_data(prices, '1w')
-    vol_1w = df_1w['volume'].values
-    vol_ma_1w = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
-    volume_spike = volume > (1.5 * vol_ma_1w_aligned)
+    # === 1d Indicators: Volume Spike (volume > 1.8x 20-period average) ===
+    df_1d = get_htf_data(prices, '1d')
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    volume_spike = volume > (1.8 * vol_ma_1d_aligned)
     
-    # === 1w Indicators: ADX > 20 (trending market filter) ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === 1d Indicators: ADX > 20 (emerging trend filter) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range
-    tr1 = pd.Series(high_1w).diff()
-    tr2 = pd.Series(low_1w).diff().abs()
-    tr3 = pd.Series(close_1w).shift(1).diff().abs()
-    tr_1w = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1w = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    tr1 = pd.Series(high_1d).diff()
+    tr2 = pd.Series(low_1d).diff().abs()
+    tr3 = pd.Series(close_1d).shift(1).diff().abs()
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # Directional Movement
-    dm_plus = pd.Series(high_1w).diff()
-    dm_minus = pd.Series(low_1w).diff().abs()
+    dm_plus = pd.Series(high_1d).diff()
+    dm_minus = pd.Series(low_1d).diff().abs()
     dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
     dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
     
     # Smoothed DM and TR
     dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_smooth = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_smooth = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # Directional Indicators
     di_plus = 100 * (dm_plus_smooth / atr_smooth)
     di_minus = 100 * (dm_minus_smooth / atr_smooth)
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    strong_trend = adx_aligned > 20
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    emerging_trend = adx_aligned > 20
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -70,24 +74,25 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 34 periods needed for Williams %R + ADX)
-    warmup = 50
+    # Warmup: ensure all indicators are valid (max 50 periods needed for BB/ADX/ATR)
+    warmup = 100
     
     # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Calculate 1d ATR for stoploss
-    tr1_1d = pd.Series(high).diff()
-    tr2_1d = pd.Series(low).diff().abs()
-    tr3_1d = pd.Series(close).shift(1).diff().abs()
-    tr_1d = pd.concat([tr1_1d, tr2_1d, tr3_1d], axis=1).max(axis=1)
-    atr_1d_raw = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Calculate 6h ATR for stoploss
+    tr1_6h = pd.Series(high).diff()
+    tr2_6h = pd.Series(low).diff().abs()
+    tr3_6h = pd.Series(close).shift(1).diff().abs()
+    tr_6h = pd.concat([tr1_6h, tr2_6h, tr3_6h], axis=1).max(axis=1)
+    atr_6h_raw = pd.Series(tr_6h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(williams_r[i]) or np.isnan(volume_spike[i]) or np.isnan(strong_trend[i]) or
-            np.isnan(atr_1d_raw[i]) or not session_filter[i]):
+        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(bb_mid[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(emerging_trend[i]) or np.isnan(atr_6h_raw[i]) or
+            not session_filter[i]):
             signals[i] = 0.0
             position = 0
             continue
@@ -95,25 +100,23 @@ def generate_signals(prices):
         # Current values
         price = close[i]
         vol_spike = volume_spike[i]
-        is_strong_trend = strong_trend[i]
-        atr_val = atr_1d_raw[i]
-        wr = williams_r[i]
-        wr_prev = williams_r[i-1]
+        is_emerging_trend = emerging_trend[i]
+        atr_val = atr_6h_raw[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if Williams %R crosses above -20 (overbought)
-            if wr > -20 and wr_prev <= -20:
+            # Exit if price crosses below BB midpoint
+            if price < bb_mid[i]:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR below entry
             elif price < entry_price - 2.0 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if Williams %R crosses below -80 (oversold)
-            if wr < -80 and wr_prev >= -80:
+            # Exit if price crosses above BB midpoint
+            if price > bb_mid[i]:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR above entry
             elif price > entry_price + 2.0 * atr_val:
@@ -127,14 +130,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Williams %R crosses above -80 (oversold bounce) AND volume spike AND trending market
-            if wr > -80 and wr_prev <= -80 and vol_spike and is_strong_trend:
+            # LONG: Price breaks above upper BB AND volume spike AND emerging trend
+            if price > bb_upper[i] and vol_spike and is_emerging_trend:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: Williams %R crosses below -20 (overbought rejection) AND volume spike AND trending market
-            elif wr < -20 and wr_prev >= -20 and vol_spike and is_strong_trend:
+            # SHORT: Price breaks below lower BB AND volume spike AND emerging trend
+            elif price < bb_lower[i] and vol_spike and is_emerging_trend:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -144,6 +147,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WilliamsR_1wVolumeSpike_1wADX_V1"
-timeframe = "1d"
+name = "6h_BB20_1dVolumeSpike_1dADX_V1"
+timeframe = "6h"
 leverage = 1.0
