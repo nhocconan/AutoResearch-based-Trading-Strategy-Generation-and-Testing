@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud with Tenkan-Kijun cross and weekly Kumo filter.
-# Long when price > Kumo AND Tenkan > Kijun (bullish momentum) AND weekly Kumo is bullish (Senkou Span A > Senkou Span B).
-# Short when price < Kumo AND Tenkan < Kijun (bearish momentum) AND weekly Kumo is bearish (Senkou Span A < Senkou Span B).
-# Uses discrete position size 0.25. Ichimoku provides trend, momentum, and support/resistance in one system.
-# Weekly Kumo filter ensures alignment with higher timeframe trend structure.
-# Target: 80-160 trades over 4 years (20-40/year) to balance opportunity and fee drag.
+# Hypothesis: 12h Donchian(20) breakout with 1w ADX trend filter and volume confirmation.
+# Long when price breaks above Donchian upper AND 1w ADX > 25 AND volume > 1.5 * average volume.
+# Short when price breaks below Donchian lower AND 1w ADX > 25 AND volume > 1.5 * average volume.
+# Uses discrete position size 0.25. Donchian provides clear breakout levels, ADX filters for trending markets only.
+# Weekly ADX ensures alignment with higher timeframe trend strength to avoid false breakouts in ranging markets.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag while capturing strong trends.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,104 +18,95 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === 6h Indicators: Ichimoku Components ===
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
+    # === 12h Indicators: Donchian Channel (20-period) ===
+    period20_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    period20_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_upper = period20_high
+    donchian_lower = period20_low
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
+    # Average volume for confirmation (20-period SMA)
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (period52_high + period52_low) / 2
-    
-    # Current Kumo (Cloud) boundaries: Senkou Span A and B shifted 26 periods ahead
-    # But for price vs cloud comparison, we use current Senkou spans
-    # Kumo top = max(Senkou A, Senkou B), Kumo bottom = min(Senkou A, Senkou B)
-    kumo_top = np.maximum(senkou_a, senkou_b)
-    kumo_bottom = np.minimum(senkou_a, senkou_b)
-    
-    # Get 1w data once before loop for weekly Kumo filter
+    # Get 1w data once before loop for ADX filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 55:  # Need enough for weekly Ichimoku calculation
+    if len(df_1w) < 30:  # Need enough for ADX calculation
         return np.zeros(n)
     
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # === 1w Indicators: Weekly Ichimoku for Kumo filter ===
-    # Weekly Tenkan-sen (9-period)
-    period9_high_1w = pd.Series(high_1w).rolling(window=9, min_periods=9).max().values
-    period9_low_1w = pd.Series(low_1w).rolling(window=9, min_periods=9).min().values
-    tenkan_1w = (period9_high_1w + period9_low_1w) / 2
+    # === 1w Indicators: ADX (14-period) ===
+    # True Range
+    tr1 = pd.Series(high_1w).rolling(window=1).max().values - pd.Series(low_1w).rolling(window=1).min().values
+    tr2 = abs(pd.Series(high_1w).rolling(window=1).max().values - pd.Series(close_1w).shift(1).rolling(window=1).min().values)
+    tr3 = abs(pd.Series(low_1w).rolling(window=1).min().values - pd.Series(close_1w).shift(1).rolling(window=1).max().values)
+    tr = np.maximum.reduce([tr1, tr2, tr3])
     
-    # Weekly Kijun-sen (26-period)
-    period26_high_1w = pd.Series(high_1w).rolling(window=26, min_periods=26).max().values
-    period26_low_1w = pd.Series(low_1w).rolling(window=26, min_periods=26).min().values
-    kijun_1w = (period26_high_1w + period26_low_1w) / 2
+    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
+    up_move = pd.Series(high_1w).diff().values
+    down_move = -pd.Series(low_1w).diff().values
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Weekly Senkou Span A
-    senkou_a_1w = (tenkan_1w + kijun_1w) / 2
+    # Smoothed TR, +DM, -DM using Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    def wilders_smoothing(data, period):
+        result = np.zeros_like(data)
+        result[period-1] = np.mean(data[:period])
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    # Weekly Senkou Span B (52-period)
-    period52_high_1w = pd.Series(high_1w).rolling(window=52, min_periods=52).max().values
-    period52_low_1w = pd.Series(low_1w).rolling(window=52, min_periods=52).min().values
-    senkou_b_1w = (period52_high_1w + period52_low_1w) / 2
+    atr_1w = wilders_smoothing(tr, 14)
+    plus_dm_14 = wilders_smoothing(plus_dm, 14)
+    minus_dm_14 = wilders_smoothing(minus_dm, 14)
     
-    # Weekly Kumo is bullish when Senkou Span A > Senkou Span B
-    weekly_kumo_bullish = senkou_a_1w > senkou_b_1w
-    weekly_kumo_bearish = senkou_a_1w < senkou_b_1w
+    # +DI and -DI
+    plus_di_14 = 100 * plus_dm_14 / atr_1w
+    minus_di_14 = 100 * minus_dm_14 / atr_1w
     
-    # Align weekly Kumo filter to 6h timeframe
-    weekly_kumo_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_kumo_bullish.astype(float))
-    weekly_kumo_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_kumo_bearish.astype(float))
+    # DX and ADX
+    dx = 100 * abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
+    adx_1w = wilders_smoothing(dx, 14)
+    
+    # Align 1w ADX to 12h timeframe
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 52 periods needed)
-    warmup = 60
+    # Warmup: ensure all indicators are valid (max 20 + 14 + 14 periods for Donchian and ADX)
+    warmup = 50
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(kumo_top[i]) or np.isnan(kumo_bottom[i]) or
-            np.isnan(weekly_kumo_bullish_aligned[i]) or np.isnan(weekly_kumo_bearish_aligned[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(avg_volume[i]) or np.isnan(adx_1w_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values
-        tenkan_val = tenkan[i]
-        kijun_val = kijun[i]
         price = close[i]
-        kumo_top_val = kumo_top[i]
-        kumo_bottom_val = kumo_bottom[i]
-        wk_bullish = weekly_kumo_bullish_aligned[i] > 0.5
-        wk_bearish = weekly_kumo_bearish_aligned[i] > 0.5
+        vol = volume[i]
+        avg_vol = avg_volume[i]
+        adx_val = adx_1w_aligned[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price falls below Kumo or Tenkan < Kijun (momentum weakening)
-            if price < kumo_bottom_val or tenkan_val < kijun_val:
+            # Exit if price falls below Donchian lower (breakdown)
+            if price < donchian_lower[i]:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price rises above Kumo or Tenkan > Kijun (momentum weakening)
-            if price > kumo_top_val or tenkan_val > kijun_val:
+            # Exit if price rises above Donchian upper (breakout)
+            if price > donchian_upper[i]:
                 exit_signal = True
         
         if exit_signal:
@@ -125,13 +116,18 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price > Kumo (above cloud) AND Tenkan > Kijun (bullish momentum) AND weekly Kumo bullish
-            if price > kumo_top_val and tenkan_val > kijun_val and wk_bullish:
+            # Volume confirmation: current volume > 1.5 * average volume
+            volume_confirmed = vol > 1.5 * avg_vol
+            # ADX filter: trending market (ADX > 25)
+            trending = adx_val > 25
+            
+            # LONG: Price breaks above Donchian upper AND volume confirmed AND trending
+            if price > donchian_upper[i] and volume_confirmed and trending:
                 signals[i] = 0.25
                 position = 1
             
-            # SHORT: Price < Kumo (below cloud) AND Tenkan < Kijun (bearish momentum) AND weekly Kumo bearish
-            elif price < kumo_bottom_val and tenkan_val < kijun_val and wk_bearish:
+            # SHORT: Price breaks below Donchian lower AND volume confirmed AND trending
+            elif price < donchian_lower[i] and volume_confirmed and trending:
                 signals[i] = -0.25
                 position = -1
         
@@ -140,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_IchimokuTKCross_WeeklyKumoFilter_V1"
-timeframe = "6h"
+name = "12h_Donchian20_1wADX_VolumeFilter_V1"
+timeframe = "12h"
 leverage = 1.0
