@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator with 12h trend filter and volume confirmation
-# Long when: Alligator jaws (13-period SMA) > teeth (8-period SMA) > lips (5-period SMA) AND price > 12h EMA34 AND volume > 1.5x 20-period average volume
-# Short when: Alligator jaws < teeth < lips AND price < 12h EMA34 AND volume > 1.5x 20-period average volume
-# Williams Alligator identifies trend alignment, 12h EMA34 filters counter-trend trades, volume confirmation adds conviction
-# Designed for moderate trade frequency (target: 50-150 total trades over 4 years) to balance opportunity and cost on 6h timeframe
+# Hypothesis: 4h Donchian(40) breakout with 1d EMA50 trend filter and volume confirmation
+# Long when price breaks above Donchian(40) high AND price > 1d EMA50 AND volume > 2x 20-period average volume
+# Short when price breaks below Donchian(40) low AND price < 1d EMA50 AND volume > 2x 20-period average volume
+# ATR trailing stop (2.5x ATR) to manage risk
+# Designed for low trade frequency (target: 75-200 total trades over 4 years) to minimize fee drag on 4h timeframe
+# Donchian(40) breakouts capture longer-term trends, EMA50 filter avoids counter-trend trades, volume confirmation adds conviction
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,102 +20,116 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h EMA34 (trend filter) ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # === 1d EMA50 (trend filter) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === 6h Williams Alligator ===
-    # Jaws: 13-period SMA, shifted 8 bars forward
-    # Teeth: 8-period SMA, shifted 5 bars forward  
-    # Lips: 5-period SMA, shifted 3 bars forward
-    sma_5 = pd.Series(close).rolling(window=5, min_periods=5).mean().values
-    sma_8 = pd.Series(close).rolling(window=8, min_periods=8).mean().values
-    sma_13 = pd.Series(close).rolling(window=13, min_periods=13).mean().values
+    # === 4h Donchian(40) channels ===
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    donchian_high = pd.Series(high_4h).rolling(window=40, min_periods=40).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=40, min_periods=40).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
     
-    jaws = np.roll(sma_13, 8)  # shift forward 8 bars
-    teeth = np.roll(sma_8, 5)  # shift forward 5 bars
-    lips = np.roll(sma_5, 3)   # shift forward 3 bars
+    # === 4h Volume Spike Confirmation (20-period average) ===
+    vol_4h = df_4h['volume'].values
+    vol_ma_20 = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20)
     
-    # Fill NaN from rolling with forward values
-    for i in range(5):
-        if np.isnan(sma_5[i]):
-            sma_5[i] = close[i]
-    for i in range(8):
-        if np.isnan(sma_8[i]):
-            sma_8[i] = close[i]
-    for i in range(13):
-        if np.isnan(sma_13[i]):
-            sma_13[i] = close[i]
-            
-    # === 6h Volume Spike Confirmation (20-period average) ===
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # === 4h ATR for trailing stop (14-period) ===
+    # Need 4h high/low/close for TR calculation
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(df_4h['close'].values, 1))
+    tr3 = np.abs(low_4h - np.roll(df_4h['close'].values, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
     
     signals = np.zeros(n)
     
-    # Warmup - need enough for Alligator calculation
-    warmup = 50
+    # Warmup
+    warmup = 100
     
-    # Track position
+    # Track position and entry price for trailing stop
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_34_12h_aligned[i]) or 
-            np.isnan(jaws[i]) or
-            np.isnan(teeth[i]) or
-            np.isnan(lips[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(donchian_high_aligned[i]) or
+            np.isnan(donchian_low_aligned[i]) or
+            np.isnan(vol_ma_aligned[i]) or
+            np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        ema_34_val = ema_34_12h_aligned[i]
-        jaw_val = jaws[i]
-        tooth_val = teeth[i]
-        lip_val = lips[i]
-        vol_confirm = volume[i] > vol_ma_20[i] * 1.5  # 1.5x average volume for spike
+        ema_50_val = ema_50_1d_aligned[i]
+        donchian_high_val = donchian_high_aligned[i]
+        donchian_low_val = donchian_low_aligned[i]
+        vol_confirm = volume[i] > vol_ma_aligned[i] * 2.0  # 2x average volume for spike
+        atr_val = atr_aligned[i]
         
-        # Alligator alignment conditions
-        bullish_alignment = jaw_val > tooth_val and tooth_val > lip_val
-        bearish_alignment = jaw_val < tooth_val and tooth_val < lip_val
+        # === TRAILING STOP LOGIC ===
+        if position == 1:  # Long position
+            # Update highest price since entry
+            if price > highest_since_entry:
+                highest_since_entry = price
+            # Trail stop: exit if price drops 2.5*ATR from highest
+            if atr_val > 0 and price < highest_since_entry - 2.5 * atr_val:
+                signals[i] = 0.0
+                position = 0
+                highest_since_entry = 0.0
+                continue
+        
+        elif position == -1:  # Short position
+            # Update lowest price since entry
+            if price < lowest_since_entry or lowest_since_entry == 0:
+                lowest_since_entry = price
+            # Trail stop: exit if price rises 2.5*ATR from lowest
+            if atr_val > 0 and price > lowest_since_entry + 2.5 * atr_val:
+                signals[i] = 0.0
+                position = 0
+                lowest_since_entry = 0.0
+                continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Long when: bullish Alligator alignment AND price > 12h EMA34 AND volume spike
-            if bullish_alignment and price > ema_34_val and vol_confirm:
+            # Long when: price breaks above Donchian(40) high AND price > 1d EMA50 AND volume spike
+            if price > donchian_high_val and price > ema_50_val and vol_confirm:
                 signals[i] = 0.25
                 position = 1
+                entry_price = price
+                highest_since_entry = price
                 continue
-            # Short when: bearish Alligator alignment AND price < 12h EMA34 AND volume spike
-            elif bearish_alignment and price < ema_34_val and vol_confirm:
+            # Short when: price breaks below Donchian(40) low AND price < 1d EMA50 AND volume spike
+            elif price < donchian_low_val and price < ema_50_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
+                lowest_since_entry = price
                 continue
         
-        # === EXIT LOGIC ===
-        elif position == 1:  # Long position
-            # Exit when Alligator alignment turns bearish or price breaks below 12h EMA34
-            if not bullish_alignment or price < ema_34_val:
-                signals[i] = 0.0
-                position = 0
-                continue
-            else:
-                signals[i] = 0.25
-                
-        elif position == -1:  # Short position
-            # Exit when Alligator alignment turns bullish or price breaks above 12h EMA34
-            if not bearish_alignment or price > ema_34_val:
-                signals[i] = 0.0
-                position = 0
-                continue
-            else:
-                signals[i] = -0.25
+        # Hold current position
+        if position == 1:
+            signals[i] = 0.25
+        elif position == -1:
+            signals[i] = -0.25
+        else:
+            signals[i] = 0.0
     
     return signals
 
-name = "6h_WilliamsAlligator_12hEMA34_VolumeConfirmation"
-timeframe = "6h"
+name = "4h_Donchian40_1dEMA50_VolumeSpike2x_ATRTrail"
+timeframe = "4h"
 leverage = 1.0
