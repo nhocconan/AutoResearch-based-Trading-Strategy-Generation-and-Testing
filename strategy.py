@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and 1d volume spike confirmation.
-# Long when price breaks above 20-period 1d Donchian high AND 1w EMA50 is rising AND 1d volume > 1.5x 20-period average.
-# Short when price breaks below 20-period 1d Donchian low AND 1w EMA50 is falling AND 1d volume > 1.5x 20-period average.
-# Exit when price crosses the 10-period 1d EMA (dynamic stop/reversal).
-# Uses discrete position size 0.25. Designed to capture major breakouts in strong trending markets.
-# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag while maintaining edge.
-# Works in both bull and bear markets by requiring EMA50 trend alignment and volume confirmation.
+# Hypothesis: 12h TRIX momentum with 1d volume spike and 1d ADX regime filter.
+# Long when TRIX crosses above zero AND volume > 1.8x 20-period 1d average AND 1d ADX > 20 (trending market).
+# Short when TRIX crosses below zero AND volume > 1.8x 20-period 1d average AND 1d ADX > 20.
+# Exit when TRIX crosses zero in opposite direction or ATR-based stoploss (1.5*ATR from entry).
+# Uses discrete position size 0.25. TRIX filters noise and captures sustained momentum.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag while maintaining edge.
+# Works in both bull and bear markets by requiring volume confirmation and trend filter (ADX>20).
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,41 +21,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Indicators: Donchian Channel (20) ===
+    # === 12h Indicators: TRIX (15-period EMA of EMA of EMA of ROC) ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    
+    # Calculate ROC (Rate of Change) over 1 period
+    roc_12h = np.diff(close_12h, prepend=close_12h[0]) / close_12h * 100
+    
+    # Triple EMA: EMA1 of ROC, EMA2 of EMA1, EMA3 of EMA2
+    ema1 = pd.Series(roc_12h).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix_12h = ema3  # TRIX is the final smoothed EMA
+    
+    # Align to 12h timeframe
+    trix_12h_aligned = align_htf_to_ltf(prices, df_12h, trix_12h)
+    trix_prev_12h_aligned = align_htf_to_ltf(prices, df_12h, np.roll(trix_12h, 1))
+    trix_prev_12h_aligned[0] = trix_12h[0]  # handle first value
+    
+    # === 1d Indicators: Volume Spike (volume > 1.8x 20-period average) ===
     df_1d = get_htf_data(prices, '1d')
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    volume_spike = volume > (1.8 * vol_ma_1d_aligned)
+    
+    # === 1d Indicators: ADX > 20 (trending market filter) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Donchian high/low: 20-period rolling max/min
-    donchian_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # True Range
+    tr1 = pd.Series(high_1d).diff()
+    tr2 = pd.Series(low_1d).diff().abs()
+    tr3 = pd.Series(close_1d).shift(1).diff().abs()
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Align to 1d timeframe
-    donchian_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_1d)
-    donchian_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_1d)
+    # Directional Movement
+    dm_plus = pd.Series(high_1d).diff()
+    dm_minus = pd.Series(low_1d).diff().abs()
+    dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
+    dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
     
-    # === 1d Indicators: Volume Spike (volume > 1.5x 20-period average) ===
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    volume_spike = volume > (1.5 * vol_ma_1d_aligned)
+    # Smoothed DM and TR
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_smooth = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # === 1d Indicators: 10-period EMA for exit ===
-    ema_10_1d = pd.Series(close_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
-    ema_10_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_10_1d)
-    
-    # === 1w Indicators: EMA50 trend (rising/falling) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    # Trend: rising if current > previous, falling if current < previous
-    ema_50_1w_rising = ema_50_1w_aligned > np.roll(ema_50_1w_aligned, 1)
-    ema_50_1w_falling = ema_50_1w_aligned < np.roll(ema_50_1w_aligned, 1)
-    # Handle first value
-    ema_50_1w_rising[0] = False
-    ema_50_1w_falling[0] = False
+    # Directional Indicators
+    di_plus = 100 * (dm_plus_smooth / atr_smooth)
+    di_minus = 100 * (dm_minus_smooth / atr_smooth)
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    trending_market = adx_aligned > 20
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -63,18 +83,30 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed for EMA50)
+    # Warmup: ensure all indicators are valid (max 45 periods needed for TRIX/ADX)
     warmup = 100
     
     # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
+    # Calculate 12h ATR for stoploss
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    tr1_12h = pd.Series(high_12h).diff()
+    tr2_12h = pd.Series(low_12h).diff().abs()
+    tr3_12h = pd.Series(close_12h).shift(1).diff().abs()
+    tr_12h = pd.concat([tr1_12h, tr2_12h, tr3_12h], axis=1).max(axis=1)
+    atr_12h_raw = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h_raw)
+    
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(donchian_high_1d_aligned[i]) or np.isnan(donchian_low_1d_aligned[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(ema_10_1d_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or not session_filter[i]):
+        if (np.isnan(trix_12h_aligned[i]) or np.isnan(trix_prev_12h_aligned[i]) or np.isnan(volume_spike[i]) or
+            np.isnan(trending_market[i]) or np.isnan(atr_12h_aligned[i]) or
+            not session_filter[i]):
             signals[i] = 0.0
             position = 0
             continue
@@ -82,21 +114,26 @@ def generate_signals(prices):
         # Current values
         price = close[i]
         vol_spike = volume_spike[i]
-        ema_10_val = ema_10_1d_aligned[i]
-        is_ema50_rising = ema_50_1w_rising[i]
-        is_ema50_falling = ema_50_1w_falling[i]
+        is_trending = trending_market[i]
+        atr_val = atr_12h_aligned[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price crosses below 10-period EMA
-            if price < ema_10_val:
+            # Exit if TRIX crosses below zero
+            if trix_12h_aligned[i] < 0 and trix_prev_12h_aligned[i] >= 0:
+                exit_signal = True
+            # ATR-based stoploss: 1.5*ATR below entry
+            elif price < entry_price - 1.5 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price crosses above 10-period EMA
-            if price > ema_10_val:
+            # Exit if TRIX crosses above zero
+            if trix_12h_aligned[i] > 0 and trix_prev_12h_aligned[i] <= 0:
+                exit_signal = True
+            # ATR-based stoploss: 1.5*ATR above entry
+            elif price > entry_price + 1.5 * atr_val:
                 exit_signal = True
         
         if exit_signal:
@@ -107,14 +144,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Donchian high AND EMA50 rising AND volume spike
-            if price > donchian_high_1d_aligned[i] and is_ema50_rising and vol_spike:
+            # LONG: TRIX crosses above zero AND volume spike AND trending market
+            if trix_12h_aligned[i] > 0 and trix_prev_12h_aligned[i] <= 0 and vol_spike and is_trending:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: Price breaks below Donchian low AND EMA50 falling AND volume spike
-            elif price < donchian_low_1d_aligned[i] and is_ema50_falling and vol_spike:
+            # SHORT: TRIX crosses below zero AND volume spike AND trending market
+            elif trix_12h_aligned[i] < 0 and trix_prev_12h_aligned[i] >= 0 and vol_spike and is_trending:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -124,6 +161,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wEMA50_1dVolumeSpike_V1"
-timeframe = "1d"
+name = "12h_TRIX_1dVolumeSpike_1dADX_V1"
+timeframe = "12h"
 leverage = 1.0
