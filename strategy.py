@@ -3,9 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1d ADX > 25 for stronger trend filter.
-# Uses discrete position size 0.25. Higher ADX threshold reduces false breakouts in choppy markets.
-# Volume confirmation ensures breakouts have conviction. Target: 60-120 total trades over 4 years (15-30/year).
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1d ADX trend filter.
+# Long when price breaks above 4h Donchian upper(20) AND 1d volume > 1.5x 20-period average AND 1d ADX > 20.
+# Short when price breaks below 4h Donchian lower(20) AND 1d volume > 1.5x 20-period average AND 1d ADX > 20.
+# Exit when price returns to 4h Donchian midpoint.
+# Uses discrete position size 0.25. Volume confirmation reduces false signals, 1d ADX ensures trending regime.
+# Target: 80-160 total trades over 4 years (20-40/year) to balance opportunity and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -49,7 +52,7 @@ def generate_signals(prices):
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
-    # === 1d Indicators: ADX(14) for trend filter (stricter: >25) ===
+    # === 1d Indicators: ADX(14) for trend filter ===
     # True Range
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
@@ -114,8 +117,8 @@ def generate_signals(prices):
         # Volume filter: volume > 1.5x 20-period average (using 1d volume MA)
         vol_filter = vol > 1.5 * vol_ma_val if vol_ma_val > 0 else False
         
-        # Trend filter: 1d ADX > 25 (strong trending regime)
-        trend_filter = adx_val > 25
+        # Trend filter: 1d ADX > 20 (trending regime)
+        trend_filter = adx_val > 20
         
         # === EXIT LOGIC ===
         exit_signal = False
@@ -155,6 +158,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dVolumeSpike_1dADX25Trend_V1"
+name = "4h_Donchian20_1dVolumeSpike_1dADXTrend_V1"
 timeframe = "4h"
 leverage = 1.0
