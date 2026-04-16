@@ -1,118 +1,108 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-"""
-Hypothesis: 6h timeframe strategy using weekly pivot points (from 1w) for bias and 
-daily ATR for volatility filtering. In bull markets, price tends to stay above 
-weekly pivot; in bear markets, below. Weekly pivot provides structural support/resistance
-that works across regimes. Daily ATR filters out low-volatility chop. 
-Target: 15-30 trades/year per symbol with 0.25 position size.
-"""
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === Weekly data for pivot bias ===
+    # === 12h data (primary timeframe) ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    volume_12h = df_12h['volume'].values
+    
+    # 12h Donchian upper and lower bands (20 periods)
+    high_20_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    low_20_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donchian_upper_12h = align_htf_to_ltf(prices, df_12h, high_20_12h)
+    donchian_lower_12h = align_htf_to_ltf(prices, df_12h, low_20_12h)
+    
+    # 12h EMA20 for trend filter
+    close_12h_series = pd.Series(close_12h)
+    ema_20_12h = close_12h_series.ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
+    
+    # === 1w data (HTF for regime) ===
     df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
     
-    # Weekly pivot point (standard calculation)
-    # P = (H + L + C) / 3
-    weekly_pivot = (high_1w + low_1w + close_1w) / 3.0
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    
-    # === Daily data for volatility filter ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Daily True Range and ATR(14)
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # 1w ATR for volatility filter
+    tr1 = np.abs(high_1w - low_1w)
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr2[0] = np.inf
     tr3[0] = np.inf
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
     
-    # === 6h price action for entry timing ===
-    # Simple 6h high/low for breakout detection
-    high_6h = high
-    low_6h = low
-    
-    # Session filter: 08-20 UTC (avoid low liquidity periods)
-    hours = prices.index.hour
+    # === 1d data (HTF for volume filter) ===
+    df_1d = get_htf_data(prices, '1d')
+    volume_1d = df_1d['volume'].values
+    vol_ma_10_1d = pd.Series(volume_1d).rolling(window=10, min_periods=10).mean().values
+    vol_ratio_1d = volume_1d / (vol_ma_10_1d + 1e-10)
+    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
     signals = np.zeros(n)
     
-    # Warmup: ensure weekly pivot and daily ATR are valid
-    warmup = 50
+    # Warmup: ensure all indicators have valid data
+    warmup = 100
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(weekly_pivot_aligned[i]) or 
-            np.isnan(atr_1d_aligned[i])):
+        if (np.isnan(donchian_upper_12h[i]) or np.isnan(donchian_lower_12h[i]) or 
+            np.isnan(ema_20_12h_aligned[i]) or np.isnan(atr_1w_aligned[i]) or 
+            np.isnan(vol_ratio_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        price = close[i]
-        weekly_pivot_val = weekly_pivot_aligned[i]
-        atr_1d_val = atr_1d_aligned[i]
-        
-        # Calculate dynamic ATR threshold (adaptive to volatility regime)
-        # Use 50-period average of ATR to normalize
-        atr_ma = pd.Series(atr_1d_aligned[:i+1]).rolling(window=50, min_periods=10).mean().iloc[-1] if i >= 50 else np.mean(atr_1d_aligned[warmup:i+1])
-        atr_threshold = atr_ma * 0.5  # Only trade when ATR is above 50% of its average
-        
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price closes below weekly pivot OR volatility drops too low
-            if (price < weekly_pivot_val) or (atr_1d_val < atr_threshold):
+            # Exit when price closes below Donchian lower OR volatility too high
+            if (close[i] < donchian_lower_12h[i]) or (atr_1w_aligned[i] > np.percentile(atr_1w_aligned[:i+1], 80)):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price closes above weekly pivot OR volatility drops too low
-            if (price > weekly_pivot_val) or (atr_1d_val < atr_threshold):
+            # Exit when price closes above Donchian upper OR volatility too high
+            if (close[i] > donchian_upper_12h[i]) or (atr_1w_aligned[i] > np.percentile(atr_1w_aligned[:i+1], 80)):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Only trade during session and when volatility is sufficient
-            if in_session and (atr_1d_val >= atr_threshold):
-                # LONG: Price above weekly pivot (bullish bias)
-                if price > weekly_pivot_val:
-                    signals[i] = 0.25
-                    position = 1
-                    continue
-                
-                # SHORT: Price below weekly pivot (bearish bias)
-                elif price < weekly_pivot_val:
-                    signals[i] = -0.25
-                    position = -1
-                    continue
+            # LONG: Price breaks above Donchian upper AND above EMA20 (trend filter) 
+            # AND volume spike AND volatility not too high
+            if (close[i] > donchian_upper_12h[i]) and (close[i] > ema_20_12h_aligned[i]) and \
+               (vol_ratio_1d_aligned[i] > 1.5) and (atr_1w_aligned[i] < np.percentile(atr_1w_aligned[:i+1], 80)):
+                signals[i] = 0.25
+                position = 1
+                continue
+            
+            # SHORT: Price breaks below Donchian lower AND below EMA20 (trend filter) 
+            # AND volume spike AND volatility not too high
+            elif (close[i] < donchian_lower_12h[i]) and (close[i] < ema_20_12h_aligned[i]) and \
+                 (vol_ratio_1d_aligned[i] > 1.5) and (atr_1w_aligned[i] < np.percentile(atr_1w_aligned[:i+1], 80)):
+                signals[i] = -0.25
+                position = -1
+                continue
         
         # Hold current position
         if position == 1:
@@ -124,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_Bias_DailyATRFilter"
-timeframe = "6h"
+name = "12h_Donchian_Breakout_EMA20_Volume"
+timeframe = "12h"
 leverage = 1.0
