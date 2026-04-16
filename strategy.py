@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator + 1d EMA50 trend filter + volume confirmation
-# Alligator: Jaw (EMA13, 8-bar shift), Teeth (EMA8, 5-bar shift), Lips (EMA5, 3-bar shift)
-# Long when Lips > Teeth > Jaw (bullish alignment) AND price > 1d EMA50 AND volume > 1.5x 20-period average
-# Short when Lips < Teeth < Jaw (bearish alignment) AND price < 1d EMA50 AND volume > 1.5x 20-period average
+# Hypothesis: 12h Donchian channel breakout with 1w EMA200 trend filter and volume confirmation
+# Long when price breaks above Donchian(20) upper band AND price > 1w EMA200 AND volume > 1.5x 20-period average
+# Short when price breaks below Donchian(20) lower band AND price < 1w EMA200 AND volume > 1.5x 20-period average
 # ATR-based trailing stop (2.5x ATR) to manage risk
 # Designed for low trade frequency (target: 50-150 total trades over 4 years) to minimize fee drag
-# Alligator identifies trend absence (all lines intertwined) vs presence (aligned), effective in choppy markets
+# Donchian channels provide clear structure, EMA200 filters for major trend, volume confirms breakout strength
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,46 +20,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d EMA50 (trend filter) ===
+    # === 1w EMA200 (trend filter) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    
+    # === 1d Donchian(20) channels ===
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === 6h Williams Alligator components ===
-    # Jaw: EMA13, 8-bar shift
-    jaw = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    jaw = np.roll(jaw, 8)
-    jaw[:8] = np.nan
+    # Calculate Donchian channels
+    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Teeth: EMA8, 5-bar shift
-    teeth = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
-    teeth = np.roll(teeth, 5)
-    teeth[:5] = np.nan
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
     
-    # Lips: EMA5, 3-bar shift
-    lips = pd.Series(close).ewm(span=5, adjust=False, min_periods=5).mean().values
-    lips = np.roll(lips, 3)
-    lips[:3] = np.nan
+    # === 12h ATR for trailing stop (14-period) ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # === 6h ATR for trailing stop (14-period) ===
-    df_6h = get_htf_data(prices, '6h')
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
-    
-    tr1 = high_6h - low_6h
-    tr2 = np.abs(high_6h - np.roll(close_6h, 1))
-    tr3 = np.abs(low_6h - np.roll(close_6h, 1))
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_6h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_aligned = align_htf_to_ltf(prices, df_6h, atr_6h)
+    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
     
-    # === 6h Volume Confirmation (20-period average) ===
-    vol_ma_20 = pd.Series(df_6h['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_20)
+    # === 12h Volume Confirmation (20-period average) ===
+    vol_ma_20 = pd.Series(df_12h['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
     
     signals = np.zeros(n)
     
@@ -75,8 +71,9 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or
+        if (np.isnan(ema_200_1w_aligned[i]) or 
+            np.isnan(donchian_upper_aligned[i]) or
+            np.isnan(donchian_lower_aligned[i]) or
             np.isnan(vol_ma_aligned[i]) or
             np.isnan(atr_aligned[i])):
             signals[i] = 0.0
@@ -84,16 +81,11 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        ema_50_val = ema_50_1d_aligned[i]
-        lips_val = lips[i]
-        teeth_val = teeth[i]
-        jaw_val = jaw[i]
+        donchian_upper_val = donchian_upper_aligned[i]
+        donchian_lower_val = donchian_lower_aligned[i]
+        ema_200_val = ema_200_1w_aligned[i]
         vol_confirm = volume[i] > vol_ma_aligned[i] * 1.5  # 1.5x average volume
         atr_val = atr_aligned[i]
-        
-        # Alligator alignment conditions
-        bullish_alignment = lips_val > teeth_val and teeth_val > jaw_val
-        bearish_alignment = lips_val < teeth_val and teeth_val < jaw_val
         
         # === TRAILING STOP LOGIC ===
         if position == 1:  # Long position
@@ -118,18 +110,18 @@ def generate_signals(prices):
                 lowest_since_entry = 0.0
                 continue
         
-        # === EXIT LOGIC (Alligator alignment reversal) ===
+        # === EXIT LOGIC (Donchian channel reversal) ===
         if position == 1:  # Long position
-            # Exit when bullish alignment breaks
-            if not bullish_alignment:
+            # Exit when price crosses below Donchian lower band
+            if price < donchian_lower_val:
                 signals[i] = 0.0
                 position = 0
                 highest_since_entry = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when bearish alignment breaks
-            if not bearish_alignment:
+            # Exit when price crosses above Donchian upper band
+            if price > donchian_upper_val:
                 signals[i] = 0.0
                 position = 0
                 lowest_since_entry = 0.0
@@ -137,15 +129,15 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Long when: Bullish Alligator alignment AND price > 1d EMA50 AND volume confirmation
-            if bullish_alignment and price > ema_50_val and vol_confirm:
+            # Long when: price > Donchian upper AND price > 1w EMA200 AND volume confirmation
+            if price > donchian_upper_val and price > ema_200_val and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 highest_since_entry = price
                 continue
-            # Short when: Bearish Alligator alignment AND price < 1d EMA50 AND volume confirmation
-            elif bearish_alignment and price < ema_50_val and vol_confirm:
+            # Short when: price < Donchian lower AND price < 1w EMA200 AND volume confirmation
+            elif price < donchian_lower_val and price < ema_200_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -162,6 +154,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsAlligator_1dEMA50_VolumeConfirm_ATRTrail"
-timeframe = "6h"
+name = "12h_Donchian20_1wEMA200_VolumeConfirm_ATRTrail"
+timeframe = "12h"
 leverage = 1.0
