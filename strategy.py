@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Bollinger Band breakout with 12h volume spike and 1d ADX regime filter
-# Long when price > BB upper band AND 12h volume > 2.0x 20-period volume SMA AND 1d ADX < 25 (range)
-# Short when price < BB lower band AND 12h volume > 2.0x 20-period volume SMA AND 1d ADX < 25 (range)
-# Exit on price returning to BB middle band or ATR stoploss (2.0 ATR)
+# Hypothesis: 4h Camarilla R3/S3 breakout with 12h volume spike and 1d ADX regime filter
+# Long when price > Camarilla R3 AND 12h volume > 1.8x 20-period volume SMA AND 1d ADX < 25 (range)
+# Short when price < Camarilla S3 AND 12h volume > 1.8x 20-period volume SMA AND 1d ADX < 25 (range)
+# Exit on price returning to Camarilla Pivot point or ATR stoploss (2.0 ATR)
 # Uses discrete position sizing (0.25) to limit fee drag
-# Bollinger Bands provide dynamic structure; volume filter reduces false breakouts
-# ADX < 25 ensures we only trade in ranging markets where mean reversion at band edges works
+# Camarilla levels provide precise intraday support/resistance; volume filter confirms breakout strength
+# ADX < 25 ensures we only trade in ranging markets where mean reversion at pivot levels works
 # Target: 75-200 total trades over 4 years (19-50/year)
 
 def generate_signals(prices):
@@ -31,7 +31,7 @@ def generate_signals(prices):
     if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Get 1d data once before loop for ADX regime filter
+    # Get 1d data once before loop for Camarilla levels and ADX regime filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -41,11 +41,32 @@ def generate_signals(prices):
     vol_sma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
     vol_sma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_sma_20_12h)
     
-    # === 1d Indicator: ADX (14-period) for regime filter ===
+    # === 1d Indicator: Camarilla levels (based on previous day) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
+    # Calculate Camarilla levels for each day (using previous day's OHLC)
+    camarilla_r3 = np.full(len(close_1d), np.nan)
+    camarilla_s3 = np.full(len(close_1d), np.nan)
+    camarilla_pivot = np.full(len(close_1d), np.nan)
+    
+    for i in range(1, len(close_1d)):
+        # Use previous day's OHLC to calculate today's levels
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        
+        camarilla_pivot[i] = (prev_high + prev_low + prev_close) / 3.0
+        camarilla_r3[i] = camarilla_pivot[i] + 1.1 * (prev_high - prev_low) / 4.0
+        camarilla_s3[i] = camarilla_pivot[i] - 1.1 * (prev_high - prev_low) / 4.0
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    
+    # === 1d Indicator: ADX (14-period) for regime filter ===
     # True Range
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
@@ -74,13 +95,6 @@ def generate_signals(prices):
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # === 4h Indicator: Bollinger Bands (20, 2) ===
-    close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2.0 * bb_std
-    bb_lower = bb_middle - 2.0 * bb_std
-    
     # ATR for stoploss (14-period)
     tr1 = high - low
     tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
@@ -91,7 +105,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(30, 20, 28)  # 12h vol SMA, Bollinger Bands, 1d ADX need ~30 bars
+    warmup = max(30, 20, 28)  # 12h vol SMA, Camarilla levels, 1d ADX need ~30 bars
     
     # Track position state for exits
     position = 0  # 0: flat, 1: long, -1: short
@@ -106,8 +120,8 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
-            np.isnan(bb_middle[i]) or np.isnan(vol_sma_20_12h_aligned[i]) or 
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(vol_sma_20_12h_aligned[i]) or 
             np.isnan(adx_1d_aligned[i]) or np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
@@ -118,8 +132,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 12h volume > 2.0x 20-period 12h volume SMA
-        vol_threshold = vol_sma_20_12h_aligned[i] * 2.0
+        # Volume filter: current 12h volume > 1.8x 20-period 12h volume SMA
+        vol_threshold = vol_sma_20_12h_aligned[i] * 1.8
         vol_confirm = vol_12h_aligned[i] > vol_threshold
         
         # Regime filter: 1d ADX < 25 (ranging market)
@@ -127,19 +141,19 @@ def generate_signals(prices):
         
         # Price levels
         price = close[i]
-        upper = bb_upper[i]
-        lower = bb_lower[i]
-        middle = bb_middle[i]
+        r3 = camarilla_r3_aligned[i]
+        s3 = camarilla_s3_aligned[i]
+        pivot = camarilla_pivot_aligned[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         if position == 1:  # long position
-            # Exit on price returning to middle band or ATR stoploss
-            if price <= middle or price <= entry_price - 2.0 * atr_14[i]:
+            # Exit on price returning to pivot or ATR stoploss
+            if price <= pivot or price <= entry_price - 2.0 * atr_14[i]:
                 exit_signal = True
         elif position == -1:  # short position
-            # Exit on price returning to middle band or ATR stoploss
-            if price >= middle or price >= entry_price + 2.0 * atr_14[i]:
+            # Exit on price returning to pivot or ATR stoploss
+            if price >= pivot or price >= entry_price + 2.0 * atr_14[i]:
                 exit_signal = True
         
         if exit_signal:
@@ -151,15 +165,15 @@ def generate_signals(prices):
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
             # LONG CONDITIONS
-            # Price > BB upper band AND volume confirmation AND ranging market
-            if price > upper and vol_confirm and range_filter:
+            # Price > Camarilla R3 AND volume confirmation AND ranging market
+            if price > r3 and vol_confirm and range_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
             # SHORT CONDITIONS
-            # Price < BB lower band AND volume confirmation AND ranging market
-            elif price < lower and vol_confirm and range_filter:
+            # Price < Camarilla S3 AND volume confirmation AND ranging market
+            elif price < s3 and vol_confirm and range_filter:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -169,6 +183,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_BB20_12hVolSpike2.0x_1dADX_Range_v1"
+name = "4h_Camarilla_R3S3_12hVolSpike1.8x_1dADX_Range_v1"
 timeframe = "4h"
 leverage = 1.0
