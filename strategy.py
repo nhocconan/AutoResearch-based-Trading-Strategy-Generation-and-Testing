@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ADX(14) trend filter and volume confirmation.
+# Hypothesis: 12h Donchian(20) breakout with 1d ADX(14) trend filter and volume confirmation.
 # Long when price breaks above Donchian upper AND 1d ADX > 25 (trending) AND volume > 1.5x 20-period average.
 # Short when price breaks below Donchian lower AND 1d ADX > 25 (trending) AND volume > 1.5x 20-period average.
 # Exit when price crosses Donchian middle (20-period average of high/low) OR volume drops below average.
 # Uses discrete position size 0.25. Designed to capture strong trends in both bull and bear markets.
-# Target: 100-200 trades over 4 years (25-50/year) to balance opportunity and fee drag.
+# Target: 50-150 trades over 4 years (12-37/year) to balance opportunity and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,14 +20,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Indicators: Donchian Channel (20) ===
+    # === 12h Indicators: Donchian Channel (20) ===
     high_ma = pd.Series(high).rolling(window=20, min_periods=20).max()
     low_ma = pd.Series(low).rolling(window=20, min_periods=20).min()
     upper = high_ma.values
     lower = low_ma.values
     middle = ((upper + lower) / 2)
     
-    # === 4h Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    # === 12h Indicators: Volume Spike (volume > 1.5x 20-period average) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
@@ -67,7 +67,7 @@ def generate_signals(prices):
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     adx_values = adx.values
     
-    # Align 1d ADX to 4h timeframe
+    # Align 1d ADX to 12h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
     
     signals = np.zeros(n)
@@ -126,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dADX25_VolumeSpike_V1"
-timeframe = "4h"
+name = "12h_Donchian20_1dADX25_VolumeSpike_V1"
+timeframe = "12h"
 leverage = 1.0
