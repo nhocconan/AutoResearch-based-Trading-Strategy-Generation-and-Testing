@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1h chop filter.
-# Long when price breaks above Donchian upper AND 1d volume > 2.0x 20-period average AND 1h chop > 61.8 (range market).
-# Short when price breaks below Donchian lower AND 1d volume > 2.0x 20-period average AND 1h chop > 61.8.
+# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction and 1d volume confirmation.
+# Long when price breaks above Donchian upper AND price > weekly pivot (bullish bias) AND volume > 1.2x 20-period 1d average.
+# Short when price breaks below Donchian lower AND price < weekly pivot (bearish bias) AND volume > 1.2x 20-period 1d average.
 # Exit when price crosses Donchian midpoint (upper+lower)/2.
-# Uses discrete position size 0.25. Designed to capture mean-reversion breakouts in ranging markets (both bull and bear).
-# Target: 100-150 total trades over 4 years (25-38/year) to minimize fee drag while maintaining edge.
+# Uses discrete position size 0.25. Designed to capture breakouts aligned with weekly structure.
+# Target: 60-120 total trades over 4 years (15-30/year) to minimize fee drag while maintaining edge.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,51 +20,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Indicators: Donchian Channel (20-period) ===
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # === 6h Indicators: Donchian Channel (20-period) ===
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    donchian_upper = highest_high
+    donchian_lower = lowest_low
     donchian_mid = (donchian_upper + donchian_lower) / 2
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid)
     
-    # === 1d Indicators: Volume Spike (volume > 2.0x 20-period average) ===
+    # === 1d Indicators: Volume Confirmation (volume > 1.2x 20-period average) ===
     df_1d = get_htf_data(prices, '1d')
     vol_1d = df_1d['volume'].values
     vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    volume_spike = volume > (2.0 * vol_ma_1d_aligned)
+    volume_spike = volume > (1.2 * vol_ma_1d_aligned)
     
-    # === 1h Indicators: Chopiness Index (14-period) ===
-    tr1 = pd.Series(high).diff()
-    tr2 = pd.Series(low).diff().abs()
-    tr3 = pd.Series(close).shift(1).diff().abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
-    chop = np.where((highest_high - lowest_low) == 0, 50, chop)  # avoid division by zero
+    # === 1w Indicators: Weekly Pivot (directional bias) ===
+    df_1w = get_htf_data(prices, '1w')
+    # Weekly pivot = (weekly high + weekly low + weekly close) / 3
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
     
-    # Session filter: 08-20 UTC
+    # Session filter: 08-20 UTC (avoid low-volume Asian session)
     hours = prices.index.hour
     session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed)
-    warmup = 100
+    # Warmup: ensure all indicators are valid (max 20 periods for Donchian/volume MA)
+    warmup = 50
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
-            np.isnan(donchian_mid_aligned[i]) or np.isnan(volume_spike[i]) or np.isnan(chop[i]) or
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(donchian_mid[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(weekly_pivot_aligned[i]) or
             not session_filter[i]):
             signals[i] = 0.0
             position = 0
@@ -73,19 +68,19 @@ def generate_signals(prices):
         # Current values
         price = close[i]
         vol_spike = volume_spike[i]
-        chop_value = chop[i]
+        weekly_pivot_val = weekly_pivot_aligned[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price crosses below midpoint
-            if price < donchian_mid_aligned[i]:
+            # Exit if price crosses below Donchian midpoint
+            if price < donchian_mid[i]:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price crosses above midpoint
-            if price > donchian_mid_aligned[i]:
+            # Exit if price crosses above Donchian midpoint
+            if price > donchian_mid[i]:
                 exit_signal = True
         
         if exit_signal:
@@ -95,13 +90,13 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Donchian upper AND volume spike AND chop > 61.8 (range)
-            if price > donchian_upper_aligned[i] and vol_spike and chop_value > 61.8:
+            # LONG: Price breaks above Donchian upper AND price > weekly pivot (bullish bias) AND volume spike
+            if price > donchian_upper[i] and price > weekly_pivot_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
             
-            # SHORT: Price breaks below Donchian lower AND volume spike AND chop > 61.8 (range)
-            elif price < donchian_lower_aligned[i] and vol_spike and chop_value > 61.8:
+            # SHORT: Price breaks below Donchian lower AND price < weekly pivot (bearish bias) AND volume spike
+            elif price < donchian_lower[i] and price < weekly_pivot_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
@@ -110,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dVolumeSpike_1hChop_V1"
-timeframe = "4h"
+name = "6h_Donchian20_WeeklyPivot_VolumeSpike_V1"
+timeframe = "6h"
 leverage = 1.0
