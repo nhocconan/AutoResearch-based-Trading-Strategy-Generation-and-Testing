@@ -13,20 +13,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h data (primary) ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    volume_4h = df_4h['volume'].values
-    
-    # === 12h data (HTF for trend filter) ===
+    # === 12h data (primary) ===
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
+    volume_12h = df_12h['volume'].values
     
-    # === 1d data (HTF for volatility filter) ===
+    # === 1d data (HTF for trend filter) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
@@ -45,9 +39,9 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # === 4h Donchian channel (20-period) ===
-    donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # === 12h Donchian channel (20-period) ===
+    donch_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
     # Shift by 1 to avoid look-ahead (use previous bar's channel)
     donch_high = np.roll(donch_high, 1)
@@ -55,9 +49,9 @@ def generate_signals(prices):
     donch_high[0] = np.nan
     donch_low[0] = np.nan
     
-    # === 4h volume ratio for confirmation ===
-    vol_ma_10_4h = pd.Series(volume_4h).rolling(window=10, min_periods=10).mean().values
-    vol_ratio_4h = volume_4h / vol_ma_10_4h
+    # === 12h volume ratio for confirmation ===
+    vol_ma_10_12h = pd.Series(volume_12h).rolling(window=10, min_periods=10).mean().values
+    vol_ratio_12h = volume_12h / vol_ma_10_12h
     
     signals = np.zeros(n)
     
@@ -74,7 +68,7 @@ def generate_signals(prices):
             np.isnan(donch_low[i]) or 
             np.isnan(ema_34_12h_aligned[i]) or 
             np.isnan(atr_14_1d_aligned[i]) or
-            np.isnan(vol_ratio_4h[i])):
+            np.isnan(vol_ratio_12h[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -84,7 +78,7 @@ def generate_signals(prices):
         lower = donch_low[i]
         ema_trend = ema_34_12h_aligned[i]
         atr = atr_14_1d_aligned[i]
-        vol_ratio = vol_ratio_4h[i]
+        vol_ratio = vol_ratio_12h[i]
         
         # === STOPLOSS LOGIC ===
         if position == 1:  # Long position
@@ -149,6 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_12hEMA34_Volume_VolatilityFilter"
-timeframe = "4h"
+name = "12h_Donchian_1dEMA34_Volume_VolatilityFilter"
+timeframe = "12h"
 leverage = 1.0
