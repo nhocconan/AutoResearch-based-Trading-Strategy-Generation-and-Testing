@@ -3,100 +3,120 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w Williams Alligator (Jaw/Teeth/Lips) with 1d EMA50 trend filter.
-# Long when Lips > Teeth > Jaw (bullish alignment) AND close > EMA50 (uptrend).
-# Short when Lips < Teeth < Jaw (bearish alignment) AND close < EMA50 (downtrend).
-# Exit when Alligator alignment breaks or price crosses EMA50.
-# Uses discrete position size 0.25. Alligator identifies trend phases; EMA50 filters counter-trend noise.
-# 1d timeframe targets 30-100 total trades over 4 years (7-25/year) to minimize fee drag.
-# Works in bull markets (capture uptrends) and bear markets (capture downtrends) by trading with Alligator alignment.
+# Hypothesis: 6h strategy using 12h Supertrend for trend direction and 1d Williams %R for mean-reversion entries.
+# Long when 12h Supertrend is bullish AND 1d Williams %R < -80 (oversold).
+# Short when 12h Supertrend is bearish AND 1d Williams %R > -20 (overbought).
+# Exit when Supertrend flips or Williams %R reverts to neutral (-50).
+# Uses discrete position size 0.25. Combines trend-following (Supertrend) with mean-reversion (Williams %R)
+# to capture trend-aligned pullbacks in both bull and bear markets. 6h timeframe targets 50-150 total trades.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 1w data once before loop for Williams Alligator (SMMA13, SMMA8, SMMA5)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 12h data once before loop for Supertrend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Get 1d data once before loop for EMA50 trend filter
+    # Get 1d data once before loop for Williams %R
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 55:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === 1w Indicators: Williams Alligator (using SMMA) ===
-    # Jaw: SMMA of close, period 13
-    # Teeth: SMMA of close, period 8
-    # Lips: SMMA of close, period 5
-    def smma(values, period):
-        """Smoothed Moving Average"""
-        if len(values) < period:
-            return np.full_like(values, np.nan, dtype=float)
-        result = np.full_like(values, np.nan, dtype=float)
-        # First value is SMA
-        result[period-1] = np.mean(values[:period])
-        # Subsequent values: SMMA = (Prev_SMMA*(period-1) + Current_Close) / period
-        for i in range(period, len(values)):
-            result[i] = (result[i-1] * (period-1) + values[i]) / period
-        return result
+    # === 12h Indicators: Supertrend (ATR=10, mult=3.0) ===
+    # ATR calculation
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.concatenate([[np.max([high_12h[0] - low_12h[0], np.abs(high_12h[0] - close_12h[0]), np.abs(low_12h[0] - close_12h[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    jaw_1w = smma(close_1w, 13)
-    teeth_1w = smma(close_1w, 8)
-    lips_1w = smma(close_1w, 5)
+    # Supertrend bands
+    hl2 = (high_12h + low_12h) / 2
+    upper_band = hl2 + (3.0 * atr)
+    lower_band = hl2 - (3.0 * atr)
     
-    # === 1d Indicators: EMA50 for trend filter ===
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Supertrend logic
+    supertrend = np.zeros(len(close_12h))
+    direction = np.ones(len(close_12h))  # 1 for uptrend, -1 for downtrend
     
-    # Align all indicators to primary timeframe (1d)
-    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw_1w)
-    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth_1w)
-    lips_aligned = align_htf_to_ltf(prices, df_1w, lips_1w)
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    supertrend[0] = upper_band[0]
+    direction[0] = 1
+    
+    for i in range(1, len(close_12h)):
+        if close_12h[i] > supertrend[i-1]:
+            direction[i] = 1
+        else:
+            direction[i] = -1
+        
+        if direction[i] == 1:
+            supertrend[i] = max(lower_band[i], supertrend[i-1])
+        else:
+            supertrend[i] = min(upper_band[i], supertrend[i-1])
+        
+        # Recalculate if needed
+        if direction[i] > 0 and supertrend[i] < supertrend[i-1]:
+            supertrend[i] = supertrend[i-1]
+        if direction[i] < 0 and supertrend[i] > supertrend[i-1]:
+            supertrend[i] = supertrend[i-1]
+    
+    # === 1d Indicators: Williams %R (14-period) ===
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    
+    # Align all indicators to primary timeframe (6h)
+    supertrend_aligned = align_htf_to_ltf(prices, df_12h, supertrend)
+    direction_aligned = align_htf_to_ltf(prices, df_12h, direction)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 60  # EMA50 needs sufficient warmup
+    warmup = 30  # Williams %R needs sufficient warmup
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(ema50_aligned[i])):
+        if (np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i]) or 
+            np.isnan(williams_r_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values (aligned)
-        jaw = jaw_aligned[i]
-        teeth = teeth_aligned[i]
-        lips = lips_aligned[i]
-        ema50 = ema50_aligned[i]
+        supertrend_val = supertrend_aligned[i]
+        direction_val = direction_aligned[i]
+        williams_r_val = williams_r_aligned[i]
         price = close[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit when Alligator alignment breaks bullish (Lips <= Teeth or Teeth <= Jaw) OR price < EMA50 (trend break)
-            if (lips <= teeth) or (teeth <= jaw) or (price < ema50):
+            # Exit when Supertrend turns bearish OR Williams %R > -50 (exits oversold)
+            if (direction_val == -1) or (williams_r_val > -50):
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit when Alligator alignment breaks bearish (Lips >= Teeth or Teeth >= Jaw) OR price > EMA50 (trend break)
-            if (lips >= teeth) or (teeth >= jaw) or (price > ema50):
+            # Exit when Supertrend turns bullish OR Williams %R < -50 (exits overbought)
+            if (direction_val == 1) or (williams_r_val < -50):
                 exit_signal = True
         
         if exit_signal:
@@ -106,13 +126,13 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Bullish alignment (Lips > Teeth > Jaw) AND price > EMA50 (uptrend)
-            if (lips > teeth) and (teeth > jaw) and (price > ema50):
+            # LONG: Supertrend bullish (direction=1) AND Williams %R < -80 (oversold)
+            if (direction_val == 1) and (williams_r_val < -80):
                 signals[i] = 0.25
                 position = 1
             
-            # SHORT: Bearish alignment (Lips < Teeth < Jaw) AND price < EMA50 (downtrend)
-            elif (lips < teeth) and (teeth < jaw) and (price < ema50):
+            # SHORT: Supertrend bearish (direction=-1) AND Williams %R > -20 (overbought)
+            elif (direction_val == -1) and (williams_r_val > -20):
                 signals[i] = -0.25
                 position = -1
         
@@ -121,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1wWilliamsAlligator_1dEMA50_TrendFilter_V1"
-timeframe = "1d"
+name = "6h_12hSupertrend_1dWilliamsR_MeanReversion_V1"
+timeframe = "6h"
 leverage = 1.0
