@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,93 +13,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h data (HTF for key levels) ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # === Daily data (HTF for key levels) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === Previous 12h Values for Pivot Calculation ===
-    prev_close_12h = np.roll(close_12h, 1)
-    prev_high_12h = np.roll(high_12h, 1)
-    prev_low_12h = np.roll(low_12h, 1)
-    # First period uses current period values (no look-ahead)
-    prev_close_12h[0] = close_12h[0]
-    prev_high_12h[0] = high_12h[0]
-    prev_low_12h[0] = low_12h[0]
+    # === Previous Day Values for Pivot Calculation ===
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    # First day uses current day values (no look-ahead)
+    prev_close_1d[0] = close_1d[0]
+    prev_high_1d[0] = high_1d[0]
+    prev_low_1d[0] = low_1d[0]
     
-    # === 12h Pivot Points ===
-    pivot_point_12h = (prev_high_12h + prev_low_12h + prev_close_12h) / 3
-    prev_range_12h = prev_high_12h - prev_low_12h
+    # === Daily Pivot Points (Standard) ===
+    pivot_point = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
     
-    # === R1 and S1 Levels (Standard Pivot) ===
-    r1_12h = pivot_point_12h + prev_range_12h * 0.382  # Fibonacci 0.382
-    s1_12h = pivot_point_12h - prev_range_12h * 0.382
+    # Calculate Fibonacci-based levels: R1 at 0.382, S1 at 0.382
+    prev_range = prev_high_1d - prev_low_1d
+    r1 = pivot_point + prev_range * 0.382
+    s1 = pivot_point - prev_range * 0.382
     
-    # === R2 and S2 Levels (Exit) ===
-    r2_12h = pivot_point_12h + prev_range_12h * 0.618  # Fibonacci 0.618
-    s2_12h = pivot_point_12h - prev_range_12h * 0.618
+    # === Additional levels for exit: R2 at 0.618, S2 at 0.618 ===
+    r2 = pivot_point + prev_range * 0.618
+    s2 = pivot_point - prev_range * 0.618
     
-    # === 12h ADX Trend Filter ===
-    # True Range
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_12h[0] = high_12h[0] - low_12h[0]
+    # Align all levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    
+    # === ADX Trend Filter (Daily) ===
+    # Calculate True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # First TR uses high-low only (no look-ahead)
+    tr[0] = high_1d[0] - low_1d[0]
     
     # Directional Movement
-    dm_plus_12h = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h),
-                           np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
-    dm_minus_12h = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)),
-                            np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
-    dm_plus_12h[0] = 0
-    dm_minus_12h[0] = 0
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    # First period DM is zero (no look-ahead)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Wilder's smoothing
+    # Smooth with Wilder's smoothing (equivalent to EMA with alpha=1/period)
     def wilders_smooth(data, period):
         result = np.full_like(data, np.nan)
         if len(data) >= period:
+            # First value is simple average
             result[period-1] = np.mean(data[:period])
+            # Subsequent values: Wilder's smoothing
             for i in range(period, len(data)):
                 result[i] = (result[i-1] * (period-1) + data[i]) / period
         return result
     
     period = 14
-    tr14_12h = wilders_smooth(tr_12h, period)
-    dm_plus14_12h = wilders_smooth(dm_plus_12h, period)
-    dm_minus14_12h = wilders_smooth(dm_minus_12h, period)
+    tr14 = wilders_smooth(tr, period)
+    dm_plus14 = wilders_smooth(dm_plus, period)
+    dm_minus14 = wilders_smooth(dm_minus, period)
     
     # Avoid division by zero
-    dm_plus14_12h_safe = np.where(tr14_12h == 0, 1, dm_plus14_12h)
-    dm_minus14_12h_safe = np.where(tr14_12h == 0, 1, dm_minus14_12h)
-    tr14_12h_safe = np.where(tr14_12h == 0, 1, tr14_12h)
+    dm_plus14_safe = np.where(tr14 == 0, 1, dm_plus14)
+    dm_minus14_safe = np.where(tr14 == 0, 1, dm_minus14)
+    tr14_safe = np.where(tr14 == 0, 1, tr14)
     
-    di_plus_12h = 100 * dm_plus14_12h / tr14_12h_safe
-    di_minus_12h = 100 * dm_minus14_12h / tr14_12h_safe
-    dx_12h = 100 * np.abs(di_plus_12h - di_minus_12h) / (di_plus_12h + di_minus_12h)
-    adx_12h = wilders_smooth(dx_12h, period)
+    di_plus = 100 * dm_plus14 / tr14_safe
+    di_minus = 100 * dm_minus14 / tr14_safe
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    # First DX value may be NaN if di_plus+di_minus=0
+    adx = wilders_smooth(dx, period)
     
-    # Align 12h indicators to 6h timeframe
-    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
-    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
-    r2_12h_aligned = align_htf_to_ltf(prices, df_12h, r2_12h)
-    s2_12h_aligned = align_htf_to_ltf(prices, df_12h, s2_12h)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    # Align ADX to 4h
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # === Volume Confirmation (6h) ===
+    # === Volume Confirmation (4h) ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma_20
     
-    # === ATR for dynamic stop (6h) ===
-    tr_6h = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr_6h[0] = high[0] - low[0]
-    atr_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
+    # === ATR for dynamic stop (4h) ===
+    tr_4h = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr_4h[0] = high[0] - low[0]
+    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     
     # Warmup: enough for ADX calculation (14+14+14=42) plus buffer
-    warmup = 60
+    warmup = 50
     
     # Track position and entry price for stop management
     position = 0  # 0: flat, 1: long, -1: short
@@ -107,22 +114,21 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or 
-            np.isnan(r2_12h_aligned[i]) or np.isnan(s2_12h_aligned[i]) or 
-            np.isnan(adx_12h_aligned[i]) or np.isnan(vol_ratio[i]) or 
-            np.isnan(atr_6h[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ratio[i]) or 
+            np.isnan(atr_4h[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        r1_val = r1_12h_aligned[i]
-        s1_val = s1_12h_aligned[i]
-        r2_val = r2_12h_aligned[i]
-        s2_val = s2_12h_aligned[i]
-        adx_val = adx_12h_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        r2_val = r2_aligned[i]
+        s2_val = s2_aligned[i]
+        adx_val = adx_aligned[i]
         vol_ratio_val = vol_ratio[i]
-        atr_val = atr_6h[i]
+        atr_val = atr_4h[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
@@ -167,6 +173,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_FibPivot_R1_S1_Volume_ADX_Filter"
-timeframe = "6h"
+name = "4h_FibPivot_Volume_ADX_Filter"
+timeframe = "4h"
 leverage = 1.0
