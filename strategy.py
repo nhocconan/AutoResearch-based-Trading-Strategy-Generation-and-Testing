@@ -1,14 +1,14 @@
-# This strategy uses a 4h Bollinger Squeeze with 1d RSI momentum and volume confirmation.
-# In low volatility (Bollinger Band Width < 20th percentile), we look for RSI(14) extremes on the daily timeframe.
-# Long when RSI < 30 (oversold) and price breaks above the Bollinger middle band with volume.
-# Short when RSI > 70 (overbought) and price breaks below the Bollinger middle band with volume.
-# Position size 0.25 to manage drawdown. Designed to capture mean reversion after volatility contractions
-# in both bull and bear markets, avoiding whipsaw in high volatility periods.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 4h VWAP deviation with 1d ATR filter for mean reversion in range-bound markets.
+# In ranging markets (ADX < 20), price tends to revert to VWAP with oversold/overbought conditions.
+# Uses 4h VWAP deviation (price/VWAP - 1) and 1d ATR to set dynamic entry/exit zones.
+# Long when price < VWAP - 1.5*ATR(1d) and short when price > VWAP + 1.5*ATR(1d).
+# Volume confirmation (>1.3x average) required. Position size 0.25.
+# Works in both bull and bear by adapting to volatility and mean reversion in ranges.
 
 def generate_signals(prices):
     n = len(prices)
@@ -27,44 +27,48 @@ def generate_signals(prices):
     low_4h = df_4h['low'].values
     volume_4h = df_4h['volume'].values
     
-    # === 1d data (higher timeframe for RSI) ===
+    # === 1d data (higher timeframe for ATR) ===
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === 4h Bollinger Bands (20, 2) ===
-    bb_period = 20
-    bb_std = 2
-    sma_bb = pd.Series(close_4h).rolling(window=bb_period, min_periods=bb_period).mean()
-    std_bb = pd.Series(close_4h).rolling(window=bb_period, min_periods=bb_period).std()
-    bb_upper = sma_bb + (std_bb * bb_std)
-    bb_lower = sma_bb - (std_bb * bb_std)
-    bb_middle = sma_bb  # same as SMA
-    bb_width = bb_upper - bb_lower
+    # === 4h VWAP calculation ===
+    typical_price_4h = (high_4h + low_4h + close_4h) / 3
+    vwap_num = (typical_price_4h * volume_4h).cumsum()
+    vwap_den = volume_4h.cumsum()
+    vwap_4h = vwap_num / vwap_den
+    vwap_deviation = (close_4h / vwap_4h) - 1  # Positive = above VWAP
     
-    # Bollinger Band Width percentile (20) for squeeze detection
-    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=50).rank(pct=True) * 100
-    squeeze = bb_width_percentile < 20  # True when BBW in lowest 20%
+    # === 1d ATR(14) for volatility scaling ===
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = 0
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # === 1d RSI(14) ===
-    rsi_period = 14
-    delta = pd.Series(close_1d).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    avg_loss = loss.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # === 4h ADX(14) for regime detection (trending vs ranging) ===
+    # +DM, -DM, TR
+    up_move = high_4h - np.roll(high_4h, 1)
+    down_move = np.roll(low_4h, 1) - low_4h
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum()
+    plus_di_14 = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean() / tr_14
+    minus_di_14 = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean() / tr_14
+    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean()
+    adx_values = adx.values
     
     # === 4h volume ratio for confirmation ===
     vol_ma_10_4h = pd.Series(volume_4h).rolling(window=10, min_periods=10).mean().values
     vol_ratio_4h = volume_4h / vol_ma_10_4h
     
-    # Align all indicators to 4h timeframe
-    squeeze_aligned = align_htf_to_ltf(prices, df_4h, squeeze.values.astype(float))
-    bb_middle_aligned = align_htf_to_ltf(prices, df_4h, bb_middle.values)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_4h, vol_ratio_4h)
+    # Align all indicators to lower timeframe
+    vwap_dev_aligned = align_htf_to_ltf(prices, df_4h, vwap_deviation)
+    adx_aligned = align_htf_to_ltf(prices, df_4h, adx_values)
     
     signals = np.zeros(n)
     
@@ -77,30 +81,32 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(squeeze_aligned[i]) or 
-            np.isnan(bb_middle_aligned[i]) or
-            np.isnan(rsi_aligned[i]) or
-            np.isnan(vol_ratio_aligned[i])):
+        if (np.isnan(vwap_dev_aligned[i]) or 
+            np.isnan(atr_14_1d_aligned[i]) or
+            np.isnan(adx_aligned[i]) or
+            np.isnan(vol_ratio_4h[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        is_squeeze = squeeze_aligned[i] > 0.5  # True if in squeeze
-        bb_mid = bb_middle_aligned[i]
-        rsi_val = rsi_aligned[i]
-        vol_ratio = vol_ratio_aligned[i]
+        vwap_dev = vwap_dev_aligned[i]
+        atr = atr_14_1d_aligned[i]
+        adx_val = adx_aligned[i]
+        vol_ratio = vol_ratio_4h[i]
         
-        # === STOPLOSS LOGIC (fixed 4% stop) ===
+        # === STOPLOSS LOGIC ===
         if position == 1:  # Long position
-            if price < entry_price * 0.96:  # 4% stop loss
+            # Stop loss: price closes below entry - 2.0 * ATR
+            if price < entry_price - 2.0 * atr:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            if price > entry_price * 1.04:  # 4% stop loss
+            # Stop loss: price closes above entry + 2.0 * ATR
+            if price > entry_price + 2.0 * atr:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -108,36 +114,35 @@ def generate_signals(prices):
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price crosses below BB middle or RSI > 60
-            if price < bb_mid or rsi_val > 60:
+            # Exit when price returns to VWAP or ADX indicates strong trend
+            if vwap_dev >= -0.02 or adx_val > 25:  # Near VWAP or strong trend
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price crosses above BB middle or RSI < 40
-            if price > bb_mid or rsi_val < 40:
+            # Exit when price returns to VWAP or ADX indicates strong trend
+            if vwap_dev <= 0.02 or adx_val > 25:  # Near VWAP or strong trend
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
-        # === ENTRY LOGIC (only when flat) ===
-        if position == 0:
-            if is_squeeze and vol_ratio > 1.5:  # In squeeze with volume confirmation
-                # LONG: RSI oversold and price breaks above BB middle
-                if rsi_val < 30 and price > bb_mid:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = price
-                    continue
-                # SHORT: RSI overbought and price breaks below BB middle
-                elif rsi_val > 70 and price < bb_mid:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = price
-                    continue
+        # === ENTRY LOGIC (only when flat and ranging market) ===
+        if position == 0 and adx_val < 20:  # Only enter in ranging markets (ADX < 20)
+            # LONG: price significantly below VWAP with volume
+            if vwap_dev < -0.015 and vol_ratio > 1.3:  # Below VWAP by 1.5*ATR equivalent
+                signals[i] = 0.25
+                position = 1
+                entry_price = price
+                continue
+            # SHORT: price significantly above VWAP with volume
+            elif vwap_dev > 0.015 and vol_ratio > 1.3:  # Above VWAP by 1.5*ATR equivalent
+                signals[i] = -0.25
+                position = -1
+                entry_price = price
+                continue
         
         # Hold current position
         if position == 1:
@@ -149,6 +154,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_BollingerSqueeze_RSI_Momentum_Volume_v1"
+name = "4h_VWAP_ADX_RangeMeanReversion_Volume_v1"
 timeframe = "4h"
 leverage = 1.0
