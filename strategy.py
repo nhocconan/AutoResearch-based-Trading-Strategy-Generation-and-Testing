@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R (14) mean reversion with 1d ADX trend filter and volume confirmation.
-# Long when Williams %R < -80 (oversold) AND price > 200-period EMA (bullish bias) AND volume > 1.5x 20-period average AND 1d ADX > 25 (strong trend).
-# Short when Williams %R > -20 (overbought) AND price < 200-period EMA (bearish bias) AND volume > 1.5x 20-period average AND 1d ADX > 25.
-# Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts) or ATR-based stoploss (2*ATR from entry).
-# Uses discrete position size 0.25. Designed to capture mean reversion in strong trends with volume confirmation.
-# Works in both bull and bear markets by requiring strong trend (ADX>25) and volume confirmation, avoiding ranging markets.
-# Target: 75-200 total trades over 4 years (19-50/year) to balance edge and fee drag.
+# Hypothesis: 6h Donchian(20) breakout with 1d weekly pivot filter and volume confirmation.
+# Long when price breaks above 20-period 6h Donchian high AND price > 1d weekly pivot R1 AND volume > 1.5x 20-period 6h average volume.
+# Short when price breaks below 20-period 6h Donchian low AND price < 1d weekly pivot S1 AND volume > 1.5x 20-period 6h average volume.
+# Exit when price crosses the 20-period 6h Donchian midpoint (mean of high/low).
+# Uses discrete position size 0.25. Designed to capture breakouts in the direction of the weekly pivot bias.
+# Weekly pivot acts as regime filter: R1/S1 from 1d timeframe define bull/bear bias.
+# Target: 50-150 total trades over 4 years (12-37/year) to balance edge and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,49 +21,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Indicators: Williams %R (14) and EMA(200) ===
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
-    ema_200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # === 6h Indicators: Donchian Channel (20-period) ===
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    donchian_mid = (highest_high + lowest_low) / 2.0
     
-    # === 1d Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    # === 1d Indicators: Weekly Pivot Points (using prior week's HLC) ===
     df_1d = get_htf_data(prices, '1d')
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    volume_spike = volume > (1.5 * vol_ma_1d_aligned)
+    # We need to compute weekly pivot from daily data: (Prior Week High + Low + Close) / 3
+    # But since we don't have direct weekly data, we approximate using 5-day rolling (1 week ≈ 5 trading days)
+    # Weekly high = max of prior 5 daily highs
+    # Weekly low = min of prior 5 daily lows
+    # Weekly close = close of 5th prior day
+    if len(df_1d) >= 5:
+        weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().shift(1).values  # shift(1) to use prior week
+        weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().shift(1).values
+        weekly_close = pd.Series(df_1d['close']).shift(5).values  # close 5 days ago
+        # Weekly pivot = (weekly_high + weekly_low + weekly_close) / 3
+        weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+        # R1 = (2 * weekly_pivot) - weekly_low
+        # S1 = (2 * weekly_pivot) - weekly_high
+        r1 = (2 * weekly_pivot) - weekly_low
+        s1 = (2 * weekly_pivot) - weekly_high
+        # Align to 6h timeframe
+        r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+        s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    else:
+        # Not enough data for weekly pivot
+        r1_aligned = np.full(n, np.nan)
+        s1_aligned = np.full(n, np.nan)
     
-    # === 1d Indicators: ADX > 25 (strong trending market filter) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = pd.Series(high_1d).diff()
-    tr2 = pd.Series(low_1d).diff().abs()
-    tr3 = pd.Series(close_1d).shift(1).diff().abs()
-    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Movement
-    dm_plus = pd.Series(high_1d).diff()
-    dm_minus = pd.Series(low_1d).diff().abs()
-    dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
-    dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
-    
-    # Smoothed DM and TR
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_smooth = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * (dm_plus_smooth / atr_smooth)
-    di_minus = 100 * (dm_minus_smooth / atr_smooth)
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    strong_trend = adx_aligned > 25
+    # === 6h Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma_6h)
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -71,24 +62,17 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 200 periods needed for EMA200)
-    warmup = 200
+    # Warmup: ensure all indicators are valid
+    warmup = 50  # enough for 20-period Donchian, 5+20 for weekly pivot, 20 for volume MA
     
-    # Track position state and entry price for stoploss
+    # Track position state and entry price for exit logic
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Calculate 4h ATR for stoploss
-    tr1_4h = pd.Series(high).diff()
-    tr2_4h = pd.Series(low).diff().abs()
-    tr3_4h = pd.Series(close).shift(1).diff().abs()
-    tr_4h = pd.concat([tr1_4h, tr2_4h, tr3_4h], axis=1).max(axis=1)
-    atr_4h_raw = pd.Series(tr_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(williams_r[i]) or np.isnan(ema_200[i]) or np.isnan(volume_spike[i]) or
-            np.isnan(strong_trend[i]) or np.isnan(atr_4h_raw[i]) or
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(donchian_mid[i]) or
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(volume_spike[i]) or
             not session_filter[i]):
             signals[i] = 0.0
             position = 0
@@ -97,27 +81,18 @@ def generate_signals(prices):
         # Current values
         price = close[i]
         vol_spike = volume_spike[i]
-        is_strong_trend = strong_trend[i]
-        atr_val = atr_4h_raw[i]
-        wr = williams_r[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if Williams %R crosses above -50 (mean reversion complete)
-            if wr > -50:
-                exit_signal = True
-            # ATR-based stoploss: 2*ATR below entry
-            elif price < entry_price - 2.0 * atr_val:
+            # Exit if price crosses below Donchian midpoint
+            if price < donchian_mid[i]:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if Williams %R crosses below -50 (mean reversion complete)
-            if wr < -50:
-                exit_signal = True
-            # ATR-based stoploss: 2*ATR above entry
-            elif price > entry_price + 2.0 * atr_val:
+            # Exit if price crosses above Donchian midpoint
+            if price > donchian_mid[i]:
                 exit_signal = True
         
         if exit_signal:
@@ -128,14 +103,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Williams %R < -80 (oversold) AND price > EMA200 (bullish bias) AND volume spike AND strong trending market
-            if wr < -80 and price > ema_200[i] and vol_spike and is_strong_trend:
+            # LONG: Price breaks above Donchian high AND price > weekly R1 AND volume spike
+            if (price > highest_high[i]) and (price > r1_aligned[i]) and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: Williams %R > -20 (overbought) AND price < EMA200 (bearish bias) AND volume spike AND strong trending market
-            elif wr > -20 and price < ema_200[i] and vol_spike and is_strong_trend:
+            # SHORT: Price breaks below Donchian low AND price < weekly S1 AND volume spike
+            elif (price < lowest_low[i]) and (price < s1_aligned[i]) and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -145,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_1dVolumeSpike_1dADX_V1"
-timeframe = "4h"
+name = "6h_Donchian20_1dWeeklyPivot_VolumeSpike_V1"
+timeframe = "6h"
 leverage = 1.0
