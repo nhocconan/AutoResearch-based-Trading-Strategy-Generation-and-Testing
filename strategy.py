@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d Camarilla pivot levels with volume confirmation and ATR filter.
-# Long when price breaks above R4 AND volume > 1.5x 20-period average AND ATR(14) < 0.03 * price (low volatility breakout).
-# Short when price breaks below S4 AND volume > 1.5x 20-period average AND ATR(14) < 0.03 * price.
-# Exit when price retests the 1d pivot point (PP) or reverses to opposite Camarilla level (R3/S3).
-# Uses discrete position size 0.25. 1d Camarilla provides structure, 6h provides execution timing.
+# Hypothesis: 12h strategy using 1d Donchian(20) breakout with 1w ADX(14) trend filter and volume confirmation.
+# Long when price breaks above 1d Donchian(20) upper band AND 1w ADX > 20 AND 12h volume > 1.5x 20-period average.
+# Short when price breaks below 1d Donchian(20) lower band AND 1w ADX > 20 AND 12h volume > 1.5x 20-period average.
+# Exit when price crosses the 1d Donchian middle band (20-period average).
+# Uses discrete position size 0.25. 1d/1w filters provide signal direction, 12h provides entry timing.
 # Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 
 def generate_signals(prices):
@@ -20,7 +20,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once before loop for Camarilla pivots and ATR
+    # Get 1d data once before loop for Donchian channels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -29,39 +29,57 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === 1d Indicators: Camarilla Pivot Levels (R3, R4, S3, S4, PP) ===
-    # Pivot Point (PP) = (High + Low + Close) / 3
-    pp_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Get 1w data once before loop for ADX
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
     
-    # Range = High - Low
-    range_1d = high_1d - low_1d
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Camarilla levels
-    r4_1d = close_1d + range_1d * 1.1 / 2
-    r3_1d = close_1d + range_1d * 1.1 / 4
-    s3_1d = close_1d - range_1d * 1.1 / 4
-    s4_1d = close_1d - range_1d * 1.1 / 2
+    # === 1d Indicators: Donchian Channels (20) ===
+    donchian_upper_20_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_lower_20_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_middle_20_1d = (donchian_upper_20_1d + donchian_lower_20_1d) / 2.0
     
-    # === 1d Indicators: ATR (14) for volatility filter ===
+    # === 1w Indicators: ADX (14) ===
     # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr1[0] = 0
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # ATR(14) using Wilder's smoothing (alpha=1/14)
-    atr_14_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Directional Movement
+    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), 
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), 
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Align all indicators to primary timeframe (6h)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Smoothed TR, DM+, DM- (Wilder's smoothing)
+    atr_14_1w = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_plus_14_1w = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_14_1w = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # DI+ and DI-
+    di_plus_14_1w = 100 * dm_plus_14_1w / atr_14_1w
+    di_minus_14_1w = 100 * dm_minus_14_1w / atr_14_1w
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus_14_1w - di_minus_14_1w) / (di_plus_14_1w + di_minus_14_1w)
+    dx = np.where(np.isnan(dx), 0, dx)
+    adx_14_1w = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Align all indicators to primary timeframe (12h)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper_20_1d)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower_20_1d)
+    donchian_middle_aligned = align_htf_to_ltf(prices, df_1d, donchian_middle_20_1d)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx_14_1w)
     
     signals = np.zeros(n)
     
@@ -73,37 +91,32 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(pp_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(atr_aligned[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(donchian_middle_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values (aligned)
-        pp = pp_aligned[i]
-        r4 = r4_aligned[i]
-        r3 = r3_aligned[i]
-        s3 = s3_aligned[i]
-        s4 = s4_aligned[i]
-        atr = atr_aligned[i]
+        donchian_upper = donchian_upper_aligned[i]
+        donchian_lower = donchian_lower_aligned[i]
+        donchian_middle = donchian_middle_aligned[i]
+        adx = adx_aligned[i]
         price = close[i]
         vol = volume[i]
         
-        # Get 6h volume average aligned
-        vol_ma_20_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        
-        # Volatility filter: ATR < 3% of price (low volatility breakout)
-        vol_filter = atr < 0.03 * price
+        # Get 12h volume average aligned
+        vol_ma_20_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            if price <= pp or price >= r3:  # Exit when price retests PP or reaches R3
+            if price < donchian_middle:  # Exit when price crosses below middle band
                 exit_signal = True
         
         elif position == -1:  # Short position
-            if price >= pp or price <= s3:  # Exit when price retests PP or reaches S3
+            if price > donchian_middle:  # Exit when price crosses above middle band
                 exit_signal = True
         
         if exit_signal:
@@ -113,13 +126,13 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above R4 AND volume > 1.5x 20-period avg AND low volatility
-            if (price > r4) and (vol > 1.5 * vol_ma_20_6h[i]) and vol_filter:
+            # LONG: Price breaks above Donchian upper AND ADX > 20 AND volume > 1.5x 20-period avg
+            if (price > donchian_upper) and (adx > 20) and (vol > 1.5 * vol_ma_20_12h[i]):
                 signals[i] = 0.25
                 position = 1
             
-            # SHORT: Price breaks below S4 AND volume > 1.5x 20-period avg AND low volatility
-            elif (price < s4) and (vol > 1.5 * vol_ma_20_6h[i]) and vol_filter:
+            # SHORT: Price breaks below Donchian lower AND ADX > 20 AND volume > 1.5x 20-period avg
+            elif (price < donchian_lower) and (adx > 20) and (vol > 1.5 * vol_ma_20_12h[i]):
                 signals[i] = -0.25
                 position = -1
         
@@ -128,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1dCamarillaR4S4_Volume_ATRFilter_V1"
-timeframe = "6h"
+name = "12h_1dDonchian20_1wADX_VolumeConfirmation_V1"
+timeframe = "12h"
 leverage = 1.0
