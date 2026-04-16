@@ -20,22 +20,21 @@ def generate_signals(prices):
     low_4h = df_4h['low'].values
     volume_4h = df_4h['volume'].values
     
-    # === 1d data (HTF for Donchian and EMA) ===
+    # === 1d data (HTF for trend filter) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # === 12h EMA34 (trend filter) ===
-    ema_34_12h = pd.Series(close_1d).ewm(span=34, adjust=False).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_1d, ema_34_12h)
+    # === 1d EMA50 (trend filter) ===
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # === 4h Donchian channel (20-period) ===
     donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
     donch_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Align Donchian to 4h (already in 4h, no alignment needed for same timeframe)
-    # But we need to shift by 1 to avoid look-ahead (use previous bar's channel)
+    # Shift by 1 to avoid look-ahead (use previous bar's channel)
     donch_high = np.roll(donch_high, 1)
     donch_low = np.roll(donch_low, 1)
     donch_high[0] = np.nan
@@ -57,7 +56,7 @@ def generate_signals(prices):
         # Skip if any data is NaN
         if (np.isnan(donch_high[i]) or 
             np.isnan(donch_low[i]) or 
-            np.isnan(ema_34_12h_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(vol_ratio_4h[i])):
             signals[i] = 0.0
             position = 0
@@ -66,7 +65,7 @@ def generate_signals(prices):
         price = close[i]
         upper = donch_high[i]
         lower = donch_low[i]
-        ema_trend = ema_34_12h_aligned[i]
+        ema_trend = ema_50_1d_aligned[i]
         vol_ratio = vol_ratio_4h[i]
         
         # === EXIT LOGIC ===
@@ -107,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_12hEMA34_Trend_Volume"
+name = "4h_Donchian_1dEMA50_Trend_Volume"
 timeframe = "4h"
 leverage = 1.0
