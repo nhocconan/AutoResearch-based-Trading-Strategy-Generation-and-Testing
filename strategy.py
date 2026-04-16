@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1d ADX trend filter.
-# Long when price breaks above 20-period 4h Donchian high AND volume > 2.0x 20-period 1d average AND 1d ADX > 25 (strong trending market).
-# Short when price breaks below 20-period 4h Donchian low AND volume > 2.0x 20-period 1d average AND 1d ADX > 25.
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1d ADX > 25 trend filter.
+# Long when price breaks above 4h Donchian high AND volume > 2.0x 20-period 1d average volume AND 1d ADX > 25.
+# Short when price breaks below 4h Donchian low AND volume > 2.0x 20-period 1d average volume AND 1d ADX > 25.
 # Exit when price crosses the 4h Donchian midpoint or ATR-based stoploss (2*ATR from entry).
 # Uses discrete position size 0.25. Designed to capture major breakouts in strong trending markets.
 # Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag while maintaining edge.
