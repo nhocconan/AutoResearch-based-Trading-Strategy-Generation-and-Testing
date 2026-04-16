@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 80:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -36,7 +36,7 @@ def generate_signals(prices):
     r1 = pivot_point + prev_range * 0.382  # Fibonacci R1
     s1 = pivot_point - prev_range * 0.382  # Fibonacci S1
     
-    # Align to 6h timeframe
+    # Align to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -44,14 +44,21 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === Volume confirmation (6h) ===
+    # === Volume confirmation (12h) ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma_20
+    
+    # === 1d ATR for volatility filter ===
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr2 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, tr2)])
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 60
+    warmup = 80
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,7 +66,8 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # Skip if any data is NaN
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ratio[i]) or 
+            np.isnan(atr_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -69,6 +77,7 @@ def generate_signals(prices):
         s1_val = s1_aligned[i]
         ema_34_1d_val = ema_34_1d_aligned[i]
         vol_ratio_val = vol_ratio[i]
+        atr_1d_val = atr_1d_aligned[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
@@ -109,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_FibPivot_R1_S1_EMA34_VolumeSpike_v2"
-timeframe = "6h"
+name = "12h_FibPivot_R1_S1_EMA34_VolumeSpike_ATRFilter"
+timeframe = "12h"
 leverage = 1.0
