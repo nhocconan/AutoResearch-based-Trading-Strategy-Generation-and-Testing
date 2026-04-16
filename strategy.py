@@ -20,13 +20,13 @@ def generate_signals(prices):
     low_4h = df_4h['low'].values
     volume_4h = df_4h['volume'].values
     
-    # === 12h data (HTF for trend filter) ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # === 1d data (HTF for trend filter) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # === 12h EMA34 (trend filter) ===
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # === 1d EMA34 (trend filter) ===
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # === 4h Donchian channel (20-period) ===
     donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
@@ -50,6 +50,9 @@ def generate_signals(prices):
     tr[0] = 0
     atr_14_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
+    # === Hour filter: 08-20 UTC ===
+    hours = prices.index.hour  # Pre-compute for efficiency
+    
     signals = np.zeros(n)
     
     # Warmup
@@ -63,17 +66,26 @@ def generate_signals(prices):
         # Skip if any data is NaN
         if (np.isnan(donch_high[i]) or 
             np.isnan(donch_low[i]) or 
-            np.isnan(ema_34_12h_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(vol_ratio_4h[i]) or
             np.isnan(atr_14_4h[i])):
             signals[i] = 0.0
             position = 0
             continue
         
+        # Session filter: only trade 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+            continue
+        
         price = close[i]
         upper = donch_high[i]
         lower = donch_low[i]
-        ema_trend = ema_34_12h_aligned[i]
+        ema_trend = ema_34_1d_aligned[i]
         vol_ratio = vol_ratio_4h[i]
         atr = atr_14_4h[i]
         
@@ -136,6 +148,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_12hEMA34_Volume_ATRStop_v1"
-timeframe = "4h"
+name = "1h_Donchian_1dEMA34_Volume_ATRStop_Session_v1"
+timeframe = "1h"
 leverage = 1.0
