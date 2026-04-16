@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h volume spike and 1d ADX regime filter
-# Long when price > Donchian upper band AND 12h volume > 2.0x 20-period volume SMA AND 1d ADX < 25 (range)
-# Short when price < Donchian lower band AND 12h volume > 2.0x 20-period volume SMA AND 1d ADX < 25 (range)
-# Exit on price returning to Donchian middle band or ATR stoploss (2.0 ATR)
+# Hypothesis: 4h Bollinger Band breakout with 12h volume spike and 1d ADX regime filter
+# Long when price > BB upper band AND 12h volume > 2.0x 20-period volume SMA AND 1d ADX < 25 (range)
+# Short when price < BB lower band AND 12h volume > 2.0x 20-period volume SMA AND 1d ADX < 25 (range)
+# Exit on price returning to BB middle band or ATR stoploss (2.0 ATR)
 # Uses discrete position sizing (0.25) to limit fee drag
-# Donchian channels provide objective structure; volume filter reduces false breakouts
-# ADX < 25 ensures we only trade in ranging markets where mean reversion at channel edges works
+# Bollinger Bands provide dynamic structure; volume filter reduces false breakouts
+# ADX < 25 ensures we only trade in ranging markets where mean reversion at band edges works
 # Target: 75-200 total trades over 4 years (19-50/year)
 
 def generate_signals(prices):
@@ -74,12 +74,12 @@ def generate_signals(prices):
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # === 4h Indicator: Donchian Channels (20-period) ===
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_middle = (donchian_upper + donchian_lower) / 2.0
+    # === 4h Indicator: Bollinger Bands (20, 2) ===
+    close_series = pd.Series(close)
+    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2.0 * bb_std
+    bb_lower = bb_middle - 2.0 * bb_std
     
     # ATR for stoploss (14-period)
     tr1 = high - low
@@ -91,7 +91,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(30, 20, 28)  # 12h vol SMA, Donchian, 1d ADX need ~30 bars
+    warmup = max(30, 20, 28)  # 12h vol SMA, Bollinger Bands, 1d ADX need ~30 bars
     
     # Track position state for exits
     position = 0  # 0: flat, 1: long, -1: short
@@ -106,8 +106,8 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(donchian_middle[i]) or np.isnan(vol_sma_20_12h_aligned[i]) or 
+        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
+            np.isnan(bb_middle[i]) or np.isnan(vol_sma_20_12h_aligned[i]) or 
             np.isnan(adx_1d_aligned[i]) or np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
@@ -127,9 +127,9 @@ def generate_signals(prices):
         
         # Price levels
         price = close[i]
-        upper = donchian_upper[i]
-        lower = donchian_lower[i]
-        middle = donchian_middle[i]
+        upper = bb_upper[i]
+        lower = bb_lower[i]
+        middle = bb_middle[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
@@ -151,14 +151,14 @@ def generate_signals(prices):
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
             # LONG CONDITIONS
-            # Price > Donchian upper band AND volume confirmation AND ranging market
+            # Price > BB upper band AND volume confirmation AND ranging market
             if price > upper and vol_confirm and range_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
             # SHORT CONDITIONS
-            # Price < Donchian lower band AND volume confirmation AND ranging market
+            # Price < BB lower band AND volume confirmation AND ranging market
             elif price < lower and vol_confirm and range_filter:
                 signals[i] = -0.25
                 position = -1
@@ -169,6 +169,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_12hVolSpike2.0x_1dADX_Range_v1"
+name = "4h_BB20_12hVolSpike2.0x_1dADX_Range_v1"
 timeframe = "4h"
 leverage = 1.0
