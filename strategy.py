@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike filter and 12h EMA trend filter
-# Long when price breaks above 4h Donchian upper (20) AND 1d volume > 2.5x 20-period median AND price > 12h EMA50
-# Short when price breaks below 4h Donchian lower (20) AND 1d volume > 2.5x 20-period median AND price < 12h EMA50
-# Exit when price reverses 2.0x ATR from extreme OR reverts to 12h EMA50
-# Uses discrete position size 0.25 to balance capture and fee drag. Target: 75-200 total trades over 4 years.
-# Combines price channel breakout (Donchian) with trend filter (12h EMA50) and volume confirmation (1d) for robustness across regimes.
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA(50) trend filter and 1d volume spike (2x median)
+# Long when price > Donchian upper AND price > 12h EMA50 AND 1d volume > 2x 20-period median
+# Short when price < Donchian lower AND price < 12h EMA50 AND 1d volume > 2x 20-period median
+# Exit when price crosses 12h EMA50 (mean reversion to trend)
+# Uses discrete position size 0.25 to limit fee drag. Target: 75-200 total trades over 4 years.
+# Combines price channel breakout with trend and volume filters for robustness across bull/bear markets.
 
 def generate_signals(prices):
     n = len(prices)
@@ -44,7 +44,7 @@ def generate_signals(prices):
     ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Get 4h data for Donchian channels and ATR
+    # Get 4h data for Donchian channels
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 30:
         return np.zeros(n)
@@ -61,32 +61,14 @@ def generate_signals(prices):
     donch_upper_aligned = align_htf_to_ltf(prices, df_4h, donch_upper)
     donch_lower_aligned = align_htf_to_ltf(prices, df_4h, donch_lower)
     
-    # Get ATR for stoploss (using 4h data)
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.concatenate([[close_4h[0]], close_4h[:-1]])) if 'close_4h' in locals() else np.abs(high_4h - np.concatenate([[df_4h['close'].iloc[0]], df_4h['close'].iloc[:-1]]))
-    tr3 = np.abs(low_4h - np.concatenate([[low_4h[0]], low_4h[:-1]]))
-    tr_4h = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
-    atr_aligned = align_htf_to_ltf(prices, df_4h, atr_14_4h)
-    
-    # Need close_4h for TR calculation
-    close_4h = df_4h['close'].values
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.concatenate([[close_4h[0]], close_4h[:-1]]))
-    tr3 = np.abs(low_4h - np.concatenate([[close_4h[0]], close_4h[:-1]]))
-    tr_4h = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
-    atr_aligned = align_htf_to_ltf(prices, df_4h, atr_14_4h)
-    
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(30, 20, 50, 14)  # 1d volume, 4h Donchian, 12h EMA, 4h ATR
+    warmup = max(30, 20, 50, 20)  # 1d volume, 4h Donchian, 12h EMA
     
     # Track position state for exits
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    max_favorable_price = 0.0  # track highest price for long, lowest for short
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -94,13 +76,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             if position != 0:
                 position = 0  # force flat outside session
-                max_favorable_price = 0.0
             continue
         
         # Skip if any required data is NaN
         if (np.isnan(donch_upper_aligned[i]) or np.isnan(donch_lower_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(atr_aligned[i]) or 
-            np.isnan(vol_median_20_1d_aligned[i])):
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_median_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -110,8 +90,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 1d volume > 2.5x 20-period 1d volume median
-        vol_threshold = vol_median_20_1d_aligned[i] * 2.5
+        # Volume filter: current 1d volume > 2x 20-period 1d volume median
+        vol_threshold = vol_median_20_1d_aligned[i] * 2.0
         vol_confirm = vol_1d_aligned[i] > vol_threshold
         
         # Price levels
@@ -123,25 +103,18 @@ def generate_signals(prices):
         # === EXIT LOGIC ===
         exit_signal = False
         if position == 1:  # long position
-            # Update max favorable price
-            if price > max_favorable_price:
-                max_favorable_price = price
-            # Exit when price retraces 2.0x ATR from high OR reverts to EMA50
-            if price <= max_favorable_price - 2.0 * atr_aligned[i] or price <= ema50:
+            # Exit when price crosses below 12h EMA50 (trend change)
+            if price < ema50:
                 exit_signal = True
         elif position == -1:  # short position
-            # Update max favorable price (lowest price for short)
-            if price < max_favorable_price or max_favorable_price == 0.0:
-                max_favorable_price = price
-            # Exit when price rallies 2.0x ATR from low OR reverts to EMA50
-            if price >= max_favorable_price + 2.0 * atr_aligned[i] or price >= ema50:
+            # Exit when price crosses above 12h EMA50 (trend change)
+            if price > ema50:
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
             entry_price = 0.0
-            max_favorable_price = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
@@ -152,7 +125,6 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-                max_favorable_price = price
             
             # SHORT CONDITIONS
             # Price breaks below Donchian lower AND volume confirmation AND price < EMA50
@@ -160,13 +132,12 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
-                max_favorable_price = price
         
         else:
             signals[i] = position * 0.25  # maintain position
     
     return signals
 
-name = "4h_Donchian20_1dVolumeSpike_12hEMA50_v1"
+name = "4h_Donchian20_12hEMA50_1dVolume2x_v1"
 timeframe = "4h"
 leverage = 1.0
