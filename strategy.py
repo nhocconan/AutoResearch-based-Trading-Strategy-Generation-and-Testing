@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h volume spike and 1d ADX > 25 trend filter.
-# Long when price breaks above Donchian upper band AND volume > 1.8x 20-period 12h average AND 1d ADX > 25.
-# Short when price breaks below Donchian lower band AND volume > 1.8x 20-period 12h average AND 1d ADX > 25.
-# Exit when price crosses the Donchian midpoint (upper+lower)/2.
-# Uses discrete position size 0.25. Designed to capture breakouts in trending markets (both bull and bear).
-# Target: 100-180 total trades over 4 years (25-45/year) to minimize fee drag while maintaining edge.
+# Hypothesis: 1h Camarilla R3/S3 breakout with 4h volume spike and 1d ADX trend filter.
+# Long when price breaks above R3 AND volume > 1.5x 20-period 4h average AND 1d ADX > 25 (trending market).
+# Short when price breaks below S3 AND volume > 1.5x 20-period 4h average AND 1d ADX > 25.
+# Exit when price crosses the 1h midpoint (R3+S3)/2.
+# Uses discrete position size 0.20. Designed to capture breakouts in trending markets (both bull and bear).
+# Target: 80-120 total trades over 4 years (20-30/year) to minimize fee drag while maintaining edge.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,18 +20,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Indicators: Donchian(20) channels ===
-    lookback = 20
-    upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    midpoint = (upper + lower) / 2
+    # === 1h Indicators: Camarilla R3/S3 levels (from previous bar) ===
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # === 12h Indicators: Volume Spike (volume > 1.8x 20-period average) ===
-    df_12h = get_htf_data(prices, '12h')
-    vol_12h = df_12h['volume'].values
-    vol_ma_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
-    volume_spike = volume > (1.8 * vol_ma_12h_aligned)
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    
+    # Camarilla R3 and S3 levels
+    R3 = pivot + (range_hl * 1.1 / 4)  # R3 = pivot + range*1.1/4
+    S3 = pivot - (range_hl * 1.1 / 4)  # S3 = pivot - range*1.1/4
+    midpoint = (R3 + S3) / 2  # Exit level
+    
+    # === 4h Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    df_4h = get_htf_data(prices, '4h')
+    vol_4h = df_4h['volume'].values
+    vol_ma_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
+    volume_spike = volume > (1.5 * vol_ma_4h_aligned)
     
     # === 1d Indicators: ADX > 25 (trending market filter) ===
     df_1d = get_htf_data(prices, '1d')
@@ -79,7 +89,7 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(midpoint[i]) or
+        if (np.isnan(R3[i]) or np.isnan(S3[i]) or np.isnan(midpoint[i]) or
             np.isnan(volume_spike[i]) or np.isnan(trending[i]) or
             not session_filter[i]):
             signals[i] = 0.0
@@ -111,21 +121,21 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above upper band AND volume spike AND trending market
-            if price > upper[i] and vol_spike and is_trending:
-                signals[i] = 0.25
+            # LONG: Price breaks above R3 AND volume spike AND trending market
+            if price > R3[i] and vol_spike and is_trending:
+                signals[i] = 0.20
                 position = 1
             
-            # SHORT: Price breaks below lower band AND volume spike AND trending market
-            elif price < lower[i] and vol_spike and is_trending:
-                signals[i] = -0.25
+            # SHORT: Price breaks below S3 AND volume spike AND trending market
+            elif price < S3[i] and vol_spike and is_trending:
+                signals[i] = -0.20
                 position = -1
         
         else:
-            signals[i] = position * 0.25
+            signals[i] = position * 0.20
     
     return signals
 
-name = "4h_Donchian20_12hVolumeSpike_1dADX_V1"
-timeframe = "4h"
+name = "1h_Camarilla_R3_S3_Breakout_Volume_4h_ADX1d_V1"
+timeframe = "1h"
 leverage = 1.0
