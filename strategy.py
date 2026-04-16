@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike and choppiness regime filter.
-# Long when price closes above Camarilla R3 AND 1d volume > 1.5x 20-period average AND chop > 61.8 (range).
-# Short when price closes below Camarilla S3 AND 1d volume > 1.5x 20-period average AND chop > 61.8 (range).
-# Exit on opposite Camarilla level (R3/S3) or ATR-based stoploss (2*ATR from entry).
-# Uses discrete position size 0.25. Designed to capture mean-reversion breaks in ranging markets with volume confirmation.
-# Works in both bull and bear markets by requiring chop regime filter (range-bound) and volume confirmation, avoiding false breakouts.
+# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA200 trend filter, volume confirmation, and ATR stoploss.
+# Long when price breaks above Camarilla R3 AND 1w EMA200 trending up AND volume > 1.5x 20-period average.
+# Short when price breaks below Camarilla S3 AND 1w EMA200 trending down AND volume > 1.5x 20-period average.
+# Exit on ATR-based stoploss (2*ATR from entry) or opposite Camarilla break.
+# Uses discrete position size 0.25. Designed to capture strong momentum moves with volume confirmation in trending markets.
+# Works in both bull and bear markets by requiring 1w trend filter (EMA200 direction) and volume confirmation, avoiding false breakouts.
 # Target: 75-200 total trades over 4 years (19-50/year) to balance edge and fee drag.
 
 def generate_signals(prices):
@@ -21,35 +21,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Indicators: Camarilla Pivot Levels (R3, S3) ===
-    # Camarilla: R3 = close + (high - low) * 1.1/4, S3 = close - (high - low) * 1.1/4
-    camarilla_r3 = close + (high - low) * 1.1 / 4
-    camarilla_s3 = close - (high - low) * 1.1 / 4
+    # === 1d Indicators: Camarilla Pivot Levels (R3, S3) ===
+    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
+    camarilla_r3 = close + 1.1 * (high - low) / 2
+    camarilla_s3 = close - 1.1 * (high - low) / 2
+    
+    # === 1w Indicators: EMA200 for trend ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    ema_up = ema_200_1w_aligned > np.roll(ema_200_1w_aligned, 1)
+    ema_down = ema_200_1w_aligned < np.roll(ema_200_1w_aligned, 1)
     
     # === 1d Indicators: Volume Spike (volume > 1.5x 20-period average) ===
-    df_1d = get_htf_data(prices, '1d')
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    volume_spike = volume > (1.5 * vol_ma_1d_aligned)
+    vol_ma_1d = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma_1d)
     
-    # === 1d Indicators: Choppiness Index (CHOP > 61.8 = ranging) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    atr_1d = pd.Series(high_1d - low_1d).rolling(window=14, min_periods=14).mean().values
-    sum_tr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
-    max_hh_ll_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values - pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop_1d = 100 * np.log10(sum_tr_14 / (np.log(14) * max_hh_ll_14)) / np.log10(14)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    chop_range = chop_1d_aligned > 61.8  # ranging market
-    
-    # === 4h ATR for stoploss ===
+    # === 1d ATR for stoploss ===
     tr1 = pd.Series(high).diff()
     tr2 = pd.Series(low).diff().abs()
     tr3 = pd.Series(close).shift(1).diff().abs()
-    tr_4h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_4h_raw = pd.Series(tr_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d_raw = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -57,8 +51,8 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed for chop/volume/ATR)
-    warmup = 100
+    # Warmup: ensure all indicators are valid (max 200 periods needed for EMA200)
+    warmup = 250
     
     # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,8 +60,8 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or np.isnan(volume_spike[i]) or
-            np.isnan(chop_range[i]) or np.isnan(atr_4h_raw[i]) or
+        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or np.isnan(ema_200_1w_aligned[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(atr_1d_raw[i]) or
             not session_filter[i]):
             signals[i] = 0.0
             position = 0
@@ -76,14 +70,13 @@ def generate_signals(prices):
         # Current values
         price = close[i]
         vol_spike = volume_spike[i]
-        chop_reg = chop_range[i]
-        atr_val = atr_4h_raw[i]
+        atr_val = atr_1d_raw[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price closes below Camarilla S3
+            # Exit if price breaks below Camarilla S3
             if price < camarilla_s3[i]:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR below entry
@@ -91,7 +84,7 @@ def generate_signals(prices):
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price closes above Camarilla R3
+            # Exit if price breaks above Camarilla R3
             if price > camarilla_r3[i]:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR above entry
@@ -106,14 +99,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price closes above Camarilla R3 AND volume spike AND chop > 61.8 (ranging)
-            if price > camarilla_r3[i] and vol_spike and chop_reg:
+            # LONG: Price breaks above Camarilla R3 AND EMA trending up AND volume spike
+            if price > camarilla_r3[i] and ema_up[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: Price closes below Camarilla S3 AND volume spike AND chop > 61.8 (ranging)
-            elif price < camarilla_s3[i] and vol_spike and chop_reg:
+            # SHORT: Price breaks below Camarilla S3 AND EMA trending down AND volume spike
+            elif price < camarilla_s3[i] and ema_down[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -123,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_CamarillaR3S3_1dVolumeSpike_ChopFilter_V1"
-timeframe = "4h"
+name = "1d_CamarillaR3S3_1wEMA200_VolumeSpike_V1"
+timeframe = "1d"
 leverage = 1.0
