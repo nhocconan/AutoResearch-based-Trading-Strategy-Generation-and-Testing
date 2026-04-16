@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w Williams Alligator (Jaw/Teeth/Lips) for trend direction,
-# combined with 1d volume spike and ADX trend strength filter.
-# Long when Alligator is bullish (Lips > Teeth > Jaw), volume > 2x 20-period average, and ADX > 25.
-# Short when Alligator is bearish (Lips < Teeth < Jaw), volume > 2x 20-period average, and ADX > 25.
-# Exit when Alligator direction becomes neutral or volume drops below average.
-# Uses discrete position size 0.25. Alligator provides smoothed trend, volume confirms momentum,
-# ADX ensures trending regime to avoid whipsaws. Target: 30-100 total trades over 4 years (7-25/year).
+# Hypothesis: 6h strategy using 1d Camarilla pivot levels with volume confirmation.
+# Long when price breaks above R4 with volume > 1.5x 20-period average.
+# Short when price breaks below S4 with volume > 1.5x 20-period average.
+# Exit when price returns to the 1d VWAP (mean reversion to daily fair value).
+# Uses discrete position size 0.25. Camarilla levels provide institutional support/resistance,
+# volume confirms institutional participation, VWAP exit provides mean reversion edge.
+# Target: 50-150 total trades over 4 years (12-37/year).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,113 +21,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data once before loop for Alligator and ADX
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 60:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # === 1w Indicators: Williams Alligator (SMMA-based) ===
-    # Smoothed Moving Average (SMMA) - similar to Wilder's smoothing
-    def smma(arr, period):
-        result = np.full_like(arr, np.nan, dtype=np.float64)
-        if len(arr) < period:
-            return result
-        # First value is simple SMA
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
-    
-    # Alligator periods: Jaw=13, Teeth=8, Lips=5 (all shifted forward)
-    jaw_period = 13
-    teeth_period = 8
-    lips_period = 5
-    
-    jaw = smma(close_1w, jaw_period)
-    teeth = smma(close_1w, teeth_period)
-    lips = smma(close_1w, lips_period)
-    
-    # Shift Alligator lines forward by their respective periods (as per Williams)
-    jaw = np.roll(jaw, -jaw_period)
-    teeth = np.roll(teeth, -teeth_period)
-    lips = np.roll(lips, -lips_period)
-    
-    # Alligator direction: 1=bullish (Lips > Teeth > Jaw), -1=bearish (Lips < Teeth < Jaw), 0=neutral/entanglement
-    alligator_dir = np.zeros_like(close_1w)
-    bullish = (lips > teeth) & (teeth > jaw)
-    bearish = (lips < teeth) & (teeth < jaw)
-    alligator_dir[bullish] = 1
-    alligator_dir[bearish] = -1
-    
-    # === 1w Indicators: ADX (Trend Strength) ===
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Directional Movement
-    up_move = high_1w - np.roll(high_1w, 1)
-    down_move = np.roll(low_1w, 1) - low_1w
-    up_move[0] = 0
-    down_move[0] = 0
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed TR, +DM, -DM (using Wilder's smoothing = SMMA)
-    atr = smma(tr, 14)
-    plus_dm_sm = smma(plus_dm, 14)
-    minus_dm_sm = smma(minus_dm, 14)
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_sm / atr
-    minus_di = 100 * minus_dm_sm / atr
-    
-    # DX and ADX
-    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
-    adx = smma(dx, 14)
-    
-    # Get 1d data once before loop for volume
+    # Get 1d data once before loop for Camarilla pivots and VWAP
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align HTF indicators to 1d timeframe
-    alligator_dir_aligned = align_htf_to_ltf(prices, df_1w, alligator_dir)
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # === 1d Indicators: Camarilla Pivot Levels (R1-R4, S1-S4) and VWAP ===
+    # Pivot point (PP)
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    
+    # Range
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels
+    r1 = pp + (range_1d * 1.0 / 12)
+    r2 = pp + (range_1d * 2.0 / 12)
+    r3 = pp + (range_1d * 3.0 / 12)
+    r4 = pp + (range_1d * 4.0 / 12)
+    s1 = pp - (range_1d * 1.0 / 12)
+    s2 = pp - (range_1d * 2.0 / 12)
+    s3 = pp - (range_1d * 3.0 / 12)
+    s4 = pp - (range_1d * 4.0 / 12)
+    
+    # 1d VWAP (for exit)
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
+    vp_1d = typical_price_1d * volume_1d
+    cum_vp_1d = np.cumsum(vp_1d)
+    cum_vol_1d = np.cumsum(volume_1d)
+    vwap_1d = np.divide(cum_vp_1d, cum_vol_1d, out=np.zeros_like(cum_vp_1d), where=cum_vol_1d!=0)
+    
+    # Align 1d indicators to 6h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    
+    # Get 6h data for volume MA (volume confirmation)
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
+        return np.zeros(n)
+    
+    volume_6h = df_6h['volume'].values
+    
+    # Volume moving average (20-period) on 6h
+    vol_ma_20_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_20_6h)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 100
+    warmup = 50
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(alligator_dir_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(vwap_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values
-        alligator_dir_val = alligator_dir_aligned[i]
-        adx_val = adx_aligned[i]
+        r4_val = r4_aligned[i]
+        s4_val = s4_aligned[i]
+        vwap_val = vwap_aligned[i]
         vol_ma_val = vol_ma_aligned[i]
         price = close[i]
         vol = volume[i]
@@ -136,13 +99,13 @@ def generate_signals(prices):
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if Alligator turns neutral/bearish or ADX weakens
-            if alligator_dir_val <= 0 or adx_val < 20:
+            # Exit if price returns to 1d VWAP (mean reversion)
+            if price <= vwap_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if Alligator turns neutral/bullish or ADX weakens
-            if alligator_dir_val >= 0 or adx_val < 20:
+            # Exit if price returns to 1d VWAP (mean reversion)
+            if price >= vwap_val:
                 exit_signal = True
         
         if exit_signal:
@@ -152,22 +115,16 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Trend filter: Alligator must show clear direction
-            trend_filter = alligator_dir_val != 0
+            # Volume filter: volume > 1.5x 20-period average (6h)
+            vol_filter = vol > 1.5 * vol_ma_val
             
-            # Volume filter: volume > 2x 20-period average (1d)
-            vol_filter = vol > 2.0 * vol_ma_val
-            
-            # Trend strength filter: ADX > 25 (strong trend)
-            adx_filter = adx_val > 25
-            
-            # LONG: Alligator bullish, volume spike, strong trend
-            if (alligator_dir_val > 0) and vol_filter and adx_filter:
+            # LONG: price breaks above R4 with volume confirmation
+            if price > r4_val and vol_filter:
                 signals[i] = 0.25
                 position = 1
             
-            # SHORT: Alligator bearish, volume spike, strong trend
-            elif (alligator_dir_val < 0) and vol_filter and adx_filter:
+            # SHORT: price breaks below S4 with volume confirmation
+            elif price < s4_val and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
@@ -176,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1wAlligator_ADX_VolumeSpike_V1"
-timeframe = "1d"
+name = "6h_1dCamarillaR4S4_VolumeConfirmation_VWAPExit_V1"
+timeframe = "6h"
 leverage = 1.0
