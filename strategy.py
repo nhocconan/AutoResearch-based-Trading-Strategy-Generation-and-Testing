@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12h ATR expansion breakout with volume confirmation and ATR trailing stop.
-# ATR expansion indicates increasing volatility and potential trend continuation.
-# Long when price breaks above 12h Donchian upper + ATR(12h) > 1.2x its 20-period median + volume > 1.5x median.
-# Short when price breaks below 12h Donchian lower + ATR(12h) > 1.2x its 20-period median + volume > 1.5x median.
-# Uses discrete position size 0.25. ATR trailing stop exits when price moves against position by 2.5x ATR.
-# ATR expansion filter ensures we only trade during volatile breakout periods, reducing false signals in ranging markets.
-# Works in both bull and bear markets by capturing strong directional moves with volume confirmation.
+# Hypothesis: 1h strategy using 4h Donchian(20) breakout direction + 1h RSI(14) pullback entry.
+# Long when 4h Donchian upper is broken on 1h and RSI(14) < 40 (oversold pullback in uptrend).
+# Short when 4h Donchian lower is broken on 1h and RSI(14) > 60 (overbought pullback in downtrend).
+# Uses discrete position size 0.20. Session filter 08-20 UTC to avoid low-volume hours.
+# Designed to work in both bull (breakouts with pullbacks) and bear (fades of rallies into resistance).
+# Target: 15-37 trades/year/symbol to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,127 +18,100 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 12h data once before loop for Donchian channels, ATR, and volume
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4h data once before loop for Donchian channels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # === 12h Indicators: Donchian Channels (20-period) ===
-    donchian_upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # === 4h Indicators: Donchian Channels (20-period) ===
+    donchian_upper_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_lower_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: ATR (14-period) for expansion filter ===
-    tr1_12h = high_12h[1:] - low_12h[1:]
-    tr2_12h = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3_12h = np.abs(low_12h[1:] - close_12h[:-1])
-    tr_12h = np.concatenate([[np.nan], np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))])
-    atr_12h = pd.Series(tr_12h).ewm(span=14, min_periods=14, adjust=False).mean().values
-    atr_median_20 = pd.Series(atr_12h).rolling(window=20, min_periods=20).median().values
+    # Align 4h indicators to 1h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper_4h)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower_4h)
     
-    # === 12h Indicators: Volume Median (20-period) ===
-    vol_median_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).median().values
+    # === 1h Indicators: RSI(14) ===
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values  # neutral when undefined
     
-    # === 4h Indicators: ATR (14-period) for trailing stop ===
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
-    
-    # Align all indicators to primary timeframe (4h)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
-    atr_median_aligned = align_htf_to_ltf(prices, df_12h, atr_median_20)
-    vol_median_aligned = align_htf_to_ltf(prices, df_12h, vol_median_20)
-    volume_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_12h)
+    # Pre-compute session filter (08-20 UTC)
+    hours = prices.index.hour  # open_time is datetime64[ms], index is DatetimeIndex
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 20  # Donchian, ATR median, and volume median need 20 periods
+    warmup = 20  # Donchian and RSI need 20 periods
     
-    # Track position state and entry price for trailing stop
+    # Track position state
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
     for i in range(warmup, n):
-        # Skip if any required data is NaN
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
-            np.isnan(atr_12h_aligned[i]) or np.isnan(atr_median_aligned[i]) or
-            np.isnan(vol_median_aligned[i]) or np.isnan(atr[i])):
+        # Skip if outside trading session
+        if not in_session[i]:
             signals[i] = 0.0
             position = 0
-            entry_price = 0.0
             continue
         
-        # Current values (aligned)
+        # Skip if any required data is NaN
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
+            np.isnan(rsi[i])):
+            signals[i] = 0.0
+            position = 0
+            continue
+        
+        # Current values
         upper = donchian_upper_aligned[i]
         lower = donchian_lower_aligned[i]
-        atr_12h_val = atr_12h_aligned[i]
-        atr_median_val = atr_median_aligned[i]
-        vol_median_val = vol_median_aligned[i]
         price = close[i]
-        atr_val = atr[i]
-        current_vol_12h = volume_12h_aligned[i]
+        rsi_val = rsi[i]
         
-        # ATR expansion filter: current 12h ATR > 1.2x its 20-period median
-        atr_expansion = atr_12h_val > (atr_median_val * 1.2)
-        
-        # Volume spike filter: current 12h volume > 1.5x median volume
-        volume_spike = current_vol_12h > (vol_median_val * 1.5)
-        
-        # === EXIT LOGIC ===
+        # === EXIT LOGIC: reverse Donchian break ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # ATR trailing stop: exit if price drops below entry_price - 2.5 * ATR
-            if price < entry_price - 2.5 * atr_val:
-                exit_signal = True
-            # Optional: exit on reverse breakout with volume and ATR expansion
-            elif price < lower and volume_spike and atr_expansion:
+            # Exit on break below 4h Donchian lower (trend invalidation)
+            if price < lower:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # ATR trailing stop: exit if price rises above entry_price + 2.5 * ATR
-            if price > entry_price + 2.5 * atr_val:
-                exit_signal = True
-            # Optional: exit on reverse breakout with volume and ATR expansion
-            elif price > upper and volume_spike and atr_expansion:
+            # Exit on break above 4h Donchian upper (trend invalidation)
+            if price > upper:
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
-            entry_price = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: price breaks above Donchian upper with volume spike AND ATR expansion
-            if price > upper and volume_spike and atr_expansion:
-                signals[i] = 0.25
+            # LONG: price breaks above 4h Donchian upper AND RSI < 40 (pullback in uptrend)
+            if price > upper and rsi_val < 40:
+                signals[i] = 0.20
                 position = 1
-                entry_price = price
             
-            # SHORT: price breaks below Donchian lower with volume spike AND ATR expansion
-            elif price < lower and volume_spike and atr_expansion:
-                signals[i] = -0.25
+            # SHORT: price breaks below 4h Donchian lower AND RSI > 60 (pullback in downtrend)
+            elif price < lower and rsi_val > 60:
+                signals[i] = -0.20
                 position = -1
-                entry_price = price
         
         else:
-            signals[i] = position * 0.25  # maintain position
+            signals[i] = position * 0.20  # maintain position
     
     return signals
 
-name = "4h_12hATRExpansion_Donchian20_VolumeSpike1.5x_ATRTrail2.5_v1"
-timeframe = "4h"
+name = "1h_4hDonchian20_RSI14_Pullback_Session08-20_v1"
+timeframe = "1h"
 leverage = 1.0
