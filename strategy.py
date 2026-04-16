@@ -1,15 +1,16 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1D Donchian(20) breakout with weekly EMA34 filter and volume confirmation
-# Long when price breaks above Donchian(20) high AND price > weekly EMA34 AND volume > 2x 20-period average volume
-# Short when price breaks below Donchian(20) low AND price < weekly EMA34 AND volume > 2x 20-period average volume
-# ATR trailing stop (2.0x ATR) to manage risk
-# Designed for low trade frequency (target: 30-100 total trades over 4 years) on 1d timeframe
-# Weekly EMA34 filter avoids counter-trend trades, volume confirmation adds conviction
-# Works in both bull and bear by following higher-timeframe trend with volume confirmation
+# Hypothesis: 6h Williams Alligator with 1-day EMA50 trend filter and volume confirmation
+# Williams Alligator consists of three SMAs: Jaw (13), Teeth (8), Lips (5)
+# In trending markets: Lips > Teeth > Jaw (bullish) or Lips < Teeth < Jaw (bearish)
+# In ranging markets: lines intertwine
+# We add 1-day EMA50 filter to ensure we only trade in direction of higher timeframe trend
+# Volume confirmation (1.5x 20-period average) adds conviction to breakouts
+# Designed for low trade frequency (target: 50-150 total trades over 4 years) to minimize fee drag on 6h timeframe
+# Williams Alligator catches trends early, daily EMA50 filter avoids counter-trend trades, volume confirmation adds conviction
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,95 +22,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Weekly EMA34 filter ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # === 1-day EMA50 trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # === 1D Donchian(20) channels ===
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === Williams Alligator on 6h (using close prices) ===
+    # Jaw: 13-period SMMA (smoothed moving average)
+    # Teeth: 8-period SMMA
+    # Lips: 5-period SMMA
+    # SMMA calculation: SMMA(t) = (SMMA(t-1) * (period-1) + close(t)) / period
+    def smma(series, period):
+        result = np.full_like(series, np.nan)
+        if len(series) >= period:
+            # First value is SMA
+            result[period-1] = np.mean(series[:period])
+            # Subsequent values
+            for i in range(period, len(series)):
+                result[i] = (result[i-1] * (period-1) + series[i]) / period
+        return result
     
-    # === Volume Confirmation (20-period average) ===
+    jaw = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
+    
+    # === 6h Volume Confirmation (20-period average) ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # === ATR for trailing stop (14-period) ===
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 100
+    warmup = 60
     
-    # Track position and entry price for trailing stop
+    # Track position
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_1w_aligned[i]) or 
-            np.isnan(donchian_high[i]) or
-            np.isnan(donchian_low[i]) or
-            np.isnan(vol_ma_20[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(jaw[i]) or
+            np.isnan(teeth[i]) or
+            np.isnan(lips[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        ema_val = ema_1w_aligned[i]
-        donchian_high_val = donchian_high[i]
-        donchian_low_val = donchian_low[i]
-        vol_confirm = volume[i] > vol_ma_20[i] * 2.0  # 2x average volume for confirmation
-        atr_val = atr[i]
+        ema_val = ema_1d_aligned[i]
+        jaw_val = jaw[i]
+        teeth_val = teeth[i]
+        lips_val = lips[i]
+        vol_confirm = volume[i] > vol_ma_20[i] * 1.5  # 1.5x average volume for confirmation
         
-        # === TRAILING STOP LOGIC ===
+        # Williams Alligator signals:
+        # Bullish alignment: Lips > Teeth > Jaw
+        # Bearish alignment: Lips < Teeth < Jaw
+        
+        # Exit conditions: when alignment breaks or contrary to higher timeframe trend
         if position == 1:  # Long position
-            # Update highest price since entry
-            if price > highest_since_entry:
-                highest_since_entry = price
-            # Trail stop: exit if price drops 2.0*ATR from highest
-            if atr_val > 0 and price < highest_since_entry - 2.0 * atr_val:
+            # Exit if: bearish alignment OR price below EMA50 (contrary to trend)
+            if not (lips_val > teeth_val > jaw_val) or price < ema_val:
                 signals[i] = 0.0
                 position = 0
-                highest_since_entry = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Update lowest price since entry
-            if price < lowest_since_entry or lowest_since_entry == 0:
-                lowest_since_entry = price
-            # Trail stop: exit if price rises 2.0*ATR from lowest
-            if atr_val > 0 and price > lowest_since_entry + 2.0 * atr_val:
+            # Exit if: bullish alignment OR price above EMA50 (contrary to trend)
+            if not (lips_val < teeth_val < jaw_val) or price > ema_val:
                 signals[i] = 0.0
                 position = 0
-                lowest_since_entry = 0.0
                 continue
         
-        # === ENTRY LOGIC (only when flat) ===
+        # Entry conditions (only when flat)
         if position == 0:
-            # Long when: price breaks above Donchian(20) high AND price > weekly EMA34 AND volume confirmation
-            if price > donchian_high_val and price > ema_val and vol_confirm:
+            # Bullish alignment AND price above EMA50 AND volume confirmation
+            if lips_val > teeth_val > jaw_val and price > ema_val and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-                highest_since_entry = price
                 continue
-            # Short when: price breaks below Donchian(20) low AND price < weekly EMA34 AND volume confirmation
-            elif price < donchian_low_val and price < ema_val and vol_confirm:
+            # Bearish alignment AND price below EMA50 AND volume confirmation
+            elif lips_val < teeth_val < jaw_val and price < ema_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
-                lowest_since_entry = price
                 continue
         
         # Hold current position
@@ -122,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Donchian20_1wEMA34_Volume2x_ATRTrail"
-timeframe = "1d"
+name = "6h_WilliamsAlligator_1dEMA50_Volume1.5x"
+timeframe = "6h"
 leverage = 1.0
