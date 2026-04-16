@@ -24,16 +24,16 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    low_12d = df_1d['low'].values  # Note: variable name kept for compatibility
     
     # === 1d EMA34 (trend filter) ===
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # === 1d ATR(14) for volatility filter ===
-    tr1 = high_1d - low_1d
+    tr1 = high_1d - low_12d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_12d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = 0
     atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
