@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R mean reversion with 1d volume spike and 1d chop regime filter.
-# Long when Williams %R(14) < -80 (oversold) AND volume > 1.3x 20-period 1d average AND chop > 61.8 (ranging market).
-# Short when Williams %R(14) > -20 (overbought) AND volume > 1.3x 20-period 1d average AND chop > 61.8.
-# Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts).
-# Uses discrete position size 0.25. Designed to capture mean reversion in ranging markets with volume confirmation.
-# Target: 80-180 total trades over 4 years (20-45/year) to balance opportunity and fee drag.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d volume confirmation and 1w ADX trend filter.
+# Long when price breaks above 12h Camarilla R3 level AND 1d volume > 1.2x 20-period average AND 1w ADX > 20.
+# Short when price breaks below 12h Camarilla S3 level AND 1d volume > 1.2x 20-period average AND 1w ADX > 20.
+# Exit when price crosses the 12h Camarilla pivot (midpoint) or ATR-based stoploss (2.5*ATR from entry).
+# Uses discrete position size 0.25. Designed to capture institutional breakout levels with volume confirmation.
+# Target: 80-150 total trades over 4 years (20-38/year) to balance edge and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,47 +20,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 6h Indicators: Williams %R (14-period) ===
-    highest_high_6h = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_6h = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_6h - close) / (highest_high_6h - lowest_low_6h)
-    # Handle division by zero (when high == low)
-    williams_r = np.where((highest_high_6h - lowest_low_6h) == 0, -50, williams_r)
+    # === 12h Indicators: Camarilla Pivot Levels ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # === 1d Indicators: Volume Spike (volume > 1.3x 20-period average) ===
+    # Calculate pivot point
+    pivot_12h = (high_12h + low_12h + close_12h) / 3
+    range_12h = high_12h - low_12h
+    
+    # Camarilla levels
+    r3_12h = close_12h + range_12h * 1.1 / 4
+    s3_12h = close_12h - range_12h * 1.1 / 4
+    pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
+    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
+    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
+    
+    # === 1d Indicators: Volume Confirmation ===
     df_1d = get_htf_data(prices, '1d')
     vol_1d = df_1d['volume'].values
     vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    volume_spike = volume > (1.3 * vol_ma_1d_aligned)
+    volume_confirm = volume > (1.2 * vol_ma_1d_aligned)
     
-    # === 1d Indicators: Choppiness Index (CHOP) > 61.8 (ranging market) ===
-    atr_1d_list = []
-    for i in range(len(df_1d)):
-        if i < 14:
-            atr_1d_list.append(np.nan)
-        else:
-            tr = np.maximum(
-                df_1d['high'].iloc[i] - df_1d['low'].iloc[i],
-                np.maximum(
-                    np.abs(df_1d['high'].iloc[i] - df_1d['close'].iloc[i-1]),
-                    np.abs(df_1d['low'].iloc[i] - df_1d['close'].iloc[i-1])
-                )
-            )
-            if i == 14:
-                atr_1d_list.append(tr)
-            else:
-                atr_1d_list.append((atr_1d_list[-1] * 13 + tr) / 14)
-    atr_1d = np.array(atr_1d_list)
+    # === 1w Indicators: ADX Trend Filter ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    highest_high_14d = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
-    lowest_low_14d = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_1d * np.sqrt(14) / (highest_high_14d - lowest_low_14d)) / np.log10(14)
-    # Handle division by zero and invalid values
-    chop = np.where((highest_high_14d - lowest_low_14d) == 0, 50, chop)
-    chop = np.where(np.isnan(chop), 50, chop)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    chop_filter = chop_aligned > 61.8
+    # True Range
+    tr1 = pd.Series(high_1w).diff()
+    tr2 = pd.Series(low_1w).diff().abs()
+    tr3 = pd.Series(close_1w).shift(1).diff().abs()
+    tr_1w = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1w = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Movement
+    dm_plus = pd.Series(high_1w).diff()
+    dm_minus = pd.Series(low_1w).diff().abs()
+    dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
+    dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
+    
+    # Smoothed DM and TR
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_smooth = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * (dm_plus_smooth / atr_smooth)
+    di_minus = 100 * (dm_minus_smooth / atr_smooth)
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    trend_filter = adx_aligned > 20
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -71,57 +85,77 @@ def generate_signals(prices):
     # Warmup: ensure all indicators are valid
     warmup = 100
     
-    # Track position state
+    # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    
+    # Calculate 12h ATR for stoploss
+    tr1_12h = pd.Series(high_12h).diff()
+    tr2_12h = pd.Series(low_12h).diff().abs()
+    tr3_12h = pd.Series(close_12h).shift(1).diff().abs()
+    tr_12h = pd.concat([tr1_12h, tr2_12h, tr3_12h], axis=1).max(axis=1)
+    atr_12h_raw = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h_raw)
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(williams_r[i]) or np.isnan(volume_spike[i]) or np.isnan(chop_filter[i]) or
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_12h_aligned[i]) or np.isnan(s3_12h_aligned[i]) or
+            np.isnan(volume_confirm[i]) or np.isnan(trend_filter[i]) or np.isnan(atr_12h_aligned[i]) or
             not session_filter[i]):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values
-        wr = williams_r[i]
-        vol_spike = volume_spike[i]
-        is_chop = chop_filter[i]
+        price = close[i]
+        vol_conf = volume_confirm[i]
+        is_trending = trend_filter[i]
+        atr_val = atr_12h_aligned[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if Williams %R crosses above -50
-            if wr > -50:
+            # Exit if price crosses below pivot
+            if price < pivot_aligned[i]:
+                exit_signal = True
+            # ATR-based stoploss: 2.5*ATR below entry
+            elif price < entry_price - 2.5 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if Williams %R crosses below -50
-            if wr < -50:
+            # Exit if price crosses above pivot
+            if price > pivot_aligned[i]:
+                exit_signal = True
+            # ATR-based stoploss: 2.5*ATR above entry
+            elif price > entry_price + 2.5 * atr_val:
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
+            entry_price = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Williams %R oversold (< -80) AND volume spike AND choppy market
-            if wr < -80 and vol_spike and is_chop:
+            # LONG: Price breaks above R3 AND volume confirmation AND trending market
+            if price > r3_12h_aligned[i] and vol_conf and is_trending:
                 signals[i] = 0.25
                 position = 1
+                entry_price = price
             
-            # SHORT: Williams %R overbought (> -20) AND volume spike AND choppy market
-            elif wr > -20 and vol_spike and is_chop:
+            # SHORT: Price breaks below S3 AND volume confirmation AND trending market
+            elif price < s3_12h_aligned[i] and vol_conf and is_trending:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         else:
             signals[i] = position * 0.25
     
     return signals
 
-name = "6h_WilliamsR_MeanReversion_1dVolumeSpike_1dChop_V1"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_1dVolumeConfirm_1wADX_V1"
+timeframe = "12h"
 leverage = 1.0
