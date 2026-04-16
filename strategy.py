@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d Camarilla pivot levels (R3/S3 fade, R4/S4 breakout)
-# with volume confirmation and ADX(14) regime filter from 1d.
-# Long when price breaks above R4 with volume > 1.5x average and ADX > 25 (strong trend).
-# Short when price breaks below S4 with volume > 1.5x average and ADX > 25.
-# Fade longs at R3 when price fails to break R4 and shows weakness (close < open).
-# Fade shorts at S3 when price fails to break S4 and shows strength (close > open).
-# Exit when price returns to daily pivot point (PP) or opposite Camarilla level.
-# Uses discrete position size 0.25. Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 12h strategy using daily Williams %R(14) for mean reversion in ranging markets
+# combined with 1d ADX(14) regime filter to avoid trending markets.
+# Long when Williams %R < -80 (oversold) and ADX < 25 (ranging/weak trend)
+# Short when Williams %R > -20 (overbought) and ADX < 25
+# Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts)
+# Uses discrete position size 0.25. Williams %R provides mean reversion signals,
+# ADX filter ensures we only trade in ranging conditions where mean reversion works.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,7 +22,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once before loop for Camarilla levels and filters
+    # Get daily data once before loop for Williams %R and ADX
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -31,31 +31,18 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === Daily Indicators: Camarilla Pivot Levels (based on prior day) ===
-    # Calculate using prior day's high, low, close (shift by 1 to use completed day only)
-    phigh = np.roll(high_1d, 1)
-    plow = np.roll(low_1d, 1)
-    pclose = np.roll(close_1d, 1)
-    phigh[0] = np.nan
-    plow[0] = np.nan
-    pclose[0] = np.nan
+    # === Daily Indicators: Williams %R (14) ===
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Camarilla levels
-    pp = (phigh + plow + pclose) / 3.0
-    range_ = phigh - plow
-    r3 = pp + range_ * 1.1 / 4
-    s3 = pp - range_ * 1.1 / 4
-    r4 = pp + range_ * 1.1 / 2
-    s4 = pp - range_ * 1.1 / 2
+    # Align daily Williams %R to 12h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Align daily Camarilla levels to 6h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # === Daily Indicators: ADX (14) for trend strength filter ===
+    # === Daily Indicators: ADX (14) for regime filter ===
     # True Range
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
@@ -86,102 +73,67 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Align daily ADX to 6h timeframe
+    # Align daily ADX to 12h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume moving average (20-period) on 6h
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
     warmup = 100
     
-    # Track position state and entry price for stoploss
+    # Track position state
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             position = 0
-            entry_price = 0.0
             continue
         
         # Current values
-        pp_val = pp_aligned[i]
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
-        r4_val = r4_aligned[i]
-        s4_val = s4_aligned[i]
+        wr = williams_r_aligned[i]
         adx_val = adx_aligned[i]
         price = close[i]
-        vol = volume[i]
-        vol_ma = vol_ma_20[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price returns to daily pivot or drops to S3
-            if price <= pp_val or price <= s3_val:
+            # Exit if Williams %R crosses above -50 (moving out of oversold)
+            if wr > -50:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price returns to daily pivot or rises to R3
-            if price >= pp_val or price >= r3_val:
+            # Exit if Williams %R crosses below -50 (moving out of overbought)
+            if wr < -50:
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
-            entry_price = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Trend filter: only trade when ADX > 25 (strong trend)
-            trend_filter = adx_val > 25
+            # Regime filter: only trade when ADX < 25 (ranging/weak trend)
+            regime_filter = adx_val < 25
             
-            # Volume filter: volume > 1.5x 20-period average
-            vol_filter = vol > 1.5 * vol_ma
-            
-            # BREAKOUT LONG: Price breaks above R4 with trend and volume confirmation
-            if (price > r4_val) and trend_filter and vol_filter:
+            # LONG: Williams %R < -80 (oversold) in ranging market
+            if (wr < -80) and regime_filter:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
             
-            # BREAKOUT SHORT: Price breaks below S4 with trend and volume confirmation
-            elif (price < s4_val) and trend_filter and vol_filter:
+            # SHORT: Williams %R > -20 (overbought) in ranging market
+            elif (wr > -20) and regime_filter:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
-            
-            # FADE LONG: Price rejects at S3 (fails to break lower) with bullish close
-            elif (price >= s3_val and price <= s4_val) and trend_filter and vol_filter:
-                # Look for bullish reversal: close > open and price showing strength
-                if i > 0 and close[i] > prices['open'].iloc[i]:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = price
-            
-            # FADE SHORT: Price rejects at R3 (fails to break higher) with bearish close
-            elif (price >= r3_val and price <= r4_val) and trend_filter and vol_filter:
-                # Look for bearish reversal: close < open and price showing weakness
-                if i > 0 and close[i] < prices['open'].iloc[i]:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = price
         
         else:
             signals[i] = position * 0.25
     
     return signals
 
-name = "6h_1dCamarillaR3S3R4S4_Volume_ADXFilter_V1"
-timeframe = "6h"
+name = "12h_1dWilliamsR14_1dADX25_RangeFilter_V1"
+timeframe = "12h"
 leverage = 1.0
