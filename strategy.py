@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout (20) + 1d EMA trend filter + volume confirmation
-# Donchian channels provide clear breakout levels that work in both bull/bear markets.
-# 1d EMA filter ensures we trade with the higher timeframe trend.
-# Volume confirmation adds conviction to breakout signals.
-# ATR-based trailing stop manages risk without look-ahead.
-# Target: 80-180 total trades over 4 years (20-45/year) to minimize fee drag.
+# Hypothesis: 6h Williams Fractal breakout with 1d trend filter and volume confirmation
+# Williams Fractals identify significant swing highs/lows that act as support/resistance.
+# Breakouts above recent bearish fractals or below bullish fractals with 1d EMA trend filter
+# and volume confirmation capture momentum moves in both bull and bear markets.
+# ATR-based trailing stop manages risk. Target: 50-150 total trades over 4 years (12-37/year).
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,38 +19,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h data (primary timeframe) ===
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    # === 6h data (primary timeframe) ===
+    df_6h = get_htf_data(prices, '6h')
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    volume_6h = df_6h['volume'].values
     
     # === 1d data (HTF for trend filter) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # === 4h Donchian Channel (20) ===
-    highest_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_upper = highest_high_20
-    donchian_lower = lowest_low_20
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
+    # === 1d Williams Fractals (5-bar) ===
+    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n-3] < high[n-2] > high[n-1] > high[n] > high[n+1] > high[n+2]
+    # Simplified: high[i] is highest among 5 bars centered at i
+    n_1d = len(close_1d)
+    bearish_fractal = np.full(n_1d, np.nan)
+    bullish_fractal = np.full(n_1d, np.nan)
+    
+    for i in range(2, n_1d - 2):
+        if (high_1d[i] == np.max(high_1d[i-2:i+3]) and 
+            high_1d[i] > high_1d[i-1] and high_1d[i] > high_1d[i-2] and 
+            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
+            bearish_fractal[i] = high_1d[i]
+        if (low_1d[i] == np.min(low_1d[i-2:i+3]) and 
+            low_1d[i] < low_1d[i-1] and low_1d[i] < low_1d[i-2] and 
+            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
+            bullish_fractal[i] = low_1d[i]
+    
+    # Williams Fractals need 2 extra bars for confirmation (bar closes after fractal completion)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     
     # === 1d EMA Trend Filter (34) ===
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === 4h Volume Confirmation (20-period average) ===
-    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20)
+    # === 6h Volume Confirmation (20-period average) ===
+    vol_ma_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_20)
     
-    # === 4h ATR (15) for trailing stop ===
-    atr_4h = np.maximum(high_4h - low_4h, np.maximum(np.abs(high_4h - np.roll(close_4h, 1)), np.abs(low_4h - np.roll(close_4h, 1))))
-    atr_4h[0] = high_4h[0] - low_4h[0]  # Fix first value
-    atr_ma = pd.Series(atr_4h).ewm(span=15, adjust=False, min_periods=15).mean().values
-    atr_aligned = align_htf_to_ltf(prices, df_4h, atr_ma)
+    # === 6h ATR (15) for trailing stop ===
+    atr_6h = np.maximum(high_6h - low_6h, np.maximum(np.abs(high_6h - np.roll(close_6h, 1)), np.abs(low_6h - np.roll(close_6h, 1))))
+    atr_6h[0] = high_6h[0] - low_6h[0]  # Fix first value
+    atr_ma = pd.Series(atr_6h).ewm(span=15, adjust=False, min_periods=15).mean().values
+    atr_aligned = align_htf_to_ltf(prices, df_6h, atr_ma)
     
     signals = np.zeros(n)
     
@@ -66,8 +78,8 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(donchian_upper_aligned[i]) or 
-            np.isnan(donchian_lower_aligned[i]) or
+        if (np.isnan(bearish_fractal_aligned[i]) or 
+            np.isnan(bullish_fractal_aligned[i]) or
             np.isnan(ema_34_aligned[i]) or
             np.isnan(vol_ma_aligned[i]) or
             np.isnan(atr_aligned[i])):
@@ -76,8 +88,8 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        upper = donchian_upper_aligned[i]
-        lower = donchian_lower_aligned[i]
+        bear_fract = bearish_fractal_aligned[i]
+        bull_fract = bullish_fractal_aligned[i]
         ema_trend = ema_34_aligned[i]
         vol_confirm = volume[i] > vol_ma_aligned[i] * 1.5  # 1.5x average volume for confirmation
         atr_val = atr_aligned[i]
@@ -107,10 +119,10 @@ def generate_signals(prices):
                 lowest_since_entry = 0.0
                 continue
         
-        # === EXIT LOGIC (Donchian reversal) ===
+        # === EXIT LOGIC (Fractal reversal) ===
         if position == 1:  # Long position
-            # Exit when price breaks below lower Donchian band
-            if price < lower:
+            # Exit when price breaks below bullish fractal (support)
+            if not np.isnan(bull_fract) and price < bull_fract:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -118,8 +130,8 @@ def generate_signals(prices):
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price breaks above upper Donchian band
-            if price > upper:
+            # Exit when price breaks above bearish fractal (resistance)
+            if not np.isnan(bear_fract) and price > bear_fract:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -130,15 +142,15 @@ def generate_signals(prices):
         if position == 0:
             # Require volume confirmation
             if vol_confirm:
-                # Long when price breaks above upper Donchian band AND price above 1d EMA (uptrend)
-                if price > upper and price > ema_trend:
+                # Long when price breaks above bearish fractal (resistance) AND price above 1d EMA (uptrend)
+                if not np.isnan(bear_fract) and price > bear_fract and price > ema_trend:
                     signals[i] = 0.25
                     position = 1
                     entry_price = price
                     highest_since_entry = price
                     continue
-                # Short when price breaks below lower Donchian band AND price below 1d EMA (downtrend)
-                elif price < lower and price < ema_trend:
+                # Short when price breaks below bullish fractal (support) AND price below 1d EMA (downtrend)
+                elif not np.isnan(bull_fract) and price < bull_fract and price < ema_trend:
                     signals[i] = -0.25
                     position = -1
                     entry_price = price
@@ -155,6 +167,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_VolumeConfirm_ATRTrail"
-timeframe = "4h"
+name = "6h_WilliamsFractal_1dEMA34_VolumeConfirm_ATRTrail"
+timeframe = "6h"
 leverage = 1.0
