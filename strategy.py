@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and 12h choppiness regime filter.
-# Long when price breaks above Donchian(20) high AND 12h volume > 1.5x 20-period average AND 12h chop > 61.8 (ranging market).
-# Short when price breaks below Donchian(20) low AND 12h volume > 1.5x 20-period average AND 12h chop > 61.8.
-# Exit when price reverts to Donchian(20) midpoint or ATR-based stoploss (2*ATR from entry).
-# Uses discrete position size 0.25. Designed to capture mean reversion in ranging markets with volume confirmation.
-# Works in both bull and bear markets by requiring ranging conditions (chop>61.8) and volume confirmation, avoiding strong trends.
-# Target: 75-200 total trades over 4 years (19-50/year) to balance edge and fee drag.
+# Hypothesis: 1h Donchian breakout with 4h volume confirmation and 1d ADX regime filter.
+# Long when price breaks above 20-period 1h Donchian upper band AND 4h volume > 1.5x 20-period average AND 1d ADX > 25 (strong trend).
+# Short when price breaks below 20-period 1h Donchian lower band AND 4h volume > 1.5x 20-period average AND 1d ADX > 25.
+# Exit when price reverses to opposite Donchian band or ATR-based stoploss (1.5*ATR from entry).
+# Uses discrete position size 0.20. Designed to capture strong trend continuation moves with volume confirmation.
+# Target: 60-150 total trades over 4 years (15-37/year) to balance edge and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,46 +20,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Indicators: Donchian Channel (20-period) ===
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2.0
+    # === 1h Indicators: Donchian Channel (20-period) ===
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: ATR (14-period) for stoploss ===
-    tr1 = pd.Series(high).diff()
-    tr2 = pd.Series(low).diff().abs()
-    tr3 = pd.Series(close).shift(1).diff().abs()
-    tr_4h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_4h_raw = pd.Series(tr_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # === 4h Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    df_4h = get_htf_data(prices, '4h')
+    vol_4h = df_4h['volume'].values
+    vol_ma_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
+    volume_spike_4h = volume > (1.5 * vol_ma_4h_aligned)
     
-    # === 12h Indicators: Volume Spike (volume > 1.5x 20-period average) ===
-    df_12h = get_htf_data(prices, '12h')
-    vol_12h = df_12h['volume'].values
-    vol_ma_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
-    volume_spike = volume > (1.5 * vol_ma_12h_aligned)
-    
-    # === 12h Indicators: Choppiness Index (14-period) > 61.8 (ranging market) ===
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # === 1d Indicators: ADX > 25 (strong trend filter) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range
-    tr1_12h = pd.Series(high_12h).diff()
-    tr2_12h = pd.Series(low_12h).diff().abs()
-    tr3_12h = pd.Series(close_12h).shift(1).diff().abs()
-    tr_12h = pd.concat([tr1_12h, tr2_12h, tr3_12h], axis=1).max(axis=1)
-    atr_12h = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    tr1 = pd.Series(high_1d).diff()
+    tr2 = pd.Series(low_1d).diff().abs()
+    tr3 = pd.Series(close_1d).shift(1).diff().abs()
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Choppiness Index = 100 * log10(sum(ATR over n periods) / (max(high-n) - min(low-n))) / log10(n)
-    sum_atr_12h = pd.Series(atr_12h).rolling(window=14, min_periods=14).sum().values
-    max_h_12h = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    min_l_12h = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
-    chop_denom = max_h_12h - min_l_12h
-    chop_12h = 100 * np.log10(sum_atr_12h / chop_denom) / np.log10(14)
-    chop_12h = np.where(chop_denom == 0, 50.0, chop_12h)  # avoid division by zero
-    chop_12h_aligned = align_htf_to_ltf(prices, df_12h, chop_12h)
-    chop_filter = chop_12h_aligned > 61.8  # ranging market
+    # Directional Movement
+    dm_plus = pd.Series(high_1d).diff()
+    dm_minus = pd.Series(low_1d).diff().abs()
+    dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
+    dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
+    
+    # Smoothed DM and TR
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_smooth = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * (dm_plus_smooth / atr_smooth)
+    di_minus = 100 * (dm_minus_smooth / atr_smooth)
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    strong_trend = adx_aligned > 25
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -68,17 +69,24 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed)
-    warmup = 50
+    # Warmup: ensure all indicators are valid (max 50 periods needed for ADX/ATR/EMA)
+    warmup = 100
     
     # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
+    # Calculate 1h ATR for stoploss
+    tr1_1h = pd.Series(high).diff()
+    tr2_1h = pd.Series(low).diff().abs()
+    tr3_1h = pd.Series(close).shift(1).diff().abs()
+    tr_1h = pd.concat([tr1_1h, tr2_1h, tr3_1h], axis=1).max(axis=1)
+    atr_1h_raw = pd.Series(tr_1h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(donch_mid[i]) or
-            np.isnan(atr_4h_raw[i]) or np.isnan(volume_spike[i]) or np.isnan(chop_filter[i]) or
+        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or np.isnan(volume_spike_4h[i]) or
+            np.isnan(strong_trend[i]) or np.isnan(atr_1h_raw[i]) or
             not session_filter[i]):
             signals[i] = 0.0
             position = 0
@@ -86,27 +94,27 @@ def generate_signals(prices):
         
         # Current values
         price = close[i]
-        vol_spike = volume_spike[i]
-        is_ranging = chop_filter[i]
-        atr_val = atr_4h_raw[i]
+        vol_spike = volume_spike_4h[i]
+        is_strong_trend = strong_trend[i]
+        atr_val = atr_1h_raw[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price reverts to Donchian midpoint
-            if price <= donch_mid[i]:
+            # Exit if price reverses to lower Donchian band
+            if price <= lowest_20[i]:
                 exit_signal = True
-            # ATR-based stoploss: 2*ATR below entry
-            elif price < entry_price - 2.0 * atr_val:
+            # ATR-based stoploss: 1.5*ATR below entry
+            elif price < entry_price - 1.5 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price reverts to Donchian midpoint
-            if price >= donch_mid[i]:
+            # Exit if price reverses to upper Donchian band
+            if price >= highest_20[i]:
                 exit_signal = True
-            # ATR-based stoploss: 2*ATR above entry
-            elif price > entry_price + 2.0 * atr_val:
+            # ATR-based stoploss: 1.5*ATR above entry
+            elif price > entry_price + 1.5 * atr_val:
                 exit_signal = True
         
         if exit_signal:
@@ -117,23 +125,23 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Donchian high AND volume spike AND ranging market
-            if price > donch_high[i] and vol_spike and is_ranging:
-                signals[i] = 0.25
+            # LONG: Price breaks above upper Donchian band AND 4h volume spike AND strong 1d trend
+            if price > highest_20[i] and vol_spike and is_strong_trend:
+                signals[i] = 0.20
                 position = 1
                 entry_price = price
             
-            # SHORT: Price breaks below Donchian low AND volume spike AND ranging market
-            elif price < donch_low[i] and vol_spike and is_ranging:
-                signals[i] = -0.25
+            # SHORT: Price breaks below lower Donchian band AND 4h volume spike AND strong 1d trend
+            elif price < lowest_20[i] and vol_spike and is_strong_trend:
+                signals[i] = -0.20
                 position = -1
                 entry_price = price
         
         else:
-            signals[i] = position * 0.25
+            signals[i] = position * 0.20
     
     return signals
 
-name = "4h_Donchian20_12hVolumeSpike_12hChop_V1"
-timeframe = "4h"
+name = "1h_Donchian20_4hVolumeSpike_1dADX_V1"
+timeframe = "1h"
 leverage = 1.0
