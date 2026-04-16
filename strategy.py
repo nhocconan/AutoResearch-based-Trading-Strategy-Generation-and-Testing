@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ehlers Fisher Transform with 1d trend filter and volume confirmation
-# Long when Fisher crosses above -1.5 AND price > 1d EMA50 AND volume > 1.3x 6h average volume
-# Short when Fisher crosses below +1.5 AND price < 1d EMA50 AND volume > 1.3x 6h average volume
-# Fisher Transform identifies turning points in cyclical price action
-# EMA50 filter ensures alignment with intermediate trend to avoid counter-trend trades
-# Volume confirmation adds conviction to reversals
-# Target: 80-160 total trades over 4 years (20-40/year) with controlled risk
+# Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and 1d ADX25 trend filter
+# Long when price breaks above Donchian upper band AND volume > 1.5x 1d average volume AND ADX > 25
+# Short when price breaks below Donchian lower band AND volume > 1.5x 1d average volume AND ADX > 25
+# ATR trailing stop (2.0x ATR) to manage risk
+# Donchian channels provide clear trend-following structure
+# Volume confirmation ensures breakout conviction
+# ADX filter ensures trading only in trending markets (avoids chop)
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,92 +22,145 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d EMA50 trend filter ===
+    # === 1d ADX(14) trend filter ===
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # === Ehlers Fisher Transform (9-period) ===
-    # Normalize price to 0-1 range over lookback period
-    hlc = (high + low + close) / 3.0
-    max_h = pd.Series(hlc).rolling(window=9, min_periods=9).max().values
-    min_l = pd.Series(hlc).rolling(window=9, min_periods=9).min().values
-    range_hlc = max_h - min_l
-    # Avoid division by zero
-    range_hlc = np.where(range_hlc == 0, 1e-10, range_hlc)
-    value1 = 0.33 * 2 * ((hlc - min_l) / range_hlc - 0.5) + 0.67 * np.roll(0.33 * 2 * ((hlc - min_l) / range_hlc - 0.5) + 0.67 * np.zeros_like(hlc), 1)
-    value1[0] = 0
-    # Apply smoothing
-    value2 = pd.Series(value1).ewm(alpha=0.5, adjust=False).mean().values
-    # Fisher Transform
-    value2 = np.clip(value2, -0.999, 0.999)
-    fisher = 0.5 * np.log((1 + value2) / (1 - value2))
-    # Signal line
-    fisher_signal = pd.Series(fisher).ewm(span=3, adjust=False).mean().values
+    # Calculate True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # === Volume Confirmation (6h average) ===
-    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values  # 6 periods of 6h = 36h
+    # Calculate Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    up_move[0] = 0
+    down_move[0] = 0
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smooth TR and DM
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate DI and DX
+    plus_di_14 = 100 * plus_dm_14 / tr_14
+    minus_di_14 = 100 * minus_dm_14 / tr_14
+    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
+    dx = np.where(np.isnan(dx), 0, dx)
+    
+    # Calculate ADX
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_14 = adx  # ADX(14)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
+    
+    # === 12h Donchian(20) channels ===
+    # Use 12h high/low from 1d data? No, need actual 12h data
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    # Calculate Donchian channels (20-period high/low)
+    donch_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    
+    # Align to 12h timeframe (already in 12h, but align to lower timeframe if needed)
+    # Since we're using 12h as primary, we need to align 12h indicators to 12h bars
+    # But our prices are at what timeframe? The function receives prices at the strategy's timeframe
+    # Since timeframe = "12h", prices are already 12h bars
+    donch_high_aligned = donch_high  # Already aligned to 12h
+    donch_low_aligned = donch_low    # Already aligned to 12h
+    
+    # === 1d Volume Confirmation ===
+    vol_ma_1d = pd.Series(volume).rolling(window=2, min_periods=2).mean().values  # 2 periods of 12h = 1d
+    
+    # === 12h ATR for trailing stop (10-period) ===
+    tr1_12h = high - low
+    tr2_12h = np.abs(high - np.roll(close, 1))
+    tr3_12h = np.abs(low - np.roll(close, 1))
+    tr2_12h[0] = tr1_12h[0]
+    tr3_12h[0] = tr1_12h[0]
+    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
+    atr = pd.Series(tr_12h).rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 30
+    warmup = 50
     
-    # Track position
+    # Track position and entry price for trailing stop
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_50_aligned[i]) or 
-            np.isnan(fisher[i]) or
-            np.isnan(fisher_signal[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(adx_aligned[i]) or 
+            np.isnan(donch_high_aligned[i]) or
+            np.isnan(donch_low_aligned[i]) or
+            np.isnan(vol_ma_1d[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        ema_val = ema_50_aligned[i]
-        fish = fisher[i]
-        fish_sig = fisher_signal[i]
-        vol_confirm = volume[i] > vol_ma[i] * 1.3  # 1.3x average volume
+        adx_val = adx_aligned[i]
+        upper_band = donch_high_aligned[i]
+        lower_band = donch_low_aligned[i]
+        vol_confirm = volume[i] > vol_ma_1d[i] * 1.5  # 1.5x average volume for confirmation
+        atr_val = atr[i]
         
-        # Fisher crossover signals
-        fish_cross_up = fish > fish_sig and np.roll(fish, 1)[i] <= np.roll(fisher_signal, 1)[i]
-        fish_cross_down = fish < fish_sig and np.roll(fish, 1)[i] >= np.roll(fisher_signal, 1)[i]
+        # === TRAILING STOP LOGIC ===
+        if position == 1:  # Long position
+            # Update highest price since entry
+            if price > highest_since_entry:
+                highest_since_entry = price
+            # Trail stop: exit if price drops 2.0*ATR from highest
+            if atr_val > 0 and price < highest_since_entry - 2.0 * atr_val:
+                signals[i] = 0.0
+                position = 0
+                highest_since_entry = 0.0
+                continue
         
-        # Handle roll boundary
-        if i == 0:
-            fish_cross_up = False
-            fish_cross_down = False
-        else:
-            fish_cross_up = fish > fish_sig and fisher[i-1] <= fisher_signal[i-1]
-            fish_cross_down = fish < fish_sig and fisher[i-1] >= fisher_signal[i-1]
+        elif position == -1:  # Short position
+            # Update lowest price since entry
+            if price < lowest_since_entry or lowest_since_entry == 0:
+                lowest_since_entry = price
+            # Trail stop: exit if price rises 2.0*ATR from lowest
+            if atr_val > 0 and price > lowest_since_entry + 2.0 * atr_val:
+                signals[i] = 0.0
+                position = 0
+                lowest_since_entry = 0.0
+                continue
         
-        # === ENTRY LOGIC ===
+        # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Long when: Fisher crosses above signal AND price > EMA50 AND volume confirmation
-            if fish_cross_up and price > ema_val and vol_confirm:
+            # Long when: price breaks above Donchian upper band AND volume confirmation AND ADX > 25
+            if price > upper_band and vol_confirm and adx_val > 25:
                 signals[i] = 0.25
                 position = 1
+                entry_price = price
+                highest_since_entry = price
                 continue
-            # Short when: Fisher crosses below signal AND price < EMA50 AND volume confirmation
-            elif fish_cross_down and price < ema_val and vol_confirm:
+            # Short when: price breaks below Donchian lower band AND volume confirmation AND ADX > 25
+            elif price < lower_band and vol_confirm and adx_val > 25:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
+                lowest_since_entry = price
                 continue
         
-        # === EXIT LOGIC: Reverse on opposite signal ===
-        elif position == 1 and fish_cross_down:
-            signals[i] = -0.25
-            position = -1
-        elif position == -1 and fish_cross_up:
-            signals[i] = 0.25
-            position = 1
-        
         # Hold current position
-        elif position == 1:
+        if position == 1:
             signals[i] = 0.25
         elif position == -1:
             signals[i] = -0.25
@@ -115,6 +169,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_FisherTransform_1dEMA50_Volume1.3x"
-timeframe = "6h"
+name = "12h_Donchian20_1dADX25_Volume1.5x_ATRTrail_2.0x"
+timeframe = "12h"
 leverage = 1.0
