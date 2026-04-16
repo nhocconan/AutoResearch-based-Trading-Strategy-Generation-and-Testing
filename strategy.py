@@ -3,68 +3,73 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w volume spike and 1w ADX trend filter.
-# Long when price breaks above 20-period 1d Donchian high AND volume > 2.0x 20-period 1w average AND 1w ADX > 25 (strong trending market).
-# Short when price breaks below 20-period 1d Donchian low AND volume > 2.0x 20-period 1w average AND 1w ADX > 25.
-# Exit when price crosses the 1d Donchian midpoint or ATR-based stoploss (2*ATR from entry).
-# Uses discrete position size 0.25. Designed to capture major breakouts in strong trending markets on daily timeframe.
-# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag while maintaining edge.
-# Works in both bull and bear markets by requiring strong trend (ADX>25) and volume confirmation.
+# Hypothesis: 12h Williams Alligator (Jaw/Teeth/Lips) crossover with 1d volume confirmation and 1d ADX trend filter.
+# Long when Alligator Lips (5-period SMA of median price, shifted 3) crosses above Teeth (8-period SMA, shifted 5) AND
+# price is above Jaw (13-period SMA, shifted 8) AND 1d volume > 1.5x 20-period average AND 1d ADX > 20.
+# Short when Lips crosses below Teeth AND price below Jaw AND same volume/ADX conditions.
+# Exit when Lips crosses back over Teeth in opposite direction or price crosses Jaw.
+# Uses discrete position size 0.25. Designed to catch trends with smoothed Alligator filters to reduce whipsaw.
+# Williams Alligator is effective in both bull and bear markets by identifying trending vs ranging conditions.
+# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe to balance opportunity and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1d Indicators: Donchian Channel (20-period) ===
-    high_1d = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_1d = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_high = high_1d
-    donchian_low = low_1d
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # === 12h Williams Alligator ===
+    # Median price = (high + low) / 2
+    median_price = (high + low) / 2
     
-    # === 1w Indicators: Volume Spike (volume > 2.0x 20-period average) ===
-    df_1w = get_htf_data(prices, '1w')
-    vol_1w = df_1w['volume'].values
-    vol_ma_1w = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
-    volume_spike = volume > (2.0 * vol_ma_1w_aligned)
+    # Jaw: 13-period SMA of median price, shifted 8 bars
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
+    # Teeth: 8-period SMA of median price, shifted 5 bars
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
+    # Lips: 5-period SMA of median price, shifted 3 bars
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # === 1w Indicators: ADX > 25 (strong trending market filter) ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === 1d Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    df_1d = get_htf_data(prices, '1d')
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    volume_spike = volume > (1.5 * vol_ma_1d_aligned)
+    
+    # === 1d Indicators: ADX > 20 (trending market filter) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range
-    tr1 = pd.Series(high_1w).diff()
-    tr2 = pd.Series(low_1w).diff().abs()
-    tr3 = pd.Series(close_1w).shift(1).diff().abs()
-    tr_1w = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1w = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    tr1 = pd.Series(high_1d).diff()
+    tr2 = pd.Series(low_1d).diff().abs()
+    tr3 = pd.Series(close_1d).shift(1).diff().abs()
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # Directional Movement
-    dm_plus = pd.Series(high_1w).diff()
-    dm_minus = pd.Series(low_1w).diff().abs()
+    dm_plus = pd.Series(high_1d).diff()
+    dm_minus = pd.Series(low_1d).diff().abs()
     dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
     dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
     
     # Smoothed DM and TR
     dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_smooth = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_smooth = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # Directional Indicators
     di_plus = 100 * (dm_plus_smooth / atr_smooth)
     di_minus = 100 * (dm_minus_smooth / atr_smooth)
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    strong_trend = adx_aligned > 25
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    strong_trend = adx_aligned > 20
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -72,24 +77,16 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed for ADX/ATR)
-    warmup = 100
+    # Warmup: ensure all indicators are valid (max shift 8 + max period 13 = 21, plus ADX/ATR needs ~35)
+    warmup = 50
     
-    # Track position state and entry price for stoploss
+    # Track position state
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    
-    # Calculate 1d ATR for stoploss
-    tr1_1d = pd.Series(high).diff()
-    tr2_1d = pd.Series(low).diff().abs()
-    tr3_1d = pd.Series(close).shift(1).diff().abs()
-    tr_1d = pd.concat([tr1_1d, tr2_1d, tr3_1d], axis=1).max(axis=1)
-    atr_1d_raw = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(donchian_mid[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(strong_trend[i]) or np.isnan(atr_1d_raw[i]) or
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(strong_trend[i]) or
             not session_filter[i]):
             signals[i] = 0.0
             position = 0
@@ -97,54 +94,47 @@ def generate_signals(prices):
         
         # Current values
         price = close[i]
+        lips_val = lips[i]
+        teeth_val = teeth[i]
+        jaw_val = jaw[i]
         vol_spike = volume_spike[i]
         is_strong_trend = strong_trend[i]
-        atr_val = atr_1d_raw[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price crosses below Donchian midpoint
-            if price < donchian_mid[i]:
-                exit_signal = True
-            # ATR-based stoploss: 2*ATR below entry
-            elif price < entry_price - 2.0 * atr_val:
+            # Exit if Lips crosses below Teeth (trend weakening) OR price crosses below Jaw
+            if lips_val < teeth_val or price < jaw_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price crosses above Donchian midpoint
-            if price > donchian_mid[i]:
-                exit_signal = True
-            # ATR-based stoploss: 2*ATR above entry
-            elif price > entry_price + 2.0 * atr_val:
+            # Exit if Lips crosses above Teeth (trend weakening) OR price crosses above Jaw
+            if lips_val > teeth_val or price > jaw_val:
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
-            entry_price = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Donchian high AND volume spike AND strong trending market
-            if price > donchian_high[i] and vol_spike and is_strong_trend:
+            # LONG: Lips crosses above Teeth AND price above Jaw AND volume spike AND strong trend
+            if lips_val > teeth_val and price > jaw_val and vol_spike and is_strong_trend:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
             
-            # SHORT: Price breaks below Donchian low AND volume spike AND strong trending market
-            elif price < donchian_low[i] and vol_spike and is_strong_trend:
+            # SHORT: Lips crosses below Teeth AND price below Jaw AND volume spike AND strong trend
+            elif lips_val < teeth_val and price < jaw_val and vol_spike and is_strong_trend:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
         
         else:
             signals[i] = position * 0.25
     
     return signals
 
-name = "1d_Donchian20_1wVolumeSpike_1wADX_V1"
-timeframe = "1d"
+name = "12h_WilliamsAlligator_1dVolumeSpike_1dADX_V1"
+timeframe = "12h"
 leverage = 1.0
