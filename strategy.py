@@ -3,13 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout + 1w EMA50 trend filter + volume confirmation
-# Donchian breakouts capture momentum moves. 1w EMA50 ensures alignment with higher timeframe trend.
-# Volume confirmation (>1.5x 20-period average) filters false breakouts.
-# ATR trailing stop (2.5x) manages risk while letting winners run.
-# Target: 40-80 total trades over 4 years (10-20/year) to minimize fee drag.
-# Works in bull markets via breakouts and in bear markets via short breakdowns.
-# Uses daily timeframe for lower frequency and higher reliability.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 1d EMA34 Trend Filter + Volume Spike
+# Elder Ray measures bull/bear power relative to EMA13. Strong bull power + price above 1d EMA34 = long.
+# Strong bear power + price below 1d EMA34 = short. Volume spike (>2x 20-period) confirms conviction.
+# ATR trailing stop (2.5x) manages risk. Works in bull/bear as EMA34 adapts and Elder Ray shows momentum exhaustion.
+# Target: 50-150 total trades over 4 years (12-37/year). Discrete size 0.25 minimizes fee churn.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,39 +19,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data (primary timeframe) ===
+    # === 6h data (primary timeframe) ===
+    df_6h = get_htf_data(prices, '6h')
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    volume_6h = df_6h['volume'].values
+    
+    # === 1d data (HTF for EMA34 trend filter) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # === 1w data (HTF for trend filter) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # === 1d EMA34 for trend filter ===
+    close_1d_series = pd.Series(close_1d)
+    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # === Calculate Donchian Channels (20-period) from 1d data ===
-    # Upper band = 20-period high, Lower band = 20-period low
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # === 6h EMA13 for Elder Ray calculation ===
+    close_6h_series = pd.Series(close_6h)
+    ema13_6h = close_6h_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema13_6h_aligned = align_htf_to_ltf(prices, df_6h, ema13_6h)
     
-    # Align Donchian levels to 1d timeframe (already aligned, but using for consistency)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # === Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13 ===
+    bull_power = high_6h - ema13_6h
+    bear_power = low_6h - ema13_6h
     
-    # === Calculate 1w EMA50 for trend filter ===
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Smooth Elder Ray with EMA(8) to reduce noise
+    bull_power_series = pd.Series(bull_power)
+    bear_power_series = pd.Series(bear_power)
+    bull_power_smooth = bull_power_series.ewm(span=8, adjust=False, min_periods=8).mean().values
+    bear_power_smooth = bear_power_series.ewm(span=8, adjust=False, min_periods=8).mean().values
     
-    # === 1d Volume Confirmation (20-period average) ===
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Align smoothed Elder Ray to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_6h, bull_power_smooth)
+    bear_power_aligned = align_htf_to_ltf(prices, df_6h, bear_power_smooth)
     
-    # === 1d ATR (15) for trailing stop ===
-    atr_1d = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), np.abs(low_1d - np.roll(close_1d, 1))))
-    atr_1d[0] = high_1d[0] - low_1d[0]  # Fix first value
-    atr_ma = pd.Series(atr_1d).ewm(span=15, adjust=False, min_periods=15).mean().values
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_ma)
+    # === 6h Volume Confirmation (20-period average) ===
+    vol_ma_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_20)
+    
+    # === 6h ATR (15) for trailing stop ===
+    atr_6h = np.maximum(high_6h - low_6h, np.maximum(np.abs(high_6h - np.roll(close_6h, 1)), np.abs(low_6h - np.roll(close_6h, 1))))
+    atr_6h[0] = high_6h[0] - low_6h[0]  # Fix first value
+    atr_ma = pd.Series(atr_6h).ewm(span=15, adjust=False, min_periods=15).mean().values
+    atr_aligned = align_htf_to_ltf(prices, df_6h, atr_ma)
     
     signals = np.zeros(n)
     
@@ -68,9 +79,9 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(bull_power_aligned[i]) or
+            np.isnan(bear_power_aligned[i]) or
             np.isnan(vol_ma_aligned[i]) or
             np.isnan(atr_aligned[i])):
             signals[i] = 0.0
@@ -78,10 +89,10 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        upper = donchian_high_aligned[i]
-        lower = donchian_low_aligned[i]
-        ema_50 = ema_50_1w_aligned[i]
-        vol_confirm = volume[i] > vol_ma_aligned[i] * 1.5  # 1.5x average volume for confirmation
+        ema34 = ema34_1d_aligned[i]
+        bull = bull_power_aligned[i]
+        bear = bear_power_aligned[i]
+        vol_confirm = volume[i] > vol_ma_aligned[i] * 2.0  # 2x average volume for confirmation
         atr_val = atr_aligned[i]
         
         # === TRAILING STOP LOGIC ===
@@ -109,10 +120,10 @@ def generate_signals(prices):
                 lowest_since_entry = 0.0
                 continue
         
-        # === EXIT LOGIC (Donchian reversal) ===
+        # === EXIT LOGIC (Elder Ray divergence) ===
         if position == 1:  # Long position
-            # Exit when price breaks below lower Donchian band
-            if price < lower:
+            # Exit when bull power turns negative (momentum loss)
+            if bull < 0:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -120,8 +131,8 @@ def generate_signals(prices):
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price breaks above upper Donchian band
-            if price > upper:
+            # Exit when bear power turns positive (momentum loss)
+            if bear > 0:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -130,17 +141,17 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Require volume confirmation and trend filter
+            # Require volume confirmation
             if vol_confirm:
-                # Long when price breaks above upper band AND price > 1w EMA50 (uptrend)
-                if price > upper and price > ema_50:
+                # Long when bull power > 0 AND price above 1d EMA34 (uptrend)
+                if bull > 0 and price > ema34:
                     signals[i] = 0.25
                     position = 1
                     entry_price = price
                     highest_since_entry = price
                     continue
-                # Short when price breaks below lower band AND price < 1w EMA50 (downtrend)
-                elif price < lower and price < ema_50:
+                # Short when bear power < 0 AND price below 1d EMA34 (downtrend)
+                elif bear < 0 and price < ema34:
                     signals[i] = -0.25
                     position = -1
                     entry_price = price
@@ -157,6 +168,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wEMA50_VolumeConfirm_ATRTrail"
-timeframe = "1d"
+name = "6h_ElderRay_EMA34Trend_VolumeSpike_ATRTrail"
+timeframe = "6h"
 leverage = 1.0
