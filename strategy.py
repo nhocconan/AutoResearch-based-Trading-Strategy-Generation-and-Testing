@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot R3/S3 breakout with 12h volume spike (1.8x median) and 1d ADX trend filter (ADX > 25)
-# Long when price > Camarilla R3 AND 12h volume > 1.8x 20-period median AND 1d ADX > 25
-# Short when price < Camarilla S3 AND 12h volume > 1.8x 20-period median AND 1d ADX > 25
-# Exit when price crosses Camarilla pivot point (mean reversion to equilibrium)
+# Hypothesis: 4h Donchian(20) breakout with 12h volume spike (2.0x median) and 1d ADX regime filter (ADX > 20)
+# Long when price > Donchian upper band AND 12h volume > 2.0x 20-period median AND 1d ADX > 20
+# Short when price < Donchian lower band AND 12h volume > 2.0x 20-period median AND 1d ADX > 20
+# Exit when price crosses Donchian middle band (mean reversion to equilibrium)
 # Uses discrete position size 0.25 to limit fee drag. Target: 75-200 total trades over 4 years.
-# Combines pivot level breakout with volume confirmation and trend regime filter for robustness in bull/bear markets.
+# Combines price channel breakout with volume confirmation and trend regime filter for robustness in bull/bear markets.
 
 def generate_signals(prices):
     n = len(prices)
@@ -71,34 +71,30 @@ def generate_signals(prices):
     vol_median_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).median().values
     vol_median_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_median_20_12h)
     
-    # Get 4h data for Camarilla levels
+    # Get 4h data for Donchian channels
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 30:
         return np.zeros(n)
     
-    # === 4h Indicators: Camarilla Pivot Levels (based on previous day) ===
+    # === 4h Indicators: Donchian Channels (20-period) ===
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
     
-    # Camarilla levels calculated from previous 4h bar's high/low/close
-    # Using 1d OHLC for Camarilla calculation (standard approach)
-    camarilla_pivot = (high_4h + low_4h + close_4h) / 3.0
-    camarilla_range = high_4h - low_4h
-    camarilla_r3 = camarilla_pivot + (camarilla_range * 1.1 / 4.0)
-    camarilla_s3 = camarilla_pivot - (camarilla_range * 1.1 / 4.0)
-    camarilla_r4 = camarilla_pivot + (camarilla_range * 1.1 / 2.0)
-    camarilla_s4 = camarilla_pivot - (camarilla_range * 1.1 / 2.0)
+    # Donchian channels
+    donchian_upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_middle = (donchian_upper + donchian_lower) / 2.0
     
-    # Align Camarilla levels to primary timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_4h, camarilla_pivot)
+    # Align Donchian levels to primary timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
+    donchian_middle_aligned = align_htf_to_ltf(prices, df_4h, donchian_middle)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(30, 20, 14)  # 1d ADX, 12h volume, 4h Camarilla
+    warmup = max(30, 20, 14)  # 1d ADX, 12h volume, 4h Donchian
     
     # Track position state for exits
     position = 0  # 0: flat, 1: long, -1: short
@@ -113,8 +109,8 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(donchian_middle_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
             np.isnan(vol_median_20_12h_aligned[i])):
             signals[i] = 0.0
             continue
@@ -125,28 +121,28 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 12h volume > 1.8x 20-period 12h volume median
-        vol_threshold = vol_median_20_12h_aligned[i] * 1.8
+        # Volume filter: current 12h volume > 2.0x 20-period 12h volume median
+        vol_threshold = vol_median_20_12h_aligned[i] * 2.0
         vol_confirm = vol_12h_aligned[i] > vol_threshold
         
-        # Regime filter: 1d ADX > 25 (trending market)
-        regime_filter = adx_1d_aligned[i] > 25
+        # Regime filter: 1d ADX > 20 (trending market)
+        regime_filter = adx_1d_aligned[i] > 20
         
         # Price levels
         price = close[i]
-        r3 = camarilla_r3_aligned[i]
-        s3 = camarilla_s3_aligned[i]
-        pivot = camarilla_pivot_aligned[i]
+        upper = donchian_upper_aligned[i]
+        lower = donchian_lower_aligned[i]
+        middle = donchian_middle_aligned[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         if position == 1:  # long position
-            # Exit when price crosses below Camarilla pivot point (mean reversion)
-            if price < pivot:
+            # Exit when price crosses below Donchian middle band (mean reversion)
+            if price < middle:
                 exit_signal = True
         elif position == -1:  # short position
-            # Exit when price crosses above Camarilla pivot point (mean reversion)
-            if price > pivot:
+            # Exit when price crosses above Donchian middle band (mean reversion)
+            if price > middle:
                 exit_signal = True
         
         if exit_signal:
@@ -158,15 +154,15 @@ def generate_signals(prices):
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
             # LONG CONDITIONS
-            # Price breaks above Camarilla R3 AND volume confirmation AND trend regime
-            if price > r3 and vol_confirm and regime_filter:
+            # Price breaks above Donchian upper band AND volume confirmation AND trend regime
+            if price > upper and vol_confirm and regime_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
             # SHORT CONDITIONS
-            # Price breaks below Camarilla S3 AND volume confirmation AND trend regime
-            elif price < s3 and vol_confirm and regime_filter:
+            # Price breaks below Donchian lower band AND volume confirmation AND trend regime
+            elif price < lower and vol_confirm and regime_filter:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -176,6 +172,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_12hVolume1.8x_1dADX25_v1"
+name = "4h_Donchian20_12hVolume2.0x_1dADX20_v1"
 timeframe = "4h"
 leverage = 1.0
