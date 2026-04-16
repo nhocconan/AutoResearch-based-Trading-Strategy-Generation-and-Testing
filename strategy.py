@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R1/S1 breakout with 1d volume spike and ADX trend filter
-# Uses 4h primary timeframe with 1d HTF for volume confirmation and ADX trend regime.
-# Camarilla pivot levels (R1, S1) act as intraday support/resistance derived from prior 1d range.
-# Breakouts above R1 or below S1 with volume confirmation capture momentum moves.
-# ADX > 25 ensures we only trade in trending markets, avoiding false breakouts in ranges.
-# Works in both bull and bear markets by only taking breakouts aligned with higher timeframe trend.
-# Target: 75-200 trades over 4 years (19-50/year) to balance statistical significance and fee drag.
+# Hypothesis: 6h Camarilla R1/S1 breakout with 1d volume spike and 1w trend filter
+# Uses 6h primary timeframe with 1d HTF for volume confirmation and 1w HTF for trend direction.
+# Camarilla pivot levels identify intraday support/resistance; breakouts at R1/S1 with volume
+# capture institutional participation. Weekly trend filter ensures alignment with higher timeframe
+# momentum, reducing false breakouts in counter-trend periods. Works in both bull and bear
+# markets by only taking breakouts aligned with weekly trend.
+# Target: 50-150 trades over 4 years (12-37/year) to minimize fee drag while maintaining statistical significance.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,72 +21,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h data (primary timeframe) ===
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # === 6h data (primary timeframe) ===
+    df_6h = get_htf_data(prices, '6h')
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
     
-    # === 1d data (HTF for volume confirmation, ADX trend filter, and Camarilla calculation) ===
+    # === 1d data (HTF for Camarilla pivot calculation and volume confirmation) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # === 1d Camarilla levels (based on prior 1d bar) ===
-    # Camarilla R1 = close + (high - low) * 1.1/12
-    # Camarilla S1 = close - (high - low) * 1.1/12
-    rang_1d = high_1d - low_1d
-    camarilla_r1 = close_1d + rang_1d * 1.1 / 12
-    camarilla_s1 = close_1d - rang_1d * 1.1 / 12
+    # === 1w data (HTF for trend filter) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Align Camarilla levels to 4h timeframe (wait for 1d bar close)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # === 1d Camarilla pivot levels (based on previous day) ===
+    # Calculate pivot using previous day's OHLC
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    # First day will have NaN due to roll, handled by min_periods later
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_ = prev_high - prev_low
+    r1 = pivot + (range_ * 1.1 / 12)
+    s1 = pivot - (range_ * 1.1 / 12)
+    r2 = pivot + (range_ * 1.1 / 6)
+    s2 = pivot - (range_ * 1.1 / 6)
+    r3 = pivot + (range_ * 1.1 / 4)
+    s3 = pivot - (range_ * 1.1 / 4)
+    r4 = pivot + (range_ * 1.1 / 2)
+    s4 = pivot - (range_ * 1.1 / 2)
+    
+    # Align Camarilla levels to 6h timeframe (wait for 1d bar close)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # === 1d Volume confirmation ===
     vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume_1d > (2.0 * vol_ma_20_1d)
     vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
     
-    # === 1d ADX trend filter ===
-    # +DM = high[t] - high[t-1] if high[t] - high[t-1] > low[t-1] - low[t] and > 0 else 0
-    # -DM = low[t-1] - low[t] if low[t-1] - low[t] > high[t] - high[t-1] and > 0 else 0
-    # TR = max(high[t] - low[t], high[t-1] - close[t-1], low[t-1] - close[t-1])
-    # +DI = 100 * EMA(+DM, 14) / ATR(14)
-    # -DI = 100 * EMA(-DM, 14) / ATR(14)
-    # DX = 100 * |+DI - -DI| / (+DI + -DI)
-    # ADX = EMA(DX, 14)
-    
-    # Calculate +DM and -DM
-    high_diff = high_1d[1:] - high_1d[:-1]
-    low_diff = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0.0)
-    minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0.0)
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
-    
-    # Calculate True Range (TR)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[tr[0]], tr])  # prepend first value
-    
-    # Calculate ATR (smoothed TR)
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Calculate +DI and -DI
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
-    
-    # Calculate DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align ADX to 4h timeframe (wait for 1d bar close)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # === 1w Trend filter (EMA34) ===
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     signals = np.zeros(n)
     
@@ -99,25 +85,40 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(vol_spike_aligned[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(vol_spike_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or
+            np.isnan(s2_aligned[i]) or
+            np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or
+            np.isnan(r4_aligned[i]) or
+            np.isnan(s4_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        r1 = camarilla_r1_aligned[i]
-        s1 = camarilla_s1_aligned[i]
         vol_conf = vol_spike_aligned[i]
-        adx_val = adx_aligned[i]
+        weekly_trend_up = ema_34_aligned[i]  # EMA value for trend comparison
+        
+        # Get weekly trend direction: price > EMA34 = uptrend
+        # Need previous weekly close to determine trend
+        if i >= 1:
+            weekly_close_prev = close_1w[np.searchsorted(df_1w['open_time'].values, prices['open_time'].iloc[i]) - 1] if hasattr(df_1w['open_time'], 'values') else close_1w[max(0, (i // 28) - 1)]  # Approximate for safety
+            # Simpler: use aligned EMA and price relationship
+            weekly_close_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
+            weekly_close_val = weekly_close_aligned[i]
+            weekly_trend_up = weekly_close_val > ema_34_aligned[i]
+        else:
+            weekly_trend_up = True  # default
         
         # === STOPLOSS LOGIC (ATR-based) ===
         if position == 1:  # Long position
-            atr_4h = np.abs(high_4h - low_4h)
-            atr_ma = pd.Series(atr_4h).rolling(window=14, min_periods=14).mean().values
-            atr_aligned = align_htf_to_ltf(prices, df_4h, atr_ma)
+            atr_6h = np.abs(high_6h - low_6h)
+            atr_ma = pd.Series(atr_6h).rolling(window=14, min_periods=14).mean().values
+            atr_aligned = align_htf_to_ltf(prices, df_6h, atr_ma)
             atr_val = atr_aligned[i]
             if price < entry_price - 2.5 * atr_val:
                 signals[i] = 0.0
@@ -126,9 +127,9 @@ def generate_signals(prices):
                 continue
         
         elif position == -1:  # Short position
-            atr_4h = np.abs(high_4h - low_4h)
-            atr_ma = pd.Series(atr_4h).rolling(window=14, min_periods=14).mean().values
-            atr_aligned = align_htf_to_ltf(prices, df_4h, atr_ma)
+            atr_6h = np.abs(high_6h - low_6h)
+            atr_ma = pd.Series(atr_6h).rolling(window=14, min_periods=14).mean().values
+            atr_aligned = align_htf_to_ltf(prices, df_6h, atr_ma)
             atr_val = atr_aligned[i]
             if price > entry_price + 2.5 * atr_val:
                 signals[i] = 0.0
@@ -138,16 +139,16 @@ def generate_signals(prices):
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price reaches Camarilla S1 (mean reversion) or shows weakness
-            if price <= s1:  # Exit at Camarilla S1
+            # Exit when price reaches S1 (mean reversion) or shows weakness
+            if price <= s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price reaches Camarilla R1 (mean reversion) or shows strength
-            if price >= r1:  # Exit at Camarilla R1
+            # Exit when price reaches R1 (mean reversion) or shows strength
+            if price >= r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -155,16 +156,16 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Require trending regime (ADX > 25) and volume spike
-            if adx_val > 25 and vol_conf:
-                # Go long when price breaks above Camarilla R1 with volume
-                if price > r1:
+            # Require volume spike
+            if vol_conf:
+                # Go long when price breaks above R1 with volume AND weekly uptrend
+                if price > r1_aligned[i] and weekly_trend_up:
                     signals[i] = 0.25
                     position = 1
                     entry_price = price
                     continue
-                # Go short when price breaks below Camarilla S1 with volume
-                elif price < s1:
+                # Go short when price breaks below S1 with volume AND weekly downtrend
+                elif price < s1_aligned[i] and not weekly_trend_up:
                     signals[i] = -0.25
                     position = -1
                     entry_price = price
@@ -180,6 +181,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_1dVolumeSpike_ADXFilter"
-timeframe = "4h"
+name = "6h_Camarilla_R1_S1_Breakout_1dVolumeSpike_1wTrendFilter"
+timeframe = "6h"
 leverage = 1.0
