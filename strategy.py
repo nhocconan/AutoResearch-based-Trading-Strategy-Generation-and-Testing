@@ -1,9 +1,3 @@
-# USL Strategy
-# Hypothesis: On 12h timeframe, price breaking above/below daily R1/S1 pivots with volume confirmation and price above/below daily EMA50 (trend filter) will capture sustained moves in both bull and bear markets.
-# Uses 1d pivots and EMA50 for trend filter, volume > 1.5x 20-period MA for confirmation.
-# Target: 15-30 trades/year on 12h (60-120 total over 4 years) to avoid fee drag.
-# Position size: 0.25 (25% of capital) to limit drawdown during extended moves.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -11,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,91 +13,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data (HTF for pivot levels and trend filter) ===
+    # === 1d data (HTF for key levels) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # === Calculate 1d Pivot Points (Standard) ===
+    # === 4h data (HTF for trend filter) ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    
+    # === Calculate 1d Camarilla pivot levels ===
     # Using previous day's OHLC
     prev_close_1d = np.roll(close_1d, 1)
     prev_high_1d = np.roll(high_1d, 1)
     prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d[0] = close_1d[0]
+    prev_close_1d[0] = close_1d[0]  # First value
     prev_high_1d[0] = high_1d[0]
     prev_low_1d[0] = low_1d[0]
     
-    # Standard pivot formula
-    pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
-    r1 = 2 * pivot - prev_low_1d
-    s1 = 2 * pivot - prev_high_1d
-    r2 = pivot + (prev_high_1d - prev_low_1d)
-    s2 = pivot - (prev_high_1d - prev_low_1d)
+    # Camarilla formula
+    camarilla_base = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
+    camarilla_range = prev_high_1d - prev_low_1d
     
-    # Align to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    # Resistance and Support levels
+    r3 = camarilla_base + camarilla_range * 1.1 / 4
+    s3 = camarilla_base - camarilla_range * 1.1 / 4
     
-    # === 1d EMA50 for trend filter ===
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align to 4h timeframe
+    camarilla_base_aligned = align_htf_to_ltf(prices, df_1d, camarilla_base)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # === Volume confirmation (12h) ===
+    # === 4h EMA34 for trend filter ===
+    ema_34_4h = pd.Series(close_4h).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    
+    # === Volume confirmation (4h) ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma_20
+    
+    # === 4h ATR for volatility filter ===
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]  # First value
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 50
+    warmup = 100
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_ratio[i]) or 
+            np.isnan(atr[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema_50_1d_val = ema_50_1d_aligned[i]
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
+        ema_34_4h_val = ema_34_4h_aligned[i]
         vol_ratio_val = vol_ratio[i]
+        atr_val = atr[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price closes below S1 (stop) or hits R2 (target)
-            if price < s1_val or price > r2_val:
+            # Exit when price closes below S3 (stop) or hits R3*1.5 (take profit)
+            if price < s3_val or price > r3_val * 1.5:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price closes above R1 (stop) or hits S2 (target)
-            if price > r1_val or price < s2_val:
+            # Exit when price closes above R3 (stop) or hits S3*0.5 (take profit)
+            if price > r3_val or price < s3_val * 0.5:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above R1 with volume AND above daily EMA50 (uptrend)
-            if (price > r1_val) and (price > ema_50_1d_val) and (vol_ratio_val > 1.5):
+            # LONG: Price breaks above R3 with volume AND above 4h EMA34 (uptrend)
+            if (price > r3_val) and (price > ema_34_4h_val) and (vol_ratio_val > 2.0):
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Price breaks below S1 with volume AND below daily EMA50 (downtrend)
-            elif (price < s1_val) and (price < ema_50_1d_val) and (vol_ratio_val > 1.5):
+            # SHORT: Price breaks below S3 with volume AND below 4h EMA34 (downtrend)
+            elif (price < s3_val) and (price < ema_34_4h_val) and (vol_ratio_val > 2.0):
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -118,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "USL_12h_Pivot_R1_S1_Breakout_Volume_EMA50"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_Volume_EMA34_v3"
+timeframe = "4h"
 leverage = 1.0
