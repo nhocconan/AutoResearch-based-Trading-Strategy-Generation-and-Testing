@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,26 +13,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data (HTF for trend & regime) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === 1h data (HTF for trend) ===
+    df_1h = get_htf_data(prices, '1h')
+    close_1h = df_1h['close'].values
+    high_1h = df_1h['high'].values
+    low_1h = df_1h['low'].values
     
-    # 1d EMA200 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema_200_1d = close_1d_series.ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    
-    # 1d ATR for volatility regime
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr2[0] = np.inf
-    tr3[0] = np.inf
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # 1h EMA50 for trend filter
+    close_1h_series = pd.Series(close_1h)
+    ema_50_1h = close_1h_series.ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1h_aligned = align_htf_to_ltf(prices, df_1h, ema_50_1h)
     
     # === 4h data (primary timeframe) ===
     df_4h = get_htf_data(prices, '4h')
@@ -45,7 +35,23 @@ def generate_signals(prices):
     donchian_upper_4h = align_htf_to_ltf(prices, df_4h, high_20_4h)
     donchian_lower_4h = align_htf_to_ltf(prices, df_4h, low_20_4h)
     
-    # === 4h indicators for entry timing ===
+    # === 1d data (HTF for regime) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # 1d ATR for volatility regime
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = np.inf
+    tr3[0] = np.inf
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # === 1h indicators for entry timing ===
     # RSI(14)
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
@@ -65,7 +71,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators have valid data
-    warmup = 200
+    warmup = 100
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
@@ -73,7 +79,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # Skip if any required data is NaN
         if (np.isnan(donchian_upper_4h[i]) or np.isnan(donchian_lower_4h[i]) or 
-            np.isnan(ema_200_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(ema_50_1h_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
             np.isnan(rsi[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             position = 0
@@ -85,7 +91,7 @@ def generate_signals(prices):
         price = close[i]
         upper_4h = donchian_upper_4h[i]
         lower_4h = donchian_lower_4h[i]
-        ema_200_1d_val = ema_200_1d_aligned[i]
+        ema_50_1h_val = ema_50_1h_aligned[i]
         atr_1d_val = atr_1d_aligned[i]
         rsi_val = rsi[i]
         vol_ratio_val = vol_ratio[i]
@@ -109,17 +115,17 @@ def generate_signals(prices):
         if position == 0:
             # Only trade during session
             if in_session:
-                # LONG: Price breaks above Donchian upper AND above EMA200 (trend filter) 
+                # LONG: Price breaks above Donchian upper AND above EMA50 (trend filter) 
                 # AND RSI not overbought AND volume spike AND volatility not too high
-                if (price > upper_4h) and (price > ema_200_1d_val) and (rsi_val < 60) and \
+                if (price > upper_4h) and (price > ema_50_1h_val) and (rsi_val < 60) and \
                    (vol_ratio_val > 2.0) and (atr_1d_val < np.percentile(atr_1d_aligned[:i+1], 80)):
                     signals[i] = 0.25
                     position = 1
                     continue
                 
-                # SHORT: Price breaks below Donchian lower AND below EMA200 (trend filter) 
+                # SHORT: Price breaks below Donchian lower AND below EMA50 (trend filter) 
                 # AND RSI not oversold AND volume spike AND volatility not too high
-                elif (price < lower_4h) and (price < ema_200_1d_val) and (rsi_val > 40) and \
+                elif (price < lower_4h) and (price < ema_50_1h_val) and (rsi_val > 40) and \
                      (vol_ratio_val > 2.0) and (atr_1d_val < np.percentile(atr_1d_aligned[:i+1], 80)):
                     signals[i] = -0.25
                     position = -1
@@ -135,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_EMA200_RSI_Volume"
+name = "4h_Donchian_Breakout_EMA50_RSI_Volume"
 timeframe = "4h"
 leverage = 1.0
