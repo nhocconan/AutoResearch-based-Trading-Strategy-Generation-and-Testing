@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h ADX Trend + RSI Pullback Entry with Volume Confirmation
-# Uses ADX(14) > 25 to identify trending markets, then enters on RSI(14) pullbacks
-# (long when RSI < 40 in uptrend, short when RSI > 60 in downtrend) with volume > 1.5x average.
-# Works in both bull and bear markets by following the trend direction.
+# Hypothesis: 4h Bollinger Band Squeeze + Volume Spike + RSI Reversion
+# Uses Bollinger Bands width percentile to detect low volatility squeeze (breakout precursor).
+# Enters long/short on price breaking BB ±2σ with volume > 1.5x average and RSI confirming momentum.
+# Works in both bull and bear markets by capturing volatility expansion phases.
 # Target: 80-180 total trades over 4 years (20-45/year) with disciplined entries.
 
 def generate_signals(prices):
@@ -25,15 +25,31 @@ def generate_signals(prices):
     low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
     volume_4h = df_4h['volume'].values
-    open_4h = df_4h['open'].values
     
-    # === 1d data (higher timeframe for ADX trend filter) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === Bollinger Bands (20, 2) on 4h close ===
+    close_series = pd.Series(close_4h)
+    bb_middle = close_series.rolling(window=20, min_periods=20).mean()
+    bb_std = close_series.rolling(window=20, min_periods=20).std()
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
+    bb_width = bb_upper - bb_lower
     
-    # === 4x RSI(14) calculation ===
+    # Bollinger Band width percentile (50-day lookback) to detect squeeze
+    bb_width_series = pd.Series(bb_width.values)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
+    ).values
+    squeeze_condition = bb_width_percentile < 0.2  # Bottom 20% = squeeze
+    
+    # === Breakout detection ===
+    breakout_up = close_4h > bb_upper
+    breakout_down = close_4h < bb_lower
+    
+    # === Volume spike detection ===
+    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_4h > (1.5 * vol_ma_20_4h)
+    
+    # === RSI(14) for momentum confirmation ===
     delta = pd.Series(close_4h).diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -43,40 +59,12 @@ def generate_signals(prices):
     rsi = 100 - (100 / (1 + rs))
     rsi_values = rsi.values
     
-    # === 4x volume spike detection ===
-    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_4h > (1.5 * vol_ma_20_4h)
-    
-    # === 1d ADX(14) for trend filter ===
-    # Calculate True Range
-    tr1 = pd.Series(high_1d).diff()
-    tr2 = abs(pd.Series(high_1d).diff())
-    tr3 = abs(pd.Series(low_1d).diff())
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr.rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate Directional Movement
-    up_move = pd.Series(high_1d).diff()
-    down_move = -pd.Series(low_1d).diff()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smooth DM and TR
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_1d
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_1d
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Determine trend direction from +DI/-DI crossover
-    plus_di_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_di_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
-    di_diff = plus_di_smooth - minus_di_smooth
-    # Uptrend when +DI > -DI, downtrend when -DI > +DI
-    uptrend = di_diff > 0
-    downtrend = di_diff < 0
-    uptrend_aligned = align_htf_to_ltf(prices, df_1d, uptrend.astype(float))
-    downtrend_aligned = align_htf_to_ltf(prices, df_1d, downtrend.astype(float))
+    # Align indicators to LTF
+    squeeze_aligned = align_htf_to_ltf(prices, df_4h, squeeze_condition)
+    breakout_up_aligned = align_htf_to_ltf(prices, df_4h, breakout_up)
+    breakout_down_aligned = align_htf_to_ltf(prices, df_4h, breakout_down)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_4h, vol_spike)
+    rsi_aligned = align_htf_to_ltf(prices, df_4h, rsi_values)
     
     signals = np.zeros(n)
     
@@ -89,21 +77,21 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(adx_aligned[i]) or 
-            np.isnan(rsi_values[i]) or
-            np.isnan(vol_ma_20_4h[i]) or
-            np.isnan(uptrend_aligned[i]) or
-            np.isnan(downtrend_aligned[i])):
+        if (np.isnan(squeeze_aligned[i]) or 
+            np.isnan(breakout_up_aligned[i]) or
+            np.isnan(breakout_down_aligned[i]) or
+            np.isnan(vol_spike_aligned[i]) or
+            np.isnan(rsi_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        adx_val = adx_aligned[i]
-        rsi_val = rsi_values[i]
-        vol_spike_val = vol_spike[i]
-        is_uptrend = uptrend_aligned[i] > 0.5
-        is_downtrend = downtrend_aligned[i] > 0.5
+        is_squeeze = squeeze_aligned[i] > 0.5
+        is_breakout_up = breakout_up_aligned[i] > 0.5
+        is_breakout_down = breakout_down_aligned[i] > 0.5
+        vol_spike_val = vol_spike_aligned[i]
+        rsi_val = rsi_aligned[i]
         
         # === STOPLOSS LOGIC ===
         if position == 1:  # Long position
@@ -130,16 +118,16 @@ def generate_signals(prices):
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when trend weakens or RSI overbought
-            if adx_val < 20 or rsi_val > 70:
+            # Exit when breakout fails or RSI overbought
+            if not is_breakout_up or rsi_val > 70:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when trend weakens or RSI oversold
-            if adx_val < 20 or rsi_val < 30:
+            # Exit when breakout fails or RSI oversold
+            if not is_breakout_down or rsi_val < 30:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -147,16 +135,16 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Require trending market (ADX > 25) and volume spike
-            if adx_val > 25 and vol_spike_val:
-                # Go long in uptrend on RSI pullback (< 40)
-                if is_uptrend and rsi_val < 40:
+            # Require squeeze condition, volume spike, and breakout with RSI confirmation
+            if is_squeeze and vol_spike_val:
+                # Go long on upward breakout with RSI > 50 (bullish momentum)
+                if is_breakout_up and rsi_val > 50:
                     signals[i] = 0.25
                     position = 1
                     entry_price = price
                     continue
-                # Go short in downtrend on RSI bounce (> 60)
-                elif is_downtrend and rsi_val > 60:
+                # Go short on downward breakout with RSI < 50 (bearish momentum)
+                elif is_breakout_down and rsi_val < 50:
                     signals[i] = -0.25
                     position = -1
                     entry_price = price
@@ -172,6 +160,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_ADXTrend_RSIPullback_Volume_v1"
+name = "4h_BB_Squeeze_Volume_RSI_Breakout_v1"
 timeframe = "4h"
 leverage = 1.0
