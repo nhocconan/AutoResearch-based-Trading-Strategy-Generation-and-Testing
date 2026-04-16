@@ -32,16 +32,16 @@ def generate_signals(prices):
     tr_1d[0] = high_1d[0] - low_1d[0]
     atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     
-    # Align daily data to 6h timeframe
-    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
-    atr_6h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Align daily data to 12h timeframe
+    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # 6h EMA34 for trend filter (primary timeframe)
-    ema_6h = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # 12h EMA34 for trend filter
+    ema_12h = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume spike detection (20-period volume MA on 6h)
+    # Volume spike detection (20-period volume MA on 12h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
@@ -55,18 +55,18 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or
-            np.isnan(atr_6h[i]) or np.isnan(ema_6h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or
+            np.isnan(atr_12h[i]) or np.isnan(ema_12h[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        pivot_level = pivot_6h[i]
-        r1_level = r1_6h[i]
-        s1_level = s1_6h[i]
-        atr = atr_6h[i]
-        ema_trend = ema_6h[i]
+        pivot_level = pivot_12h[i]
+        r1_level = r1_12h[i]
+        s1_level = s1_12h[i]
+        atr = atr_12h[i]
+        ema_trend = ema_12h[i]
         vol_spike = volume_spike[i]
         
         # === EXIT LOGIC ===
@@ -108,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Pivot_R1_S1_Breakout_Volume_EMA34Trend"
-timeframe = "6h"
+name = "12h_Pivot_R1_S1_Breakout_Volume_EMA34Trend"
+timeframe = "12h"
 leverage = 1.0
