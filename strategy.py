@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h volume spike and 12h chop regime filter
-# Uses 4h primary timeframe with 12h HTF for volume confirmation and chop regime.
-# Donchian breakouts capture strong momentum moves; volume spike confirms institutional participation.
-# Chop regime filter avoids false breakouts in ranging markets (Chop > 61.8 = range, < 38.2 = trend).
-# Works in both bull and bear markets by only taking breakouts aligned with higher timeframe structure.
-# Target: 75-200 trades over 4 years (19-50/year) to balance statistical significance and fee drag.
+# Hypothesis: 1d Williams %R extreme reversal with 1w volume spike filter and ATR-based stoploss
+# Uses 1d primary timeframe with 1w HTF for volume confirmation.
+# Williams %R identifies overbought/oversold conditions; extreme readings (>80 or <20) signal potential reversals.
+# Volume spike confirms institutional participation at reversal points.
+# ATR stoploss manages risk during trending markets.
+# Target: 30-100 trades over 4 years (7-25/year) to minimize fee drag while maintaining statistical significance.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,39 +20,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h data (primary timeframe) ===
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # === 1d data (primary timeframe) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === 12h data (HTF for volume confirmation, chop regime, and Donchian calculation) ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    # === 1w data (HTF for volume confirmation) ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # === 12h Donchian channels (20-period) ===
-    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # === 1d Williams %R (14-period) ===
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14 + 1e-10)
     
-    # Align Donchian levels to 4h timeframe (wait for 12h bar close)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    # Align Williams %R to 1d timeframe (no additional delay needed as it's based on completed 1d bar)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # === 12h Chop regime filter (Ehler's Chop Index) ===
-    atr_12h = np.abs(high_12h - low_12h)
-    atr_sum_14 = pd.Series(atr_12h).rolling(window=14, min_periods=14).sum().values
-    max_high_14 = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
-    chop_raw = 100 * np.log10(atr_sum_14 / (max_high_14 - min_low_14 + 1e-10)) / np.log10(14)
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop_raw)
+    # === 1w Volume confirmation (20-period MA spike) ===
+    vol_ma_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1w = volume_1w > (2.0 * vol_ma_20_1w)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1w, vol_spike_1w)
     
-    # === 12h Volume confirmation ===
-    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_12h > (2.0 * vol_ma_20_12h)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_12h, vol_spike)
+    # === 1d ATR (14-period) for stoploss ===
+    atr_1d = np.maximum(
+        np.maximum(high_1d - low_1d, np.abs(high_1d - np.roll(close_1d, 1))),
+        np.abs(low_1d - np.roll(close_1d, 1))
+    )
+    atr_1d[0] = high_1d[0] - low_1d[0]  # Fix first value
+    atr_ma_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).mean().values
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_14)
     
     signals = np.zeros(n)
     
@@ -65,26 +66,20 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(chop_aligned[i]) or 
+        if (np.isnan(williams_r_aligned[i]) or 
             np.isnan(vol_spike_aligned[i]) or
-            np.isnan(donchian_high_aligned[i]) or
-            np.isnan(donchian_low_aligned[i])):
+            np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        chop = chop_aligned[i]
+        wr = williams_r_aligned[i]
         vol_conf = vol_spike_aligned[i]
-        upper = donchian_high_aligned[i]
-        lower = donchian_low_aligned[i]
+        atr_val = atr_aligned[i]
         
         # === STOPLOSS LOGIC (ATR-based) ===
         if position == 1:  # Long position
-            atr_4h = np.abs(high_4h - low_4h)
-            atr_ma = pd.Series(atr_4h).rolling(window=14, min_periods=14).mean().values
-            atr_aligned = align_htf_to_ltf(prices, df_4h, atr_ma)
-            atr_val = atr_aligned[i]
             if price < entry_price - 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
@@ -92,10 +87,6 @@ def generate_signals(prices):
                 continue
         
         elif position == -1:  # Short position
-            atr_4h = np.abs(high_4h - low_4h)
-            atr_ma = pd.Series(atr_4h).rolling(window=14, min_periods=14).mean().values
-            atr_aligned = align_htf_to_ltf(prices, df_4h, atr_ma)
-            atr_val = atr_aligned[i]
             if price > entry_price + 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
@@ -104,16 +95,16 @@ def generate_signals(prices):
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price reaches Donchian low (mean reversion) or shows weakness
-            if price <= lower:  # Exit at Donchian low
+            # Exit when Williams %R returns from oversold (> -50) or shows weakness
+            if wr > -50:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price reaches Donchian high (mean reversion) or shows strength
-            if price >= upper:  # Exit at Donchian high
+            # Exit when Williams %R returns from overbought (< -50) or shows strength
+            if wr < -50:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -121,16 +112,16 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Require trending regime (Chop < 38.2) and volume spike
-            if chop < 38.2 and vol_conf:
-                # Go long when price breaks above Donchian high with volume
-                if price > upper:
+            # Require volume spike for confirmation
+            if vol_conf:
+                # Go long when Williams %R is deeply oversold (< -80)
+                if wr < -80:
                     signals[i] = 0.25
                     position = 1
                     entry_price = price
                     continue
-                # Go short when price breaks below Donchian low with volume
-                elif price < lower:
+                # Go short when Williams %R is deeply overbought (> -20)
+                elif wr > -20:
                     signals[i] = -0.25
                     position = -1
                     entry_price = price
@@ -146,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_12hVolumeSpike_ChopFilter"
-timeframe = "4h"
+name = "1d_WilliamsR_Extreme_1wVolumeSpike_ATRStop"
+timeframe = "1d"
 leverage = 1.0
