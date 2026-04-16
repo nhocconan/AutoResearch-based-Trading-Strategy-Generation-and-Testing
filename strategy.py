@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d HMA(21) trend filter and volume confirmation.
-# Long when price breaks above Donchian(20) high AND 1d HMA(21) is rising AND volume > 1.5x 20-period average.
-# Short when price breaks below Donchian(20) low AND 1d HMA(21) is falling AND volume > 1.5x 20-period average.
-# Uses discrete position size 0.25. Donchian breakout captures momentum, 1d HMA ensures higher timeframe trend alignment (avoiding counter-trend trades),
-# volume spike confirms institutional participation. Designed to work in both bull (buy breakouts) and bear (sell breakdowns) markets.
-# Target: 100-180 trades over 4 years (25-45/year) to balance opportunity and fee drag.
+# Hypothesis: 6h Elder Ray Index (Bull/Bear Power) with 1d EMA34 trend filter and volume confirmation.
+# Long when Bull Power > 0 AND Bear Power < 0 AND price > 1d EMA34 (bullish regime) AND volume > 1.5x 20-period average.
+# Short when Bear Power < 0 AND Bull Power > 0 AND price < 1d EMA34 (bearish regime) AND volume > 1.5x 20-period average.
+# Uses discrete position size 0.25. Elder Ray measures bull/bear strength via EMA13, 1d EMA34 filters higher timeframe trend,
+# volume spike confirms institutional participation. Designed to capture strong directional moves in both bull and bear markets.
+# Target: 80-180 trades over 4 years (20-45/year) balancing opportunity and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,93 +20,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Indicators: Donchian(20) ===
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === 6h Indicators: Elder Ray (Bull Power, Bear Power) ===
+    # EMA13 for Elder Ray
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13  # Bull Power: High - EMA13
+    bear_power = low - ema13   # Bear Power: Low - EMA13
     
-    # === 4h Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    # === 6h Indicators: Volume Spike (volume > 1.5x 20-period average) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
     # Get 1d data once before loop for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need enough for HMA calculation
+    if len(df_1d) < 40:  # Need enough for EMA34 calculation
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # === 1d Indicators: HMA(21) for trend filter ===
-    def calculate_hma(arr, period):
-        """Calculate Hull Moving Average"""
-        half_period = period // 2
-        sqrt_period = int(np.sqrt(period))
-        
-        # WMA of half period
-        weights_half = np.arange(1, half_period + 1)
-        wma_half = np.convolve(arr, weights_half, mode='valid') / weights_half.sum()
-        
-        # WMA of full period
-        weights_full = np.arange(1, period + 1)
-        wma_full = np.convolve(arr, weights_full, mode='valid') / weights_full.sum()
-        
-        # HMA = 2*WMA(half) - WMA(full)
-        hma_raw = 2 * wma_half - wma_full
-        
-        # Final WMA of sqrt period
-        weights_sqrt = np.arange(1, sqrt_period + 1)
-        hma = np.convolve(hma_raw, weights_sqrt, mode='valid') / weights_sqrt.sum()
-        
-        # Pad with NaN to match original length
-        hma_padded = np.full(len(arr), np.nan)
-        hma_padded[period-1:len(hma)+period-1] = hma
-        
-        return hma_padded
-    
-    hma_21_1d = calculate_hma(close_1d, 21)
-    hma_21_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_21_1d)
-    
-    # HMA slope (rising/falling) - compare current vs previous value
-    hma_slope = np.diff(hma_21_1d_aligned, prepend=np.nan)
-    hma_rising = hma_slope > 0
-    hma_falling = hma_slope < 0
+    # === 1d Indicators: EMA34 for trend filter ===
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 20 periods for Donchian/volume, 21+ for HMA)
-    warmup = 50
+    # Warmup: ensure all indicators are valid (max 34 periods needed for EMA34, 20 for volume MA, 13 for EMA13)
+    warmup = 40
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(hma_21_1d_aligned[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values
         price = close[i]
-        upper_channel = highest_high[i]
-        lower_channel = lowest_low[i]
+        bull_val = bull_power[i]
+        bear_val = bear_power[i]
+        ema34_val = ema34_1d_aligned[i]
         vol_spike = volume_spike[i]
-        hma_rising_val = hma_rising[i]
-        hma_falling_val = hma_falling[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price returns to middle of channel or volume spike ends
-            mid_channel = (upper_channel + lower_channel) / 2
-            if price <= mid_channel or not vol_spike:
+            # Exit if Elder Ray turns bearish (Bear Power > 0) or volume spike ends
+            if bear_val > 0 or not vol_spike:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price returns to middle of channel or volume spike ends
-            mid_channel = (upper_channel + lower_channel) / 2
-            if price >= mid_channel or not vol_spike:
+            # Exit if Elder Ray turns bullish (Bull Power < 0) or volume spike ends
+            if bull_val < 0 or not vol_spike:
                 exit_signal = True
         
         if exit_signal:
@@ -116,13 +84,13 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above upper Donchian channel AND 1d HMA rising AND volume spike
-            if price > upper_channel and hma_rising_val and vol_spike:
+            # LONG: Bull Power > 0 AND Bear Power < 0 AND price > 1d EMA34 (bullish regime) AND volume spike
+            if bull_val > 0 and bear_val < 0 and price > ema34_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
             
-            # SHORT: Price breaks below lower Donchian channel AND 1d HMA falling AND volume spike
-            elif price < lower_channel and hma_falling_val and vol_spike:
+            # SHORT: Bear Power < 0 AND Bull Power > 0 AND price < 1d EMA34 (bearish regime) AND volume spike
+            elif bear_val < 0 and bull_val > 0 and price < ema34_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
@@ -131,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dHMA21_VolumeSpike_V1"
-timeframe = "4h"
+name = "6h_ElderRay_1dEMA34_VolumeSpike_V1"
+timeframe = "6h"
 leverage = 1.0
