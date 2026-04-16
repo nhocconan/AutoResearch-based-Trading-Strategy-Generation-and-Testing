@@ -1,3 +1,8 @@
+# 6h_ElderRay_1dTrend_SwingReversal
+# Elder Ray (Bull/Bear Power) with 1d EMA trend filter and swing reversal signals
+# Works in bull (trend continuation) and bear (mean reversion at swings)
+# Target: 15-35 trades/year per symbol, low turnover to minimize fee drag
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,94 +18,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data (HTF for key levels) ===
+    # === 1d data (HTF for trend and swing levels) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # === 4h data (HTF for trend filter) ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # === Calculate 13-period EMA for Elder Ray (1d) ===
+    ema13_1d = pd.Series(close_1d).ewm(span=13, min_periods=13, adjust=False).mean().values
     
-    # === Calculate 1d Camarilla pivot levels ===
-    # Using previous day's OHLC
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d[0] = close_1d[0]  # First value
-    prev_high_1d[0] = high_1d[0]
-    prev_low_1d[0] = low_1d[0]
+    # Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power_1d = high_1d - ema13_1d
+    bear_power_1d = low_1d - ema13_1d
     
-    # Camarilla formula
-    camarilla_base = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
-    camarilla_range = prev_high_1d - prev_low_1d
+    # === Calculate swing high/low from 1d (2-bar lookback for confirmation) ===
+    # Swing High: high > previous high AND high > next high
+    # Swing Low: low < previous low AND low < next low
+    swing_high_1d = np.zeros_like(high_1d, dtype=bool)
+    swing_low_1d = np.zeros_like(low_1d, dtype=bool)
     
-    # Resistance and Support levels
-    r3 = camarilla_base + camarilla_range * 1.1 / 4
-    s3 = camarilla_base - camarilla_range * 1.1 / 4
+    for i in range(1, len(high_1d)-1):
+        if high_1d[i] > high_1d[i-1] and high_1d[i] > high_1d[i+1]:
+            swing_high_1d[i] = True
+        if low_1d[i] < low_1d[i-1] and low_1d[i] < low_1d[i+1]:
+            swing_low_1d[i] = True
     
-    # Align to 4h timeframe
-    camarilla_base_aligned = align_htf_to_ltf(prices, df_1d, camarilla_base)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # === Align all 1d indicators to 6h timeframe ===
+    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
+    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    swing_high_1d_aligned = align_htf_to_ltf(prices, df_1d, swing_high_1d.astype(float))
+    swing_low_1d_aligned = align_htf_to_ltf(prices, df_1d, swing_low_1d.astype(float))
     
-    # === 4h EMA34 for trend filter ===
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
-    
-    # === Volume confirmation (4h) ===
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma_20
+    # === 6s EMA20 for entry confirmation ===
+    ema20_6h = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 100
+    warmup = 50
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(ema13_1d_aligned[i]) or np.isnan(bull_power_1d_aligned[i]) or 
+            np.isnan(bear_power_1d_aligned[i]) or np.isnan(swing_high_1d_aligned[i]) or
+            np.isnan(swing_low_1d_aligned[i]) or np.isnan(ema20_6h[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
-        ema_34_4h_val = ema_34_4h_aligned[i]
-        vol_ratio_val = vol_ratio[i]
+        ema13 = ema13_1d_aligned[i]
+        bull_power = bull_power_1d_aligned[i]
+        bear_power = bear_power_1d_aligned[i]
+        swing_high = swing_high_1d_aligned[i] > 0.5
+        swing_low = swing_low_1d_aligned[i] > 0.5
+        ema20 = ema20_6h[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price closes below S3 (stop) or hits R3*1.5 (take profit)
-            if price < s3_val or price > r3_val * 1.5:
+            # Exit on bearish swing OR bear power turning negative
+            if swing_low or bear_power < 0:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price closes above R3 (stop) or hits S3*0.5 (take profit)
-            if price > r3_val or price < s3_val * 0.5:
+            # Exit on bullish swing OR bull power turning positive
+            if swing_high or bull_power > 0:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above R3 with volume AND above 4h EMA34 (uptrend)
-            if (price > r3_val) and (price > ema_34_4h_val) and (vol_ratio_val > 2.0):
+            # LONG: Bull power positive AND price above EMA20 AND at swing low (reversal)
+            if bull_power > 0 and price > ema20 and swing_low:
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Price breaks below S3 with volume AND below 4h EMA34 (downtrend)
-            elif (price < s3_val) and (price < ema_34_4h_val) and (vol_ratio_val > 2.0):
+            # SHORT: Bear power negative AND price below EMA20 AND at swing high (reversal)
+            elif bear_power < 0 and price < ema20 and swing_high:
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -115,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_Volume_EMA34_v2"
-timeframe = "4h"
+name = "6h_ElderRay_1dTrend_SwingReversal"
+timeframe = "6h"
 leverage = 1.0
