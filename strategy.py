@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla pivot (R3/S3) breakout with 4h volume spike and 1d ADX trend filter.
-# Long when price breaks above Camarilla R3 AND volume > 1.8x 20-period 4h average AND 1d ADX > 20.
-# Short when price breaks below Camarilla S3 with same filters.
-# Exit when price returns to Camarilla pivot point (PP).
-# Uses discrete position size 0.20. Uses 4h/1d for signal direction, 1h only for entry timing.
-# Session filter: 08-20 UTC to avoid low-volume periods. Target: 80-160 total trades over 4 years (20-40/year).
+# Hypothesis: 6h Williams %R(14) extreme reversal with 1d volume spike and 1w ADX trend filter.
+# Long when Williams %R < -80 (oversold) AND volume > 1.8x 20-period average AND 1w ADX > 20.
+# Short when Williams %R > -20 (overbought) AND volume > 1.8x 20-period average AND 1w ADX > 20.
+# Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts).
+# Uses discrete position size 0.25. Williams %R captures momentum extremes, volume confirmation
+# reduces false signals in low-liquidity periods, and 1w ADX ensures we only trade in established trends.
+# Target: 60-140 total trades over 4 years (15-35/year).
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,63 +20,62 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h data once before loop for Camarilla pivot and volume
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get 6h data once before loop for Williams %R calculation
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 14:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
     
-    # === 4h Indicators: Camarilla pivot levels (based on previous 4h bar) ===
-    # Pivot Point (PP) = (High + Low + Close) / 3
-    # R3 = Close + (High - Low) * 1.1 / 4
-    # S3 = Close - (High - Low) * 1.1 / 4
-    pp = (high_4h + low_4h + close_4h) / 3.0
-    r3 = close_4h + (high_4h - low_4h) * 1.1 / 4.0
-    s3 = close_4h - (high_4h - low_4h) * 1.1 / 4.0
+    # === 6h Indicators: Williams %R(14) ===
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_6h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_6h).rolling(window=14, min_periods=14).min().values
+    williams_r = np.where((highest_high - lowest_low) != 0,
+                          (highest_high - close_6h) / (highest_high - lowest_low) * -100, -50)
+    williams_r = np.where(np.isnan(williams_r), -50, williams_r)
     
-    # Align Camarilla levels to 4h timeframe (use previous bar's values)
-    pp_aligned_4h = align_htf_to_ltf(prices, df_4h, pp)
-    r3_aligned_4h = align_htf_to_ltf(prices, df_4h, r3)
-    s3_aligned_4h = align_htf_to_ltf(prices, df_4h, s3)
+    # Align Williams %R to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_6h, williams_r)
     
-    # 4h volume average (20-period)
-    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
-    
-    # Get 1d data once before loop for ADX trend filter
+    # Get 1d data once before loop for volume average
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # === 1d Indicators: ADX(14) for trend filter ===
+    # Calculate 20-period volume average on 1d timeframe
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    
+    # Get 1w data once before loop for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # === 1w Indicators: ADX(14) for trend filter ===
     # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr1[0] = 0
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
     # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w),
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)),
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
     dm_plus[0] = 0
     dm_minus[0] = 0
     
@@ -93,8 +93,8 @@ def generate_signals(prices):
     dx = np.where(np.isnan(dx), 0, dx)
     adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align ADX to 1d timeframe
-    adx_aligned_1d = align_htf_to_ltf(prices, df_1d, adx)
+    # Align ADX to 1w timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     signals = np.zeros(n)
     
@@ -103,77 +103,63 @@ def generate_signals(prices):
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
     for i in range(warmup, n):
-        # Skip if not in trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            position = 0
-            entry_price = 0.0
-            continue
-        
         # Skip if any required data is NaN
-        if (np.isnan(pp_aligned_4h[i]) or np.isnan(r3_aligned_4h[i]) or np.isnan(s3_aligned_4h[i]) or 
-            np.isnan(vol_ma_20_4h_aligned[i]) or np.isnan(adx_aligned_1d[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or 
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             position = 0
-            entry_price = 0.0
             continue
         
         # Current values
-        pp_val = pp_aligned_4h[i]
-        r3_val = r3_aligned_4h[i]
-        s3_val = s3_aligned_4h[i]
-        vol_ma_20_val = vol_ma_20_4h_aligned[i]
-        adx_val = adx_aligned_1d[i]
-        price = close[i]
+        wr = williams_r_aligned[i]
+        vol_ma = vol_ma_20_aligned[i]
+        adx_val = adx_aligned[i]
         vol = volume[i]
+        price = close[i]
         
-        # Volume filter: volume > 1.8x 20-period 4h average
-        vol_filter = vol > 1.8 * vol_ma_20_val if vol_ma_20_val > 0 else False
+        # Volume filter: volume > 1.8x 20-period average
+        vol_filter = vol > 1.8 * vol_ma if vol_ma > 0 else False
         
-        # Trend filter: 1d ADX > 20 (trending regime)
+        # Trend filter: 1w ADX > 20 (trending regime)
         trend_filter = adx_val > 20
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price returns to pivot point
-            if price <= pp_val:
+            # Exit if Williams %R crosses above -50 (momentum weakening)
+            if wr > -50:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price returns to pivot point
-            if price >= pp_val:
+            # Exit if Williams %R crosses below -50 (momentum weakening)
+            if wr < -50:
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
-            entry_price = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: price breaks above Camarilla R3 with volume and trend confirmation
-            if price > r3_val and vol_filter and trend_filter:
-                signals[i] = 0.20
+            # LONG: Williams %R oversold (< -80) with volume and trend confirmation
+            if wr < -80 and vol_filter and trend_filter:
+                signals[i] = 0.25
                 position = 1
-                entry_price = price
             
-            # SHORT: price breaks below Camarilla S3 with volume and trend confirmation
-            elif price < s3_val and vol_filter and trend_filter:
-                signals[i] = -0.20
+            # SHORT: Williams %R overbought (> -20) with volume and trend confirmation
+            elif wr > -20 and vol_filter and trend_filter:
+                signals[i] = -0.25
                 position = -1
-                entry_price = price
         
         else:
-            signals[i] = position * 0.20
+            signals[i] = position * 0.25
     
     return signals
 
-name = "1h_CamarillaR3S3_4hVolumeSpike_1dADXTrend_V1"
-timeframe = "1h"
+name = "6h_WilliamsR14_1dVolumeSpike_1wADXTrend_V1"
+timeframe = "6h"
 leverage = 1.0
