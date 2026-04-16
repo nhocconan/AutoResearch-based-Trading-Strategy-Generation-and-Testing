@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout + 1d trend filter + volume confirmation
-# In bull markets: buy when price breaks above Donchian(20) high with 1d EMA50 uptrend
-# In bear markets: sell when price breaks below Donchian(20) low with 1d EMA50 downtrend
-# Volume > 2x average confirms breakout strength. Position size 0.25 for risk control.
-# Uses 4h as primary timeframe with 1d EMA50 for trend filter.
+# Hypothesis: 6h Elder Ray with 1d ADX regime filter.
+# Elder Ray = Bull Power (High - EMA13) and Bear Power (EMA13 - Low).
+# In bull regime (ADX > 25): buy when Bull Power turns positive after being negative.
+# In bear regime (ADX > 25): sell when Bear Power turns positive after being negative.
+# Volume > 1.5x average confirms the move. Position size 0.25 for risk control.
+# Works in both bull (buy dips in uptrend) and bear (sell rallies in downtrend).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,33 +20,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h data (primary timeframe) ===
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    # === 6h data (primary timeframe) ===
+    df_6h = get_htf_data(prices, '6h')
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    volume_6h = df_6h['volume'].values
     
-    # === 1d data (higher timeframe for EMA50 trend filter) ===
+    # === 1d data (higher timeframe for ADX regime filter) ===
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === Donchian Channel (20) on 4h ===
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # === 6h EMA13 for Elder Ray ===
+    close_6h_series = pd.Series(close_6h)
+    ema13_6h = close_6h_series.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # === EMA50 on 1d for trend filter ===
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Bull Power = High - EMA13
+    bull_power = high_6h - ema13_6h
+    # Bear Power = EMA13 - Low
+    bear_power = ema13_6h - low_6h
     
-    # === Volume confirmation ===
-    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_4h = volume_4h / vol_ma_20_4h
+    # === 1d ADX (14) for regime filter ===
+    # Calculate True Range
+    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
+    tr2 = abs(pd.Series(high_1d).shift(1) - pd.Series(close_1d).shift(1))
+    tr3 = abs(pd.Series(low_1d).shift(1) - pd.Series(close_1d).shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = tr.rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate Directional Movement
+    up_move = pd.Series(high_1d).diff()
+    down_move = -pd.Series(low_1d).diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smooth DM and TR
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_1d
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_1d
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # === 6h volume ratio for confirmation ===
+    vol_ma_10_6h = pd.Series(volume_6h).rolling(window=10, min_periods=10).mean().values
+    vol_ratio_6h = volume_6h / vol_ma_10_6h
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 50
+    warmup = 100
     
     # Track position and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
@@ -53,36 +78,36 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ratio_4h[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ratio_6h[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        don_high = donchian_high[i]
-        don_low = donchian_low[i]
-        ema50 = ema50_1d_aligned[i]
-        vol_ratio = vol_ratio_4h[i]
+        bp = bull_power[i]
+        be = bear_power[i]
+        adx_val = adx_aligned[i]
+        vol_ratio = vol_ratio_6h[i]
         
         # === STOPLOSS LOGIC ===
         if position == 1:  # Long position
-            atr_4h = np.abs(high_4h - low_4h)
-            atr_ma = pd.Series(atr_4h).rolling(window=14, min_periods=14).mean().values
-            atr_aligned = align_htf_to_ltf(prices, df_4h, atr_ma)
+            atr_6h = np.abs(high_6h - low_6h)
+            atr_ma = pd.Series(atr_6h).rolling(window=14, min_periods=14).mean().values
+            atr_aligned = align_htf_to_ltf(prices, df_6h, atr_ma)
             atr_val = atr_aligned[i]
-            if price < entry_price - 2.5 * atr_val:
+            if price < entry_price - 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            atr_4h = np.abs(high_4h - low_4h)
-            atr_ma = pd.Series(atr_4h).rolling(window=14, min_periods=14).mean().values
-            atr_aligned = align_htf_to_ltf(prices, df_4h, atr_ma)
+            atr_6h = np.abs(high_6h - low_6h)
+            atr_ma = pd.Series(atr_6h).rolling(window=14, min_periods=14).mean().values
+            atr_aligned = align_htf_to_ltf(prices, df_6h, atr_ma)
             atr_val = atr_aligned[i]
-            if price > entry_price + 2.5 * atr_val:
+            if price > entry_price + 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -90,16 +115,16 @@ def generate_signals(prices):
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price breaks below Donchian low or trend reverses
-            if price < don_low or close_4h[i] < ema50_1d_aligned[i]:
+            # Exit when Bull Power turns negative or regime weakens
+            if bp < 0 or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price breaks above Donchian high or trend reverses
-            if price > don_high or close_4h[i] > ema50_1d_aligned[i]:
+            # Exit when Bear Power turns negative or regime weakens
+            if be < 0 or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -107,16 +132,16 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Require volume confirmation
-            if vol_ratio > 2.0:
-                # Buy when price breaks above Donchian high in uptrend
-                if price > don_high and close_4h[i] > ema50_1d_aligned[i]:
+            # Require trending market (ADX > 25)
+            if adx_val > 25:
+                # Buy when Bull Power turns positive after being negative with volume
+                if bp > 0 and bull_power[i-1] <= 0 and vol_ratio > 1.5:
                     signals[i] = 0.25
                     position = 1
                     entry_price = price
                     continue
-                # Sell when price breaks below Donchian low in downtrend
-                elif price < don_low and close_4h[i] < ema50_1d_aligned[i]:
+                # Sell when Bear Power turns positive after being negative with volume
+                elif be > 0 and bear_power[i-1] <= 0 and vol_ratio > 1.5:
                     signals[i] = -0.25
                     position = -1
                     entry_price = price
@@ -132,6 +157,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_EMA50_TrendFilter_Volume"
-timeframe = "4h"
+name = "6h_ElderRay_ADX_VolumeFilter_v1"
+timeframe = "6h"
 leverage = 1.0
