@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Donchian breakout with volume confirmation and ADX regime filter.
-# Long when price breaks above 1d Donchian upper (20-period high) with 4h volume spike (>2.0x median) and ADX>30.
-# Short when price breaks below 1d Donchian lower (20-period low) with same filters.
+# Hypothesis: 4h strategy using 1d Bollinger Band breakout with volume confirmation and chop regime filter.
+# Long when price breaks above upper BB(20,2.0) with volume spike (>1.8x median) and chop < 61.8 (trending).
+# Short when price breaks below lower BB(20,2.0) with same filters.
 # Exit via ATR(10) trailing stop: long exits when price < highest high since entry - 2.5*ATR,
 # short exits when price > lowest low since entry + 2.5*ATR.
-# Uses discrete position size 0.25. Target: 75-200 total trades over 4 years (19-50/year).
-# Higher volume threshold (2.0x) and ADX>30 reduce trades vs v1. Wider ATR stop (2.5x) reduces whipsaw exits.
+# Uses discrete position size 0.25. Tight volume and chop filters reduce overtrading.
+# Bollinger Bands adapt to volatility, working in both bull and bear markets.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,21 +20,23 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 1d data once before loop for Donchian breakout levels
+    # Get 1d data once before loop for Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === 1d Indicators: Donchian Channel (20-period) ===
-    # Upper band: 20-period high
-    upper_donch_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    # Lower band: 20-period low
-    lower_donch_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # === 1d Indicators: Bollinger Bands (20,2.0) ===
+    # Middle band: 20-period SMA
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    # Standard deviation
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    # Upper and lower bands
+    upper_bb = sma_20 + 2.0 * std_20
+    lower_bb = sma_20 - 2.0 * std_20
     
-    # Get 4h data for volume, ADX, and ATR
+    # Get 4h data for volume, ATR, and chop filter
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 50:
         return np.zeros(n)
@@ -44,55 +46,42 @@ def generate_signals(prices):
     close_4h = df_4h['close'].values
     volume_4h = df_4h['volume'].values
     
-    # === 4h Indicators: Volume Median, ADX(14), ATR(10) ===
+    # === 4h Indicators: Volume Median, ATR(10), Chop Filter ===
     # Volume median (20-period)
     vol_median_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).median().values
     
-    # ADX(14)
+    # ATR(10) for trailing stop
     tr1_4h = pd.Series(high_4h - low_4h)
     tr2_4h = pd.Series(np.abs(high_4h - np.roll(close_4h, 1)))
     tr3_4h = pd.Series(np.abs(low_4h - np.roll(close_4h, 1)))
     tr2_4h.iloc[0] = tr1_4h.iloc[0]
     tr3_4h.iloc[0] = tr1_4h.iloc[0]
     tr_4h = pd.concat([tr1_4h, tr2_4h, tr3_4h], axis=1).max(axis=1)
-    atr_temp = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values  # ATR for DX calculation
-    
-    # +DM and -DM
-    up_move = pd.Series(high_4h).diff()
-    down_move = pd.Series(low_4h).diff()
-    up_move.iloc[0] = 0
-    down_move.iloc[0] = 0
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed +DM, -DM, TR
-    tr_period = 14
-    atr_14 = pd.Series(tr_4h).rolling(window=tr_period, min_periods=tr_period).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/tr_period, adjust=False, min_periods=tr_period).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/tr_period, adjust=False, min_periods=tr_period).mean().values
-    
-    # DI+ and DI-
-    plus_di = 100 * plus_dm_smooth / atr_14
-    minus_di = 100 * minus_dm_smooth / atr_14
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/tr_period, adjust=False, min_periods=tr_period).mean().values
-    
-    # ATR(10) for trailing stop
     atr_10 = pd.Series(tr_4h).rolling(window=10, min_periods=10).mean().values
     
+    # Choppiness Index (14) for regime filter
+    # Chop = 100 * log10(sum(ATR(14)) / log10(highest_high - lowest_low)) / log10(14)
+    atr_14 = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
+    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
+    highest_high_14 = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+    range_14 = highest_high_14 - lowest_low_14
+    # Avoid division by zero
+    chop = 100 * (np.log10(sum_atr_14) - np.log10(range_14)) / np.log10(14)
+    # Handle invalid values (set to 50 as neutral)
+    chop = np.where((range_14 == 0) | np.isnan(chop), 50.0, chop)
+    
     # Align all indicators to primary timeframe (4h)
-    upper_donch_aligned = align_htf_to_ltf(prices, df_1d, upper_donch_1d)
-    lower_donch_aligned = align_htf_to_ltf(prices, df_1d, lower_donch_1d)
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
     vol_median_aligned = align_htf_to_ltf(prices, df_4h, vol_median_20)
-    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
     atr_aligned = align_htf_to_ltf(prices, df_4h, atr_10)
+    chop_aligned = align_htf_to_ltf(prices, df_4h, chop)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(20, 14, 10)  # Donchian(20), ADX(14), ATR(10)
+    warmup = max(20, 14, 10)  # BB(20), Chop(14), ATR(10)
     
     # Track position state for trailing stops
     position = 0  # 0: flat, 1: long, -1: short
@@ -101,8 +90,8 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_donch_aligned[i]) or np.isnan(lower_donch_aligned[i]) or 
-            np.isnan(vol_median_aligned[i]) or np.isnan(adx_aligned[i]) or np.isnan(atr_aligned[i])):
+        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
+            np.isnan(vol_median_aligned[i]) or np.isnan(atr_aligned[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             position = 0
             highest_since_entry = 0.0
@@ -110,26 +99,26 @@ def generate_signals(prices):
             continue
         
         # Current values (aligned)
-        upper_donch = upper_donch_aligned[i]
-        lower_donch = lower_donch_aligned[i]
+        upper_bb = upper_bb_aligned[i]
+        lower_bb = lower_bb_aligned[i]
         vol_median = vol_median_aligned[i]
-        adx_val = adx_aligned[i]
         atr = atr_aligned[i]
+        chop_val = chop_aligned[i]
         price = close[i]
         
         # Get current 4h volume for volume spike filter
         vol_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_4h)
         current_vol_4h = vol_4h_aligned[i]
         
-        # Volume spike filter: current 4h volume > 2.0x median volume (higher threshold to reduce trades)
-        volume_spike = current_vol_4h > (vol_median * 2.0)
+        # Volume spike filter: current 4h volume > 1.8x median volume
+        volume_spike = current_vol_4h > (vol_median * 1.8)
         
-        # Trend filter: ADX > 30 (stronger trend filter to reduce whipsaws)
-        trending = adx_val > 30
+        # Regime filter: chop < 61.8 indicates trending market (not choppy/ranging)
+        trending = chop_val < 61.8
         
         # Breakout conditions
-        breakout_long = price > upper_donch
-        breakout_short = price < lower_donch
+        breakout_long = price > upper_bb
+        breakout_short = price < lower_bb
         
         # === EXIT LOGIC (trailing stop) ===
         exit_signal = False
@@ -158,14 +147,14 @@ def generate_signals(prices):
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
             # LONG CONDITIONS
-            # Breakout above upper Donchian, volume spike, and trending market (ADX>30)
+            # Breakout above upper Bollinger Band, volume spike, and trending market (chop < 61.8)
             if breakout_long and volume_spike and trending:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = price  # initialize trailing stop
             
             # SHORT CONDITIONS
-            # Breakout below lower Donchian, volume spike, and trending market (ADX>30)
+            # Breakout below lower Bollinger Band, volume spike, and trending market (chop < 61.8)
             elif breakout_short and volume_spike and trending:
                 signals[i] = -0.25
                 position = -1
@@ -176,6 +165,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dDonchianBreakout_VolumeSpike2.0x_ADX30_ATRTrail2.5_v1"
+name = "4h_1dBollingerBreakout_VolumeSpike1.8x_Chop61.8_ATRTrail2.5_v1"
 timeframe = "4h"
 leverage = 1.0
