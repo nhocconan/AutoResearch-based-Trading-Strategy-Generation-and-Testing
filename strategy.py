@@ -1,3 +1,8 @@
+# Hypothesis: 12h Donchian breakout with 1d EMA50 trend filter, volume confirmation, and ATR-based stoploss. 
+# Timeframe 12h reduces trade frequency, avoiding fee drag. Trend filter adapts to bull/bear regimes.
+# Volume > 1.5x 20-period average confirms breakout strength. Stoploss at 2.5x ATR limits drawdown.
+# Designed for ~20-40 trades/year, targeting 80-160 total over 4 years.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,24 +18,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data (primary) ===
+    # === 12h data (primary) ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    volume_12h = df_12h['volume'].values
+    
+    # === 1d data (HTF for trend filter) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
     
-    # === 1w data (HTF for trend filter) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # === 1d EMA50 (trend filter) ===
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === 1w EMA50 (trend filter) ===
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # === 1d Donchian channel (20-period) ===
-    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # === 12h Donchian channel (20-period) ===
+    donch_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
     # Shift by 1 to avoid look-ahead (use previous bar's channel)
     donch_high = np.roll(donch_high, 1)
@@ -38,17 +43,17 @@ def generate_signals(prices):
     donch_high[0] = np.nan
     donch_low[0] = np.nan
     
-    # === 1d volume ratio for confirmation ===
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1d = volume_1d / vol_ma_20_1d
+    # === 12h volume ratio for confirmation ===
+    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_12h = volume_12h / vol_ma_20_12h
     
     # === 14-period ATR for stoploss ===
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = 0
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     
@@ -63,9 +68,9 @@ def generate_signals(prices):
         # Skip if any data is NaN
         if (np.isnan(donch_high[i]) or 
             np.isnan(donch_low[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(vol_ratio_1d[i]) or
-            np.isnan(atr_14_1d[i])):
+            np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_ratio_12h[i]) or
+            np.isnan(atr_14_12h[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -73,9 +78,9 @@ def generate_signals(prices):
         price = close[i]
         upper = donch_high[i]
         lower = donch_low[i]
-        ema_trend = ema_50_1w_aligned[i]
-        vol_ratio = vol_ratio_1d[i]
-        atr = atr_14_1d[i]
+        ema_trend = ema_50_1d_aligned[i]
+        vol_ratio = vol_ratio_12h[i]
+        atr = atr_14_12h[i]
         
         # === STOPLOSS LOGIC ===
         if position == 1:  # Long position
@@ -114,13 +119,13 @@ def generate_signals(prices):
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
             # LONG: Break above Donchian upper with volume, in uptrend (above EMA50)
-            if price > upper and vol_ratio > 2.0 and price > ema_trend:
+            if price > upper and vol_ratio > 1.5 and price > ema_trend:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 continue
             # SHORT: Break below Donchian lower with volume, in downtrend (below EMA50)
-            elif price < lower and vol_ratio > 2.0 and price < ema_trend:
+            elif price < lower and vol_ratio > 1.5 and price < ema_trend:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -136,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian_1wEMA50_Volume_ATRStop_v1"
-timeframe = "1d"
+name = "12h_Donchian_1dEMA50_Volume_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
