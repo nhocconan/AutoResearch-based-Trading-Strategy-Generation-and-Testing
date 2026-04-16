@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot breakout with weekly trend filter and volume confirmation.
-# Long when price breaks above R4 AND weekly close > weekly open (bullish weekly candle) AND volume > 1.5x 20-period average.
-# Short when price breaks below S4 AND weekly close < weekly open (bearish weekly candle) AND volume > 1.5x 20-period average.
-# Exit on opposite Camarilla level (R3 for longs, S3 for shorts) or ATR-based stop (2*ATR from entry).
-# Uses discrete position size 0.25. Weekly trend filter ensures alignment with higher timeframe momentum.
-# Volume confirmation avoids false breakouts. Designed for 6h timeframe to capture multi-day moves with controlled trade frequency.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag while maintaining edge.
+# Hypothesis: 12h Camarilla R1/S1 breakout with 1d volume spike and ADX(14) trend filter.
+# Long when price breaks above Camarilla R1 AND 1d ADX > 25 AND 1d volume > 1.5x 20-period average.
+# Short when price breaks below Camarilla S1 AND 1d ADX > 25 AND 1d volume > 1.5x 20-period average.
+# Exit on opposite Camarilla break (R1 for shorts, S1 for longs) or ATR(14) stoploss (2*ATR).
+# Uses discrete position size 0.25. Designed to capture intraday momentum with volume and trend confirmation.
+# Works in both bull and bear markets by requiring 1d ADX trend filter and volume confirmation, avoiding false breakouts in ranging conditions.
+# Target: 50-150 total trades over 4 years (12-37/year) to balance edge and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,44 +21,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 6h Indicators: Camarilla Pivot Levels (based on prior 6h bar) ===
-    # Camarilla levels calculated from prior bar's high, low, close
-    # R4 = close + ((high - low) * 1.1 / 2)
-    # R3 = close + ((high - low) * 1.1 / 4)
-    # S3 = close - ((high - low) * 1.1 / 4)
-    # S4 = close - ((high - low) * 1.1 / 2)
-    # Using prior bar values to avoid look-ahead
-    prior_high = np.roll(high, 1)
-    prior_low = np.roll(low, 1)
-    prior_close = np.roll(close, 1)
-    prior_high[0] = prior_low[0] = prior_close[0] = np.nan  # first bar has no prior
+    # === 12h Indicators: Camarilla Pivot Levels (R1, S1) ===
+    # Based on previous day's OHLC
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_val = prev_high - prev_low
+    camarilla_r1 = pivot + (range_val * 1.1 / 12)
+    camarilla_s1 = pivot - (range_val * 1.1 / 12)
     
-    camarilla_r4 = prior_close + ((prior_high - prior_low) * 1.1 / 2)
-    camarilla_r3 = prior_close + ((prior_high - prior_low) * 1.1 / 4)
-    camarilla_s3 = prior_close - ((prior_high - prior_low) * 1.1 / 4)
-    camarilla_s4 = prior_close - ((prior_high - prior_low) * 1.1 / 2)
+    # === 1d Indicators: ADX(14) for trend strength ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === 1w Indicators: Weekly trend filter (bullish/bearish weekly candle) ===
-    df_1w = get_htf_data(prices, '1w')
-    weekly_open = df_1w['open'].values
-    weekly_close = df_1w['close'].values
-    weekly_bullish = weekly_close > weekly_open  # bullish weekly candle
-    weekly_bearish = weekly_close < weekly_open  # bearish weekly candle
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish)
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish)
+    # True Range
+    tr1 = pd.Series(high_1d).diff()
+    tr2 = pd.Series(low_1d).diff().abs()
+    tr3 = pd.Series(close_1d).shift(1).diff().abs()
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # === 1w Indicators: Volume Spike (volume > 1.5x 20-period average) ===
-    weekly_volume = df_1w['volume'].values
-    vol_ma_1w = pd.Series(weekly_volume).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
-    volume_spike = volume > (1.5 * vol_ma_1w_aligned)
+    # Directional Movement
+    up_move = pd.Series(high_1d).diff()
+    down_move = pd.Series(low_1d).diff().abs()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # === 6h ATR for stoploss ===
-    tr1 = pd.Series(high).diff()
-    tr2 = pd.Series(low).diff().abs()
-    tr3 = pd.Series(close).shift(1).diff().abs()
-    tr_6h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_6h_raw = pd.Series(tr_6h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Smoothed DM
+    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # DI and ADX
+    plus_di = 100 * plus_dm_smooth / atr_1d
+    minus_di = 100 * minus_dm_smooth / atr_1d
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    adx_strong = adx_1d_aligned > 25
+    
+    # === 1d Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    volume_spike = volume > (1.5 * vol_ma_1d_aligned)
+    
+    # === 12h ATR for stoploss ===
+    tr1_12h = pd.Series(high).diff()
+    tr2_12h = pd.Series(low).diff().abs()
+    tr3_12h = pd.Series(close).shift(1).diff().abs()
+    tr_12h = pd.concat([tr1_12h, tr2_12h, tr3_12h], axis=1).max(axis=1)
+    atr_12h_raw = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -66,7 +81,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed for ATR/volume MA)
+    # Warmup: ensure all indicators are valid (max 50 periods needed for ADX/ATR)
     warmup = 100
     
     # Track position state and entry price for stoploss
@@ -75,33 +90,33 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(camarilla_r4[i]) or np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or
-            np.isnan(camarilla_s4[i]) or np.isnan(weekly_bullish_aligned[i]) or
-            np.isnan(weekly_bearish_aligned[i]) or np.isnan(volume_spike[i]) or
-            np.isnan(atr_6h_raw[i]) or not session_filter[i]):
+        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or np.isnan(adx_1d_aligned[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(atr_12h_raw[i]) or
+            not session_filter[i]):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values
         price = close[i]
+        adx_ok = adx_strong[i]
         vol_spike = volume_spike[i]
-        atr_val = atr_6h_raw[i]
+        atr_val = atr_12h_raw[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price breaks below Camarilla S3 (profit target/reversal)
-            if price < camarilla_s3[i]:
+            # Exit if price breaks below Camarilla S1
+            if price < camarilla_s1[i]:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR below entry
             elif price < entry_price - 2.0 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price breaks above Camarilla R3 (profit target/reversal)
-            if price > camarilla_r3[i]:
+            # Exit if price breaks above Camarilla R1
+            if price > camarilla_r1[i]:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR above entry
             elif price > entry_price + 2.0 * atr_val:
@@ -115,14 +130,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Camarilla R4 AND weekly bullish candle AND volume spike
-            if price > camarilla_r4[i] and weekly_bullish_aligned[i] and vol_spike:
+            # LONG: Price breaks above Camarilla R1 AND ADX > 25 AND volume spike
+            if price > camarilla_r1[i] and adx_ok and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: Price breaks below Camarilla S4 AND weekly bearish candle AND volume spike
-            elif price < camarilla_s4[i] and weekly_bearish_aligned[i] and vol_spike:
+            # SHORT: Price breaks below Camarilla S1 AND ADX > 25 AND volume spike
+            elif price < camarilla_s1[i] and adx_ok and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -132,6 +147,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R4_S4_1wTrend_VolumeSpike_V1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_1dADX25_VolumeSpike_V1"
+timeframe = "12h"
 leverage = 1.0
