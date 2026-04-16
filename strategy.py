@@ -13,57 +13,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Daily OHLC for calculations ===
+    # === Daily OHLC for Camarilla pivot calculation ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # === 12h OHLC for price action ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate Camarilla pivot levels (R1-S1)
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_hl = high_1d - low_1d
+    r1 = close_1d + range_hl * 1.1 / 12
+    s1 = close_1d - range_hl * 1.1 / 12
     
-    # === Calculate 12h ATR (14-period) for volatility ===
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    # === ATR for volatility filter (14-period) ===
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
-    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_12h_slow = pd.Series(atr_12h).rolling(window=50, min_periods=50).mean().values
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_avg = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
     
-    # === Calculate daily volatility filter ===
-    tr1d = high_1d[1:] - low_1d[1:]
-    tr2d = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3d = np.abs(low_1d[1:] - close_1d[:-1])
-    trd = np.maximum(tr1d, np.maximum(tr2d, tr3d))
-    trd = np.concatenate([[np.nan], trd])
+    # Align HTF data to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    atr_1d_avg_4h = align_htf_to_ltf(prices, df_1d, atr_1d_avg)
     
-    atr_1d = pd.Series(trd).rolling(window=14, min_periods=14).mean().values
-    atr_1d_slow = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
+    # === Volume spike detection (20-period volume MA) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
-    # === Daily volume average for spike detection ===
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # === Align all 1d data to 12h timeframe ===
-    atr_1d_slow_12h = align_htf_to_ltf(prices, df_1d, atr_1d_slow)
-    vol_ma_1d_12h = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    
-    # === Calculate 12h price channels (Donchian 20) ===
-    def donchian_channels(high_arr, low_arr, window):
-        upper = pd.Series(high_arr).rolling(window=window, min_periods=window).max().values
-        lower = pd.Series(low_arr).rolling(window=window, min_periods=window).min().values
-        return upper, lower
-    
-    dc_upper_12h, dc_lower_12h = donchian_channels(high_12h, low_12h, 20)
-    
-    # === Align 12h Donchian channels to lower timeframe ===
-    dc_upper_aligned = align_htf_to_ltf(prices, df_12h, dc_upper_12h)
-    dc_lower_aligned = align_htf_to_ltf(prices, df_12h, dc_lower_12h)
+    # === Price distance from pivot (avoid chop) ===
+    mid_pivot = (r1_4h + s1_4h) / 2
+    dist_from_pivot = np.abs(close - mid_pivot)
+    avg_dist = pd.Series(dist_from_pivot).rolling(window=50, min_periods=50).mean().values
+    too_close = dist_from_pivot < (0.5 * avg_dist)
     
     signals = np.zeros(n)
     
@@ -75,52 +60,45 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(dc_upper_aligned[i]) or np.isnan(dc_lower_aligned[i]) or
-            np.isnan(atr_1d_slow_12h[i]) or np.isnan(vol_ma_1d_12h[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
+            np.isnan(atr_1d_avg_4h[i]) or np.isnan(volume_spike[i]) or
+            np.isnan(too_close[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        upper = dc_upper_aligned[i]
-        lower = dc_lower_aligned[i]
-        atr_filter = atr_1d_slow_12h[i]
-        vol_ma_filter = vol_ma_1d_12h[i]
-        
-        # Volume spike detection: current 12h volume > 2x 1d average volume
-        # Get the corresponding 12h volume for volume spike check
-        vol_12h_idx = i // 12  # Convert 12h index to approximate daily index for volume
-        if vol_12h_idx >= len(volume):
-            vol_spike = False
-        else:
-            vol_12h = volume[vol_12h_idx * 12:(vol_12h_idx + 1) * 12].sum() if (vol_12h_idx + 1) * 12 <= len(volume) else 0
-            vol_spike = vol_12h > (2.0 * vol_ma_filter)
+        r1_level = r1_4h[i]
+        s1_level = s1_4h[i]
+        atr_avg = atr_1d_avg_4h[i]
+        vol_spike = volume_spike[i]
+        too_close_to_pivot = too_close[i]
         
         # === EXIT LOGIC: Exit when price moves against position or volatility drops ===
         if position == 1:  # Long position
-            # Exit when price drops below lower Donchian or volatility drops significantly
-            if price < lower or atr_filter < (atr_1d_slow_12h[i-1] * 0.7 if i > 0 else atr_filter):
+            # Exit when price drops below S1 or volatility drops significantly
+            if price < s1_level or atr_avg < (atr_1d_avg_4h[i-1] * 0.7 if i > 0 else atr_avg):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price rises above upper Donchian or volatility drops significantly
-            if price > upper or atr_filter < (atr_1d_slow_12h[i-1] * 0.7 if i > 0 else atr_filter):
+            # Exit when price rises above R1 or volatility drops significantly
+            if price > r1_level or atr_avg < (atr_1d_avg_4h[i-1] * 0.7 if i > 0 else atr_avg):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above upper Donchian with volume spike and sufficient volatility
-            if price > upper and vol_spike and atr_filter > 0:
+            # LONG: Price breaks above R1 with volume spike, sufficient volatility, and not too close to pivot
+            if price > r1_level and vol_spike and atr_avg > 0 and not too_close_to_pivot:
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Price breaks below lower Donchian with volume spike and sufficient volatility
-            elif price < lower and vol_spike and atr_filter > 0:
+            # SHORT: Price breaks below S1 with volume spike, sufficient volatility, and not too close to pivot
+            elif price < s1_level and vol_spike and atr_avg > 0 and not too_close_to_pivot:
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -135,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_VolumeSpike_ATRFilter_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_DistFilter"
+timeframe = "4h"
 leverage = 1.0
