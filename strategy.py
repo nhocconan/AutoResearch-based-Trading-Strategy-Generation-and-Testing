@@ -1,9 +1,4 @@
-# 4h_Pivot_R1S1_Breakout_Volume_RangeFilter_Strict
-# Hypothesis: Daily pivot levels (R1/S1) act as key support/resistance. 
-# In trending regimes (ADX>25), breakouts of R1/S1 with volume confirmation capture momentum.
-# In ranging regimes (ADX<20), mean reversion at R2/S2 with volume exhaustion provides counter-trend entries.
-# Uses 4h for execution, 1d for pivots and regime filter. Tight entry criteria to limit trades (~20-50/year).
-# Works in bull/bear by adapting to regime, avoiding whipsaws in low-ADX chop.
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -18,39 +13,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h data (primary) ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    volume_4h = df_4h['volume'].values
+    # === 6h data (primary) ===
+    df_6h = get_htf_data(prices, '6h')
+    close_6h = df_6h['close'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    volume_6h = df_6h['volume'].values
     
-    # === 1d data (HTF for pivots and ADX) ===
+    # === 1d data (HTF for HL Bands) ===
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # === Daily Pivot Levels (Standard) ===
-    # Pivot = (H + L + C)/3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    pivot = np.zeros_like(close_1d)
-    r1 = np.zeros_like(close_1d)
-    s1 = np.zeros_like(close_1d)
-    r2 = np.zeros_like(close_1d)
-    s2 = np.zeros_like(close_1d)
-    
-    for i in range(1, len(close_1d)):
-        # Use previous day's OHLC
-        h = high_1d[i-1]
-        l = low_1d[i-1]
-        c = close_1d[i-1]
-        pivot[i] = (h + l + c) / 3.0
-        r1[i] = 2 * pivot[i] - l
-        s1[i] = 2 * pivot[i] - h
-        r2[i] = pivot[i] + (h - l)
-        s2[i] = pivot[i] - (h - l)
+    # === HL Bands: 20-period high/low of 1d high/low ===
+    # This creates adaptive support/resistance based on daily range
+    high_series = pd.Series(high_1d)
+    low_series = pd.Series(low_1d)
+    hl_high = high_series.rolling(window=20, min_periods=20).max().values  # 20-day high of daily highs
+    hl_low = low_series.rolling(window=20, min_periods=20).min().values    # 20-day low of daily lows
     
     # === ADX for regime filter (14-period) ===
     # True Range
@@ -83,22 +63,18 @@ def generate_signals(prices):
     
     di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
     di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
-    
     dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx = wilders_smoothing(dx, 14)
     
-    # === 4h volume ratio for confirmation ===
-    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_4h = volume_4h / vol_ma_20_4h
+    # === 6h volume ratio for confirmation ===
+    vol_ma_20_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_6h = volume_6h / vol_ma_20_6h
     
-    # Align all HTF data to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    # Align all HTF data to 6h timeframe
+    hl_high_aligned = align_htf_to_ltf(prices, df_1d, hl_high)
+    hl_low_aligned = align_htf_to_ltf(prices, df_1d, hl_low)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    vol_ratio_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ratio_4h)
+    vol_ratio_6h_aligned = align_htf_to_ltf(prices, df_6h, vol_ratio_6h)
     
     signals = np.zeros(n)
     
@@ -110,62 +86,59 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or 
+        if (np.isnan(hl_high_aligned[i]) or 
+            np.isnan(hl_low_aligned[i]) or 
             np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ratio_4h_aligned[i])):
+            np.isnan(vol_ratio_6h_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        r2_val = r2_aligned[i]
-        s2_val = s2_aligned[i]
+        hl_high_val = hl_high_aligned[i]
+        hl_low_val = hl_low_aligned[i]
         adx_val = adx_aligned[i]
-        vol_ratio = vol_ratio_4h_aligned[i]
+        vol_ratio = vol_ratio_6h_aligned[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit: price closes below S1 (trend) OR reaches R2 (profit target in range)
-            if price < s1_val or (adx_val < 20 and price > r2_val):
+            # Exit: price closes below HL low OR reaches HL high (full range)
+            if price < hl_low_val or price > hl_high_val:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit: price closes above R1 (trend) OR reaches S2 (profit target in range)
-            if price > r1_val or (adx_val < 20 and price < s2_val):
+            # Exit: price closes above HL high OR reaches HL low
+            if price > hl_high_val or price < hl_low_val:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Trending regime (ADX > 25): breakout continuation
-            if adx_val > 25:
-                # LONG: Break above R1 with volume
-                if price > r1_val and vol_ratio > 1.5:
+            # Use HL band position for entry signals
+            band_position = (price - hl_low_val) / (hl_high_val - hl_low_val) if hl_high_val > hl_low_val else 0.5
+            
+            if adx_val > 25:  # Trending regime: breakout at extremes
+                # LONG: Break above upper band with volume
+                if band_position > 0.95 and vol_ratio > 1.3:
                     signals[i] = 0.25
                     position = 1
                     continue
-                # SHORT: Break below S1 with volume
-                elif price < s1_val and vol_ratio > 1.5:
+                # SHORT: Break below lower band with volume
+                elif band_position < 0.05 and vol_ratio > 1.3:
                     signals[i] = -0.25
                     position = -1
                     continue
-            # Ranging regime (ADX < 20): mean reversion at extremes
-            elif adx_val < 20:
-                # LONG: Reversion from S2 with volume exhaustion
-                if price < s2_val and vol_ratio < 0.7:
+            else:  # Ranging regime: mean reversion at extremes
+                # LONG: Near lower band with volume exhaustion
+                if band_position < 0.15 and vol_ratio < 0.8:
                     signals[i] = 0.25
                     position = 1
                     continue
-                # SHORT: Reversion from R2 with volume exhaustion
-                elif price > r2_val and vol_ratio < 0.7:
+                # SHORT: Near upper band with volume exhaustion
+                elif band_position > 0.85 and vol_ratio < 0.8:
                     signals[i] = -0.25
                     position = -1
                     continue
@@ -180,6 +153,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Pivot_R1S1_Breakout_Volume_RangeFilter_Strict"
-timeframe = "4h"
+name = "6h_HL_Bands_ADX_Volume"
+timeframe = "6h"
 leverage = 1.0
