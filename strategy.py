@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Chaikin Money Flow (CMF) trend filter with 1h RSI mean reversion entries.
-# Uses CMF(20) on 4h to detect institutional buying/selling pressure (bullish > 0, bearish < 0).
-# In bullish 4h CMF (> 0): look for 1h RSI(14) < 30 to go long (dip buying in uptrend).
-# In bearish 4h CMF (< 0): look for 1h RSI(14) > 70 to go short (sell the rally in downtrend).
-# Volume confirmation: require 1h volume > 1.3x 20-period average.
-# Timeframe: 1h for entries, 4h for trend filter.
-# Position size: 0.20 to manage drawdown and limit trade frequency.
-# Designed to work in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
+# Hypothesis: 6h Williams %R mean reversion with weekly trend filter and volume confirmation.
+# Uses Williams %R(14) on 6h for overbought/oversold signals (> -20 = overbought, < -80 = oversold).
+# Weekly trend filter: price above/below weekly EMA50 determines bias.
+# In uptrend (price > weekly EMA50): only take longs from oversold.
+# In downtrend (price < weekly EMA50): only take shorts from overbought.
+# Volume confirmation (>1.5x average) required for entries.
+# Designed to work in both bull (buy dips in uptrend) and bear (sell rallies in downtrend).
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,40 +21,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h data for CMF trend filter ===
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    # === 6d data (Williams %R calculation window) ===
+    df_6d = get_htf_data(prices, '6d')
+    high_6d = df_6d['high'].values
+    low_6d = df_6d['low'].values
+    close_6d = df_6d['close'].values
+    volume_6d = df_6d['volume'].values
     
-    # === 1h data for RSI and volume ===
-    # RSI(14) on 1h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # === 1d data (for weekly aggregation) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Volume ratio on 1h
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma_20
+    # === Williams %R(14) on 6d data ===
+    highest_high = pd.Series(high_6d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_6d).rolling(window=14, min_periods=14).min().values
+    willr = -100 * (highest_high - close_6d) / (highest_high - lowest_low)
+    willr = np.where((highest_high - lowest_low) == 0, -50, willr)  # avoid division by zero
+    willr_6d_aligned = align_htf_to_ltf(prices, df_6d, willr)
     
-    # === 4h Chaikin Money Flow (CMF) ===
-    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
-    # Money Flow Volume = Money Flow Multiplier * Volume
-    # CMF = 20-period sum of Money Flow Volume / 20-period sum of Volume
-    mfm = ((close_4h - low_4h) - (high_4h - close_4h)) / (high_4h - low_4h)
-    mfm = np.where((high_4h - low_4h) == 0, 0, mfm)  # avoid division by zero
-    mfv = mfm * volume_4h
-    cmf = pd.Series(mfv).rolling(window=20, min_periods=20).sum() / pd.Series(volume_4h).rolling(window=20, min_periods=20).sum()
-    cmf = cmf.values
+    # === Weekly EMA50 from daily data ===
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Aggregate to weekly: take last value of each week
+    weekly_ema50 = []
+    week_start = 0
+    for i in range(len(close_1d)):
+        if i == 0 or pd.Timestamp(close_1d[i]).isocalendar().week != pd.Timestamp(close_1d[i-1]).isocalendar().week or i == len(close_1d)-1:
+            if i > week_start:
+                weekly_ema50.append(ema50_1d[i-1])
+            week_start = i
+    if len(close_1d) > week_start:
+        weekly_ema50.append(ema50_1d[-1])
+    weekly_ema50 = np.array(weekly_ema50)
     
-    # Align 4h CMF to 1h timeframe
-    cmf_aligned = align_htf_to_ltf(prices, df_4h, cmf)
+    # Create weekly DataFrame for alignment
+    weekly_times = []
+    current_week_start = 0
+    for i in range(len(close_1d)):
+        if i == 0 or (i > 0 and pd.Timestamp(close_1d[i]).isocalendar().week != pd.Timestamp(close_1d[i-1]).isocalendar().week):
+            weekly_times.append(pd.Timestamp(close_1d[i-1]))
+            current_week_start = i
+    if len(close_1d) > current_week_start:
+        weekly_times.append(pd.Timestamp(close_1d[-1]))
+    
+    df_weekly = pd.DataFrame({'close': weekly_ema50}, index=pd.DatetimeIndex(weekly_times))
+    df_weekly_6h = get_htf_data(prices, '6h')  # dummy to get index
+    # Reindex weekly EMA50 to 6h index using forward fill
+    weekly_ema50_series = pd.Series(weekly_ema50, index=df_weekly.index)
+    weekly_ema50_6h = weekly_ema50_series.reindex(df_weekly_6h.index, method='ffill').values
+    
+    # === 6d volume ratio for confirmation ===
+    vol_ma_10_6d = pd.Series(volume_6d).rolling(window=10, min_periods=10).mean().values
+    vol_ratio_6d = volume_6d / vol_ma_10_6d
+    vol_ratio_6d_aligned = align_htf_to_ltf(prices, df_6d, vol_ratio_6d)
     
     signals = np.zeros(n)
     
@@ -68,30 +88,48 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(cmf_aligned[i]) or 
-            np.isnan(rsi[i]) or
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(willr_6d_aligned[i]) or 
+            np.isnan(weekly_ema50_6h[i]) or
+            np.isnan(vol_ratio_6d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        cmf_val = cmf_aligned[i]
-        rsi_val = rsi[i]
-        vol_ratio_val = vol_ratio[i]
+        willr_val = willr_6d_aligned[i]
+        weekly_ema50_val = weekly_ema50_6h[i]
+        vol_ratio = vol_ratio_6d_aligned[i]
         
         # === STOPLOSS LOGIC ===
         if position == 1:  # Long position
-            # Dynamic stop: exit if RSI shows overextension (> 70) in uptrend
-            if rsi_val > 70:
+            # Stop loss: price closes below entry - 2.5 * ATR(14)
+            # Simplified: use 2.5% of price as proxy for ATR
+            if price < entry_price * 0.975:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Dynamic stop: exit if RSI shows overextension (< 30) in downtrend
-            if rsi_val < 30:
+            # Stop loss: price closes above entry + 2.5 * ATR(14)
+            if price > entry_price * 1.025:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+                continue
+        
+        # === EXIT LOGIC ===
+        if position == 1:  # Long position
+            # Exit when Williams %R reaches overbought or trend changes
+            if willr_val >= -20 or price < weekly_ema50_val:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+                continue
+        
+        elif position == -1:  # Short position
+            # Exit when Williams %R reaches oversold or trend changes
+            if willr_val <= -80 or price > weekly_ema50_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -99,29 +137,31 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            if cmf_val > 0:  # Bullish 4h trend: buy dips
-                if rsi_val < 30 and vol_ratio_val > 1.3:  # Oversold with volume
-                    signals[i] = 0.20
+            # Uptrend: price above weekly EMA50 -> look for longs from oversold
+            if price > weekly_ema50_val:
+                if willr_val <= -80 and vol_ratio > 1.5:  # Oversold with volume
+                    signals[i] = 0.25
                     position = 1
                     entry_price = price
                     continue
-            elif cmf_val < 0:  # Bearish 4h trend: sell rallies
-                if rsi_val > 70 and vol_ratio_val > 1.3:  # Overbought with volume
-                    signals[i] = -0.20
+            # Downtrend: price below weekly EMA50 -> look for shorts from overbought
+            elif price < weekly_ema50_val:
+                if willr_val >= -20 and vol_ratio > 1.5:  # Overbought with volume
+                    signals[i] = -0.25
                     position = -1
                     entry_price = price
                     continue
         
         # Hold current position
         if position == 1:
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif position == -1:
-            signals[i] = -0.20
+            signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1h_CMF_RSI_MeanReversion_TrendFilter_Volume_v1"
-timeframe = "1h"
+name = "6h_WilliamsR_WeeklyTrend_Filter_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
