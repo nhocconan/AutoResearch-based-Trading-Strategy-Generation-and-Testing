@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-"""
-12h_Pivot_R1S1_Breakout_Trend
-Hypothesis: On 12h timeframe, breakouts of daily Camarilla R1/S1 levels with ADX>25 and volume confirmation capture medium-term trends.
-Works in both bull and bear markets by filtering for trending regimes only, avoiding range-bound whipsaws.
-Target: 15-35 trades per year (60-140 total over 4 years) with strict entry conditions.
-Uses 12h for execution, 1d for Camarilla pivots, ADX, and volume confirmation.
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -21,82 +13,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h data (primary) ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    volume_12h = df_12h['volume'].values
+    # === 4h data (primary) ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    volume_4h = df_4h['volume'].values
     
-    # === 1d data (HTF for Camarilla pivots, ADX, volume) ===
+    # === 1d data (HTF for Donchian and ATR) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
     
-    # === Camarilla pivot levels (using previous day's OHLC) ===
-    camarilla_r1 = np.zeros_like(close_1d)
-    camarilla_s1 = np.zeros_like(close_1d)
-    camarilla_r3 = np.zeros_like(close_1d)
-    camarilla_s3 = np.zeros_like(close_1d)
+    # === Donchian channel (20-day) ===
+    donchian_high = pd.Series(close_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(close_1d).rolling(window=20, min_periods=20).min().values
     
-    for i in range(1, len(close_1d)):
-        h = high_1d[i-1]
-        l = low_1d[i-1]
-        c = close_1d[i-1]
-        camarilla_r1[i] = c + ((h - l) * 1.1 / 12)
-        camarilla_s1[i] = c - ((h - l) * 1.1 / 12)
-        camarilla_r3[i] = c + ((h - l) * 1.1 / 4)
-        camarilla_s3[i] = c - ((h - l) * 1.1 / 4)
-    
-    # === ADX for trend filter (14-period) ===
+    # === ATR (14-day) for volatility filter ===
     tr1 = high_1d[1:] - low_1d[1:]
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
     tr = np.concatenate([[np.nan], tr])
     
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    def wilders_smoothing(x, period):
-        result = np.full_like(x, np.nan)
-        if len(x) >= period:
-            result[period-1] = np.nanmean(x[1:period])
-            for i in range(period, len(x)):
-                result[i] = result[i-1] - (result[i-1]/period) + x[i]
-        return result
+    # === 4h volume ratio for confirmation ===
+    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_4h = volume_4h / vol_ma_20_4h
     
-    atr = wilders_smoothing(tr, 14)
-    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
-    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
-    
-    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
-    
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilders_smoothing(dx, 14)
-    
-    # === 1d volume ratio for confirmation ===
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1d = volume_1d / vol_ma_20_1d
-    
-    # Align all HTF data to 12h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    # Align all HTF data to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    vol_ratio_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ratio_4h)
     
     signals = np.zeros(n)
     
-    # Warmup: enough for calculations
+    # Warmup
     warmup = 50
     
     # Track position
@@ -104,53 +59,47 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ratio_1d_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(atr_aligned[i]) or 
+            np.isnan(vol_ratio_4h_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        r1 = camarilla_r1_aligned[i]
-        s1 = camarilla_s1_aligned[i]
-        r3 = camarilla_r3_aligned[i]
-        s3 = camarilla_s3_aligned[i]
-        adx_val = adx_aligned[i]
-        vol_ratio = vol_ratio_1d_aligned[i]
+        upper = donchian_high_aligned[i]
+        lower = donchian_low_aligned[i]
+        atr_val = atr_aligned[i]
+        vol_ratio = vol_ratio_4h_aligned[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit: price closes below S1 (stop) OR reaches R3 (target)
-            if price < s1 or price > r3:
+            # Exit: price closes below lower band OR ATR-based stop
+            if price < lower or (position > 0 and price < upper - 1.5 * atr_val):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit: price closes above R1 (stop) OR reaches S3 (target)
-            if price > r1 or price < s3:
+            # Exit: price closes above upper band OR ATR-based stop
+            if price > upper or (position < 0 and price < lower + 1.5 * atr_val):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Only trade in trending regimes (ADX > 25)
-            if adx_val > 25:
-                # LONG: Break above R1 with volume confirmation
-                if price > r1 and vol_ratio > 1.3:
-                    signals[i] = 0.25
-                    position = 1
-                    continue
-                # SHORT: Break below S1 with volume confirmation
-                elif price < s1 and vol_ratio > 1.3:
-                    signals[i] = -0.25
-                    position = -1
-                    continue
+            # LONG: Break above upper band with volume and volatility filter
+            if price > upper and vol_ratio > 1.3 and atr_val > 0:
+                signals[i] = 0.25
+                position = 1
+                continue
+            # SHORT: Break below lower band with volume and volatility filter
+            elif price < lower and vol_ratio > 1.3 and atr_val > 0:
+                signals[i] = -0.25
+                position = -1
+                continue
         
         # Hold current position
         if position == 1:
@@ -162,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_R1S1_Breakout_Trend"
-timeframe = "12h"
+name = "4h_Donchian_20_Volume_ATRFilter"
+timeframe = "4h"
 leverage = 1.0
