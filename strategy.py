@@ -13,47 +13,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data (HTF for Pivot levels) ===
+    # === 1d data (HTF for key levels) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # === 4h data (HTF for trend filter) ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # === 12h data (HTF for trend filter) ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # === Calculate 1d Pivot (Standard) ===
+    # === Calculate 1d Camarilla pivot levels ===
     # Using previous day's OHLC
     prev_close_1d = np.roll(close_1d, 1)
     prev_high_1d = np.roll(high_1d, 1)
     prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d[0] = close_1d[0]
+    prev_close_1d[0] = close_1d[0]  # First value
     prev_high_1d[0] = high_1d[0]
     prev_low_1d[0] = low_1d[0]
     
-    # Pivot point calculation
-    pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
-    range_hl = prev_high_1d - prev_low_1d
+    # Camarilla formula
+    camarilla_base = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
+    camarilla_range = prev_high_1d - prev_low_1d
     
-    # Support and Resistance levels (Standard Pivot)
-    r1 = 2 * pivot - prev_low_1d
-    s1 = 2 * pivot - prev_high_1d
-    r2 = pivot + range_hl
-    s2 = pivot - range_hl
+    # Resistance and Support levels
+    r3 = camarilla_base + camarilla_range * 1.1 / 4
+    s3 = camarilla_base - camarilla_range * 1.1 / 4
+    r4 = camarilla_base + camarilla_range * 1.1 / 2
+    s4 = camarilla_base - camarilla_range * 1.1 / 2
     
-    # Align to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    # Align to 12h timeframe
+    camarilla_base_aligned = align_htf_to_ltf(prices, df_1d, camarilla_base)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # === 4h EMA50 for trend filter ===
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # === 12h EMA34 for trend filter ===
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # === Volume confirmation (4h) ===
+    # === Volume confirmation (12h) ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma_20
     
@@ -67,47 +70,46 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        pivot_val = pivot_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        r2_val = r2_aligned[i]
-        s2_val = s2_aligned[i]
-        ema_50_4h_val = ema_50_4h_aligned[i]
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
+        r4_val = r4_aligned[i]
+        s4_val = s4_aligned[i]
+        ema_34_12h_val = ema_34_12h_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price closes below S1 or hits R2 (take profit)
-            if price < s1_val or price > r2_val:
+            # Exit when price closes below S3 or hits R4 (take profit)
+            if price < s3_val or price > r4_val:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price closes above R1 or hits S2 (take profit)
-            if price > r1_val or price < s2_val:
+            # Exit when price closes above R3 or hits S4 (take profit)
+            if price > r3_val or price < s4_val:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above R1 with volume AND above 4h EMA50 (uptrend)
-            if (price > r1_val) and (price > ema_50_4h_val) and (vol_ratio_val > 1.5):
+            # LONG: Price breaks above R3 with volume AND above 12h EMA34 (uptrend)
+            if (price > r3_val) and (price > ema_34_12h_val) and (vol_ratio_val > 1.5):
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Price breaks below S1 with volume AND below 4h EMA50 (downtrend)
-            elif (price < s1_val) and (price < ema_50_4h_val) and (vol_ratio_val > 1.5):
+            # SHORT: Price breaks below S3 with volume AND below 12h EMA34 (downtrend)
+            elif (price < s3_val) and (price < ema_34_12h_val) and (vol_ratio_val > 1.5):
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -122,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Pivot_R1_S1_Breakout_Volume_EMA50"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_Volume_EMA34"
+timeframe = "12h"
 leverage = 1.0
