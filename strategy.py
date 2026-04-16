@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12h Donchian channel breakout with volume confirmation and ATR-based stoploss.
-# Long when price breaks above 12h Donchian upper channel (20-period) with volume > 1.5x 20-period average.
-# Short when price breaks below 12h Donchian lower channel with volume > 1.5x 20-period average.
-# Exit when price touches the opposite Donchian channel or ATR stoploss is hit.
-# Uses discrete position size 0.25. Donchian provides clear structure, volume confirms breakout validity,
-# ATR stoploss manages risk. Target: 75-200 total trades over 4 years (19-50/year).
+# Hypothesis: 1h strategy using 4h EMA trend direction with 1h Donchian breakout and volume confirmation.
+# Long when 4h EMA(34) is rising, price breaks above 1h Donchian(20) high, and volume > 1.5x 20-period average.
+# Short when 4h EMA(34) is falling, price breaks below 1h Donchian(20) low, and volume > 1.5x 20-period average.
+# Exit when 4h EMA direction reverses or price returns to the Donchian midpoint.
+# Uses discrete position size 0.20. EMA provides smooth trend, Donchian captures breakouts,
+# volume filter ensures conviction. Target: 60-150 total trades over 4 years (15-37/year).
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,116 +20,118 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data once before loop for Donchian channels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
-    
-    # === 12h Indicators: Donchian Channel (20-period) ===
-    donchian_window = 20
-    upper_channel = pd.Series(high_12h).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    lower_channel = pd.Series(low_12h).rolling(window=donchian_window, min_periods=donchian_window).min().values
-    
-    # Align 12h Donchian channels to 4h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_12h, upper_channel)
-    lower_aligned = align_htf_to_ltf(prices, df_12h, lower_channel)
-    
-    # Volume moving average (20-period) on 12h
-    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
-    
-    # ATR for stoploss calculation (14-period on 4h)
+    # Get 4h data once before loop for EMA
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    if len(df_4h) < 35:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
     
-    # True Range
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # === 4h Indicators: EMA(34) ===
+    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_dir_4h = np.zeros_like(ema_34_4h)
+    ema_34_dir_4h[1:] = np.where(ema_34_4h[1:] > ema_34_4h[:-1], 1, np.where(ema_34_4h[1:] < ema_34_4h[:-1], -1, 0))
     
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align 4h EMA and direction to 1h timeframe
+    ema_34_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    ema_34_dir_aligned = align_htf_to_ltf(prices, df_4h, ema_34_dir_4h)
+    
+    # Get 1h data once before loop for Donchian and volume
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 20:
+        return np.zeros(n)
+    
+    high_1h = df_1h['high'].values
+    low_1h = df_1h['low'].values
+    close_1h = df_1h['close'].values
+    volume_1h = df_1h['volume'].values
+    
+    # Donchian Channel (20-period) on 1h
+    donchian_high_20 = pd.Series(high_1h).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(low_1h).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high_20 + donchian_low_20) / 2.0
+    
+    # Align 1h Donchian to 1h timeframe (no alignment needed as we're using 1h data directly)
+    donchian_high_aligned = donchian_high_20
+    donchian_low_aligned = donchian_low_20
+    donchian_mid_aligned = donchian_mid
+    
+    # Volume moving average (20-period) on 1h
+    vol_ma_20_1h = pd.Series(volume_1h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = vol_ma_20_1h  # no alignment needed
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
     warmup = 100
     
-    # Track position state and entry price for stoploss
+    # Track position state
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(vol_ma_aligned[i]) or np.isnan(atr_14[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(ema_34_dir_aligned[i]) or 
+            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             position = 0
-            entry_price = 0.0
             continue
         
         # Current values
+        ema_val = ema_34_aligned[i]
+        ema_dir_val = ema_34_dir_aligned[i]
+        donchian_high = donchian_high_aligned[i]
+        donchian_low = donchian_low_aligned[i]
+        donchian_mid = donchian_mid_aligned[i]
+        vol_ma_val = vol_ma_aligned[i]
         price = close[i]
         vol = volume[i]
-        upper = upper_aligned[i]
-        lower = lower_aligned[i]
-        vol_ma = vol_ma_aligned[i]
-        atr = atr_14[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price touches lower Donchian channel or ATR stoploss hit
-            if price <= lower or price <= entry_price - 2.5 * atr:
+            # Exit if EMA direction turns down or price returns to Donchian midpoint
+            if ema_dir_val <= 0 or price <= donchian_mid:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price touches upper Donchian channel or ATR stoploss hit
-            if price >= upper or price >= entry_price + 2.5 * atr:
+            # Exit if EMA direction turns up or price returns to Donchian midpoint
+            if ema_dir_val >= 0 or price >= donchian_mid:
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
-            entry_price = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Volume filter: volume > 1.5x 20-period average
-            vol_filter = vol > 1.5 * vol_ma
+            # Trend filter: EMA direction must be non-zero
+            trend_filter = ema_dir_val != 0
             
-            # LONG: price breaks above upper Donchian channel with volume confirmation
-            if price > upper and vol_filter:
-                signals[i] = 0.25
+            # Volume filter: volume > 1.5x 20-period average (1h)
+            vol_filter = vol > 1.5 * vol_ma_val
+            
+            # Breakout filters
+            breakout_long = price > donchian_high
+            breakout_short = price < donchian_low
+            
+            # LONG: EMA up, price breaks above Donchian high, volume spike
+            if (ema_dir_val > 0) and breakout_long and vol_filter:
+                signals[i] = 0.20
                 position = 1
-                entry_price = price
             
-            # SHORT: price breaks below lower Donchian channel with volume confirmation
-            elif price < lower and vol_filter:
-                signals[i] = -0.25
+            # SHORT: EMA down, price breaks below Donchian low, volume spike
+            elif (ema_dir_val < 0) and breakout_short and vol_filter:
+                signals[i] = -0.20
                 position = -1
-                entry_price = price
         
         else:
-            signals[i] = position * 0.25
+            signals[i] = position * 0.20
     
     return signals
 
-name = "4h_12hDonchian20_VolumeConfirmation_ATRStop_V1"
-timeframe = "4h"
+name = "1h_4hEMA34_1hDonchian20_VolumeSpike_V1"
+timeframe = "1h"
 leverage = 1.0
