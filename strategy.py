@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,7 +26,7 @@ def generate_signals(prices):
     tr_4h[0] = high_4h[0] - low_4h[0]
     atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
     
-    # Align 4h data to primary timeframe (15m)
+    # Align 4h data to primary timeframe (4h)
     atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
     
     # === 1d data for pivot points ===
@@ -41,7 +41,7 @@ def generate_signals(prices):
     r1_1d = pivot_1d + range_1d
     s1_1d = pivot_1d - range_1d
     
-    # Align 1d data to primary timeframe (15m)
+    # Align 1d data to primary timeframe (4h)
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
@@ -53,7 +53,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators have valid data
-    warmup = 60
+    warmup = 100
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
@@ -113,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "15m_Pivot_R1_S1_Breakout_Volume_ATRFilter_4h_1d"
-timeframe = "15m"
+name = "4h_Pivot_R1_S1_Breakout_Volume_ATRFilter"
+timeframe = "4h"
 leverage = 1.0
