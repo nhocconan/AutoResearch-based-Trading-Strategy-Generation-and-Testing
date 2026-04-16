@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ATR-based risk management.
-# Long when price breaks above Donchian upper band AND 1d volume > 1.5x 20-period average.
-# Short when price breaks below Donchian lower band AND 1d volume > 1.5x 20-period average.
-# Exit on ATR-based stoploss (2*ATR from entry) or opposite Donchian break.
-# Uses discrete position size 0.30. Designed to capture strong breakouts with volume confirmation.
-# Works in both bull and bear markets by requiring volume confirmation and using price channels.
-# Target: 75-200 total trades over 4 years (19-50/year) to balance edge and fee drag.
+# Hypothesis: 1d Camarilla R3/S3 breakout with 1w volume confirmation and ATR stoploss.
+# Long when price breaks above Camarilla R3 level AND 1w volume > 1.3x 20-period average.
+# Short when price breaks below Camarilla S3 level AND 1w volume > 1.3x 20-period average.
+# Exit on ATR-based stoploss (2*ATR from entry) or opposite Camarilla break (R4/S4).
+# Uses discrete position size 0.25. Designed for low-frequency, high-conviction trades.
+# Target: 30-80 total trades over 4 years (7-20/year) to minimize fee drag and generalize to bear markets.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,42 +20,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Indicators: Donchian Channel (20-period) ===
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === 1d Indicators: Camarilla Pivot Levels (using prior day's OHLC) ===
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close[0] = close[0]
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
     
-    # === 1d Indicators: Volume Spike (volume > 1.5x 20-period average) ===
-    df_1d = get_htf_data(prices, '1d')
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    volume_spike = volume > (1.5 * vol_ma_1d_aligned)
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_val = prev_high - prev_low
     
-    # === 4h ATR for stoploss ===
+    camarilla_r3 = pivot + range_val * 1.1 / 4.0
+    camarilla_s3 = pivot - range_val * 1.1 / 4.0
+    camarilla_r4 = pivot + range_val * 1.1 / 2.0
+    camarilla_s4 = pivot - range_val * 1.1 / 2.0
+    
+    # === 1w Indicators: Volume Spike (volume > 1.3x 20-period average) ===
+    df_1w = get_htf_data(prices, '1w')
+    vol_1w = df_1w['volume'].values
+    vol_ma_1w = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
+    volume_spike = volume > (1.3 * vol_ma_1w_aligned)
+    
+    # === 1d ATR for stoploss ===
     tr1 = pd.Series(high).diff()
     tr2 = pd.Series(low).diff().abs()
     tr3 = pd.Series(close).shift(1).diff().abs()
-    tr_4h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_4h_raw = pd.Series(tr_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d_raw = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid (max 50 periods needed)
-    warmup = 50
+    warmup = 100
     
     # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     for i in range(warmup, n):
-        # Skip if any required data is NaN or outside session
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(volume_spike[i]) or np.isnan(atr_4h_raw[i]) or
-            not session_filter[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or np.isnan(camarilla_r4[i]) or
+            np.isnan(camarilla_s4[i]) or np.isnan(volume_spike[i]) or np.isnan(atr_1d_raw[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -64,22 +70,22 @@ def generate_signals(prices):
         # Current values
         price = close[i]
         vol_spike = volume_spike[i]
-        atr_val = atr_4h_raw[i]
+        atr_val = atr_1d_raw[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price breaks below Donchian lower band (strong reversal)
-            if price < low_20[i]:
+            # Exit if price breaks below Camarilla S4 (strong reversal)
+            if price < camarilla_s4[i]:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR below entry
             elif price < entry_price - 2.0 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price breaks above Donchian upper band (strong reversal)
-            if price > high_20[i]:
+            # Exit if price breaks above Camarilla R4 (strong reversal)
+            if price > camarilla_r4[i]:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR above entry
             elif price > entry_price + 2.0 * atr_val:
@@ -93,23 +99,23 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Donchian upper band AND volume spike
-            if price > high_20[i] and vol_spike:
-                signals[i] = 0.30
+            # LONG: Price breaks above Camarilla R3 AND volume spike
+            if price > camarilla_r3[i] and vol_spike:
+                signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: Price breaks below Donchian lower band AND volume spike
-            elif price < low_20[i] and vol_spike:
-                signals[i] = -0.30
+            # SHORT: Price breaks below Camarilla S3 AND volume spike
+            elif price < camarilla_s3[i] and vol_spike:
+                signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         else:
-            signals[i] = position * 0.30
+            signals[i] = position * 0.25
     
     return signals
 
-name = "4h_Donchian20_1dVolumeSpike_V2"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_1wVolumeSpike_V1"
+timeframe = "1d"
 leverage = 1.0
