@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R reversal with 1d EMA34 trend filter and volume spike confirmation
-# Long when Williams %R(14) < -80 (oversold) AND price > 1d EMA34 AND volume > 2.0x 20-period average
-# Short when Williams %R(14) > -20 (overbought) AND price < 1d EMA34 AND volume > 2.0x 20-period average
-# ATR trailing stop (2.5x ATR) to manage risk
-# Williams %R identifies exhaustion points, EMA34 filters for higher-timeframe trend, volume spike confirms conviction
-# Designed for low trade frequency (target: 50-150 total trades over 4 years) to minimize fee drag
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter, volume confirmation, and ATR stoploss
+# Long when price breaks above 20-period Donchian high AND price > 1d EMA50 AND volume > 1.3x 20-period average
+# Short when price breaks below 20-period Donchian low AND price < 1d EMA50 AND volume > 1.3x 20-period average
+# ATR-based trailing stop (2.5x ATR) to manage risk
+# Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year)
+# Uses 1d EMA50 for faster trend adaptation vs 200-period, volume confirmation for conviction
+# ATR stoploss adapts to volatility, Donchian channels provide clear structure
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,35 +21,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d EMA34 (trend filter) ===
+    # === 1d EMA50 (trend filter) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === 6h Williams %R (14-period) ===
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    # Avoid division by zero
-    denominator = highest_high_14 - lowest_low_14
-    williams_r = np.where(denominator != 0, -100 * (highest_high_14 - close) / denominator, -50)
+    # === 12h Donchian(20) channels ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    donch_high_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donch_low_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high_20)
+    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low_20)
     
-    # === 6h Volume Confirmation (20-period average) ===
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # === 12h Volume Confirmation (20-period average) ===
+    vol_ma_20 = pd.Series(df_12h['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
     
-    # === 6h ATR for trailing stop (14-period) ===
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # === 12h ATR for trailing stop (14-period) ===
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(df_12h['close'].values, 1))
+    tr3 = np.abs(low_12h - np.roll(df_12h['close'].values, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 50
+    warmup = 100
     
     # Track position and entry price for trailing stop
     position = 0  # 0: flat, 1: long, -1: short
@@ -58,19 +63,21 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(williams_r[i]) or
-            np.isnan(vol_ma_20[i]) or
-            np.isnan(atr_14[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(donch_high_aligned[i]) or
+            np.isnan(donch_low_aligned[i]) or
+            np.isnan(vol_ma_aligned[i]) or
+            np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        wr = williams_r[i]
-        ema_34_val = ema_34_1d_aligned[i]
-        vol_confirm = volume[i] > vol_ma_20[i] * 2.0  # 2.0x average volume
-        atr_val = atr_14[i]
+        donch_high = donch_high_aligned[i]
+        donch_low = donch_low_aligned[i]
+        ema_50_val = ema_50_1d_aligned[i]
+        vol_confirm = volume[i] > vol_ma_aligned[i] * 1.3  # 1.3x average volume
+        atr_val = atr_aligned[i]
         
         # === TRAILING STOP LOGIC ===
         if position == 1:  # Long position
@@ -95,18 +102,18 @@ def generate_signals(prices):
                 lowest_since_entry = 0.0
                 continue
         
-        # === EXIT LOGIC (Williams %R mean reversion) ===
+        # === EXIT LOGIC (Donchian opposite touch) ===
         if position == 1:  # Long position
-            # Exit when Williams %R returns above -50 (mean reversion)
-            if wr > -50:
+            # Exit when price touches or crosses below Donchian low
+            if price <= donch_low:
                 signals[i] = 0.0
                 position = 0
                 highest_since_entry = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when Williams %R returns below -50 (mean reversion)
-            if wr < -50:
+            # Exit when price touches or crosses above Donchian high
+            if price >= donch_high:
                 signals[i] = 0.0
                 position = 0
                 lowest_since_entry = 0.0
@@ -114,15 +121,15 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Long when: Williams %R < -80 (oversold) AND price > 1d EMA34 AND volume confirmation
-            if wr < -80 and price > ema_34_val and vol_confirm:
+            # Long when: price breaks above Donchian high AND price > 1d EMA50 AND volume confirmation
+            if price > donch_high and price > ema_50_val and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 highest_since_entry = price
                 continue
-            # Short when: Williams %R > -20 (overbought) AND price < 1d EMA34 AND volume confirmation
-            elif wr > -20 and price < ema_34_val and vol_confirm:
+            # Short when: price breaks below Donchian low AND price < 1d EMA50 AND volume confirmation
+            elif price < donch_low and price < ema_50_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -139,6 +146,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_1dEMA34_VolumeSpike_ATRTrail"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA50_VolumeConfirm_ATRTrail"
+timeframe = "12h"
 leverage = 1.0
