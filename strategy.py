@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -36,9 +36,15 @@ def generate_signals(prices):
     r1 = pivot_point + prev_range * 0.382
     s1 = pivot_point - prev_range * 0.382
     
+    # === Additional levels for exit: R2 at 0.618, S2 at 0.618 ===
+    r2 = pivot_point + prev_range * 0.618
+    s2 = pivot_point - prev_range * 0.618
+    
     # Align all levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
     # === ADX Trend Filter (Daily) ===
     # Calculate True Range
@@ -100,7 +106,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: enough for ADX calculation (14+14+14=42) plus buffer
-    warmup = 60
+    warmup = 50
     
     # Track position and entry price for stop management
     position = 0  # 0: flat, 1: long, -1: short
@@ -118,21 +124,23 @@ def generate_signals(prices):
         price = close[i]
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
+        r2_val = r2_aligned[i]
+        s2_val = s2_aligned[i]
         adx_val = adx_aligned[i]
         vol_ratio_val = vol_ratio[i]
         atr_val = atr_4h[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit conditions: stop at S1, or adverse 2x ATR move
-            if price < s1_val or price < entry_price - 2.0 * atr_val:
+            # Exit conditions: stop at S1, target at R2, or adverse 2x ATR move
+            if price < s1_val or price > r2_val or price < entry_price - 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit conditions: stop at R1, or adverse 2x ATR move
-            if price > r1_val or price > entry_price + 2.0 * atr_val:
+            # Exit conditions: stop at R1, target at S2, or adverse 2x ATR move
+            if price > r1_val or price < s2_val or price > entry_price + 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 continue
