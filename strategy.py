@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R1/S1 breakout with 1w volume spike and 1w ADX > 25 trend filter.
-# Long when price breaks above 12h Camarilla R1 AND volume > 1.5x 20-period 1w average AND 1w ADX > 25.
-# Short when price breaks below 12h Camarilla S1 AND volume > 1.5x 20-period 1w average AND 1w ADX > 25.
-# Exit when price crosses the 12h Camarilla pivot point (PP) or ATR-based stoploss (2*ATR from entry).
-# Uses discrete position size 0.25. Designed to capture breakouts in strong trending markets.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag while maintaining edge.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike and 1w ADX trend filter.
+# Long when price breaks above Camarilla R3 (1d) AND volume > 2.0x 20-period 1d average AND 1w ADX > 25.
+# Short when price breaks below Camarilla S3 (1d) AND volume > 2.0x 20-period 1d average AND 1w ADX > 25.
+# Exit when price crosses the 1d midpoint (close) or ATR-based stoploss (2*ATR from entry).
+# Uses discrete position size 0.25. Designed to capture major breakouts in strong trending markets across regimes.
+# Target: 80-180 total trades over 4 years (20-45/year) to balance edge and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,30 +20,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h Indicators: Camarilla Pivot Levels ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # === 1d Indicators: Camarilla Pivot Levels (R3, S3, midpoint) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Camarilla pivot calculation (based on previous 12h bar)
-    pp_12h = (high_12h + low_12h + close_12h) / 3
-    r1_12h = close_12h + (high_12h - low_12h) * 1.1 / 12
-    s1_12h = close_12h - (high_12h - low_12h) * 1.1 / 12
+    # Camarilla levels: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
+    camarilla_r3_1d = close_1d + 1.1 * (high_1d - low_1d) / 2
+    camarilla_s3_1d = close_1d - 1.1 * (high_1d - low_1d) / 2
+    camarilla_mid_1d = close_1d  # Midpoint is close for Camarilla
     
-    # Align 12h indicators to primary timeframe (already aligned as primary)
-    pp_12h_aligned = pp_12h
-    r1_12h_aligned = r1_12h
-    s1_12h_aligned = s1_12h
+    # Align to 4h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
+    camarilla_mid_aligned = align_htf_to_ltf(prices, df_1d, camarilla_mid_1d)
     
-    # === 1w Indicators: Volume Spike (volume > 1.5x 20-period average) ===
-    df_1w = get_htf_data(prices, '1w')
-    vol_1w = df_1w['volume'].values
-    vol_ma_1w = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
-    volume_spike = volume > (1.5 * vol_ma_1w_aligned)
+    # === 1d Indicators: Volume Spike (volume > 2.0x 20-period average) ===
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    volume_spike = volume > (2.0 * vol_ma_1d_aligned)
     
     # === 1w Indicators: ADX > 25 (strong trending market filter) ===
+    df_1w = get_htf_data(prices, '1w')
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
@@ -87,18 +87,18 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Calculate 12h ATR for stoploss
-    tr1_12h = pd.Series(high_12h).diff()
-    tr2_12h = pd.Series(low_12h).diff().abs()
-    tr3_12h = pd.Series(close_12h).shift(1).diff().abs()
-    tr_12h = pd.concat([tr1_12h, tr2_12h, tr3_12h], axis=1).max(axis=1)
-    atr_12h_raw = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_12h_aligned = atr_12h_raw  # Already aligned as primary timeframe
+    # Calculate 4h ATR for stoploss
+    tr1 = pd.Series(high).diff()
+    tr2 = pd.Series(low).diff().abs()
+    tr3 = pd.Series(close).shift(1).diff().abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_raw = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_aligned = atr_raw  # Already aligned as primary timeframe
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(pp_12h_aligned[i]) or np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(strong_trend[i]) or np.isnan(atr_12h_aligned[i]) or
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_mid_aligned[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(strong_trend[i]) or np.isnan(atr_aligned[i]) or
             not session_filter[i]):
             signals[i] = 0.0
             position = 0
@@ -108,22 +108,22 @@ def generate_signals(prices):
         price = close[i]
         vol_spike = volume_spike[i]
         is_strong_trend = strong_trend[i]
-        atr_val = atr_12h_aligned[i]
+        atr_val = atr_aligned[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price crosses below pivot point
-            if price < pp_12h_aligned[i]:
+            # Exit if price crosses below midpoint
+            if price < camarilla_mid_aligned[i]:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR below entry
             elif price < entry_price - 2.0 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price crosses above pivot point
-            if price > pp_12h_aligned[i]:
+            # Exit if price crosses above midpoint
+            if price > camarilla_mid_aligned[i]:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR above entry
             elif price > entry_price + 2.0 * atr_val:
@@ -137,14 +137,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Camarilla R1 AND volume spike AND strong trending market
-            if price > r1_12h_aligned[i] and vol_spike and is_strong_trend:
+            # LONG: Price breaks above Camarilla R3 AND volume spike AND strong trending market
+            if price > camarilla_r3_aligned[i] and vol_spike and is_strong_trend:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: Price breaks below Camarilla S1 AND volume spike AND strong trending market
-            elif price < s1_12h_aligned[i] and vol_spike and is_strong_trend:
+            # SHORT: Price breaks below Camarilla S3 AND volume spike AND strong trending market
+            elif price < camarilla_s3_aligned[i] and vol_spike and is_strong_trend:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -154,6 +154,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_1wVolumeSpike_1wADX_V1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_1dVolumeSpike_1wADX_V1"
+timeframe = "4h"
 leverage = 1.0
