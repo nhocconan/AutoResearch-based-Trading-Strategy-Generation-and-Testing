@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d volume confirmation and ATR stoploss.
-# Long when price breaks above Donchian(20) high AND 1d volume > 1.3x 20-period average.
-# Short when price breaks below Donchian(20) low AND 1d volume > 1.3x 20-period average.
-# Exit on ATR-based stoploss (2*ATR from entry) or opposite Donchian break.
-# Uses discrete position size 0.25. Works in both bull and bear markets by requiring
-# volume confirmation and using symmetric breakout levels.
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d volume confirmation and ATR stoploss.
+# Long when price breaks above Camarilla R1 AND 1d volume > 1.5x 20-period average.
+# Short when price breaks below Camarilla S1 AND 1d volume > 1.5x 20-period average.
+# Exit on ATR-based stoploss (2*ATR from entry) or opposite Camarilla break.
+# Uses discrete position size 0.25. Volume confirmation reduces false breakouts.
+# ATR stoploss manages risk in both bull and bear markets.
 # Target: 75-200 total trades over 4 years (19-50/year).
 
 def generate_signals(prices):
@@ -21,16 +21,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Indicators: Donchian Channel (20-period) ===
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === 4h Indicators: Camarilla Pivot Levels (R1, S1) ===
+    # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
+    # Use previous bar's OHLC to avoid look-ahead
+    prev_close = pd.Series(close).shift(1).values
+    prev_high = pd.Series(high).shift(1).values
+    prev_low = pd.Series(low).shift(1).values
+    camarilla_r1 = prev_close + 1.1 * (prev_high - prev_low) / 12
+    camarilla_s1 = prev_close - 1.1 * (prev_high - prev_low) / 12
     
-    # === 1d Indicators: Volume Spike (volume > 1.3x 20-period average) ===
+    # === 1d Indicators: Volume Spike (volume > 1.5x 20-period average) ===
     df_1d = get_htf_data(prices, '1d')
     vol_1d = df_1d['volume'].values
     vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    volume_spike = volume > (1.3 * vol_ma_1d_aligned)
+    volume_spike = volume > (1.5 * vol_ma_1d_aligned)
     
     # === 4h ATR for stoploss ===
     tr1 = pd.Series(high).diff()
@@ -45,7 +50,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 20 periods needed)
+    # Warmup: ensure all indicators are valid (max 20 periods needed for MA, plus 1 for shift)
     warmup = 50
     
     # Track position state and entry price for stoploss
@@ -54,7 +59,7 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or np.isnan(volume_spike[i]) or
+        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or np.isnan(volume_spike[i]) or
             np.isnan(atr_4h_raw[i]) or not session_filter[i]):
             signals[i] = 0.0
             position = 0
@@ -69,16 +74,16 @@ def generate_signals(prices):
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price breaks below Donchian low (opposite breakout)
-            if price < low_roll[i]:
+            # Exit if price breaks below Camarilla S1 (opposite breakout)
+            if price < camarilla_s1[i]:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR below entry
             elif price < entry_price - 2.0 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price breaks above Donchian high (opposite breakout)
-            if price > high_roll[i]:
+            # Exit if price breaks above Camarilla R1 (opposite breakout)
+            if price > camarilla_r1[i]:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR above entry
             elif price > entry_price + 2.0 * atr_val:
@@ -92,14 +97,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Donchian high AND volume spike
-            if price > high_roll[i] and vol_spike:
+            # LONG: Price breaks above Camarilla R1 AND volume spike
+            if price > camarilla_r1[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: Price breaks below Donchian low AND volume spike
-            elif price < low_roll[i] and vol_spike:
+            # SHORT: Price breaks below Camarilla S1 AND volume spike
+            elif price < camarilla_s1[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -109,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dVolumeSpike_ATRStop_V1"
+name = "4h_Camarilla_R1_S1_1dVolumeSpike_ATRStop_V1"
 timeframe = "4h"
 leverage = 1.0
