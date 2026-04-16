@@ -1,12 +1,3 @@
-# 4h Fibonacci Pivot + Volume Spike + ADX Trend Filter
-# Targets BTC/ETH with proven pivot-based breakout strategy
-# Uses Fibonacci retracement levels from daily pivot for entry
-# Volume confirmation ensures institutional participation
-# ADX filter ensures trades only in trending markets (avoids chop)
-# Designed for 4-8 trades per month per symbol (~50-100/year)
-# Exit: opposite level touch or adverse 2x ATR move
-# Position size: 0.25 (25%) to balance risk and reward
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
