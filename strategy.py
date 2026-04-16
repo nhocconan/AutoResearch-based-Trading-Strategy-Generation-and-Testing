@@ -33,13 +33,14 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], tr])
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # === 6h EMA for trend filter (60-period) ===
-    ema_6h = pd.Series(close).ewm(span=60, min_periods=60, adjust=False).mean().values
+    # === 1d EMA for trend filter (34-period) ===
+    ema_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
     
-    # Align HTF data to 6h timeframe
-    r2_6h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_6h = align_htf_to_ltf(prices, df_1d, s2)
-    atr_14_6h = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Align HTF data to 1d timeframe
+    r2_1d = align_htf_to_ltf(prices, df_1d, r2)
+    s2_1d = align_htf_to_ltf(prices, df_1d, s2)
+    atr_14_1d = align_htf_to_ltf(prices, df_1d, atr_14)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # === Volume spike detection (20-period volume MA) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,44 +56,44 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or
-            np.isnan(atr_14_6h[i]) or np.isnan(ema_6h[i]) or
+        if (np.isnan(r2_1d[i]) or np.isnan(s2_1d[i]) or
+            np.isnan(atr_14_1d[i]) or np.isnan(ema_1d_aligned[i]) or
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        r2_level = r2_6h[i]
-        s2_level = s2_6h[i]
-        atr_val = atr_14_6h[i]
-        ema_val = ema_6h[i]
+        r2_level = r2_1d[i]
+        s2_level = s2_1d[i]
+        atr_val = atr_14_1d[i]
+        ema_val = ema_1d_aligned[i]
         vol_spike = volume_spike[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
             # Exit when price drops below S2 or volatility drops significantly
-            if price < s2_level or (i > 0 and atr_val < atr_14_6h[i-1] * 0.7):
+            if price < s2_level or (i > 0 and atr_val < atr_14_1d[i-1] * 0.7):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
             # Exit when price rises above R2 or volatility drops significantly
-            if price > r2_level or (i > 0 and atr_val < atr_14_6h[i-1] * 0.7):
+            if price > r2_level or (i > 0 and atr_val < atr_14_1d[i-1] * 0.7):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above R2 with volume spike, above EMA60
+            # LONG: Price breaks above R2 with volume spike, above EMA34
             if price > r2_level and vol_spike and price > ema_val:
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Price breaks below S2 with volume spike, below EMA60
+            # SHORT: Price breaks below S2 with volume spike, below EMA34
             elif price < s2_level and vol_spike and price < ema_val:
                 signals[i] = -0.25
                 position = -1
@@ -108,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Pivot_R2_S2_Breakout_Volume_EMA60Filter"
-timeframe = "6h"
+name = "1d_Pivot_R2_S2_Breakout_Volume_EMA34Filter"
+timeframe = "1d"
 leverage = 1.0
