@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot R4/S4 breakout with 12h volume spike confirmation and ATR-based position sizing
-# Long when price > Camarilla R4 AND 12h volume > 2.5x 20-period volume SMA
-# Short when price < Camarilla S4 AND 12h volume > 2.5x 20-period volume SMA
-# Exit on price returning to Camarilla pivot point (PP) or ATR stoploss (2.0 ATR)
+# Hypothesis: 4h Camarilla pivot H3/L3 breakout with 12h volume spike confirmation and ATR-based position sizing
+# Long when price > Camarilla H3 AND 12h volume > 2.0x 20-period volume SMA
+# Short when price < Camarilla L3 AND 12h volume > 2.0x 20-period volume SMA
+# Exit on price returning to Camarilla pivot point (PP) or ATR stoploss (1.5 ATR)
 # Uses discrete position sizing (0.25) to limit fee drag and Camarilla levels provide objective structure proven in ranging/ bear markets
 # Volume filter reduces false breakouts; pivot points work across regimes
-# R4/S4 levels are more extreme than R3/S3, reducing trade frequency and improving edge
+# H3/L3 levels provide better frequency than R4/S4 while maintaining edge
 
 def generate_signals(prices):
     n = len(prices)
@@ -38,8 +38,8 @@ def generate_signals(prices):
     # === 4h Indicator: Camarilla Pivot Levels (based on previous day) ===
     # Camarilla levels calculated from prior day's OHLC
     # PP = (H + L + C) / 3
-    # R4 = PP + (H - L) * 1.1
-    # S4 = PP - (H - L) * 1.1
+    # H3 = PP + (H - L) * 1.1/2
+    # L3 = PP - (H - L) * 1.1/2
     # We use 1d data to calculate daily pivots, then align to 4h
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
@@ -51,13 +51,13 @@ def generate_signals(prices):
     c_1d = df_1d['close'].values
     
     pp_1d = (h_1d + l_1d + c_1d) / 3.0
-    r4_1d = pp_1d + (h_1d - l_1d) * 1.1
-    s4_1d = pp_1d - (h_1d - l_1d) * 1.1
+    h3_1d = pp_1d + (h_1d - l_1d) * 1.1 / 2.0
+    l3_1d = pp_1d - (h_1d - l_1d) * 1.1 / 2.0
     
     # Align 1d levels to 4h timeframe (wait for completed 1d bar)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
     
     # ATR for stoploss (14-period)
     tr1 = high - low
@@ -84,8 +84,8 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(pp_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or np.isnan(vol_sma_20_12h_aligned[i]) or 
+        if (np.isnan(pp_aligned[i]) or np.isnan(h3_aligned[i]) or 
+            np.isnan(l3_aligned[i]) or np.isnan(vol_sma_20_12h_aligned[i]) or 
             np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
@@ -96,25 +96,25 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 12h volume > 2.5x 20-period 12h volume SMA
-        vol_threshold = vol_sma_20_12h_aligned[i] * 2.5
+        # Volume filter: current 12h volume > 2.0x 20-period 12h volume SMA
+        vol_threshold = vol_sma_20_12h_aligned[i] * 2.0
         vol_confirm = vol_12h_aligned[i] > vol_threshold
         
         # Price levels
         price = close[i]
         pp = pp_aligned[i]
-        r4 = r4_aligned[i]
-        s4 = s4_aligned[i]
+        h3 = h3_aligned[i]
+        l3 = l3_aligned[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         if position == 1:  # long position
             # Exit on price returning to pivot point or ATR stoploss
-            if price <= pp or price <= entry_price - 2.0 * atr_14[i]:
+            if price <= pp or price <= entry_price - 1.5 * atr_14[i]:
                 exit_signal = True
         elif position == -1:  # short position
             # Exit on price returning to pivot point or ATR stoploss
-            if price >= pp or price >= entry_price + 2.0 * atr_14[i]:
+            if price >= pp or price >= entry_price + 1.5 * atr_14[i]:
                 exit_signal = True
         
         if exit_signal:
@@ -126,15 +126,15 @@ def generate_signals(prices):
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
             # LONG CONDITIONS
-            # Price > Camarilla R4 AND volume confirmation
-            if price > r4 and vol_confirm:
+            # Price > Camarilla H3 AND volume confirmation
+            if price > h3 and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
             # SHORT CONDITIONS
-            # Price < Camarilla S4 AND volume confirmation
-            elif price < s4 and vol_confirm:
+            # Price < Camarilla L3 AND volume confirmation
+            elif price < l3 and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -144,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R4S4_12hVolSpike2.5x_v1"
+name = "4h_Camarilla_H3L3_12hVolSpike2.0x_v1"
 timeframe = "4h"
 leverage = 1.0
