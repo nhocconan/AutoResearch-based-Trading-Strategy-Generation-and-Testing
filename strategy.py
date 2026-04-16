@@ -13,58 +13,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data (HTF for structure) ===
+    # === 12h data (primary timeframe) ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    # 12h Donchian upper and lower bands (10 periods)
+    high_10_12h = pd.Series(high_12h).rolling(window=10, min_periods=10).max().values
+    low_10_12h = pd.Series(low_12h).rolling(window=10, min_periods=10).min().values
+    donchian_upper_12h = align_htf_to_ltf(prices, df_12h, high_10_12h)
+    donchian_lower_12h = align_htf_to_ltf(prices, df_12h, low_10_12h)
+    
+    # === 1d data (HTF for trend filter) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     
-    # Calculate Camarilla pivot levels for 1d
-    # Pivot point = (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    # Resistance levels: R1 = C + (H-L)*1.1/12, R2 = C + (H-L)*1.1/6, R3 = C + (H-L)*1.1/4, R4 = C + (H-L)*1.1/2
-    # Support levels: S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
-    r1_1d = close_1d + range_1d * 1.1 / 12
-    r2_1d = close_1d + range_1d * 1.1 / 6
-    r3_1d = close_1d + range_1d * 1.1 / 4
-    r4_1d = close_1d + range_1d * 1.1 / 2
-    s1_1d = close_1d - range_1d * 1.1 / 12
-    s2_1d = close_1d - range_1d * 1.1 / 6
-    s3_1d = close_1d - range_1d * 1.1 / 4
-    s4_1d = close_1d - range_1d * 1.1 / 2
+    # 1d EMA50 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_50_1d = close_1d_series.ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align Camarilla levels to 6h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    
-    # === 1w data (HTF for trend direction) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Weekly trend: price above/below 21-period EMA
-    close_1w_series = pd.Series(close_1w)
-    ema_21_1w = close_1w_series.ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
-    
-    # === 6h indicators for entry timing ===
-    # RSI(14) for momentum filter
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume spike detection (20-period average)
+    # === Volume spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma_20
     
@@ -81,8 +51,8 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
-            np.isnan(ema_21_1w_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(donchian_upper_12h[i]) or np.isnan(donchian_lower_12h[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -91,30 +61,22 @@ def generate_signals(prices):
         in_session = (8 <= hour <= 20)
         
         price = close[i]
-        pivot_val = pivot_1d_aligned[i]
-        r1_val = r1_1d_aligned[i]
-        r2_val = r2_1d_aligned[i]
-        r3_val = r3_1d_aligned[i]
-        r4_val = r4_1d_aligned[i]
-        s1_val = s1_1d_aligned[i]
-        s2_val = s2_1d_aligned[i]
-        s3_val = s3_1d_aligned[i]
-        s4_val = s4_1d_aligned[i]
-        ema_21_1w_val = ema_21_1w_aligned[i]
-        rsi_val = rsi[i]
+        upper_12h = donchian_upper_12h[i]
+        lower_12h = donchian_lower_12h[i]
+        ema_50_1d_val = ema_50_1d_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price closes below S1 (first support) or RSI overbought
-            if (price < s1_val) or (rsi_val > 70):
+            # Exit when price closes below Donchian lower
+            if price < lower_12h:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price closes above R1 (first resistance) or RSI oversold
-            if (price > r1_val) or (rsi_val < 30):
+            # Exit when price closes above Donchian upper
+            if price > upper_12h:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -123,18 +85,14 @@ def generate_signals(prices):
         if position == 0:
             # Only trade during session
             if in_session:
-                # LONG: Price breaks above R1 AND above weekly EMA (trend filter) 
-                # AND RSI not overbought AND volume spike
-                if (price > r1_val) and (price > ema_21_1w_val) and (rsi_val < 60) and \
-                   (vol_ratio_val > 1.5):
+                # LONG: Price breaks above Donchian upper AND above 1d EMA50 (trend filter) AND volume spike
+                if (price > upper_12h) and (price > ema_50_1d_val) and (vol_ratio_val > 2.0):
                     signals[i] = 0.25
                     position = 1
                     continue
                 
-                # SHORT: Price breaks below S1 AND below weekly EMA (trend filter) 
-                # AND RSI not oversold AND volume spike
-                elif (price < s1_val) and (price < ema_21_1w_val) and (rsi_val > 40) and \
-                     (vol_ratio_val > 1.5):
+                # SHORT: Price breaks below Donchian lower AND below 1d EMA50 (trend filter) AND volume spike
+                elif (price < lower_12h) and (price < ema_50_1d_val) and (vol_ratio_val > 2.0):
                     signals[i] = -0.25
                     position = -1
                     continue
@@ -149,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R1S1_WeeklyTrend_Filter_Volume"
-timeframe = "6h"
+name = "12h_Donchian_Breakout_EMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
