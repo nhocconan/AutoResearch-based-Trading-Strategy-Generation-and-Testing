@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,41 +13,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h data (primary) ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    volume_4h = df_4h['volume'].values
-    
-    # === 1d data (HTF for Donchian and EMA) ===
+    # === 1d data (primary) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # === 12h EMA34 (trend filter) ===
-    ema_34_12h = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_1d, ema_34_12h)
+    # === 1w data (HTF for EMA trend) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # === 4h Donchian channel (20-period) ===
-    donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # === 1w EMA34 (trend filter) ===
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Shift by 1 to avoid look-ahead (use previous bar's channel)
+    # === 1d Donchian channel (20-period) ===
+    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Shift by 1 to avoid look-ahead (use previous day's channel)
     donch_high = np.roll(donch_high, 1)
     donch_low = np.roll(donch_low, 1)
     donch_high[0] = np.nan
     donch_low[0] = np.nan
     
-    # === 4h volume ratio for confirmation ===
-    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_4h = volume_4h / vol_ma_20_4h
+    # === 1d volume ratio for confirmation ===
+    vol_ma_10_1d = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    vol_ratio_1d = volume / vol_ma_10_1d
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 50
+    warmup = 100
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
@@ -56,8 +55,8 @@ def generate_signals(prices):
         # Skip if any data is NaN
         if (np.isnan(donch_high[i]) or 
             np.isnan(donch_low[i]) or 
-            np.isnan(ema_34_12h_aligned[i]) or 
-            np.isnan(vol_ratio_4h[i])):
+            np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(vol_ratio_1d[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -65,8 +64,8 @@ def generate_signals(prices):
         price = close[i]
         upper = donch_high[i]
         lower = donch_low[i]
-        ema_trend = ema_34_12h_aligned[i]
-        vol_ratio = vol_ratio_4h[i]
+        ema_trend = ema_34_1w_aligned[i]
+        vol_ratio = vol_ratio_1d[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
@@ -106,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_12hEMA34_Trend_Volume"
-timeframe = "4h"
+name = "1d_Donchian_1wEMA34_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
