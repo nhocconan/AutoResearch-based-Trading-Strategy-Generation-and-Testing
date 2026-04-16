@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Bollinger Band breakout with volume confirmation and chop regime filter.
-# Long when price breaks above upper BB(20,2.0) with volume spike (>1.8x median) and chop < 61.8 (trending).
-# Short when price breaks below lower BB(20,2.0) with same filters.
+# Hypothesis: 4h strategy using 1d Donchian channel breakout with volume confirmation and chop regime filter.
+# Long when price breaks above 1d Donchian(20) upper channel with volume spike (>1.8x median) and chop < 61.8 (trending).
+# Short when price breaks below 1d Donchian(20) lower channel with same filters.
 # Exit via ATR(10) trailing stop: long exits when price < highest high since entry - 2.5*ATR,
 # short exits when price > lowest low since entry + 2.5*ATR.
 # Uses discrete position size 0.25. Tight volume and chop filters reduce overtrading.
-# Bollinger Bands adapt to volatility, working in both bull and bear markets.
+# Donchian channels adapt to volatility, working in both bull and bear markets.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,21 +20,20 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 1d data once before loop for Bollinger Bands
+    # Get 1d data once before loop for Donchian channels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === 1d Indicators: Bollinger Bands (20,2.0) ===
-    # Middle band: 20-period SMA
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    # Standard deviation
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    # Upper and lower bands
-    upper_bb = sma_20 + 2.0 * std_20
-    lower_bb = sma_20 - 2.0 * std_20
+    # === 1d Indicators: Donchian Channel (20) ===
+    # Upper channel: 20-period high
+    upper_donch = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    # Lower channel: 20-period low
+    lower_donch = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
     # Get 4h data for volume, ATR, and chop filter
     df_4h = get_htf_data(prices, '4h')
@@ -72,8 +71,8 @@ def generate_signals(prices):
     chop = np.where((range_14 == 0) | np.isnan(chop), 50.0, chop)
     
     # Align all indicators to primary timeframe (4h)
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    upper_donch_aligned = align_htf_to_ltf(prices, df_1d, upper_donch)
+    lower_donch_aligned = align_htf_to_ltf(prices, df_1d, lower_donch)
     vol_median_aligned = align_htf_to_ltf(prices, df_4h, vol_median_20)
     atr_aligned = align_htf_to_ltf(prices, df_4h, atr_10)
     chop_aligned = align_htf_to_ltf(prices, df_4h, chop)
@@ -81,7 +80,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(20, 14, 10)  # BB(20), Chop(14), ATR(10)
+    warmup = max(20, 14, 10)  # Donchian(20), Chop(14), ATR(10)
     
     # Track position state for trailing stops
     position = 0  # 0: flat, 1: long, -1: short
@@ -90,7 +89,7 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
+        if (np.isnan(upper_donch_aligned[i]) or np.isnan(lower_donch_aligned[i]) or 
             np.isnan(vol_median_aligned[i]) or np.isnan(atr_aligned[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             position = 0
@@ -99,8 +98,8 @@ def generate_signals(prices):
             continue
         
         # Current values (aligned)
-        upper_bb = upper_bb_aligned[i]
-        lower_bb = lower_bb_aligned[i]
+        upper_donch = upper_donch_aligned[i]
+        lower_donch = lower_donch_aligned[i]
         vol_median = vol_median_aligned[i]
         atr = atr_aligned[i]
         chop_val = chop_aligned[i]
@@ -117,8 +116,8 @@ def generate_signals(prices):
         trending = chop_val < 61.8
         
         # Breakout conditions
-        breakout_long = price > upper_bb
-        breakout_short = price < lower_bb
+        breakout_long = price > upper_donch
+        breakout_short = price < lower_donch
         
         # === EXIT LOGIC (trailing stop) ===
         exit_signal = False
@@ -147,14 +146,14 @@ def generate_signals(prices):
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
             # LONG CONDITIONS
-            # Breakout above upper Bollinger Band, volume spike, and trending market (chop < 61.8)
+            # Breakout above upper Donchian channel, volume spike, and trending market (chop < 61.8)
             if breakout_long and volume_spike and trending:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = price  # initialize trailing stop
             
             # SHORT CONDITIONS
-            # Breakout below lower Bollinger Band, volume spike, and trending market (chop < 61.8)
+            # Breakout below lower Donchian channel, volume spike, and trending market (chop < 61.8)
             elif breakout_short and volume_spike and trending:
                 signals[i] = -0.25
                 position = -1
@@ -165,6 +164,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dBollingerBreakout_VolumeSpike1.8x_Chop61.8_ATRTrail2.5_v1"
+name = "4h_1dDonchianBreakout_VolumeSpike1.8x_Chop61.8_ATRTrail2.5_v1"
 timeframe = "4h"
 leverage = 1.0
