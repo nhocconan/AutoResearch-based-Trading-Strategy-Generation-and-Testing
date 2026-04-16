@@ -13,37 +13,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data (HTF for ATR and levels) ===
+    # === 1d data (HTF for key levels) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === Calculate ATR(14) on 1d for volatility filter ===
-    atr_period = 14
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    atr_1d = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # === 4h data (HTF for trend filter) ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # === 12h data (HTF for EMA trend filter) ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # === Calculate 1d Camarilla pivot levels ===
+    # Using previous day's OHLC
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d[0] = close_1d[0]
+    prev_high_1d[0] = high_1d[0]
+    prev_low_1d[0] = low_1d[0]
     
-    # === 12h EMA34 for trend filter ===
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    camarilla_base = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
+    camarilla_range = prev_high_1d - prev_low_1d
     
-    # === 12h price action: Calculate 12-period high/low for breakout ===
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    high_12h_max = pd.Series(high_12h).rolling(window=12, min_periods=12).max().values
-    low_12h_min = pd.Series(low_12h).rolling(window=12, min_periods=12).min().values
-    high_12h_max_aligned = align_htf_to_ltf(prices, df_12h, high_12h_max)
-    low_12h_min_aligned = align_htf_to_ltf(prices, df_12h, low_12h_min)
+    # Resistance and Support levels
+    r1 = camarilla_base + camarilla_range * 1.1 / 12
+    s1 = camarilla_base - camarilla_range * 1.1 / 12
+    r2 = camarilla_base + camarilla_range * 1.1 / 6
+    s2 = camarilla_base - camarilla_range * 1.1 / 6
+    r3 = camarilla_base + camarilla_range * 1.1 / 4
+    s3 = camarilla_base - camarilla_range * 1.1 / 4
+    r4 = camarilla_base + camarilla_range * 1.1 / 2
+    s4 = camarilla_base - camarilla_range * 1.1 / 2
+    
+    # Align to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # === 4h EMA34 for trend filter ===
+    ema_34_4h = pd.Series(close_4h).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    
+    # === Volume confirmation (4h) ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma_20
     
     signals = np.zeros(n)
     
@@ -55,76 +67,57 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(ema_34_12h_aligned[i]) or 
-            np.isnan(high_12h_max_aligned[i]) or 
-            np.isnan(low_12h_min_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        atr_val = atr_1d_aligned[i]
-        ema_34_12h_val = ema_34_12h_aligned[i]
-        high_break = high_12h_max_aligned[i]
-        low_break = low_12h_min_aligned[i]
-        
-        # === VOLATILITY FILTER: Only trade when volatility is elevated ===
-        # Use ATR relative to its 50-period average
-        if i >= 50:  # Need enough history for ATR average
-            atr_ma_50 = np.mean(np.trim_zeros(atr_1d_aligned[max(0, i-49):i+1]) or [0])
-            if atr_ma_50 > 0:
-                atr_ratio = atr_val / atr_ma_50
-                # Only trade when volatility is above average (avoid low volatility chop)
-                if atr_ratio < 0.8:
-                    # Hold current position or stay flat
-                    if position == 1:
-                        signals[i] = 0.20
-                    elif position == -1:
-                        signals[i] = -0.20
-                    else:
-                        signals[i] = 0.0
-                    continue
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
+        ema_34_4h_val = ema_34_4h_aligned[i]
+        vol_ratio_val = vol_ratio[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price closes below 12-period low or ATR-based stop
-            if price < low_break or price < (high_break - 1.5 * atr_val):
+            # Exit when price closes below S3 or hits R4 (take profit)
+            if price < s3_val or price > r3_val + (r3_val - s3_val) * 1.5:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price closes above 12-period high or ATR-based stop
-            if price > high_break or price > (low_break + 1.5 * atr_val):
+            # Exit when price closes above R3 or hits S4 (take profit)
+            if price > r3_val or price < s3_val - (r3_val - s3_val) * 1.5:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above 12-period high with trend filter
-            if (price > high_break) and (price > ema_34_12h_val):
-                signals[i] = 0.20
+            # LONG: Price breaks above R3 with volume AND above 4h EMA34 (uptrend)
+            if (price > r3_val) and (price > ema_34_4h_val) and (vol_ratio_val > 1.8):
+                signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Price breaks below 12-period low with trend filter
-            elif (price < low_break) and (price < ema_34_12h_val):
-                signals[i] = -0.20
+            # SHORT: Price breaks below S3 with volume AND below 4h EMA34 (downtrend)
+            elif (price < s3_val) and (price < ema_34_4h_val) and (vol_ratio_val > 1.8):
+                signals[i] = -0.25
                 position = -1
                 continue
         
         # Hold current position
         if position == 1:
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif position == -1:
-            signals[i] = -0.20
+            signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "12h_Volatility_Filtered_Breakout_EMA34"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_Volume_EMA34"
+timeframe = "4h"
 leverage = 1.0
