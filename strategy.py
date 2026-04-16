@@ -13,13 +13,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data (HTF for key levels) ===
+    # === 1d data for levels ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === Calculate 1d Fibonacci pivot levels (using previous day's OHLC) ===
+    # === 1d Fibonacci pivot levels (using previous day's OHLC) ===
     prev_close_1d = np.roll(close_1d, 1)
     prev_high_1d = np.roll(high_1d, 1)
     prev_low_1d = np.roll(low_1d, 1)
@@ -34,7 +34,7 @@ def generate_signals(prices):
     r1 = pivot_point + prev_range * 0.382
     s1 = pivot_point - prev_range * 0.382
     
-    # Align to 4h timeframe
+    # Align to daily timeframe (no extra delay needed for pivot points)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -42,7 +42,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === Volume confirmation (4h) ===
+    # === Volume confirmation ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma_20
     
@@ -107,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_FibPivot_R1_S1_EMA34_VolumeSpike"
-timeframe = "4h"
+name = "1d_FibPivot_R1_S1_EMA34_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
