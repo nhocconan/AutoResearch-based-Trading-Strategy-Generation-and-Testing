@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h volume spike and 1d ADX trend filter.
-# Long when Bull Power > 0 AND volume > 1.5x 20-period average AND 1d ADX > 20.
-# Short when Bear Power < 0 AND volume > 1.5x 20-period average AND 1d ADX > 20.
-# Exit when Elder Ray power crosses zero (Bull Power <= 0 for long, Bear Power >= 0 for short).
-# Uses discrete position size 0.25. Elder Ray measures trend strength via power of bulls/bears,
-# volume confirmation ensures participation, and 1d ADX filters for trending regimes.
-# Target: 80-180 total trades over 4 years (20-45/year) to balance opportunity and fee drag.
+# Hypothesis: 12h Donchian(20) breakout with 1d volume spike and 1w ADX trend filter.
+# Long when price breaks above 12h Donchian upper band AND 1d volume > 2.0x 20-period average AND 1w ADX > 25.
+# Short when price breaks below 12h Donchian lower band AND 1d volume > 2.0x 20-period average AND 1w ADX > 25.
+# Exit when price returns to 12h Donchian middle band or ATR contraction.
+# Uses discrete position size 0.25. Donchian provides structure, volume confirmation reduces false signals,
+# and 1w ADX ensures we only trade in trending regimes. Target: 50-120 total trades over 4 years (12-30/year).
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,41 +20,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data once before loop for EMA(13) used in Elder Ray
+    # Get 12h data once before loop for Donchian bands
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 20:
         return np.zeros(n)
     
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     
-    # === 12h Indicators: EMA(13) for Elder Ray calculation ===
-    ema_13_12h = pd.Series(close_12h).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema_13_aligned = align_htf_to_ltf(prices, df_12h, ema_13_12h)
+    # === 12h Indicators: Donchian channels (20-period) ===
+    upper_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    lower_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    middle_12h = (upper_12h + lower_12h) / 2.0
     
-    # Get 1d data once before loop for ADX trend filter
+    # Align Donchian bands to 12h timeframe
+    upper_12h_aligned = align_htf_to_ltf(prices, df_12h, upper_12h)
+    lower_12h_aligned = align_htf_to_ltf(prices, df_12h, lower_12h)
+    middle_12h_aligned = align_htf_to_ltf(prices, df_12h, middle_12h)
+    
+    # Get 1d data once before loop for volume filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 1w data once before loop for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
+        return np.zeros(n)
     
-    # === 1d Indicators: ADX(14) for trend filter ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # === 1w Indicators: ADX(14) for trend filter ===
     # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr1[0] = 0
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
     # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w),
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)),
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
     dm_plus[0] = 0
     dm_minus[0] = 0
     
@@ -74,7 +86,7 @@ def generate_signals(prices):
     adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     # Align ADX to 1d timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     signals = np.zeros(n)
     
@@ -87,45 +99,44 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_13_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(upper_12h_aligned[i]) or np.isnan(lower_12h_aligned[i]) or 
+            np.isnan(middle_12h_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             position = 0
             entry_price = 0.0
             continue
         
         # Current values
-        ema_13 = ema_13_aligned[i]
+        upper_val = upper_12h_aligned[i]
+        lower_val = lower_12h_aligned[i]
+        middle_val = middle_12h_aligned[i]
         adx_val = adx_aligned[i]
         price = close[i]
         vol = volume[i]
         
-        # Calculate Elder Ray Power: Bull Power = High - EMA13, Bear Power = Low - EMA13
-        bull_power = high[i] - ema_13
-        bear_power = low[i] - ema_13
-        
-        # Calculate 20-period volume average
+        # Calculate 20-period volume average on 1d timeframe
         if i >= 20:
             vol_ma_20 = np.mean(volume[max(0, i-19):i+1])
         else:
             vol_ma_20 = 0.0
         
-        # Volume filter: volume > 1.5x 20-period average
-        vol_filter = vol > 1.5 * vol_ma_20 if vol_ma_20 > 0 else False
+        # Volume filter: volume > 2.0x 20-period average
+        vol_filter = vol > 2.0 * vol_ma_20 if vol_ma_20 > 0 else False
         
-        # Trend filter: 1d ADX > 20 (trending regime)
-        trend_filter = adx_val > 20
+        # Trend filter: 1w ADX > 25 (trending regime)
+        trend_filter = adx_val > 25
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if Bull Power <= 0 (bulls losing control)
-            if bull_power <= 0:
+            # Exit if price returns to middle band
+            if price <= middle_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if Bear Power >= 0 (bears losing control)
-            if bear_power >= 0:
+            # Exit if price returns to middle band
+            if price >= middle_val:
                 exit_signal = True
         
         if exit_signal:
@@ -136,14 +147,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Bull Power > 0 with volume and trend confirmation
-            if bull_power > 0 and vol_filter and trend_filter:
+            # LONG: price breaks above Donchian upper band with volume and trend confirmation
+            if price > upper_val and vol_filter and trend_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: Bear Power < 0 with volume and trend confirmation
-            elif bear_power < 0 and vol_filter and trend_filter:
+            # SHORT: price breaks below Donchian lower band with volume and trend confirmation
+            elif price < lower_val and vol_filter and trend_filter:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -153,6 +164,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_12hEMA13_1dVolumeSpike_1dADXTrend_V1"
-timeframe = "6h"
+name = "12h_Donchian20_1dVolumeSpike_1wADXTrend_V1"
+timeframe = "12h"
 leverage = 1.0
