@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using Donchian channel breakout from 1d timeframe with volume confirmation and ATR stoploss.
-# Long when price breaks above 1d Donchian upper (20-period high) with volume > 1.8x 20-period median volume.
-# Short when price breaks below 1d Donchian lower (20-period low) with volume > 1.8x 20-period median volume.
+# Hypothesis: 4h strategy using 1d Donchian breakout with volume confirmation and ATR trailing stop.
+# Long when price breaks above 1d Donchian upper (20-period high) with volume > 1.8x median volume.
+# Short when price breaks below 1d Donchian lower (20-period low) with volume > 1.8x median volume.
 # Uses discrete position size 0.25. Exits when price reaches opposite Donchian band or ATR stoploss hits (2.5x ATR).
 # Donchian breakout captures volatility expansion after consolidation. Volume confirmation filters false breakouts.
 # 4h timeframe targets 19-50 trades/year (75-200 total over 4 years) to minimize fee drag. Works in both bull/bear markets as it trades volatility expansion.
