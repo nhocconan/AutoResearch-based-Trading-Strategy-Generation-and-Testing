@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Entry on breakout above 20-period high (long) or below 20-period low (short) on 4h timeframe.
-# 1d EMA50 acts as trend filter: only long when 4h close > 1d EMA50, short when 4h close < 1d EMA50.
-# Volume confirmation: current 4h volume > 1.5x 20-period 4h volume average.
-# ATR-based trailing stop (2.0x ATR) to manage risk and reduce whipsaws.
-# Designed for low trade frequency (target: 75-200 total trades over 4 years) to minimize fee drag.
-# Works in both bull and bear markets via trend filter and volatility-based stops.
+# Hypothesis: 6h Williams %R + 1d EMA50 Trend + Volume Spike
+# Williams %R(14) identifies overbought/oversold conditions on 6h chart.
+# Long when %R crosses above -80 from below AND price > 1d EMA50 (uptrend filter).
+# Short when %R crosses below -20 from above AND price < 1d EMA50 (downtrend filter).
+# Volume confirmation: current volume > 1.8x 20-period 6h volume average.
+# ATR-based trailing stop (2.0x ATR) to manage risk.
+# Designed for low trade frequency (target: 50-150 total trades over 4 years) to minimize fee drag.
+# Works in bull markets via trend filter long bias, in bear via short bias, and range via mean reversion at extremes.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,43 +22,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data for EMA50 (HTF) ===
+    # === 6h Williams %R (14-period) ===
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Avoid division by zero
+    hh_ll = highest_high_14 - lowest_low_14
+    hh_ll = np.where(hh_ll == 0, 1e-10, hh_ll)
+    willr = -100 * (highest_high_14 - close) / hh_ll  # Williams %R: -100 to 0
+    
+    # === 1d data for EMA50 (HTF trend filter) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    
-    # === 1d EMA50 (trend filter) ===
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # === 4h Donchian channels (20-period) ===
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    # === 6h Volume Confirmation (20-period average) ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Donchian high = max(high, lookback=20)
-    donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    # Donchian low = min(low, lookback=20)
-    donch_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to 4h timeframe (already aligned, but using helper for consistency)
-    donch_high_aligned = align_htf_to_ltf(prices, df_4h, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_4h, donch_low)
-    
-    # === 4h Volume Confirmation (20-period average) ===
-    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20)
-    
-    # === 4h ATR for trailing stop (14-period) ===
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr2[0] = tr1[0]  # first bar has no previous close
+    # === 6h ATR for trailing stop (14-period) ===
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     
@@ -72,21 +61,19 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or
+        if (np.isnan(willr[i]) or 
             np.isnan(ema50_aligned[i]) or
-            np.isnan(vol_ma_aligned[i]) or
-            np.isnan(atr_aligned[i])):
+            np.isnan(vol_ma_20[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        donch_high_val = donch_high_aligned[i]
-        donch_low_val = donch_low_aligned[i]
+        willr_val = willr[i]
         ema50_val = ema50_aligned[i]
-        vol_confirm = volume[i] > vol_ma_aligned[i] * 1.5  # 1.5x average volume
-        atr_val = atr_aligned[i]
+        vol_confirm = volume[i] > vol_ma_20[i] * 1.8  # 1.8x average volume
+        atr_val = atr[i]
         
         # === TRAILING STOP LOGIC ===
         if position == 1:  # Long position
@@ -130,15 +117,18 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Long when: price breaks above Donchian high AND price > EMA50 AND volume confirmation
-            if price > donch_high_val and price > ema50_val and vol_confirm:
+            # Williams %R crossover signals
+            willr_prev = willr[i-1] if i > 0 else -100
+            
+            # Long when: %R crosses above -80 from below AND price > EMA50 AND volume confirmation
+            if willr_prev <= -80 and willr_val > -80 and price > ema50_val and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 highest_since_entry = price
                 continue
-            # Short when: price breaks below Donchian low AND price < EMA50 AND volume confirmation
-            elif price < donch_low_val and price < ema50_val and vol_confirm:
+            # Short when: %R crosses below -20 from above AND price < EMA50 AND volume confirmation
+            elif willr_prev >= -20 and willr_val < -20 and price < ema50_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -155,6 +145,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA50_VolumeConfirm_ATRTrail"
-timeframe = "4h"
+name = "6h_WilliamsR_1dEMA50_VolumeSpike_ATRTrail"
+timeframe = "6h"
 leverage = 1.0
