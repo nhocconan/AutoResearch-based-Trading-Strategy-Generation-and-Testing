@@ -4,11 +4,11 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA200 trend filter and volume confirmation.
-# Long when price breaks above Donchian(20) high AND price > 1d EMA200 (bullish regime) AND volume > 2.0x 20-period average.
-# Short when price breaks below Donchian(20) low AND price < 1d EMA200 (bearish regime) AND volume > 2.0x 20-period average.
-# Uses discrete position size 0.25. Donchian captures breakouts, 1d EMA200 ensures alignment with long-term trend,
-# high volume threshold (2.0x) reduces false breakouts and overtrading. Designed for both bull (buy breakouts) and bear (sell breakdowns).
-# Target: 80-160 trades over 4 years (20-40/year) to avoid fee drag while capturing strong moves.
+# Long when price breaks above Donchian(20) high AND price > 1d EMA200 (bullish bias) AND volume > 1.8x 20-period average.
+# Short when price breaks below Donchian(20) low AND price < 1d EMA200 (bearish bias) AND volume > 1.8x 20-period average.
+# Uses discrete position size 0.25. The 1d EMA200 provides strong trend filter to avoid counter-trend trades.
+# Higher volume threshold (1.8x) reduces false breakouts. Designed for fewer, higher-quality trades.
+# Target: 75-150 trades over 4 years (19-38/year) to balance opportunity and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,9 +24,9 @@ def generate_signals(prices):
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume Spike (volume > 2.0x 20-period average) ===
+    # === 4h Indicators: Volume Spike (volume > 1.8x 20-period average) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (1.8 * vol_ma)
     
     # Get 1d data once before loop for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -44,7 +44,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid (max 200 periods needed for EMA, 20 for Donchian/volume MA)
-    warmup = 220
+    warmup = 210
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
@@ -84,12 +84,12 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Donchian(20) high AND price > 1d EMA200 (bullish regime) AND volume spike
+            # LONG: Price breaks above Donchian(20) high AND price > 1d EMA200 (bullish) AND volume spike
             if price > upper_channel and price > ema_1d and vol_spike:
                 signals[i] = 0.25
                 position = 1
             
-            # SHORT: Price breaks below Donchian(20) low AND price < 1d EMA200 (bearish regime) AND volume spike
+            # SHORT: Price breaks below Donchian(20) low AND price < 1d EMA200 (bearish) AND volume spike
             elif price < lower_channel and price < ema_1d and vol_spike:
                 signals[i] = -0.25
                 position = -1
