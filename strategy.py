@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ATR-based volume spike filter
-# Long when price breaks above 20-period high AND 1d volume > 1.5x 20-period volume SMA AND ATR(14) > ATR(50)
-# Short when price breaks below 20-period low AND 1d volume > 1.5x 20-period volume SMA AND ATR(14) > ATR(50)
-# Uses volatility expansion (ATR ratio) to filter for genuine breakouts, reducing false signals
-# Discrete sizing 0.25 limits drawdown; targets 15-30 trades/year to avoid fee drag
-# Works in bull (breakouts continuation) and bear (breakdowns) via symmetric long/short logic
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and ATR regime filter
+# Long when price breaks above 20-period high AND 1d volume > 2.0x 20-period volume SMA AND ATR(14) > ATR(50)
+# Short when price breaks below 20-period low AND 1d volume > 2.0x 20-period volume SMA AND ATR(14) > ATR(50)
+# Uses stricter volume threshold (2.0x) to reduce false breakouts and target 20-40 trades/year
+# Works in bull (continuation breakouts) and bear (breakdowns) via symmetric logic
+# Discrete sizing 0.25 limits drawdown; session filter (08-20 UTC) avoids low-liquidity hours
 
 def generate_signals(prices):
     n = len(prices)
@@ -53,12 +53,14 @@ def generate_signals(prices):
     
     # === 1d Indicator: ATR (14-period and 50-period) for volatility regime filter ===
     # True Range calculation
-    tr1 = pd.Series(df_1d['high']).values - pd.Series(df_1d['low']).values
-    tr2 = np.abs(pd.Series(df_1d['high']).values - pd.Series(df_1d['close']).shift(1).values)
-    tr3 = np.abs(pd.Series(df_1d['low']).values - pd.Series(df_1d['close']).shift(1).values)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))  # shift(1) with first value handled
+    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    # Handle first value where shift creates NaN
-    tr[0] = tr1[0]
     
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
@@ -91,8 +93,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 1d volume > 1.5x 20-period 1d volume SMA
-        vol_threshold = vol_sma_20_1d_aligned[i] * 1.5
+        # Volume filter: current 1d volume > 2.0x 20-period 1d volume SMA (stricter threshold)
+        vol_threshold = vol_sma_20_1d_aligned[i] * 2.0
         vol_confirm = vol_1d_aligned[i] > vol_threshold
         
         # Volatility filter: ATR(14) > ATR(50) - ensures we're in expanding volatility regime
@@ -116,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_VolumeVolatilityFilter_v1"
+name = "4h_Donchian20_Volume2x_ATRFilter_v1"
 timeframe = "4h"
 leverage = 1.0
