@@ -13,20 +13,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data (primary timeframe) ===
+    # === 6h data (primary timeframe) ===
+    df_6h = get_htf_data(prices, '6h')
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    volume_6h = df_6h['volume'].values
+    
+    # === 1d data (HTF) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # === 1w data (HTF) ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # === Calculate ATR on 1d ===
+    # === 1d ATR(14) for volatility filter ===
     tr_1d = np.maximum(high_1d - low_1d,
                        np.maximum(np.abs(high_1d - np.roll(close_1d, 1)),
                                   np.abs(low_1d - np.roll(close_1d, 1))))
@@ -34,26 +34,31 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # === Calculate ATR on 1w ===
-    tr_1w = np.maximum(high_1w - low_1w,
-                       np.maximum(np.abs(high_1w - np.roll(close_1w, 1)),
-                                  np.abs(low_1w - np.roll(close_1w, 1))))
-    tr_1w[0] = high_1w[0] - low_1w[0]
-    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    # === 1d ATR(50) for long-term volatility ===
+    atr_50_1d = pd.Series(tr_1d).rolling(window=50, min_periods=50).mean().values
+    atr_50_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_50_1d)
     
-    # === 1w EMA(34) for trend filter ===
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # === 6h ATR(14) for position sizing ===
+    tr_6h = np.maximum(high_6h - low_6h,
+                       np.maximum(np.abs(high_6h - np.roll(close_6h, 1)),
+                                  np.abs(low_6h - np.roll(close_6h, 1))))
+    tr_6h[0] = high_6h[0] - low_6h[0]
+    atr_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
+    atr_6h_aligned = align_htf_to_ltf(prices, df_6h, atr_6h)
     
-    # === 1d RSI(14) for momentum filter ===
-    delta = np.diff(close_1d, prepend=close_1d[0])
+    # === 6h Volume ratio (current vs 20-period average) ===
+    vol_ma_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume_6h / vol_ma_20
+    vol_ratio_aligned = align_htf_to_ltf(prices, df_6h, vol_ratio)
+    
+    # === 6h RSI(14) for momentum ===
+    delta = np.diff(close_6h, prepend=close_6h[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
     avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
     rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_14 = 100 - (100 / (1 + rs))
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     
@@ -65,43 +70,48 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_1d_aligned[i]) or np.isnan(atr_1w_aligned[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(rsi_14[i])):
+        if (np.isnan(atr_6h_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(atr_50_1d_aligned[i]) or np.isnan(vol_ratio_aligned[i]) or 
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        price = close_1d[i]
-        ema_34_val = ema_34_1w_aligned[i]
+        price = close_6h[i]
+        atr_6h_val = atr_6h_aligned[i]
         atr_1d_val = atr_1d_aligned[i]
-        atr_1w_val = atr_1w_aligned[i]
-        rsi_val = rsi_14[i]
+        atr_50_1d_val = atr_50_1d_aligned[i]
+        vol_ratio_val = vol_ratio_aligned[i]
+        rsi_val = rsi[i]
+        
+        # Volatility regime: short-term ATR vs long-term ATR
+        vol_regime = atr_6h_val / atr_50_1d_val if atr_50_1d_val > 0 else 1.0
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price closes below 1w EMA(34) OR RSI > 70 (overbought)
-            if (price < ema_34_val) or (rsi_val > 70):
+            # Exit when volatility drops (range-bound) OR RSI overbought
+            if vol_regime < 0.8 or rsi_val > 70:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price closes above 1w EMA(34) OR RSI < 30 (oversold)
-            if (price > ema_34_val) or (rsi_val < 30):
+            # Exit when volatility drops OR RSI oversold
+            if vol_regime < 0.8 or rsi_val < 30:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price above 1w EMA(34) AND RSI between 40 and 60 (neutral momentum)
-            if (price > ema_34_val) and (40 <= rsi_val <= 60):
+            # LONG: High volume + momentum + volatility expansion
+            if (vol_ratio_val > 1.5) and (rsi_val > 55) and (vol_regime > 1.2):
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Price below 1w EMA(34) AND RSI between 40 and 60 (neutral momentum)
-            elif (price < ema_34_val) and (40 <= rsi_val <= 60):
+            # SHORT: High volume + momentum + volatility expansion
+            elif (vol_ratio_val > 1.5) and (rsi_val < 45) and (vol_regime > 1.2):
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -116,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA34_1w_Trend_RSI_Filter"
-timeframe = "1d"
+name = "6h_VolMom_VolRegime_Expansion"
+timeframe = "6h"
 leverage = 1.0
