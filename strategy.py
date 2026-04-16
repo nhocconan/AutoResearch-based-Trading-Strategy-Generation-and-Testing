@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d volume spike confirmation and ATR trailing stop
-# Uses 12h primary timeframe with 1d HTF for volume regime detection (spike = institutional interest).
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike confirmation and ATR trailing stop
+# Uses 4h primary timeframe with 1d HTF for volume regime detection (spike = institutional interest).
 # Donchian(20) breakout captures medium-term momentum with clear structure.
 # Volume spike: 1d volume > 2.0x 20-period average confirms strong participation.
 # ATR trailing stop (2.5x) protects gains and limits drawdown in choppy markets.
-# Target: 75-150 total trades over 4 years (19-38/year) to minimize fee drag while maintaining edge.
+# Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag while maintaining edge.
 # Works in bull markets via upside breakouts and in bear markets via downside breakouts during volume expansion.
 
 def generate_signals(prices):
@@ -21,12 +21,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h data (primary timeframe) ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    # === 4h data (primary timeframe) ===
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
     
     # === 1d data (HTF for volume regime) ===
     df_1d = get_htf_data(prices, '1d')
@@ -35,11 +35,11 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # === 12h Donchian channels (20-period) ===
-    donch_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low)
+    # === 4h Donchian channels (20-period) ===
+    donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donch_high_aligned = align_htf_to_ltf(prices, df_4h, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_4h, donch_low)
     
     # === 1d Volume spike filter ===
     vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
@@ -70,9 +70,9 @@ def generate_signals(prices):
         spike_ok = vol_spike_aligned[i]
         
         # === ATR CALCULATION FOR TRAILING STOP ===
-        atr_12h = np.abs(high_12h - low_12h)
-        atr_ma = pd.Series(atr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
-        atr_aligned = align_htf_to_ltf(prices, df_12h, atr_ma)
+        atr_4h = np.abs(high_4h - low_4h)
+        atr_ma = pd.Series(atr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
+        atr_aligned = align_htf_to_ltf(prices, df_4h, atr_ma)
         atr_val = atr_aligned[i]
         
         # === TRAILING STOP LOGIC ===
@@ -148,6 +148,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_VolumeSpike_ATRTrail"
-timeframe = "12h"
+name = "4h_Donchian20_1dVolumeSpike_ATRTrail"
+timeframe = "4h"
 leverage = 1.0
