@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot R1/S1 breakout with 1d volume spike and chop regime filter
-# Long when price breaks above 4h Camarilla R1 AND 1d volume > 1.5x 20-period 1d volume SMA AND 1d chop > 61.8 (ranging market)
-# Short when price breaks below 4h Camarilla S1 AND 1d volume > 1.5x 20-period 1d volume SMA AND 1d chop > 61.8 (ranging market)
-# Camarilla pivots identify intraday support/resistance, volume confirms conviction, chop filter avoids whipsaws in strong trends
+# Hypothesis: 4h Donchian(20) breakout with 1d ATR regime filter and volume confirmation
+# Long when price breaks above 4h Donchian upper band AND 1d ATR(14) > 1d ATR(50) (high volatility regime) AND 1d volume > 1.2x 20-period 1d volume SMA
+# Short when price breaks below 4h Donchian lower band AND 1d ATR(14) > 1d ATR(50) AND 1d volume > 1.2x 20-period 1d volume SMA
+# Donchian channels capture momentum breakouts, volatility filter ensures trading in expanding markets, volume confirms conviction
 # Discrete position sizing (0.25) to control drawdown. Target: 75-200 total trades over 4 years
 
 def generate_signals(prices):
@@ -23,36 +23,29 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 4h data once before loop for Camarilla calculation
+    # Get 4h data once before loop for Donchian calculation
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Get 1d data once before loop for volume and chop filters
+    # Get 1d data once before loop for ATR and volume filters
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # === 4h Indicator: Camarilla Pivot Points (based on previous day) ===
-    # Calculate using previous 1d OHLC, aligned to 4h
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === 4h Indicator: Donchian Channel (20-period) ===
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12
-    camarilla_s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12
+    # Upper band = highest high over 20 periods, Lower band = lowest low over 20 periods
+    donchian_upper_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_lower_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Align 1d Camarilla levels to 4h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
+    # Align 4h Donchian levels to 4h timeframe (no shift needed as we use completed bars)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper_4h)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower_4h)
     
-    # === 1d Indicator: Volume SMA (20-period) for confirmation ===
-    volume_1d = df_1d['volume'].values
-    vol_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_20_1d)
-    
-    # === 1d Indicator: Choppy Market Index (14-period) ===
+    # === 1d Indicator: ATR (14-period and 50-period) for volatility regime ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -64,25 +57,23 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First period
     
-    # Sum of True Range over 14 periods
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # ATR(14) and ATR(50)
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_50_1d = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
     
-    # Highest high and lowest low over 14 periods
-    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Align ATR to 1d timeframe
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    atr_50_aligned = align_htf_to_ltf(prices, df_1d, atr_50_1d)
     
-    # Choppy Market Index: 100 * log10(sum(tr)/(hh_ll)) / log10(14)
-    hh_ll = hh_14 - ll_14
-    chop = np.where(hh_ll > 0, 100 * np.log10(tr_sum / hh_ll) / np.log10(14), 50)
-    chop = np.where((tr_sum == 0) | (hh_ll == 0), 50, chop)
-    
-    # Align chop to 1d timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # === 1d Indicator: Volume SMA (20-period) for confirmation ===
+    volume_1d = df_1d['volume'].values
+    vol_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_20_1d)
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (need 20 periods for vol SMA + 14 for chop)
-    warmup = 50
+    # Warmup: ensure all indicators are valid (need 50 periods for ATR(50) + 20 for Donchian + 20 for vol SMA)
+    warmup = 60
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -91,30 +82,31 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(vol_sma_20_1d_aligned[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
+            np.isnan(atr_14_aligned[i]) or np.isnan(atr_50_aligned[i]) or
+            np.isnan(vol_sma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current 1d volume > 1.5x 20-period 1d volume SMA
+        # Volume filter: current 1d volume > 1.2x 20-period 1d volume SMA
         vol_1d_series = df_1d['volume'].values
         vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d_series)
         vol_confirm = False
         if not np.isnan(vol_1d_aligned[i]):
-            vol_threshold = vol_sma_20_1d_aligned[i] * 1.5
+            vol_threshold = vol_sma_20_1d_aligned[i] * 1.2
             vol_confirm = vol_1d_aligned[i] > vol_threshold
         
-        # Chop filter: chop > 61.8 indicates ranging market (mean reversion favorable)
-        chop_filter = chop_aligned[i] > 61.8
+        # Volatility filter: ATR(14) > ATR(50) indicates expanding volatility (trend favorable)
+        vol_filter = atr_14_aligned[i] > atr_50_aligned[i]
         
         # === LONG CONDITIONS ===
-        # Price breaks above 4h Camarilla R1 AND volume confirmation AND chop filter
-        if (close[i] > camarilla_r1_aligned[i]) and vol_confirm and chop_filter:
+        # Price breaks above 4h Donchian upper band AND volume confirmation AND volatility filter
+        if (close[i] > donchian_upper_aligned[i]) and vol_confirm and vol_filter:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # Price breaks below 4h Camarilla S1 AND volume confirmation AND chop filter
-        elif (close[i] < camarilla_s1_aligned[i]) and vol_confirm and chop_filter:
+        # Price breaks below 4h Donchian lower band AND volume confirmation AND volatility filter
+        elif (close[i] < donchian_lower_aligned[i]) and vol_confirm and vol_filter:
             signals[i] = -0.25
         
         else:
@@ -122,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_1dVolSpike_Chop_Filter_v1"
+name = "4h_Donchian20_1dATR_Volume_Filter_v1"
 timeframe = "4h"
 leverage = 1.0
