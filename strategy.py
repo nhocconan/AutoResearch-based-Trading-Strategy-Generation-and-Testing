@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-"""
-12h_Weekly_Pullback_Trend
-Hypothesis: In strong weekly trends (price above/below weekly EMA50), pullbacks to the 12h EMA21 with volume confirmation offer high-probability entries.
-Works in bull markets by buying dips in uptrends and in bear markets by selling rallies in downtrends.
-Uses 12h for execution, 1w for trend filter (EMA50), and includes volume confirmation to avoid false signals.
-Target: 15-35 trades over 4 years (4-9/year) with disciplined entries to minimize fee drag.
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -21,35 +13,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h data (primary) ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    volume_12h = df_12h['volume'].values
+    # === 4h data (primary) ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    volume_4h = df_4h['volume'].values
     
-    # === 1w data (HTF for trend filter) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # === 1d data (HTF for Donchian and ATR) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # === Indicators on 12h ===
-    # EMA21 for dynamic support/resistance
-    ema21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    # Volume 20-period average for confirmation
-    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_12h = volume_12h / vol_ma_20_12h
+    # === Donchian channels (20-period) on daily ===
+    # Upper = highest high over last 20 days, Lower = lowest low over last 20 days
+    high_20d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_upper = high_20d
+    donchian_lower = low_20d
     
-    # === Weekly EMA50 for trend filter ===
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # === ATR (14-period) on daily ===
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])
     
-    # Align all HTF data to 12h timeframe
-    ema21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema21_12h)
-    vol_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio_12h)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # === Volume ratio (4h) ===
+    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume_4h / vol_ma_20
+    
+    # Align HTF data to 4h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    vol_ratio_aligned = align_htf_to_ltf(prices, df_4h, vol_ratio)
     
     signals = np.zeros(n)
     
-    # Warmup: enough for EMA50 weekly
+    # Warmup: enough for Donchian and ATR calculations
     warmup = 100
     
     # Track position
@@ -57,49 +62,46 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(ema21_12h_aligned[i]) or 
-            np.isnan(vol_ratio_12h_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or 
+            np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(atr_aligned[i]) or 
+            np.isnan(vol_ratio_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        ema21 = ema21_12h_aligned[i]
-        vol_ratio = vol_ratio_12h_aligned[i]
-        weekly_ema50 = ema50_1w_aligned[i]
+        upper = donchian_upper_aligned[i]
+        lower = donchian_lower_aligned[i]
+        atr_val = atr_aligned[i]
+        vol_ratio_val = vol_ratio_aligned[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit: price closes below EMA21 (trend violation)
-            if price < ema21:
+            # Exit: price closes below lower band OR trailing stop (highest high - 2*ATR)
+            if price < lower:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit: price closes above EMA21 (trend violation)
-            if price > ema21:
+            # Exit: price closes above upper band OR trailing stop (lowest low + 2*ATR)
+            if price > upper:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Uptrend: price above weekly EMA50
-            if price > weekly_ema50:
-                # LONG: Pullback to EMA21 with volume
-                if price <= ema21 * 1.005 and vol_ratio > 1.3:  # within 0.5% above EMA21
-                    signals[i] = 0.25
-                    position = 1
-                    continue
-            # Downtrend: price below weekly EMA50
-            elif price < weekly_ema50:
-                # SHORT: Pullback to EMA21 with volume
-                if price >= ema21 * 0.995 and vol_ratio > 1.3:  # within 0.5% below EMA21
-                    signals[i] = -0.25
-                    position = -1
-                    continue
+            # Breakout with volume confirmation
+            if price > upper and vol_ratio_val > 1.3:
+                signals[i] = 0.25
+                position = 1
+                continue
+            elif price < lower and vol_ratio_val > 1.3:
+                signals[i] = -0.25
+                position = -1
+                continue
         
         # Hold current position
         if position == 1:
@@ -111,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Weekly_Pullback_Trend"
-timeframe = "12h"
+name = "4h_Donchian_20_Breakout_Volume_ATR"
+timeframe = "4h"
 leverage = 1.0
