@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using weekly pivot point R1/S1 breakout with volume confirmation.
-# Long when price breaks above weekly R1 pivot with volume > 1.5x 20-period median.
-# Short when price breaks below weekly S1 pivot with volume > 1.5x 20-period median.
-# Uses discrete position size 0.25. No trailing stop - relies on mean reversion at opposite pivot level.
-# Weekly pivots provide structure from higher timeframe, volume confirms breakout validity.
-# 6h timeframe balances trade frequency and noise reduction for BTC/ETH in both bull/bear markets.
+# Hypothesis: 12h strategy using daily pivot point R1/S1 breakout with volume confirmation.
+# Long when price breaks above daily R1 pivot with volume > 1.5x 20-period median.
+# Short when price breaks below daily S1 pivot with volume > 1.5x 20-period median.
+# Uses discrete position size 0.25. Exits when price returns to daily pivot (mean reversion).
+# Daily pivots provide structure from higher timeframe, volume confirms breakout validity.
+# 12h timeframe targets 12-37 trades/year (50-150 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,33 +20,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once before loop for pivot points
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    # Get daily data once before loop for pivot points
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # === Weekly Indicators: Pivot Points (based on prior week) ===
+    # === Daily Indicators: Pivot Points (based on prior day) ===
     # Pivot = (H + L + C) / 3
     # R1 = 2*P - L
     # S1 = 2*P - H
-    # Using prior week's values to avoid look-ahead
-    pivot_1w = (np.roll(high_1w, 1) + np.roll(low_1w, 1) + np.roll(close_1w, 1)) / 3
-    r1_1w = 2 * pivot_1w - np.roll(low_1w, 1)
-    s1_1w = 2 * pivot_1w - np.roll(high_1w, 1)
+    # Using prior day's values to avoid look-ahead
+    pivot_1d = (np.roll(high_1d, 1) + np.roll(low_1d, 1) + np.roll(close_1d, 1)) / 3
+    r1_1d = 2 * pivot_1d - np.roll(low_1d, 1)
+    s1_1d = 2 * pivot_1d - np.roll(high_1d, 1)
     
-    # === Weekly Indicators: Volume Median (20-period) ===
-    vol_median_20 = pd.Series(volume_1w).rolling(window=20, min_periods=20).median().values
+    # === Daily Indicators: Volume Median (20-period) ===
+    vol_median_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).median().values
     
-    # Align all indicators to primary timeframe (6h)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    vol_median_aligned = align_htf_to_ltf(prices, df_1w, vol_median_20)
+    # Align all indicators to primary timeframe (12h)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    vol_median_aligned = align_htf_to_ltf(prices, df_1d, vol_median_20)
     
     signals = np.zeros(n)
     
@@ -70,23 +70,23 @@ def generate_signals(prices):
         r1 = r1_aligned[i]
         s1 = s1_aligned[i]
         
-        # Get current weekly volume for volume spike filter
-        vol_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_1w)
-        current_vol_1w = vol_1w_aligned[i]
+        # Get current daily volume for volume spike filter
+        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+        current_vol_1d = vol_1d_aligned[i]
         
-        # Volume spike filter: current weekly volume > 1.5x median volume
-        volume_spike = current_vol_1w > (vol_median * 1.5)
+        # Volume spike filter: current daily volume > 1.5x median volume
+        volume_spike = current_vol_1d > (vol_median * 1.5)
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit when price reaches or falls below weekly pivot (mean reversion)
+            # Exit when price reaches or falls below daily pivot (mean reversion)
             if price <= pivot_aligned[i]:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit when price reaches or rises above weekly pivot (mean reversion)
+            # Exit when price reaches or rises above daily pivot (mean reversion)
             if price >= pivot_aligned[i]:
                 exit_signal = True
         
@@ -97,12 +97,12 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: price breaks above weekly R1 with volume spike
+            # LONG: price breaks above daily R1 with volume spike
             if price > r1 and volume_spike:
                 signals[i] = 0.25
                 position = 1
             
-            # SHORT: price breaks below weekly S1 with volume spike
+            # SHORT: price breaks below daily S1 with volume spike
             elif price < s1 and volume_spike:
                 signals[i] = -0.25
                 position = -1
@@ -112,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R1S1_Breakout_VolumeSpike1.5x_v1"
-timeframe = "6h"
+name = "12h_DailyPivot_R1S1_Breakout_VolumeSpike1.5x_v1"
+timeframe = "12h"
 leverage = 1.0
