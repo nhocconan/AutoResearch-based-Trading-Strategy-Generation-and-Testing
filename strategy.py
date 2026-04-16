@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,22 +13,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d RSI for momentum filter (14-period) ===
+    # === 1d Close for Donchian channel (20-period) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate RSI
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[np.isnan(rsi)] = 50
-    rsi_14_1d = align_htf_to_ltf(prices, df_1d, rsi)
+    # Calculate Donchian channels
+    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
     
     # === 12h ATR for volatility filter and stoploss ===
     df_12h = get_htf_data(prices, '12h')
@@ -47,7 +42,7 @@ def generate_signals(prices):
     atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
     
-    # === 1d Average Volume for confirmation ===
+    # === 1d Volume for confirmation ===
     volume_1d = df_1d['volume'].values
     vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
@@ -55,7 +50,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 60
+    warmup = 100
     
     # Track position and entry price for trailing stop
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,7 +60,8 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(rsi_14_1d[i]) or 
+        if (np.isnan(upper_20_aligned[i]) or 
+            np.isnan(lower_20_aligned[i]) or
             np.isnan(atr_12h_aligned[i]) or
             np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
@@ -73,7 +69,6 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        rsi_val = rsi_14_1d[i]
         atr_val = atr_12h_aligned[i]
         vol_ma_val = vol_ma_1d_aligned[i]
         
@@ -82,16 +77,6 @@ def generate_signals(prices):
         vol_1d_current = df_1d_current['volume'].values
         vol_1d_aligned = align_htf_to_ltf(prices, df_1d_current, vol_1d_current)
         vol_confirm = vol_1d_aligned[i] > vol_ma_val * 1.2
-        
-        # RSI filter: avoid extremes, look for momentum
-        # Long: RSI > 50 and rising, Short: RSI < 50 and falling
-        if i > warmup:
-            rsi_prev = rsi_14_1d[i-1]
-            rsi_rising = rsi_val > rsi_prev
-            rsi_falling = rsi_val < rsi_prev
-        else:
-            rsi_rising = False
-            rsi_falling = False
         
         # === TRAILING STOP LOGIC ===
         if position == 1:  # Long position
@@ -118,15 +103,15 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Long when: RSI > 50 and rising AND volume confirmation
-            if rsi_val > 50 and rsi_rising and vol_confirm:
+            # Long when: price breaks above upper Donchian + volume confirmation
+            if price > upper_20_aligned[i] and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 highest_since_entry = price
                 continue
-            # Short when: RSI < 50 and falling AND volume confirmation
-            elif rsi_val < 50 and rsi_falling and vol_confirm:
+            # Short when: price breaks below lower Donchian + volume confirmation
+            elif price < lower_20_aligned[i] and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -143,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_RSI14_Volume1.2x_12hATRTrail_2.0x"
+name = "12h_Donchian20_1dVolume1.2x_12hATRTrail_2.0x"
 timeframe = "12h"
 leverage = 1.0
