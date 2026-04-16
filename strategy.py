@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and 1d ADX trend filter.
-# Donchian(20) identifies breakouts: price > upper band = bullish, price < lower band = bearish.
-# Volume > 1.5x average confirms breakout strength.
+# Hypothesis: 4h Camarilla pivot breakout with volume confirmation and 1d ADX trend filter.
+# Camarilla levels (R1, R2, S1, S2) from prior day provide precise support/resistance.
+# Breakout above R1 with volume > 2x average = long, breakdown below S1 with volume = short.
 # 1d ADX > 25 filters for trending markets, avoiding whipsaws in ranges.
-# Position size 0.25 for risk control. Stop loss at 2x ATR.
+# Position size 0.25 for risk control. Stop loss at 1.5x ATR.
 # Designed to work in bull (breakout continuations) and bear (breakdown continuations).
 
 def generate_signals(prices):
@@ -27,19 +27,29 @@ def generate_signals(prices):
     low_4h = df_4h['low'].values
     volume_4h = df_4h['volume'].values
     
-    # === 1d data (higher timeframe for ADX trend filter) ===
+    # === 1d data (higher timeframe for Camarilla pivot and ADX) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === 4h Donchian Channel (20) ===
-    highest_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_up = highest_high
-    donchian_low = lowest_low
-    donchian_up_aligned = align_htf_to_ltf(prices, df_4h, donchian_up)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    # === 1d Camarilla Pivot Levels ===
+    # Calculate pivot point and ranges from previous day
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_hl = high_1d - low_1d
+    
+    # Camarilla levels: R4 = close + range * 1.5, R3 = close + range * 1.25, etc.
+    # We use R1, R2, S1, S2 for breakouts
+    r1 = close_1d + range_hl * 1.1 / 12
+    r2 = close_1d + range_hl * 1.1 / 6
+    s1 = close_1d - range_hl * 1.1 / 12
+    s2 = close_1d - range_hl * 1.1 / 6
+    
+    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
     # === 1d ADX (14) for trend filter ===
     # Calculate True Range
@@ -77,17 +87,18 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(donchian_up_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(adx_aligned[i]) or
-            np.isnan(vol_ratio_4h[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or
+            np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ratio_4h[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        donch_up = donchian_up_aligned[i]
-        donch_low = donchian_low_aligned[i]
+        r1_val = r1_aligned[i]
+        r2_val = r2_aligned[i]
+        s1_val = s1_aligned[i]
+        s2_val = s2_aligned[i]
         adx_val = adx_aligned[i]
         vol_ratio = vol_ratio_4h[i]
         
@@ -97,7 +108,7 @@ def generate_signals(prices):
             atr_ma = pd.Series(atr_4h).rolling(window=14, min_periods=14).mean().values
             atr_aligned = align_htf_to_ltf(prices, df_4h, atr_ma)
             atr_val = atr_aligned[i]
-            if price < entry_price - 2.0 * atr_val:
+            if price < entry_price - 1.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -108,7 +119,7 @@ def generate_signals(prices):
             atr_ma = pd.Series(atr_4h).rolling(window=14, min_periods=14).mean().values
             atr_aligned = align_htf_to_ltf(prices, df_4h, atr_ma)
             atr_val = atr_aligned[i]
-            if price > entry_price + 2.0 * atr_val:
+            if price > entry_price + 1.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -116,16 +127,16 @@ def generate_signals(prices):
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price breaks below Donchian low or trend weakens
-            if price < donch_low or adx_val < 20:
+            # Exit when price breaks below S1 or trend weakens
+            if price < s1_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price breaks above Donchian up or trend weakens
-            if price > donch_up or adx_val < 20:
+            # Exit when price breaks above R1 or trend weakens
+            if price > r1_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -135,14 +146,14 @@ def generate_signals(prices):
         if position == 0:
             # Require trending market (ADX > 25)
             if adx_val > 25:
-                # Breakout long with volume confirmation
-                if price > donch_up and vol_ratio > 1.5:
+                # Breakout above R1 with volume confirmation
+                if price > r1_val and vol_ratio > 2.0:
                     signals[i] = 0.25
                     position = 1
                     entry_price = price
                     continue
-                # Breakdown short with volume confirmation
-                elif price < donch_low and vol_ratio > 1.5:
+                # Breakdown below S1 with volume confirmation
+                elif price < s1_val and vol_ratio > 2.0:
                     signals[i] = -0.25
                     position = -1
                     entry_price = price
@@ -158,6 +169,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_ADXFilter_v1"
+name = "4h_Camarilla_R1S1_Breakout_Volume_ADXFilter_v1"
 timeframe = "4h"
 leverage = 1.0
