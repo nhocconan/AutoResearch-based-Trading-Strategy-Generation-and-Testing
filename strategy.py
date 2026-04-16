@@ -20,7 +20,7 @@ def generate_signals(prices):
     r1 = pp + (df_1d['high'].shift(1) - df_1d['low'].shift(1)) * 1.1 / 6
     s1 = pp - (df_1d['high'].shift(1) - df_1d['low'].shift(1)) * 1.1 / 6
     
-    # Align pivot levels to 12h timeframe
+    # Align pivot levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
     
@@ -33,6 +33,7 @@ def generate_signals(prices):
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d.values)
     
     # === 4h ADX for Trend Strength Filter ===
+    # Calculate ADX on 4h data
     df_4h = get_htf_data(prices, '4h')
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
@@ -65,13 +66,13 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) == 0, np.nan, (plus_di + minus_di))
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
     
-    # Align ADX to 12h timeframe
+    # Align ADX to 4h timeframe (already 4h, but need to align to lower timeframe)
     adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators have valid data
-    warmup = 50
+    warmup = 50  # Need EMA50 and ADX warmup
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
@@ -131,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_R1_S1_Breakout_Volume_EMA_ADXFilter"
-timeframe = "12h"
+name = "4h_Pivot_R1_S1_Breakout_Volume_EMA_ADXFilter"
+timeframe = "4h"
 leverage = 1.0
