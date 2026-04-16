@@ -109,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_FibPivot_R1_S1_EMA34_VolumeSpike_v4"
+name = "4h_FibPivot_R1_S1_EMA34_VolumeSpike_v5"
 timeframe = "4h"
 leverage = 1.0
