@@ -3,12 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R(14) mean reversion with 1d EMA50 trend filter and volume spike
-# Long when Williams %R < -80 (oversold) + price > 1d EMA50 (uptrend) + volume > 1.5x 20-period avg
-# Short when Williams %R > -20 (overbought) + price < 1d EMA50 (downtrend) + volume > 1.5x 20-period avg
-# Williams %R identifies exhaustion points in both bull and bear markets. 1d EMA50 ensures we trade with the higher timeframe trend.
-# Volume confirmation filters low-conviction moves. Discrete sizing (0.25) controls drawdown and fee drag.
-# Target: 20-40 trades/year on 4h to avoid overtrading while capturing meaningful reversals.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d ADX regime filter and volume confirmation
+# Bull Power = High - EMA13(close); Bear Power = EMA13(close) - Low
+# Long when Bull Power > 0 AND Bear Power < 0 AND 1d ADX > 25 (trending) AND volume > 1.5x 20-period avg
+# Short when Bear Power > 0 AND Bull Power < 0 AND 1d ADX > 25 (trending) AND volume > 1.5x 20-period avg
+# Uses discrete position sizing (0.25) to control drawdown and minimize fee drag.
+# Elder Ray measures bull/bear strength relative to EMA13, working in both bull and bear markets.
+# 1d ADX > 25 ensures we only trade in trending regimes, reducing whipsaws in ranging markets.
+# Volume confirmation (1.5x) targets ~15-25 trades/year on 6h timeframe to avoid overtrading.
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,25 +28,50 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d Indicator: EMA50 ===
+    # === 1d Indicator: ADX(14) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === Williams %R(14) on 4h ===
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    highest_high = high_series.rolling(window=14, min_periods=14).max().values
-    lowest_low = low_series.rolling(window=14, min_periods=14).min().values
-    williams_r = np.where(
-        (highest_high - lowest_low) != 0,
-        ((highest_high - close) / (highest_high - lowest_low)) * -100,
-        -50.0  # neutral when range=0
-    )
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    
+    # Directional Movement
+    up_move = np.diff(high_1d, prepend=high_1d[0])
+    down_move = -np.diff(low_1d, prepend=low_1d[0])
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smoothing(values, period):
+        result = np.zeros_like(values)
+        result[period-1] = np.nansum(values[:period])
+        for i in range(period, len(values)):
+            result[i] = result[i-1] - (result[i-1] / period) + values[i]
+        return result
+    
+    period = 14
+    atr_1d = wilders_smoothing(tr, period)
+    plus_di_1d = 100 * wilders_smoothing(plus_dm, period) / atr_1d
+    minus_di_1d = 100 * wilders_smoothing(minus_dm, period) / atr_1d
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    adx_1d = wilders_smoothing(dx_1d, period)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # === 6h Indicators: EMA13 for Elder Ray ===
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Bull Power = High - EMA13
+    bull_power = high - ema_13
+    # Bear Power = EMA13 - Low
+    bear_power = ema_13 - low
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,7 +79,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(50, 14, 20) + 5  # EMA50 + Williams%R(14) + volume(20) + buffer
+    warmup = max(13, 20, 14+14) + 5  # EMA13 + Vol20 + ADX(14,14) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -61,8 +88,8 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(williams_r[i]) or
-            np.isnan(vol_sma_20[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -70,19 +97,23 @@ def generate_signals(prices):
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # === LONG CONDITIONS ===
-        # 1. Williams %R < -80 (oversold)
-        # 2. Price > 1d EMA50 (uptrend filter)
-        # 3. Volume confirmation
-        if (williams_r[i] < -80.0) and \
-           (close[i] > ema_50_1d_aligned[i]) and vol_confirm:
+        # 1. Bull Power > 0 (strong bullish momentum)
+        # 2. Bear Power < 0 (weak bearish momentum)
+        # 3. 1d ADX > 25 (strong trend)
+        # 4. Volume confirmation
+        if (bull_power[i] > 0) and \
+           (bear_power[i] < 0) and \
+           (adx_1d_aligned[i] > 25) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Williams %R > -20 (overbought)
-        # 2. Price < 1d EMA50 (downtrend filter)
-        # 3. Volume confirmation
-        elif (williams_r[i] > -20.0) and \
-             (close[i] < ema_50_1d_aligned[i]) and vol_confirm:
+        # 1. Bear Power > 0 (strong bearish momentum)
+        # 2. Bull Power < 0 (weak bullish momentum)
+        # 3. 1d ADX > 25 (strong trend)
+        # 4. Volume confirmation
+        elif (bear_power[i] > 0) and \
+             (bull_power[i] < 0) and \
+             (adx_1d_aligned[i] > 25) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -90,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR14_1dEMA50_Volume_Filter_v1"
-timeframe = "4h"
+name = "6h_ElderRay_1dADX_Volume_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
