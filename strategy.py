@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and 1d EMA50 trend filter
-# Long when price closes above Donchian upper band AND price > EMA50 AND volume > 1.5x 1d average volume
-# Short when price closes below Donchian lower band AND price < EMA50 AND volume > 1.5x 1d average volume
-# ATR trailing stop (2.0x ATR) to manage risk
-# Donchian channels provide clear breakout levels; EMA50 ensures trend alignment
-# Volume confirmation adds conviction; Target: 50-150 total trades over 4 years (12-37/year)
+# Hypothesis: 4h Williams Alligator with 1d volume confirmation and 12h Fractal filter
+# Long when: Green line (Jaw) > Red line (Teeth) > Blue line (Lips) AND price > Green line AND volume > 1.5x 1d average
+# Short when: Green line < Red line < Blue line AND price < Green line AND volume > 1.5x 1d average
+# Williams Alligator uses SMAs of median price with specific offsets to identify trend alignment
+# Williams Alligator is effective in both trending and ranging markets when combined with volume confirmation
+# Target: 80-160 total trades over 4 years (20-40/year) to balance opportunity and fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,114 +20,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h Donchian(20) channels ===
-    # Use 12h high/low for Donchian calculation
+    # === 12h Williams Alligator (Jaw, Teeth, Lips) ===
     df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    median_price_12h = (df_12h['high'].values + df_12h['low'].values) / 2.0
     
-    # Calculate 20-period Donchian channels on 12h data
-    upper_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    lower_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Jaw (Blue line): 13-period SMMA, shifted 8 bars
+    jaw_raw = pd.Series(median_price_12h).rolling(window=13, min_periods=13).mean()
+    jaw = np.roll(jaw_raw.values, 8)
+    jaw[:8] = np.nan
     
-    # Align Donchian levels to primary timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_12h, upper_12h)
-    lower_aligned = align_htf_to_ltf(prices, df_12h, lower_12h)
+    # Teeth (Red line): 8-period SMMA, shifted 5 bars
+    teeth_raw = pd.Series(median_price_12h).rolling(window=8, min_periods=8).mean()
+    teeth = np.roll(teeth_raw.values, 5)
+    teeth[:5] = np.nan
     
-    # === 1d EMA50 trend filter ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Lips (Green line): 5-period SMMA, shifted 3 bars
+    lips_raw = pd.Series(median_price_12h).rolling(window=5, min_periods=5).mean()
+    lips = np.roll(lips_raw.values, 3)
+    lips[:3] = np.nan
     
-    # === 1d Volume Confirmation (using 1h data to approximate 1d volume average) ===
-    # Since we're on 12h timeframe, use 2 periods of 12h = 1 day for volume average
-    vol_ma_1d = pd.Series(volume).rolling(window=2, min_periods=2).mean().values  # 2 periods of 12h = 1d
+    # Align Alligator lines to 4h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
     
-    # === 12h ATR for trailing stop (14-period) ===
-    # Calculate True Range using 12h data
-    high_12h_shift = np.roll(high_12h, 1)
-    low_12h_shift = np.roll(low_12h, 1)
-    close_12h_shift = np.roll(close_12h, 1)
+    # === 1d Volume Confirmation ===
+    vol_ma_1d = pd.Series(volume).rolling(window=24, min_periods=24).mean().values  # 24 periods of 1h = 1d (4h data)
     
-    high_12h_shift[0] = high_12h[0]
-    low_12h_shift[0] = low_12h[0]
-    close_12h_shift[0] = close_12h[0]
-    
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - close_12h_shift)
-    tr3 = np.abs(low_12h - close_12h_shift)
-    tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
-    atr_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
+    # === 4h ATR for stop management ===
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 50
+    warmup = 30
     
-    # Track position and entry price for trailing stop
+    # Track position
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(upper_aligned[i]) or 
-            np.isnan(lower_aligned[i]) or
-            np.isnan(ema_50_aligned[i]) or
+        if (np.isnan(jaw_aligned[i]) or 
+            np.isnan(teeth_aligned[i]) or
+            np.isnan(lips_aligned[i]) or
             np.isnan(vol_ma_1d[i]) or
-            np.isnan(atr_aligned[i])):
+            np.isnan(atr[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        upper_val = upper_aligned[i]
-        lower_val = lower_aligned[i]
-        ema_val = ema_50_aligned[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
         vol_confirm = volume[i] > vol_ma_1d[i] * 1.5  # 1.5x average volume for confirmation
-        atr_val = atr_aligned[i]
+        atr_val = atr[i]
         
-        # === TRAILING STOP LOGIC ===
+        # === STOP LOSS LOGIC (2x ATR) ===
         if position == 1:  # Long position
-            # Update highest price since entry
-            if price > highest_since_entry:
-                highest_since_entry = price
-            # Trail stop: exit if price drops 2.0*ATR from highest
-            if atr_val > 0 and price < highest_since_entry - 2.0 * atr_val:
+            if price < lips_val - 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
-                highest_since_entry = 0.0
                 continue
-        
         elif position == -1:  # Short position
-            # Update lowest price since entry
-            if price < lowest_since_entry or lowest_since_entry == 0:
-                lowest_since_entry = price
-            # Trail stop: exit if price rises 2.0*ATR from lowest
-            if atr_val > 0 and price > lowest_since_entry + 2.0 * atr_val:
+            if price > lips_val + 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
-                lowest_since_entry = 0.0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Long when: price closes above Donchian upper band AND price > EMA50 AND volume confirmation
-            if price > upper_val and price > ema_val and vol_confirm:
+            # Alligator aligned for uptrend: Jaw > Teeth > Lips
+            if jaw_val > teeth_val and teeth_val > lips_val and price > lips_val and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-                highest_since_entry = price
                 continue
-            # Short when: price closes below Donchian lower band AND price < EMA50 AND volume confirmation
-            elif price < lower_val and price < ema_val and vol_confirm:
+            # Alligator aligned for downtrend: Jaw < Teeth < Lips
+            elif jaw_val < teeth_val and teeth_val < lips_val and price < lips_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
-                lowest_since_entry = price
                 continue
         
         # Hold current position
@@ -140,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dEMA50_Volume1.5x_ATRTrail_2.0x"
-timeframe = "12h"
+name = "4h_WilliamsAlligator_12hMedianPrice_1dVolume1.5x"
+timeframe = "4h"
 leverage = 1.0
