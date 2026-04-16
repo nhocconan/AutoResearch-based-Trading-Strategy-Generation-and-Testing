@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Choppiness Index regime filter + 4h RSI mean reversion + 1d volume confirmation
-# In high chop (range) markets: RSI < 30 = long, RSI > 70 = short
-# In low chop (trending) markets: avoid trades to prevent whipsaw
-# Volume confirmation ensures institutional participation
-# Target: 50-120 total trades over 4 years (12-30/year) to minimize fee drag
+# Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and 1d EMA50 trend filter
+# Long when price closes above Donchian upper band AND price > 1d EMA50 AND volume > 1.3x 1d average volume
+# Short when price closes below Donchian lower band AND price < 1d EMA50 AND volume > 1.3x 1d average volume
+# ATR trailing stop (2.0x ATR) to manage risk
+# Donchian provides clear breakout levels, EMA50 filters trend, volume adds conviction
+# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,62 +20,114 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h RSI(14) for mean reversion ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # === 1d EMA50 trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # === 4h Choppiness Index(14) for regime detection ===
+    # === 12h Donchian(20) channels ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    # Calculate Donchian channels (20-period high/low)
+    high_roll = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donchian_upper = align_htf_to_ltf(prices, df_12h, high_roll)
+    donchian_lower = align_htf_to_ltf(prices, df_12h, low_roll)
+    
+    # === 12h Volume Confirmation ===
+    vol_ma_12h = pd.Series(volume).rolling(window=48, min_periods=48).mean().values  # 48 periods of 15m = 12h (12h data)
+    
+    # === 12h ATR for trailing stop (14-period) ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / (max_high - min_low + 1e-10)) / np.log10(14)
-    
-    # === 1d Volume Confirmation (using 4h data: 6 periods = 1 day) ===
-    vol_ma_1d = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 30
+    warmup = 50
+    
+    # Track position and entry price for trailing stop
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(rsi[i]) or 
-            np.isnan(chop[i]) or
-            np.isnan(vol_ma_1d[i])):
+        if (np.isnan(ema_50_aligned[i]) or 
+            np.isnan(donchian_upper[i]) or
+            np.isnan(donchian_lower[i]) or
+            np.isnan(vol_ma_12h[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
+            position = 0
             continue
         
-        rsi_val = rsi[i]
-        chop_val = chop[i]
-        vol_confirm = volume[i] > vol_ma_1d[i] * 1.5  # 1.5x average volume
+        price = close[i]
+        ema_val = ema_50_aligned[i]
+        upper = donchian_upper[i]
+        lower = donchian_lower[i]
+        vol_confirm = volume[i] > vol_ma_12h[i] * 1.3  # 1.3x average volume for confirmation
+        atr_val = atr[i]
         
-        # Only trade in high chop (range) markets: CHOP > 61.8
-        if chop_val > 61.8:
-            # Mean reversion: RSI < 30 = long, RSI > 70 = short
-            if rsi_val < 30 and vol_confirm:
-                signals[i] = 0.25
-            elif rsi_val > 70 and vol_confirm:
-                signals[i] = -0.25
-            else:
+        # === TRAILING STOP LOGIC ===
+        if position == 1:  # Long position
+            # Update highest price since entry
+            if price > highest_since_entry:
+                highest_since_entry = price
+            # Trail stop: exit if price drops 2.0*ATR from highest
+            if atr_val > 0 and price < highest_since_entry - 2.0 * atr_val:
                 signals[i] = 0.0
+                position = 0
+                highest_since_entry = 0.0
+                continue
+        
+        elif position == -1:  # Short position
+            # Update lowest price since entry
+            if price < lowest_since_entry or lowest_since_entry == 0:
+                lowest_since_entry = price
+            # Trail stop: exit if price rises 2.0*ATR from lowest
+            if atr_val > 0 and price > lowest_since_entry + 2.0 * atr_val:
+                signals[i] = 0.0
+                position = 0
+                lowest_since_entry = 0.0
+                continue
+        
+        # === ENTRY LOGIC (only when flat) ===
+        if position == 0:
+            # Long when: price closes above Donchian upper AND price > EMA50 AND volume confirmation
+            if price > upper and price > ema_val and vol_confirm:
+                signals[i] = 0.25
+                position = 1
+                entry_price = price
+                highest_since_entry = price
+                continue
+            # Short when: price closes below Donchian lower AND price < EMA50 AND volume confirmation
+            elif price < lower and price < ema_val and vol_confirm:
+                signals[i] = -0.25
+                position = -1
+                entry_price = price
+                lowest_since_entry = price
+                continue
+        
+        # Hold current position
+        if position == 1:
+            signals[i] = 0.25
+        elif position == -1:
+            signals[i] = -0.25
         else:
-            # Low chop (trending) market: avoid trades
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Chop61.8_RSI30_70_Volume1.5x"
-timeframe = "4h"
+name = "12h_Donchian20_1dEMA50_Volume1.3x_ATRTrail_2.0x"
+timeframe = "12h"
 leverage = 1.0
