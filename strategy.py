@@ -3,13 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elliott Wave Structure + 1d Volume Profile Confirmation
-# Uses the principle that major trends unfold in 5-wave impulses followed by 3-wave corrections.
-# Identifies wave 3 (strongest impulse) and wave C (strong correction) using:
-# 1) 6h price structure: Higher highs/lows in uptrend, lower highs/lows in downtrend
-# 2) 1d volume confirmation: Volume must expand in direction of trend
-# 3) Entry on pullbacks to 6h EMA(21) during established trends
-# Works in bull markets (catch wave 3) and bear markets (catch wave C).
+# Hypothesis: 12h Donchian(20) breakout with 1d ADX trend filter and volume confirmation
+# In trending markets (ADX > 25): buy breakouts above upper Donchian channel,
+# sell breakdowns below lower Donchian channel.
+# Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
 # Target: 50-150 total trades over 4 years (12-37/year) with disciplined entries.
 
 def generate_signals(prices):
@@ -22,67 +19,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 6h data (primary timeframe) ===
-    df_6h = get_htf_data(prices, '6h')
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
-    volume_6h = df_6h['volume'].values
+    # === 12h data (primary timeframe) ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # === 1d data (higher timeframe for volume confirmation) ===
+    # === 1d data (higher timeframe for ADX trend filter) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # === 6h EMA(21) for dynamic support/resistance ===
-    ema_21_6h = pd.Series(close_6h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # === 12h Donchian Channel (20) ===
+    highest_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Higher Highs/Lower Lows Structure ===
-    # Higher High: current high > previous high AND previous high > high before that
-    hh_condition = (high_6h[2:] > high_6h[1:-1]) & (high_6h[1:-1] > high_6h[:-2])
-    hl_condition = (low_6h[2:] > low_6h[1:-1]) & (low_6h[1:-1] > low_6h[:-2])
-    # Lower High: current high < previous high AND previous high < high before that
-    lh_condition = (high_6h[2:] < high_6h[1:-1]) & (high_6h[1:-1] < high_6h[:-2])
-    ll_condition = (low_6h[2:] < low_6h[1:-1]) & (low_6h[1:-1] < low_6h[:-2])
+    # === 1d ADX(14) for trend filter ===
+    # Calculate True Range
+    tr1 = pd.Series(high_1d).diff()
+    tr2 = abs(pd.Series(high_1d).diff())
+    tr3 = abs(pd.Series(low_1d).diff())
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Pad to original length
-    hh_hl = np.zeros(len(high_6h), dtype=bool)
-    lh_ll = np.zeros(len(high_6h), dtype=bool)
-    hh_hl[2:] = hh_condition & hl_condition  # Higher High AND Higher Low
-    lh_ll[2:] = lh_condition & ll_condition  # Lower High AND Lower Low
+    # Calculate Directional Movement
+    up_move = pd.Series(high_1d).diff()
+    down_move = -pd.Series(low_1d).diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # === Trend Structure Signals ===
-    # Uptrend structure: HH&HL
-    # Downtrend structure: LH&LL
-    struct_score = np.zeros(len(high_6h))
-    struct_score[hh_hl] = 1   # Uptrend structure
-    struct_score[lh_ll] = -1  # Downtrend structure
+    # Smooth DM and TR
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_1d
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_1d
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Smooth structure signal to avoid whipsaw
-    struct_smoothed = pd.Series(struct_score).rolling(window=5, min_periods=1).sum().values
-    # Normalize to [-1, 1]
-    struct_smoothed = np.clip(struct_smoothed / 5.0, -1, 1)
-    
-    # === 1d Volume Confirmation ===
-    # Volume must be above average to confirm trend strength
-    vol_avg_1d = pd.Series(volume_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_ratio_1d = volume_1d / vol_avg_1d
-    # Volume confirmation: current volume > 1.2 * average
-    vol_confirmed = vol_ratio_1d > 1.2
-    
-    # === Align 1d data to 6s timeframe ===
-    struct_aligned = align_htf_to_ltf(prices, df_6h, struct_smoothed)
-    vol_confirmed_aligned = align_htf_to_ltf(prices, df_1d, vol_confirmed.astype(float))
-    
-    # === 6d EMA alignment for entry timing ===
-    ema_21_aligned = align_htf_to_ltf(prices, df_6h, ema_21_6h)
+    # === 12h volume ratio for confirmation ===
+    vol_ma_10_12h = pd.Series(volume_12h).rolling(window=10, min_periods=10).mean().values
+    vol_ratio_12h = volume_12h / vol_ma_10_12h
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 60
+    warmup = 100
     
     # Track position and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
@@ -90,27 +72,36 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(struct_aligned[i]) or np.isnan(vol_confirmed_aligned[i]) or 
-            np.isnan(ema_21_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ratio_12h[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        struct_val = struct_aligned[i]
-        vol_conf = vol_confirmed_aligned[i] > 0.5  # Convert back to boolean
-        ema_val = ema_21_aligned[i]
+        hh = highest_high[i]
+        ll = lowest_low[i]
+        adx_val = adx_aligned[i]
+        vol_ratio = vol_ratio_12h[i]
         
-        # === STOPLOSS LOGICS ===
+        # === STOPLOSS LOGIC ===
         if position == 1:  # Long position
-            if price < ema_val - 0.02 * ema_val:  # 2% below EMA
+            atr_12h = np.abs(high_12h - low_12h)
+            atr_ma = pd.Series(atr_12h).rolling(window=14, min_periods=14).mean().values
+            atr_aligned = align_htf_to_ltf(prices, df_12h, atr_ma)
+            atr_val = atr_aligned[i]
+            if price < entry_price - 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            if price > ema_val + 0.02 * ema_val:  # 2% above EMA
+            atr_12h = np.abs(high_12h - low_12h)
+            atr_ma = pd.Series(atr_12h).rolling(window=14, min_periods=14).mean().values
+            atr_aligned = align_htf_to_ltf(prices, df_12h, atr_ma)
+            atr_val = atr_aligned[i]
+            if price > entry_price + 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -118,16 +109,16 @@ def generate_signals(prices):
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when structure breaks down or volume fails
-            if struct_val < 0.3 or not vol_conf:
+            # Exit when price falls below lower Donchian or trend weakens
+            if price < ll or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when structure breaks down or volume fails
-            if struct_val > -0.3 or not vol_conf:
+            # Exit when price rises above upper Donchian or trend weakens
+            if price > hh or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -135,16 +126,16 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Require clear structure and volume confirmation
-            if abs(struct_val) > 0.5 and vol_conf:
-                # Long when uptrend structure and price near EMA support
-                if struct_val > 0.5 and price <= ema_val * 1.01:  # Within 1% above EMA
+            # Require trending market (ADX > 25) and volume confirmation
+            if adx_val > 25 and vol_ratio > 1.3:
+                # Buy when price breaks above upper Donchian channel
+                if price > hh:
                     signals[i] = 0.25
                     position = 1
                     entry_price = price
                     continue
-                # Short when downtrend structure and price near EMA resistance
-                elif struct_val < -0.5 and price >= ema_val * 0.99:  # Within 1% below EMA
+                # Sell when price breaks below lower Donchian channel
+                elif price < ll:
                     signals[i] = -0.25
                     position = -1
                     entry_price = price
@@ -160,6 +151,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElliottWave_Structure_Volume_Confirm_v1"
-timeframe = "6h"
+name = "12h_Donchian20_ADX_VolumeTrendFilter_v1"
+timeframe = "12h"
 leverage = 1.0
