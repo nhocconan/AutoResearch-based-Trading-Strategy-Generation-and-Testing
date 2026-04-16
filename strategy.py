@@ -13,48 +13,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data (primary timeframe) ===
+    # === 6h data (primary timeframe) ===
+    df_6h = get_htf_data(prices, '6h')
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    volume_6h = df_6h['volume'].values
+    
+    # === 12h data (HTF) ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # === 1d data (HTF) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # === 1w data (HTF) ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === 6h ATR for volatility and stops ===
+    tr_6h = np.maximum(high_6h - low_6h,
+                       np.maximum(np.abs(high_6h - np.roll(close_6h, 1)),
+                                  np.abs(low_6h - np.roll(close_6h, 1))))
+    tr_6h[0] = high_6h[0] - low_6h[0]
+    atr_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
+    atr_6h_aligned = align_htf_to_ltf(prices, df_6h, atr_6h)
     
-    # === Calculate ATR on 1d for volatility regime ===
-    tr_1d = np.maximum(high_1d - low_1d,
-                       np.maximum(np.abs(high_1d - np.roll(close_1d, 1)),
-                                  np.abs(low_1d - np.roll(close_1d, 1))))
-    tr_1d[0] = high_1d[0] - low_1d[0]
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # === 12h ATR for volatility regime detection ===
+    tr_12h = np.maximum(high_12h - low_12h,
+                        np.maximum(np.abs(high_12h - np.roll(close_12h, 1)),
+                                   np.abs(low_12h - np.roll(close_12h, 1))))
+    tr_12h[0] = high_12h[0] - low_12h[0]
+    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
     
-    # === Calculate ATR on 1w for trend filter ===
-    tr_1w = np.maximum(high_1w - low_1w,
-                       np.maximum(np.abs(high_1w - np.roll(close_1w, 1)),
-                                  np.abs(low_1w - np.roll(close_1w, 1))))
-    tr_1w[0] = high_1w[0] - low_1w[0]
-    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    # === 12h ATR ratio (12h ATR / 6h ATR) for volatility regime ===
+    atr_ratio = atr_12h_aligned / atr_6h_aligned
+    atr_ratio_ma = pd.Series(atr_ratio).rolling(window=20, min_periods=20).mean().values
+    atr_ratio_std = pd.Series(atr_ratio).rolling(window=20, min_periods=20).std().values
+    atr_ratio_upper = atr_ratio_ma + (2 * atr_ratio_std)
+    atr_ratio_lower = atr_ratio_ma - (2 * atr_ratio_std)
     
-    # === 1d Donchian Channel (15) for breakout signals ===
-    highest_15 = pd.Series(high_1d).rolling(window=15, min_periods=15).max().values
-    lowest_15 = pd.Series(low_1d).rolling(window=15, min_periods=15).min().values
-    donchian_upper = highest_15
-    donchian_lower = lowest_15
+    # === 6h Williams %R for momentum ===
+    highest_14 = pd.Series(high_6h).rolling(window=14, min_periods=14).max().values
+    lowest_14 = pd.Series(low_6h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_14 - close_6h) / (highest_14 - lowest_14)
     
-    # === 1d Volume spike detection (10-day average) ===
-    vol_ma_10 = pd.Series(volume_1d).rolling(window=10, min_periods=10).mean().values
-    vol_ratio = volume_1d / vol_ma_10
+    # === 1d Pivot Points (standard calculation) ===
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    r1_1d = 2 * pivot_1d - low_1d
+    s1_1d = 2 * pivot_1d - high_1d
+    r2_1d = pivot_1d + (high_1d - low_1d)
+    s2_1d = pivot_1d - (high_1d - low_1d)
+    r3_1d = high_1d + 2 * (pivot_1d - low_1d)
+    s3_1d = low_1d - 2 * (high_1d - pivot_1d)
     
-    # === 1w Trend filter: price above/below 20-period EMA ===
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Align 1d pivot levels to 6h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    
+    # === 6h Volume spike detection ===
+    vol_ma_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume_6h / vol_ma_20
     
     signals = np.zeros(n)
     
@@ -66,43 +92,48 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_1d_aligned[i]) or np.isnan(atr_1w_aligned[i]) or 
-            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(vol_ratio[i]) or np.isnan(ema_20_1w_aligned[i])):
+        if (np.isnan(atr_6h_aligned[i]) or np.isnan(atr_ratio[i]) or 
+            np.isnan(williams_r[i]) or np.isnan(pivot_1d_aligned[i]) or
+            np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
+            np.isnan(r2_1d_aligned[i]) or np.isnan(s2_1d_aligned[i]) or
+            np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        price = close_1d[i]
-        atr_1d_val = atr_1d_aligned[i]
+        price = close_6h[i]
+        atr_6h_val = atr_6h_aligned[i]
+        williams_r_val = williams_r[i]
         vol_ratio_val = vol_ratio[i]
-        ema_20_1w_val = ema_20_1w_aligned[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price closes below Donchian lower OR weekly trend turns bearish
-            if (price < donchian_lower[i]) or (price < ema_20_1w_val):
+            # Exit when price crosses below S1 OR Williams %R becomes overbought
+            if (price < s1_1d_aligned[i]) or (williams_r_val > -20):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price closes above Donchian upper OR weekly trend turns bullish
-            if (price > donchian_upper[i]) or (price > ema_20_1w_val):
+            # Exit when price crosses above R1 OR Williams %R becomes oversold
+            if (price > r1_1d_aligned[i]) or (williams_r_val < -80):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Donchian upper AND weekly trend bullish AND volume spike
-            if (price > donchian_upper[i]) and (price > ema_20_1w_val) and (vol_ratio_val > 2.0):
+            # LONG: Price crosses above R1 AND Williams %R is oversold AND volatility is expanding AND volume spike
+            if (price > r1_1d_aligned[i]) and (williams_r_val < -80) and \
+               (atr_ratio[i] > atr_ratio_upper[i]) and (vol_ratio_val > 1.5):
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Price breaks below Donchian lower AND weekly trend bearish AND volume spike
-            elif (price < donchian_lower[i]) and (price < ema_20_1w_val) and (vol_ratio_val > 2.0):
+            # SHORT: Price crosses below S1 AND Williams %R is overbought AND volatility is expanding AND volume spike
+            elif (price < s1_1d_aligned[i]) and (williams_r_val > -20) and \
+                 (atr_ratio[i] > atr_ratio_upper[i]) and (vol_ratio_val > 1.5):
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -117,6 +148,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyTrend_Donchian_Breakout_Volume"
-timeframe = "1d"
+name = "6h_WilliamsR_Pivot_Breakout_VolExpansion"
+timeframe = "6h"
 leverage = 1.0
