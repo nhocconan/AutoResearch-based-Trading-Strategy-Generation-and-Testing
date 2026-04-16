@@ -3,15 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike filter and ATR-based trailing stop
-# Long when price breaks above 20-period 4h Donchian high AND 1d volume > 1.5x 20-period 1d volume median
-# Short when price breaks below 20-period 4h Donchian low AND 1d volume > 1.5x 20-period 1d volume median
-# Exit via ATR(14) trailing stop: long exits when price < highest_high_since_entry - 2.5*ATR
-# short exits when price > lowest_low_since_entry + 2.5*ATR
+# Hypothesis: 4h Camarilla pivot R4/S4 breakout with 1d volume spike filter and ATR trailing stop
+# Long when price breaks above Camarilla R4 (1d) AND 1d volume > 2.5x 20-period median AND ATR-based trailing stop
+# Short when price breaks below Camarilla S4 (1d) AND 1d volume > 2.5x 20-period median AND ATR-based trailing stop
+# Exit when price reverses 2.0x ATR from extreme OR reverts to Camarilla pivot point (PP)
 # Uses discrete position size 0.25 to balance capture and fee drag. Target: 75-200 total trades over 4 years.
-# Donchian channels provide objective breakout levels that work in trending markets.
-# Volume spike filter ensures institutional participation, reducing false breakouts.
-# ATR trailing stop adapts to volatility, capturing trends while limiting drawdowns.
+# R4/S4 levels are stronger breakout points than R3/S3, reducing false signals while maintaining edge.
 
 def generate_signals(prices):
     n = len(prices)
@@ -27,32 +24,42 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data once before loop for volume filter
+    # Get 1d data once before loop for Camarilla pivots and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
+    
+    # === 1d Indicators: Camarilla Pivot Levels (R4, S4, PP) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Camarilla calculations
+    rang = high_1d - low_1d
+    camarilla_pp = (high_1d + low_1d + close_1d) / 3.0
+    camarilla_r4 = camarilla_pp + rang * 1.1 / 2.0  # R4 = PP + 1.1*range/2
+    camarilla_s4 = camarilla_pp - rang * 1.1 / 2.0  # S4 = PP - 1.1*range/2
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
     # === 1d Indicators: Volume median (20-period) ===
     volume_1d = df_1d['volume'].values
     vol_median_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).median().values
     vol_median_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_median_20_1d)
     
-    # Get 4h data for Donchian channels and ATR
+    # Get 4h data for ATR stoploss
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 30:
         return np.zeros(n)
     
-    # === 4h Indicators: Donchian Channels (20-period) ===
+    # === 4h Indicators: ATR (14-period) for stoploss ===
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
-    donchian_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    close_4h = df_4h['close'].values
     
-    # Align Donchian levels to 4h timeframe
-    donchian_high_20_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_20)
-    donchian_low_20_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_20)
-    
-    # === 4h Indicators: ATR (14-period) for trailing stop ===
     tr1 = high_4h - low_4h
     tr2 = np.abs(high_4h - np.concatenate([[close_4h[0]], close_4h[:-1]]))
     tr3 = np.abs(low_4h - np.concatenate([[close_4h[0]], close_4h[:-1]]))
@@ -63,13 +70,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(20, 20, 14)  # Donchian/volume/ATR
+    warmup = max(30, 20, 14)  # 1d Camarilla/volume, 4h ATR
     
     # Track position state for exits
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    highest_since_entry = 0.0  # for long trailing stop
-    lowest_since_entry = 0.0   # for short trailing stop
+    max_favorable_price = 0.0  # track highest price for long, lowest for short
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -77,10 +83,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             if position != 0:
                 position = 0  # force flat outside session
+                max_favorable_price = 0.0
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or 
+        if (np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or 
             np.isnan(atr_aligned[i]) or np.isnan(vol_median_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
@@ -91,66 +98,63 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 1d volume > 1.5x 20-period 1d volume median
-        vol_threshold = vol_median_20_1d_aligned[i] * 1.5
+        # Volume filter: current 1d volume > 2.5x 20-period 1d volume median
+        vol_threshold = vol_median_20_1d_aligned[i] * 2.5
         vol_confirm = vol_1d_aligned[i] > vol_threshold
         
         # Price levels
         price = close[i]
-        upper_donchian = donchian_high_20_aligned[i]
-        lower_donchian = donchian_low_20_aligned[i]
-        atr_val = atr_aligned[i]
+        pp = camarilla_pp_aligned[i]
+        r4 = camarilla_r4_aligned[i]
+        s4 = camarilla_s4_aligned[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         if position == 1:  # long position
-            # Update highest high since entry
-            if price > highest_since_entry:
-                highest_since_entry = price
-            # ATR trailing stop: exit when price drops 2.5*ATR from highest since entry
-            if price < highest_since_entry - 2.5 * atr_val:
+            # Update max favorable price
+            if price > max_favorable_price:
+                max_favorable_price = price
+            # Exit when price retraces 2.0x ATR from high OR reverts to pivot point
+            if price <= max_favorable_price - 2.0 * atr_aligned[i] or price <= pp:
                 exit_signal = True
         elif position == -1:  # short position
-            # Update lowest low since entry
-            if price < lowest_since_entry:
-                lowest_since_entry = price
-            # ATR trailing stop: exit when price rises 2.5*ATR from lowest since entry
-            if price > lowest_since_entry + 2.5 * atr_val:
+            # Update max favorable price (lowest price for short)
+            if price < max_favorable_price or max_favorable_price == 0.0:
+                max_favorable_price = price
+            # Exit when price rallies 2.0x ATR from low OR reverts to pivot point
+            if price >= max_favorable_price + 2.0 * atr_aligned[i] or price >= pp:
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
             entry_price = 0.0
-            highest_since_entry = 0.0
-            lowest_since_entry = 0.0
+            max_favorable_price = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
             # LONG CONDITIONS
-            # Price breaks above Donchian high AND volume confirmation
-            if price > upper_donchian and vol_confirm:
+            # Price breaks above Camarilla R4 AND volume confirmation
+            if price > r4 and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-                highest_since_entry = price
-                lowest_since_entry = price
+                max_favorable_price = price
             
             # SHORT CONDITIONS
-            # Price breaks below Donchian low AND volume confirmation
-            elif price < lower_donchian and vol_confirm:
+            # Price breaks below Camarilla S4 AND volume confirmation
+            elif price < s4 and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
-                highest_since_entry = price
-                lowest_since_entry = price
+                max_favorable_price = price
         
         else:
-            signals[i] = 0.0  # maintain position
+            signals[i] = position * 0.25  # maintain position
     
     return signals
 
-name = "4h_Donchian20_1dVolumeSpike_ATRTrail_v1"
+name = "4h_CamarillaR4S4_1dVolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
