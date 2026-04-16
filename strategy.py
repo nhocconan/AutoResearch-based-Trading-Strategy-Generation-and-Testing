@@ -13,67 +13,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h data for trend direction ===
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    # === 6h data (primary timeframe) ===
+    df_6h = get_htf_data(prices, '6h')
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    volume_6h = df_6h['volume'].values
     
-    # Calculate ATR on 4h
-    tr_4h = np.maximum(high_4h - low_4h,
-                       np.maximum(np.abs(high_4h - np.roll(close_4h, 1)),
-                                  np.abs(low_4h - np.roll(close_4h, 1))))
-    tr_4h[0] = high_4h[0] - low_4h[0]
-    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
-    
-    # Calculate EMA(21) on 4h
-    ema_21_4h = pd.Series(close_4h).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
-    
-    # === 1d data for trend confirmation ===
+    # === 1d data (HTF) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate EMA(50) on 1d
+    # === 1w data (HTF) ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate ATR on 6h (for volatility filter)
+    tr_6h = np.maximum(high_6h - low_6h,
+                       np.maximum(np.abs(high_6h - np.roll(close_6h, 1)),
+                                  np.abs(low_6h - np.roll(close_6h, 1))))
+    tr_6h[0] = high_6h[0] - low_6h[0]
+    atr_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
+    atr_6h_aligned = align_htf_to_ltf(prices, df_6h, atr_6h)
+    
+    # Calculate 1d ATR (for Donchian band width)
+    tr_1d = np.maximum(high_1d - low_1d,
+                       np.maximum(np.abs(high_1d - np.roll(close_1d, 1)),
+                                  np.abs(low_1d - np.roll(close_1d, 1))))
+    tr_1d[0] = high_1d[0] - low_1d[0]
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # Calculate 1d EMA(50) for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate volume ratio on 1d
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1d = np.where(vol_ma_1d > 0, volume_1d / vol_ma_1d, 0)
-    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    # Calculate 1w EMA(20) for long-term trend
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # === 1h data for entry timing ===
-    # Volume spike detection
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 0)
+    # Calculate 6h volume ratio (current vs 20-period average)
+    vol_ma_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume_6h / np.where(vol_ma_20 > 0, vol_ma_20, 1)
+    vol_ratio_aligned = vol_ratio  # already on 6h timeframe
     
-    # RSI(7) for mean reversion
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=7, min_periods=7).mean().values
-    avg_loss = pd.Series(loss).rolling(window=7, min_periods=7).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_7 = 100 - (100 / (1 + rs))
-    
-    # Bollinger Bands
-    bb_middle = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # Calculate 6-day Donchian channels on 1d data (20 periods)
+    donchian_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_1d)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_1d)
     
     signals = np.zeros(n)
     
-    # Warmup
+    # Warmup: ensure all indicators have valid data
     warmup = 100
     
     # Track position state
@@ -81,79 +78,72 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_4h_aligned[i]) or np.isnan(ema_21_4h_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ratio_1d_aligned[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(rsi_7[i]) or
-            np.isnan(bb_upper[i]) or np.isnan(bb_lower[i])):
+        if (np.isnan(atr_6h_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_20_1w_aligned[i]) or
+            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(vol_ratio_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        price = close[i]
-        ema_21_4h_val = ema_21_4h_aligned[i]
-        ema_50_1d_val = ema_50_1d_aligned[i]
-        vol_ratio_1d_val = vol_ratio_1d_aligned[i]
-        vol_ratio_val = vol_ratio[i]
-        rsi_val = rsi_7[i]
-        bb_upper_val = bb_upper[i]
-        bb_lower_val = bb_lower[i]
-        hour = hours[i]
-        
-        # Check session: 08-20 UTC
-        in_session = (8 <= hour <= 20)
-        
-        if not in_session:
-            # Outside session: flatten position
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
+        price = close_6h[i]
+        ema_50_val = ema_50_1d_aligned[i]
+        ema_20_1w_val = ema_20_1w_aligned[i]
+        atr_6h_val = atr_6h_aligned[i]
+        atr_1d_val = atr_1d_aligned[i]
+        donchian_high = donchian_high_aligned[i]
+        donchian_low = donchian_low_aligned[i]
+        vol_ratio_val = vol_ratio_aligned[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price closes below 4h EMA(21) OR RSI > 70
-            if (price < ema_21_4h_val) or (rsi_val > 70):
+            # Exit when price closes below 1d EMA(50) OR Donchian low breaks
+            if (price < ema_50_val) or (price < donchian_low):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price closes above 4h EMA(21) OR RSI < 30
-            if (price > ema_21_4h_val) or (rsi_val < 30):
+            # Exit when price closes above 1d EMA(50) OR Donchian high breaks
+            if (price > ema_50_val) or (price > donchian_high):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: 1d EMA(50) up + volume confirmation + price near lower BB
-            if (ema_50_1d_val > ema_50_1d[max(0, i-16)] if i >= 16 else ema_50_1d_val > ema_50_1d_val) and \
-               (vol_ratio_1d_val > 1.5) and (vol_ratio_val > 1.5) and \
-               (price <= bb_lower_val * 1.02):  # Allow small tolerance
-                signals[i] = 0.20
+            # Calculate Donchian width normalized by ATR
+            donchian_width = donchian_high - donchian_low
+            norm_width = donchian_width / atr_1d_val if atr_1d_val > 0 else 0
+            
+            # LONG: Price breaks above Donchian high with volume surge AND
+            # 1d EMA(50) above 1w EMA(20) (bullish alignment) AND
+            # Donchian width not too tight (avoid chop)
+            if (price > donchian_high) and (vol_ratio_val > 1.5) and \
+               (ema_50_val > ema_20_1w_val) and (norm_width > 1.0):
+                signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: 1d EMA(50) down + volume confirmation + price near upper BB
-            elif (ema_50_1d_val < ema_50_1d[max(0, i-16)] if i >= 16 else ema_50_1d_val < ema_50_1d_val) and \
-                 (vol_ratio_1d_val > 1.5) and (vol_ratio_val > 1.5) and \
-                 (price >= bb_upper_val * 0.98):  # Allow small tolerance
-                signals[i] = -0.20
+            # SHORT: Price breaks below Donchian low with volume surge AND
+            # 1d EMA(50) below 1w EMA(20) (bearish alignment) AND
+            # Donchian width not too tight (avoid chop)
+            elif (price < donchian_low) and (vol_ratio_val > 1.5) and \
+                 (ema_50_val < ema_20_1w_val) and (norm_width > 1.0):
+                signals[i] = -0.25
                 position = -1
                 continue
         
         # Hold current position
         if position == 1:
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif position == -1:
-            signals[i] = -0.20
+            signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1h_EMA50_Volume_BB_MeanReversion"
-timeframe = "1h"
+name = "6h_DonchianBreakout_VolumeSurge_TrendAlign"
+timeframe = "6h"
 leverage = 1.0
