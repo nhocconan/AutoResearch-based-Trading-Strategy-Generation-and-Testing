@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h volume spike (>3.0x median) and 12h EMA50 trend filter
-# Uses even tighter volume threshold (3.0x) to reduce trades and avoid overtrading
-# Long when price > upper Donchian(20) AND 12h volume > 3.0x 20-period 12h volume median AND close > 12h EMA50
-# Short when price < lower Donchian(20) AND 12h volume > 3.0x 20-period 12h volume median AND close < 12h EMA50
+# Hypothesis: 4h Donchian(20) breakout with 12h volume spike (>2.5x median) and 12h EMA50 trend filter
+# Uses volume threshold (2.5x) to balance trade frequency and avoid overtrading
+# Long when price > upper Donchian(20) AND 12h volume > 2.5x 20-period 12h volume median AND close > 12h EMA50
+# Short when price < lower Donchian(20) AND 12h volume > 2.5x 20-period 12h volume median AND close < 12h EMA50
 # Exit on price returning to Donchian midpoint or ATR stoploss (2.0 ATR)
-# Position size 0.25 to limit fee drag. Target: 75-150 total trades over 4 years.
+# Position size 0.25 to limit fee drag. Target: 100-200 total trades over 4 years.
 
 def generate_signals(prices):
     n = len(prices)
@@ -85,8 +85,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 12h volume > 3.0x 20-period 12h volume median (tighter threshold)
-        vol_threshold = vol_median_20_12h_aligned[i] * 3.0
+        # Volume filter: current 12h volume > 2.5x 20-period 12h volume median
+        vol_threshold = vol_median_20_12h_aligned[i] * 2.5
         vol_confirm = vol_12h_aligned[i] > vol_threshold
         
         # Trend filter: price vs 12h EMA50
@@ -137,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_12hVolMedian3.0x_EMA50_v1"
+name = "4h_Donchian20_12hVolMedian2.5x_EMA50_v1"
 timeframe = "4h"
 leverage = 1.0
