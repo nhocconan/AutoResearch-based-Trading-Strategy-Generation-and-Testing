@@ -1,20 +1,16 @@
-#!/usr/bin/env python3
-"""
-12h_Weekly_Pivot_R1S1_Breakout_VolumeFilter
-Hypothesis: Weekly pivot levels (R1/S1) act as significant support/resistance.
-In trending regimes (weekly ADX > 25), breakouts of R1/S1 with volume confirmation capture momentum.
-In ranging regimes (weekly ADX < 25), mean reversion at R3/S3 with volume exhaustion provides counter-trend edges.
-Uses 12h for execution, weekly for pivot levels and regime filter.
-Target: 50-150 trades over 4 years (12-37/year) with disciplined entries.
-Works in both bull/bear by adapting to regime, avoiding whipsaws in low-ADX chop.
-"""
+# 4h_RSI_Trend_Confirmation
+# Hypothesis: RSI(14) combined with 4h EMA(50) trend filter provides reliable entries in both bull and bear markets.
+# Long: RSI crosses above 50 + price above EMA(50) + volume confirmation.
+# Short: RSI crosses below 50 + price below EMA(50) + volume confirmation.
+# Uses 4h timeframe for execution, 1d for volume confirmation and trend confirmation.
+# Target: 100-150 trades over 4 years (25-38/year) with disciplined entries.
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,157 +18,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h data (primary) ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    volume_12h = df_12h['volume'].values
+    # === 4h data (primary) ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    volume_4h = df_4h['volume'].values
     
-    # === Weekly data (HTF for pivot levels and ADX) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # === 1d data (HTF for volume confirmation) ===
+    df_1d = get_htf_data(prices, '1d')
+    volume_1d = df_1d['volume'].values
     
-    # === Weekly pivot levels (using previous week's OHLC) ===
-    pivot = np.zeros_like(close_1w)
-    r1 = np.zeros_like(close_1w)
-    s1 = np.zeros_like(close_1w)
-    r2 = np.zeros_like(close_1w)
-    s2 = np.zeros_like(close_1w)
-    r3 = np.zeros_like(close_1w)
-    s3 = np.zeros_like(close_1w)
+    # === RSI(14) on 4h close ===
+    delta = np.diff(close_4h)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    for i in range(1, len(close_1w)):
-        h = high_1w[i-1]
-        l = low_1w[i-1]
-        c = close_1w[i-1]
-        pivot[i] = (h + l + c) / 3.0
-        r1[i] = c + (h - l)
-        s1[i] = c - (h - l)
-        r2[i] = c + 2 * (h - l)
-        s2[i] = c - 2 * (h - l)
-        r3[i] = c + 3 * (h - l)
-        s3[i] = c - 3 * (h - l)
+    avg_gain = np.full_like(close_4h, np.nan)
+    avg_loss = np.full_like(close_4h, np.nan)
     
-    # === Weekly ADX for regime filter (14-period) ===
-    # True Range
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])
+    # Wilder's smoothing for RSI
+    period = 14
+    if len(gain) >= period:
+        avg_gain[period-1] = np.mean(gain[:period])
+        avg_loss[period-1] = np.mean(loss[:period])
+        for i in range(period, len(gain)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
     
-    # Directional Movement
-    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Wilder's smoothing
-    def wilders_smoothing(x, period):
-        result = np.full_like(x, np.nan)
-        if len(x) >= period:
-            result[period-1] = np.nanmean(x[1:period])
-            for i in range(period, len(x)):
-                result[i] = result[i-1] - (result[i-1]/period) + x[i]
-        return result
+    # === EMA(50) on 4h close ===
+    ema_50 = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    atr = wilders_smoothing(tr, 14)
-    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
-    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
+    # === Volume confirmation: 1d volume ratio ===
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_1d = volume_1d / vol_ma_20_1d
     
-    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilders_smoothing(dx, 14)
-    
-    # === 12h volume ratio for confirmation ===
-    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_12h = volume_12h / vol_ma_20_12h
-    
-    # Align all weekly data to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    vol_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio_12h)
+    # Align all HTF data to 4h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_4h, rsi)
+    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
+    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
     signals = np.zeros(n)
     
-    # Warmup: enough for weekly calculations
-    warmup = 50
+    # Warmup: enough for RSI and EMA calculations
+    warmup = 60
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ratio_12h_aligned[i])):
+        if (np.isnan(rsi_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or 
+            np.isnan(vol_ratio_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        r1_level = r1_aligned[i]
-        s1_level = s1_aligned[i]
-        r3_level = r3_aligned[i]
-        s3_level = s3_aligned[i]
-        adx_val = adx_aligned[i]
-        vol_ratio = vol_ratio_12h_aligned[i]
+        rsi_val = rsi_aligned[i]
+        ema_val = ema_50_aligned[i]
+        vol_ratio = vol_ratio_1d_aligned[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit: price closes below S1 (trend) OR reaches R3 (profit target in range)
-            if price < s1_level or (adx_val < 25 and price > r3_level):
+            # Exit: RSI crosses below 50 OR price closes below EMA(50)
+            if rsi_val < 50 or price < ema_val:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit: price closes above R1 (trend) OR reaches S3 (profit target in range)
-            if price > r1_level or (adx_val < 25 and price < s3_level):
+            # Exit: RSI crosses above 50 OR price closes above EMA(50)
+            if rsi_val > 50 or price > ema_val:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Regime-based entries
-            if adx_val > 25:  # Trending regime: breakout continuation
-                # LONG: Break above R1 with volume
-                if price > r1_level and vol_ratio > 1.5:
-                    signals[i] = 0.25
-                    position = 1
-                    continue
-                # SHORT: Break below S1 with volume
-                elif price < s1_level and vol_ratio > 1.5:
-                    signals[i] = -0.25
-                    position = -1
-                    continue
-            else:  # Ranging regime (ADX < 25): mean reversion at extremes
-                # LONG: Reversion from S3 with volume exhaustion (volume < average)
-                if price < s3_level and vol_ratio < 0.7:
-                    signals[i] = 0.25
-                    position = 1
-                    continue
-                # SHORT: Reversion from R3 with volume exhaustion
-                elif price > r3_level and vol_ratio < 0.7:
-                    signals[i] = -0.25
-                    position = -1
-                    continue
+            # LONG: RSI crosses above 50 + price above EMA(50) + volume confirmation
+            if rsi_val > 50 and price > ema_val and vol_ratio > 1.2:
+                signals[i] = 0.25
+                position = 1
+                continue
+            # SHORT: RSI crosses below 50 + price below EMA(50) + volume confirmation
+            elif rsi_val < 50 and price < ema_val and vol_ratio > 1.2:
+                signals[i] = -0.25
+                position = -1
+                continue
         
         # Hold current position
         if position == 1:
@@ -184,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Weekly_Pivot_R1S1_Breakout_VolumeFilter"
-timeframe = "12h"
+name = "4h_RSI_Trend_Confirmation"
+timeframe = "4h"
 leverage = 1.0
