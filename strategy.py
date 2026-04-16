@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h HMA(21) trend filter, volume confirmation (volume > 1.5x 20-period average), and ATR(14) stoploss (1.5*ATR).
-# Long when price breaks above Donchian upper band AND 12h HMA(21) trending up AND volume > 1.5x 20-period average.
-# Short when price breaks below Donchian lower band AND 12h HMA(21) trending down AND volume > 1.5x 20-period average.
-# Exit on ATR-based stoploss (1.5*ATR from entry) or opposite Donchian break.
-# Uses discrete position size 0.25. Designed to capture strong momentum moves with volume confirmation in trending markets, avoiding false breakouts.
-# Target: 75-200 total trades over 4 years (19-50/year) to balance edge and fee drag.
+# Hypothesis: 1h volume-weighted mean reversion with 4h trend filter and session timing.
+# Long when price < 1h VWAP AND 4h EMA50 trending up AND volume > 1.5x 20-period average during 08-20 UTC.
+# Short when price > 1h VWAP AND 4h EMA50 trending down AND volume > 1.5x 20-period average during 08-20 UTC.
+# Uses discrete position size 0.20. Targets 60-150 trades over 4 years (15-37/year) to balance edge and fee drag.
+# Works in both bull and bear markets by requiring 4h trend alignment and volume confirmation, avoiding counter-trend trades.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,36 +19,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Indicators: Donchian Channel (20) ===
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === 1h Indicators: VWAP (volume weighted average price) ===
+    typical_price = (high + low + close) / 3.0
+    vwap_numerator = pd.Series(typical_price * volume).rolling(window=20, min_periods=20).sum().values
+    vwap_denominator = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
+    vwap = vwap_numerator / vwap_denominator
     
-    # === 12h Indicators: HMA(21) for trend ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    # HMA calculation: WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-    half_len = 10  # 21/2 = 10.5 -> 10
-    sqrt_len = 4   # sqrt(21) ≈ 4.58 -> 4
-    wma_half = pd.Series(close_12h).ewm(span=half_len, adjust=False, min_periods=half_len).mean().values
-    wma_full = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    raw_hma = 2 * wma_half - wma_full
-    hma_12h = pd.Series(raw_hma).ewm(span=sqrt_len, adjust=False, min_periods=sqrt_len).mean().values
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
-    hma_up = hma_12h_aligned > np.roll(hma_12h_aligned, 1)
-    hma_down = hma_12h_aligned < np.roll(hma_12h_aligned, 1)
+    # === 4h Indicators: EMA50 for trend ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    ema_4h_up = ema_4h_aligned > np.roll(ema_4h_aligned, 1)
+    ema_4h_down = ema_4h_aligned < np.roll(ema_4h_aligned, 1)
     
-    # === 12h Indicators: Volume Spike (volume > 1.5x 20-period average) ===
-    vol_12h = df_12h['volume'].values
-    vol_ma_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
-    volume_spike = volume > (1.5 * vol_ma_12h_aligned)
-    
-    # === 4h ATR for stoploss ===
-    tr1 = pd.Series(high).diff()
-    tr2 = pd.Series(low).diff().abs()
-    tr3 = pd.Series(close).shift(1).diff().abs()
-    tr_4h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_4h_raw = pd.Series(tr_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # === 1h Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -57,71 +43,58 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 60 periods needed for HMA/ATR/Donchian)
-    warmup = 100
+    # Warmup: ensure all indicators are valid (max 50 periods needed for EMA/VWAP)
+    warmup = 50
     
-    # Track position state and entry price for stoploss
+    # Track position state
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(hma_12h_aligned[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(atr_4h_raw[i]) or
+        if (np.isnan(vwap[i]) or np.isnan(ema_4h_aligned[i]) or np.isnan(volume_spike[i]) or
             not session_filter[i]):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Current values
         price = close[i]
         vol_spike = volume_spike[i]
-        atr_val = atr_4h_raw[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price breaks below Donchian lower band
-            if price < donchian_lower[i]:
-                exit_signal = True
-            # ATR-based stoploss: 1.5*ATR below entry
-            elif price < entry_price - 1.5 * atr_val:
+            # Exit if price crosses above VWAP (mean reversion target reached)
+            if price > vwap[i]:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price breaks above Donchian upper band
-            if price > donchian_upper[i]:
-                exit_signal = True
-            # ATR-based stoploss: 1.5*ATR above entry
-            elif price > entry_price + 1.5 * atr_val:
+            # Exit if price crosses below VWAP (mean reversion target reached)
+            if price < vwap[i]:
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
-            entry_price = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Donchian upper AND HMA trending up AND volume spike
-            if price > donchian_upper[i] and hma_up[i] and vol_spike:
-                signals[i] = 0.25
+            # LONG: Price below VWAP AND 4h EMA trending up AND volume spike
+            if price < vwap[i] and ema_4h_up[i] and vol_spike:
+                signals[i] = 0.20
                 position = 1
-                entry_price = price
             
-            # SHORT: Price breaks below Donchian lower AND HMA trending down AND volume spike
-            elif price < donchian_lower[i] and hma_down[i] and vol_spike:
-                signals[i] = -0.25
+            # SHORT: Price above VWAP AND 4h EMA trending down AND volume spike
+            elif price > vwap[i] and ema_4h_down[i] and vol_spike:
+                signals[i] = -0.20
                 position = -1
-                entry_price = price
         
         else:
-            signals[i] = position * 0.25
+            signals[i] = position * 0.20
     
     return signals
 
-name = "4h_Donchian20_12hHMA21_VolumeSpike_V1"
-timeframe = "4h"
+name = "1h_VWAP_MeanReversion_4hEMA50_VolumeSpike_V1"
+timeframe = "1h"
 leverage = 1.0
