@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w HMA(21) trend filter, volume confirmation, and ATR stoploss.
-# Long when price breaks above Donchian upper band AND 1w HMA trending up AND volume > 1.5x 20-period average.
-# Short when price breaks below Donchian lower band AND 1w HMA trending down AND volume > 1.5x 20-period average.
+# Hypothesis: 12h Donchian(20) breakout with 1d HMA(21) trend filter, volume confirmation, and ATR stoploss.
+# Long when price breaks above Donchian upper band AND HMA(21) trending up AND volume > 1.5x 20-period average.
+# Short when price breaks below Donchian lower band AND HMA(21) trending down AND volume > 1.5x 20-period average.
 # Exit on opposite Donchian break or ATR-based stoploss (2*ATR from entry).
 # Uses discrete position size 0.25. Designed to capture strong momentum moves with volume confirmation in trending markets.
 # Works in both bull and bear markets by requiring trend (HMA direction) and volume confirmation, avoiding false breakouts.
-# Target: 30-100 total trades over 4 years (7-25/year) to balance edge and fee drag.
+# Target: 50-150 total trades over 4 years (12-37/year) to balance edge and fee drag for 12h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,36 +21,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Indicators: Donchian Channel (20) ===
+    # === 12h Indicators: Donchian Channel (20) ===
     donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 1w Indicators: HMA(21) for trend ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # === 1d Indicators: HMA(21) for trend ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     # HMA calculation: WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
     half_len = 10  # 21/2 rounded
     sqrt_len = 4   # sqrt(21) rounded
-    wma_half = pd.Series(close_1w).ewm(span=half_len, adjust=False, min_periods=half_len).mean().values
-    wma_full = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    wma_half = pd.Series(close_1d).ewm(span=half_len, adjust=False, min_periods=half_len).mean().values
+    wma_full = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
     raw_hma = 2 * wma_half - wma_full
-    hma_1w = pd.Series(raw_hma).ewm(span=sqrt_len, adjust=False, min_periods=sqrt_len).mean().values
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
-    hma_up = hma_1w_aligned > np.roll(hma_1w_aligned, 1)
-    hma_down = hma_1w_aligned < np.roll(hma_1w_aligned, 1)
+    hma_1d = pd.Series(raw_hma).ewm(span=sqrt_len, adjust=False, min_periods=sqrt_len).mean().values
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_up = hma_1d_aligned > np.roll(hma_1d_aligned, 1)
+    hma_down = hma_1d_aligned < np.roll(hma_1d_aligned, 1)
     
-    # === 1w Indicators: Volume Spike (volume > 1.5x 20-period average) ===
-    vol_1w = df_1w['volume'].values
-    vol_ma_1w = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
-    volume_spike = volume > (1.5 * vol_ma_1w_aligned)
+    # === 1d Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    volume_spike = volume > (1.5 * vol_ma_1d_aligned)
     
-    # === 1d ATR for stoploss ===
+    # === 12h ATR for stoploss ===
     tr1 = pd.Series(high).diff()
     tr2 = pd.Series(low).diff().abs()
     tr3 = pd.Series(close).shift(1).diff().abs()
-    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d_raw = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    tr_12h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_12h_raw = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     
@@ -62,9 +66,10 @@ def generate_signals(prices):
     entry_price = 0.0
     
     for i in range(warmup, n):
-        # Skip if any required data is NaN
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(hma_1w_aligned[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(atr_1d_raw[i])):
+        # Skip if any required data is NaN or outside session
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(hma_1d_aligned[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(atr_12h_raw[i]) or
+            not session_filter[i]):
             signals[i] = 0.0
             position = 0
             continue
@@ -72,7 +77,7 @@ def generate_signals(prices):
         # Current values
         price = close[i]
         vol_spike = volume_spike[i]
-        atr_val = atr_1d_raw[i]
+        atr_val = atr_12h_raw[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
@@ -118,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wHMA21_VolumeSpike_V1"
-timeframe = "1d"
+name = "12h_Donchian20_1dHMA21_VolumeSpike_V1"
+timeframe = "12h"
 leverage = 1.0
