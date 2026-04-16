@@ -13,104 +13,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d ATR for volatility filter ===
+    # === 1d Donchian Channel (20-period) ===
     df_1d = get_htf_data(prices, '1d')
-    tr = np.maximum(df_1d['high'] - df_1d['low'], 
-                    np.maximum(np.abs(df_1d['high'] - np.roll(df_1d['close'], 1)),
-                               np.abs(df_1d['low'] - np.roll(df_1d['close'], 1))))
-    tr[0] = df_1d['high'][0] - df_1d['low'][0]
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    donchian_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
     
-    # === 1d Bollinger Bands (20, 2.0) ===
-    sma_20 = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2.0 * std_20
-    lower_bb = sma_20 - 2.0 * std_20
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    # Align Donchian levels to 1d timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # === 1d RSI(14) ===
-    delta = pd.Series(df_1d['close']).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d.values)
+    # === Volume Confirmation (20-period volume MA) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)  # Strong volume spike
     
-    # === 6h Bollinger Band Width (20, 2.0) for regime detection ===
-    sma_20_6h = pd.Series(close).rolling(window=20, min_periods=20).mean()
-    std_20_6h = pd.Series(close).rolling(window=20, min_periods=20).std()
-    upper_bb_6h = sma_20_6h + 2.0 * std_20_6h
-    lower_bb_6h = sma_20_6h - 2.0 * std_20_6h
-    bb_width_6h = (upper_bb_6h - lower_bb_6h) / sma_20_6h
-    bb_width_6h = bb_width_6h.fillna(0).values
+    # === 1d EMA Trend Filter (34-period) ===
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     
-    # Warmup
-    warmup = 40
+    # Warmup: ensure all indicators have valid data
+    warmup = 60  # Need EMA34 and data alignment
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_1d_aligned[i]) or np.isnan(upper_bb_aligned[i]) or 
-            np.isnan(lower_bb_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or
-            np.isnan(bb_width_6h[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(ema_34_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        atr = atr_1d_aligned[i]
-        bbw = bb_width_6h[i]
+        vol_spike = volume_spike[i]
+        ema34 = ema_34_1d_aligned[i]
         
-        # Regime detection: trending when BB width is expanding
-        # Use 10-period average of BB width for smoother regime detection
-        if i >= 10:
-            bbw_ma = np.mean(bb_width_6h[i-9:i+1])
-        else:
-            bbw_ma = bbw
+        # === EXIT LOGIC: Exit when price returns to midpoint of Donchian channel ===
+        midpoint = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2
         
-        # Threshold for trending regime: BB width above median
-        # We'll use a simple threshold that adapts to volatility
-        trending_regime = bbw > np.percentile(bb_width_6h[max(0, i-100):i+1], 50) if i >= 100 else bbw > 0.01
+        if position == 1:  # Long position
+            # Exit when price crosses back below midpoint
+            if price < midpoint:
+                signals[i] = 0.0
+                position = 0
+                continue
         
-        if position == 0:  # Flat - look for new entries
-            # LONG: BB squeeze breakout in trending regime with RSI not overbought
-            if (price > upper_bb_6h[i] and 
-                trending_regime and 
-                rsi_1d_aligned[i] < 70):
+        elif position == -1:  # Short position
+            # Exit when price crosses back above midpoint
+            if price > midpoint:
+                signals[i] = 0.0
+                position = 0
+                continue
+        
+        # === ENTRY LOGIC (only when flat) ===
+        if position == 0:
+            # LONG: Price breaks above Donchian high with volume confirmation and price > EMA34
+            if price > donchian_high_aligned[i] and vol_spike and price > ema34:
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: BB squeeze breakdown in trending regime with RSI not oversold
-            elif (price < lower_bb_6h[i] and 
-                  trending_regime and 
-                  rsi_1d_aligned[i] > 30):
+            # SHORT: Price breaks below Donchian low with volume confirmation and price < EMA34
+            elif price < donchian_low_aligned[i] and vol_spike and price < ema34:
                 signals[i] = -0.25
                 position = -1
-                continue
-        
-        elif position == 1:  # Long position - exit on mean reversion signal
-            # Exit when price returns to middle of Bollinger Bands
-            middle_bb_6h = (upper_bb_6h[i] + lower_bb_6h[i]) / 2
-            if price < middle_bb_6h:
-                signals[i] = 0.0
-                position = 0
-                continue
-        
-        elif position == -1:  # Short position - exit on mean reversion signal
-            # Exit when price returns to middle of Bollinger Bands
-            middle_bb_6h = (upper_bb_6h[i] + lower_bb_6h[i]) / 2
-            if price > middle_bb_6h:
-                signals[i] = 0.0
-                position = 0
                 continue
         
         # Hold current position
@@ -123,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_BBSqueeze_TrendingRegime_RSIFilter"
-timeframe = "6h"
+name = "4h_Donchian20_1d_Volume_EMA34Filter"
+timeframe = "4h"
 leverage = 1.0
