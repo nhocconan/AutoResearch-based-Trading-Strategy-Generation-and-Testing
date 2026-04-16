@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Choppiness Index regime filter + 1d ATR breakout + volume confirmation
-# Long when: CHOP(14) < 38.2 (trending) AND price > 1d ATR breakout (high + 0.5*ATR) AND volume > 1.5x average
-# Short when: CHOP(14) < 38.2 (trending) AND price < 1d ATR breakdown (low - 0.5*ATR) AND volume > 1.5x average
-# Uses 1d ATR for breakout levels to capture true volatility breakouts
-# Choppiness filter avoids whipsaws in ranging markets
-# Volume confirmation adds conviction to breakouts
-# ATR trailing stop (2x ATR) manages risk
-# Target: 60-120 total trades over 4 years (15-30/year) to minimize fee drag
+# Hypothesis: 6h Elder Ray with 1d EMA13 trend filter and volume confirmation
+# Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+# Long when Bull Power > 0 AND Bear Power < 0 AND price > 1d EMA13 AND volume > 1.5x average
+# Short when Bear Power < 0 AND Bull Power < 0 AND price < 1d EMA13 AND volume > 1.5x average
+# ATR trailing stop (2.0x ATR) to manage risk
+# Works in bull/bear: Elder Ray shows power balance, EMA13 filters trend, volume confirms conviction
+# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and fee drag
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,53 +21,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d ATR for breakout levels ===
+    # === 1d EMA13 trend filter ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_13_aligned = align_htf_to_ltf(prices, df_1d, ema_13)
     
-    # Calculate True Range and ATR (14-period)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # === 6th EMA13 for Elder Ray calculation ===
+    ema_13_6th = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).values
+    
+    # Elder Ray components
+    bull_power = high - ema_13_6th  # High - EMA13
+    bear_power = low - ema_13_6th   # Low - EMA13
+    
+    # === 6th Volume Confirmation ===
+    vol_ma_6th = pd.Series(volume).rolling(window=4, min_periods=4).mean().values  # 4 periods of 6h = 1 day
+    
+    # === 6th ATR for trailing stop (10-period) ===
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate breakout/breakdown levels from previous day
-    breakout_level = high_1d + 0.5 * atr_1d
-    breakdown_level = low_1d - 0.5 * atr_1d
-    
-    # Align levels to 4h timeframe
-    breakout_level_aligned = align_htf_to_ltf(prices, df_1d, breakout_level)
-    breakdown_level_aligned = align_htf_to_ltf(prices, df_1d, breakdown_level)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # === 4h Choppiness Index (14-period) ===
-    # CHOP = 100 * log10(sum(TR over n) / (max(high) - min(low))) / log10(n)
-    tr4h = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr4h[0] = high[0] - low[0]
-    
-    atr_4h = pd.Series(tr4h).rolling(window=14, min_periods=14).mean().values
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Avoid division by zero
-    range_14h = max_high - min_low
-    chop = np.full_like(close, 50.0)  # default to neutral
-    mask = range_14h > 0
-    chop[mask] = 100 * np.log10(pd.Series(tr4h).rolling(window=14, min_periods=14).sum().values[mask] / range_14h[mask]) / np.log10(14)
-    
-    # === 1d Volume Confirmation (using 4h data approximation) ===
-    # 6 periods of 4h = 1 day
-    vol_ma_1d = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 30
+    warmup = 20
     
     # Track position and entry price for trailing stop
     position = 0  # 0: flat, 1: long, -1: short
@@ -78,31 +59,28 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(breakout_level_aligned[i]) or 
-            np.isnan(breakdown_level_aligned[i]) or
-            np.isnan(atr_1d_aligned[i]) or
-            np.isnan(chop[i]) or
-            np.isnan(vol_ma_1d[i])):
+        if (np.isnan(ema_13_aligned[i]) or 
+            np.isnan(bull_power[i]) or
+            np.isnan(bear_power[i]) or
+            np.isnan(vol_ma_6th[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        chop_val = chop[i]
-        breakout_val = breakout_level_aligned[i]
-        breakdown_val = breakdown_level_aligned[i]
-        atr_val = atr_1d_aligned[i]
-        vol_confirm = volume[i] > vol_ma_1d[i] * 1.5  # 1.5x average volume for confirmation
-        
-        # Only trade in trending markets (CHOP < 38.2)
-        is_trending = chop_val < 38.2
+        ema_val = ema_13_aligned[i]
+        bull = bull_power[i]
+        bear = bear_power[i]
+        vol_confirm = volume[i] > vol_ma_6th[i] * 1.5  # 1.5x average volume for confirmation
+        atr_val = atr[i]
         
         # === TRAILING STOP LOGIC ===
         if position == 1:  # Long position
             # Update highest price since entry
             if price > highest_since_entry:
                 highest_since_entry = price
-            # Trail stop: exit if price drops 2*ATR from highest
+            # Trail stop: exit if price drops 2.0*ATR from highest
             if atr_val > 0 and price < highest_since_entry - 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
@@ -113,24 +91,24 @@ def generate_signals(prices):
             # Update lowest price since entry
             if price < lowest_since_entry or lowest_since_entry == 0:
                 lowest_since_entry = price
-            # Trail stop: exit if price rises 2*ATR from lowest
+            # Trail stop: exit if price rises 2.0*ATR from lowest
             if atr_val > 0 and price > lowest_since_entry + 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 lowest_since_entry = 0.0
                 continue
         
-        # === ENTRY LOGIC (only when flat and trending) ===
-        if position == 0 and is_trending:
-            # Long when: price breaks above breakout level AND volume confirmation
-            if price > breakout_val and vol_confirm:
+        # === ENTRY LOGIC (only when flat) ===
+        if position == 0:
+            # Long when: Bull Power > 0 AND Bear Power < 0 AND price > EMA13 AND volume confirmation
+            if bull > 0 and bear < 0 and price > ema_val and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 highest_since_entry = price
                 continue
-            # Short when: price breaks below breakdown level AND volume confirmation
-            elif price < breakdown_val and vol_confirm:
+            # Short when: Bear Power < 0 AND Bull Power < 0 AND price < EMA13 AND volume confirmation
+            elif bear < 0 and bull < 0 and price < ema_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -147,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_ChopTrend_ATRBreakout_Volume1.5x_ATRTrail_2x"
-timeframe = "4h"
+name = "6h_ElderRay_1dEMA13_Volume1.5x_ATRTrail_2.0x"
+timeframe = "6h"
 leverage = 1.0
