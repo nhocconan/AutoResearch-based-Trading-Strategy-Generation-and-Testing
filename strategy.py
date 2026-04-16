@@ -1,3 +1,9 @@
+# 1d_Camarilla_R1_S1_Breakout_Volume_ATRFilter_1w
+# Hypothesis: 1d Camarilla R1/S1 breakout with volume spike and 1w ATR filter.
+# Uses 1w trend direction to filter entries: only long when 1w close > 1w EMA200, short when <.
+# Target: 20-50 trades over 4 years (5-12/year) to avoid fee drag.
+# Works in bull/bear: breakouts capture momentum, 1w EMA200 avoids counter-trend in bear.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -35,17 +41,23 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_1d_avg = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
     
-    # Align HTF data to 4h timeframe
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    atr_1d_avg_4h = align_htf_to_ltf(prices, df_1d, atr_1d_avg)
+    # === 1w EMA200 for trend filter ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Align HTF data to daily timeframe
+    r1_daily = align_htf_to_ltf(prices, df_1d, r1)
+    s1_daily = align_htf_to_ltf(prices, df_1d, s1)
+    atr_1d_avg_daily = align_htf_to_ltf(prices, df_1d, atr_1d_avg)
+    ema_200_1w_daily = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
     # === Volume spike detection (20-period volume MA) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
     # === Price distance from pivot (avoid chop) ===
-    mid_pivot = (r1_4h + s1_4h) / 2
+    mid_pivot = (r1_daily + s1_daily) / 2
     dist_from_pivot = np.abs(close - mid_pivot)
     avg_dist = pd.Series(dist_from_pivot).rolling(window=50, min_periods=50).mean().values
     too_close = dist_from_pivot < (0.5 * avg_dist)
@@ -60,45 +72,46 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
-            np.isnan(atr_1d_avg_4h[i]) or np.isnan(volume_spike[i]) or
-            np.isnan(too_close[i])):
+        if (np.isnan(r1_daily[i]) or np.isnan(s1_daily[i]) or
+            np.isnan(atr_1d_avg_daily[i]) or np.isnan(volume_spike[i]) or
+            np.isnan(too_close[i]) or np.isnan(ema_200_1w_daily[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        r1_level = r1_4h[i]
-        s1_level = s1_4h[i]
-        atr_avg = atr_1d_avg_4h[i]
+        r1_level = r1_daily[i]
+        s1_level = s1_daily[i]
+        atr_avg = atr_1d_avg_daily[i]
         vol_spike = volume_spike[i]
         too_close_to_pivot = too_close[i]
+        ema_200 = ema_200_1w_daily[i]
         
-        # === EXIT LOGIC: Exit when price moves against position or volatility drops ===
+        # === EXIT LOGIC: Exit when price moves against level or volatility drops ===
         if position == 1:  # Long position
-            # Exit when price drops below S1 or volatility drops significantly
-            if price < s1_level or atr_avg < (atr_1d_avg_4h[i-1] * 0.7 if i > 0 else atr_avg):
+            if price < s1_level or atr_avg < (atr_1d_avg_daily[i-1] * 0.7 if i > 0 else atr_avg):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price rises above R1 or volatility drops significantly
-            if price > r1_level or atr_avg < (atr_1d_avg_4h[i-1] * 0.7 if i > 0 else atr_avg):
+            if price > r1_level or atr_avg < (atr_1d_avg_daily[i-1] * 0.7 if i > 0 else atr_avg):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above R1 with volume spike, sufficient volatility, and not too close to pivot
-            if price > r1_level and vol_spike and atr_avg > 0 and not too_close_to_pivot:
+            # LONG: Price breaks above R1 with volume spike, sufficient volatility,
+            # not too close to pivot, and 1w above EMA200 (bullish trend)
+            if price > r1_level and vol_spike and atr_avg > 0 and not too_close_to_pivot and close > ema_200:
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Price breaks below S1 with volume spike, sufficient volatility, and not too close to pivot
-            elif price < s1_level and vol_spike and atr_avg > 0 and not too_close_to_pivot:
+            # SHORT: Price breaks below S1 with volume spike, sufficient volatility,
+            # not too close to pivot, and 1w below EMA200 (bearish trend)
+            elif price < s1_level and vol_spike and atr_avg > 0 and not too_close_to_pivot and close < ema_200:
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -113,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_DistFilter"
-timeframe = "4h"
+name = "1d_Camarilla_R1_S1_Breakout_Volume_ATRFilter_1w"
+timeframe = "1d"
 leverage = 1.0
