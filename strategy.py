@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 1d ADX trend filter
-# Long when price breaks above Donchian high(20) AND volume > 1.5x 1d average volume AND 1d ADX > 25
-# Short when price breaks below Donchian low(20) AND volume > 1.5x 1d average volume AND 1d ADX > 25
-# ATR trailing stop (2.0x ATR) for risk management
-# Donchian provides clear breakout levels, volume confirms conviction, ADX filters for trending markets
-# Target: 80-150 total trades over 4 years (20-38/year) to balance opportunity and fee drag
+# Hypothesis: 6h Williams Alligator + 1d Williams Fractal breakout with volume confirmation
+# Long when price > Alligator Jaw (teeth > lips) AND bullish fractal confirmed AND volume > 1.5x 6h average
+# Short when price < Alligator Jaw (teeth < lips) AND bearish fractal confirmed AND volume > 1.5x 6h average
+# Williams Alligator (13,8,5 SMAs with future shifts) acts as dynamic trend filter
+# Williams Fractals provide reversal points with built-in confirmation (requires 2 bars after)
+# Volume conviction filters false breakouts
+# Target: 60-120 total trades over 4 years (15-30/year) to balance opportunity and fee drag
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,159 +21,144 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Donchian channels (20-period) ===
+    # === 1d Williams Fractals (requires 2-bar confirmation) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate Donchian channels
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Williams Fractal calculation
+    n1 = len(high_1d)
+    bearish_fractal = np.zeros(n1, dtype=bool)
+    bullish_fractal = np.zeros(n1, dtype=bool)
     
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    for i in range(2, n1 - 2):
+        # Bearish fractal: high[i-2] < high[i-1] < high[i] > high[i+1] > high[i+2]
+        if (high_1d[i-2] < high_1d[i-1] and 
+            high_1d[i-1] < high_1d[i] and 
+            high_1d[i] > high_1d[i+1] and 
+            high_1d[i+1] > high_1d[i+2]):
+            bearish_fractal[i] = True
+        
+        # Bullish fractal: low[i-2] > low[i-1] > low[i] < low[i+1] < low[i+2]
+        if (low_1d[i-2] > low_1d[i-1] and 
+            low_1d[i-1] > low_1d[i] and 
+            low_1d[i] < low_1d[i+1] and 
+            low_1d[i+1] < low_1d[i+2]):
+            bullish_fractal[i] = True
     
-    # === 1d Volume Confirmation (average volume) ===
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values  # 20 periods average
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Convert to float arrays for alignment (1.0 where fractal exists, 0.0 otherwise)
+    bearish_fractal_float = bearish_fractal.astype(float)
+    bullish_fractal_float = bullish_fractal.astype(float)
     
-    # === 1d ADX trend filter (14-period) ===
-    high_1d_arr = df_1d['high'].values
-    low_1d_arr = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
+    # Williams Fractals need 2 extra bars for confirmation (already calculated above)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal_float, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal_float, additional_delay_bars=2)
     
-    # True Range
-    tr1 = high_1d_arr - low_1d_arr
-    tr2 = np.abs(high_1d_arr - np.roll(close_1d_arr, 1))
-    tr3 = np.abs(low_1d_arr - np.roll(close_1d_arr, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # === 6h Williams Alligator (Jaw=13, Teeth=8, Lips=5 SMAs) ===
+    df_6h = get_htf_data(prices, '6h')
+    close_6h = df_6h['close'].values
     
-    # Directional Movement
-    dm_plus = np.where((high_1d_arr - np.roll(high_1d_arr, 1)) > (np.roll(low_1d_arr, 1) - low_1d_arr), 
-                       np.maximum(high_1d_arr - np.roll(high_1d_arr, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d_arr, 1) - low_1d_arr) > (high_1d_arr - np.roll(high_1d_arr, 1)), 
-                        np.maximum(np.roll(low_1d_arr, 1) - low_1d_arr, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Smoothed Moving Average (SMMA) approximation using Wilder's smoothing
+    def smma(arr, period):
+        if len(arr) < period:
+            return np.full(len(arr), np.nan)
+        result = np.full(len(arr), np.nan)
+        # First value is simple average
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (Prev SMMA * (period-1) + Current Price) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Smoothed values
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
-    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    jaw = smma(close_6h, 13)  # Blue line
+    teeth = smma(close_6h, 8)  # Red line
+    lips = smma(close_6h, 5)   # Green line
     
-    # DI values
-    di_plus = 100 * dm_plus_14 / tr14
-    di_minus = 100 * dm_minus_14 / tr14
+    jaw_aligned = align_htf_to_ltf(prices, df_6h, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_6h, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_6h, lips)
     
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    dx[np.isnan(dx)] = 0
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # === 4h ATR for trailing stop (14-period) ===
-    df_4h = get_htf_data(prices, '4h')
-    high_4h_arr = df_4h['high'].values
-    low_4h_arr = df_4h['low'].values
-    close_4h_arr = df_4h['close'].values
-    
-    tr1_4h = high_4h_arr - low_4h_arr
-    tr2_4h = np.abs(high_4h_arr - np.roll(close_4h_arr, 1))
-    tr3_4h = np.abs(low_4h_arr - np.roll(close_4h_arr, 1))
-    tr2_4h[0] = tr1_4h[0]
-    tr3_4h[0] = tr1_4h[0]
-    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
-    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    # === 6h Volume Confirmation ===
+    volume_6h = df_6h['volume'].values
+    vol_ma_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_6h_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_6h)
     
     signals = np.zeros(n)
     
-    # Warmup
+    # Warmup: need enough data for Alligator (max period 13) + fractal lookback
     warmup = 50
     
-    # Track position and entry price for trailing stop
+    # Track position
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(vol_ma_1d_aligned[i]) or
-            np.isnan(adx_aligned[i]) or
-            np.isnan(atr_4h_aligned[i])):
+        if (np.isnan(jaw_aligned[i]) or 
+            np.isnan(teeth_aligned[i]) or
+            np.isnan(lips_aligned[i]) or
+            np.isnan(bearish_fractal_aligned[i]) or
+            np.isnan(bullish_fractal_aligned[i]) or
+            np.isnan(vol_ma_6h_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        donch_high = donchian_high_aligned[i]
-        donch_low = donchian_low_aligned[i]
-        vol_ma_val = vol_ma_1d_aligned[i]
-        adx_val = adx_aligned[i]
-        atr_val = atr_4h_aligned[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        bear_fract = bearish_fractal_aligned[i]
+        bull_fract = bullish_fractal_aligned[i]
+        vol_ma_val = vol_ma_6h_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x 1d average volume
+        # Williams Alligator conditions
+        # Alligator sleeping: all lines intertwined (no clear trend)
+        # Alligator awake: jaws, teeth, lips are ordered
+        # For uptrend: Lips > Teeth > Jaw (green > red > blue)
+        # For downtrend: Jaw > Teeth > Lips (blue > red > green)
+        alligator_up = lips_val > teeth_val and teeth_val > jaw_val
+        alligator_down = jaw_val > teeth_val and teeth_val > lips_val
+        
+        # Volume confirmation: current volume > 1.5x 6h average volume
         vol_confirm = volume[i] > vol_ma_val * 1.5
         
-        # ADX filter: trending market (ADX > 25)
-        trend_filter = adx_val > 25
-        
-        # === TRAILING STOP LOGIC ===
-        if position == 1:  # Long position
-            # Update highest price since entry
-            if price > highest_since_entry:
-                highest_since_entry = price
-            # Trail stop: exit if price drops 2.0*ATR from highest
-            if atr_val > 0 and price < highest_since_entry - 2.0 * atr_val:
-                signals[i] = 0.0
-                position = 0
-                highest_since_entry = 0.0
-                continue
-        
-        elif position == -1:  # Short position
-            # Update lowest price since entry
-            if price < lowest_since_entry or lowest_since_entry == 0:
-                lowest_since_entry = price
-            # Trail stop: exit if price rises 2.0*ATR from lowest
-            if atr_val > 0 and price > lowest_since_entry + 2.0 * atr_val:
-                signals[i] = 0.0
-                position = 0
-                lowest_since_entry = 0.0
-                continue
-        
-        # === ENTRY LOGIC (only when flat) ===
+        # === ENTRY LOGIC ===
         if position == 0:
-            # Long when: price breaks above Donchian high AND volume confirmation AND trend filter
-            if price > donch_high and vol_confirm and trend_filter:
+            # Long when: Alligator bullish (Lips>Teeth>Jaw) AND bullish fractal AND volume confirmation
+            if alligator_up and bull_fract > 0.5 and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-                highest_since_entry = price
                 continue
-            # Short when: price breaks below Donchian low AND volume confirmation AND trend filter
-            elif price < donch_low and vol_confirm and trend_filter:
+            # Short when: Alligator bearish (Jaw>Teeth>Lips) AND bearish fractal AND volume confirmation
+            elif alligator_down and bear_fract > 0.5 and vol_confirm:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
-                lowest_since_entry = price
                 continue
         
-        # Hold current position
-        if position == 1:
-            signals[i] = 0.25
+        # === EXIT LOGIC: Reverse when Alligator changes direction ===
+        elif position == 1:
+            # Exit long when Alligator turns bearish
+            if alligator_down:
+                signals[i] = 0.0
+                position = 0
+                continue
+            else:
+                signals[i] = 0.25
+        
         elif position == -1:
-            signals[i] = -0.25
+            # Exit short when Alligator turns bullish
+            if alligator_up:
+                signals[i] = 0.0
+                position = 0
+                continue
+            else:
+                signals[i] = -0.25
+        
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian20_1dVolume1.5x_1dADX25_4hATRTrail_2.0x"
-timeframe = "4h"
+name = "6h_WilliamsAlligator_Fractal_Volume1.5x"
+timeframe = "6h"
 leverage = 1.0
