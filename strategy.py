@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d ATR filter and volume confirmation
-# Long when price breaks above 20-period Donchian high + ATR(1d) > 20-period mean ATR + volume > 1.5x 20-period volume SMA
-# Short when price breaks below 20-period Donchian low + ATR(1d) > 20-period mean ATR + volume > 1.5x 20-period volume SMA
-# Uses 1d ATR for volatility regime filter (only trade when volatility is elevated)
-# Donchian breakouts capture strong trends; ATR filter avoids low-volatility false breakouts
-# Volume confirmation reduces false signals
-# Discrete position sizing (0.25) to control drawdown and minimize fee drag
-# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ATR-based trend filter
+# Long when price breaks above 20-period Donchian high + volume > 1.5x 20-period avg + ATR(14) > ATR(50) (trending volatility)
+# Short when price breaks below 20-period Donchian low + volume > 1.5x 20-period avg + ATR(14) > ATR(50)
+# Uses discrete position sizing (0.25) to control drawdown and minimize fee drag
+# Target: 75-150 total trades over 4 years (19-37/year) to avoid fee drag
+# Donchian breakouts work in both bull and bear markets; volatility filter ensures we only trade when trends have strength
+# Volume confirmation reduces false breakouts
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,49 +25,34 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d HTF data once before loop for ATR calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
+    # === Primary Indicators: Donchian Channels (20-period) ===
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # === 1d Indicator: ATR (20-period) and its mean for volatility regime ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === Volume SMA for confirmation (20-period) ===
+    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # first bar: no previous close
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])  # first bar: use same bar close
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])   # first bar: use same bar close
+    # === ATR-based Trend Filter: ATR(14) > ATR(50) indicates increasing volatility/trend strength ===
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0  # first period has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # ATR(20)
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
-    
-    # 20-period mean ATR for volatility regime filter
-    mean_atr = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
-    
-    # Align ATR and mean ATR to 12h timeframe
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
-    mean_atr_aligned = align_htf_to_ltf(prices, df_1d, mean_atr)
-    
-    # === 12h Indicators: Donchian Channel (20-period) ===
-    # Donchian high: highest high over 20 periods
-    # Donchian low: lowest low over 20 periods
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume SMA for confirmation (20-period)
-    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    volatility_filter = atr_14 > atr_50  # trending when short-term ATR > long-term ATR
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    # Need Donchian(20) + volume(20) + ATR(20) + mean ATR(20) + buffer
-    warmup = 40
+    # Need Donchian(20) + volume(20) + ATR(50) + buffer
+    warmup = 60
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -78,31 +62,27 @@ def generate_signals(prices):
         
         # Skip if any required data is NaN
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(atr_aligned[i]) or np.isnan(mean_atr_aligned[i]) or
-            np.isnan(vol_sma_20[i])):
+            np.isnan(vol_sma_20[i]) or np.isnan(atr_14[i]) or np.isnan(atr_50[i])):
             signals[i] = 0.0
             continue
-        
-        # Volatility filter: current ATR > mean ATR (elevated volatility regime)
-        vol_regime = atr_aligned[i] > mean_atr_aligned[i]
         
         # Volume filter: current volume > 1.5x 20-period volume SMA
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above Donchian high (20-period breakout)
-        # 2. Elevated volatility regime (ATR > mean ATR)
-        # 3. Volume confirmation
+        # 1. Price breaks above Donchian high (20-period)
+        # 2. Volume confirmation
+        # 3. Volatility filter (ATR14 > ATR50) indicates trending market
         if (close[i] > donchian_high[i]) and \
-           vol_regime and vol_confirm:
+           vol_confirm and volatility_filter[i]:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below Donchian low (20-period breakout)
-        # 2. Elevated volatility regime (ATR > mean ATR)
-        # 3. Volume confirmation
+        # 1. Price breaks below Donchian low (20-period)
+        # 2. Volume confirmation
+        # 3. Volatility filter (ATR14 > ATR50) indicates trending market
         elif (close[i] < donchian_low[i]) and \
-             vol_regime and vol_confirm:
+             vol_confirm and volatility_filter[i]:
             signals[i] = -0.25
         
         else:
@@ -110,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dATR_Volume_Filter_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Volume_ATRTrend_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
