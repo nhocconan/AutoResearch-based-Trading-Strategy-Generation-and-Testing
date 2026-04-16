@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Daily data (HTF for key levels) ===
+    # === Daily data for pivot calculation ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -28,49 +28,44 @@ def generate_signals(prices):
     prev_high_1d[0] = high_1d[0]
     prev_low_1d[0] = low_1d[0]
     
-    # === Daily Pivot Points (Standard) ===
+    # === Daily Pivot Points ===
     pivot_point = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
-    
-    # Calculate Fibonacci-based levels: R1 at 0.382, S1 at 0.382
     prev_range = prev_high_1d - prev_low_1d
+    
+    # === Resistance/Support Levels ===
     r1 = pivot_point + prev_range * 0.382
     s1 = pivot_point - prev_range * 0.382
-    
-    # === Additional levels for exit: R2 at 0.618, S2 at 0.618 ===
     r2 = pivot_point + prev_range * 0.618
     s2 = pivot_point - prev_range * 0.618
     
-    # Align all levels to 4h timeframe
+    # Align levels to 1h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
+    # === Volume Confirmation (1h) ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma_20
+    
     # === ADX Trend Filter (Daily) ===
-    # Calculate True Range
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    # First TR uses high-low only (no look-ahead)
     tr[0] = high_1d[0] - low_1d[0]
     
-    # Directional Movement
     dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
                        np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
     dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
                         np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    # First period DM is zero (no look-ahead)
     dm_plus[0] = 0
     dm_minus[0] = 0
     
-    # Smooth with Wilder's smoothing (equivalent to EMA with alpha=1/period)
     def wilders_smooth(data, period):
         result = np.full_like(data, np.nan)
         if len(data) >= period:
-            # First value is simple average
             result[period-1] = np.mean(data[:period])
-            # Subsequent values: Wilder's smoothing
             for i in range(period, len(data)):
                 result[i] = (result[i-1] * (period-1) + data[i]) / period
         return result
@@ -80,45 +75,41 @@ def generate_signals(prices):
     dm_plus14 = wilders_smooth(dm_plus, period)
     dm_minus14 = wilders_smooth(dm_minus, period)
     
-    # Avoid division by zero
-    dm_plus14_safe = np.where(tr14 == 0, 1, dm_plus14)
-    dm_minus14_safe = np.where(tr14 == 0, 1, dm_minus14)
     tr14_safe = np.where(tr14 == 0, 1, tr14)
-    
     di_plus = 100 * dm_plus14 / tr14_safe
     di_minus = 100 * dm_minus14 / tr14_safe
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    # First DX value may be NaN if di_plus+di_minus=0
     adx = wilders_smooth(dx, period)
-    
-    # Align ADX to 4h
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # === Volume Confirmation (4h) ===
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma_20
-    
-    # === ATR for dynamic stop (4h) ===
-    tr_4h = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr_4h[0] = high[0] - low[0]
-    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
+    # === Session Filter: 08-20 UTC ===
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
-    
-    # Warmup: enough for ADX calculation (14+14+14=42) plus buffer
     warmup = 50
     
-    # Track position and entry price for stop management
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     entry_price = 0.0
     
     for i in range(warmup, n):
-        # Skip if any data is NaN
+        if not in_session[i]:
+            if position == 1:
+                signals[i] = 0.0
+                position = 0
+            elif position == -1:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ratio[i]) or 
-            np.isnan(atr_4h[i])):
-            signals[i] = 0.0
-            position = 0
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ratio[i])):
+            if position == 1:
+                signals[i] = 0.0
+                position = 0
+            elif position == -1:
+                signals[i] = 0.0
+                position = 0
             continue
         
         price = close[i]
@@ -128,51 +119,38 @@ def generate_signals(prices):
         s2_val = s2_aligned[i]
         adx_val = adx_aligned[i]
         vol_ratio_val = vol_ratio[i]
-        atr_val = atr_4h[i]
         
-        # === EXIT LOGIC ===
-        if position == 1:  # Long position
-            # Exit conditions: stop at S1, target at R2, or adverse 2x ATR move
-            if price < s1_val or price > r2_val or price < entry_price - 2.0 * atr_val:
+        # Exit logic
+        if position == 1:
+            if price < s1_val or price > r2_val:
                 signals[i] = 0.0
                 position = 0
-                continue
-        
-        elif position == -1:  # Short position
-            # Exit conditions: stop at R1, target at S2, or adverse 2x ATR move
-            if price > r1_val or price < s2_val or price > entry_price + 2.0 * atr_val:
+            else:
+                signals[i] = 0.20
+        elif position == -1:
+            if price > r1_val or price < s2_val:
                 signals[i] = 0.0
                 position = 0
-                continue
-        
-        # === ENTRY LOGIC (only when flat) ===
-        if position == 0:
-            # Strong trend filter: ADX > 25
-            if adx_val > 25:
-                # LONG: Price breaks above R1 with volume confirmation
-                if price > r1_val and vol_ratio_val > 2.0:
-                    signals[i] = 0.25
+            else:
+                signals[i] = -0.20
+        else:
+            # Entry logic
+            if adx_val > 25 and vol_ratio_val > 2.0:
+                if price > r1_val:
+                    signals[i] = 0.20
                     position = 1
                     entry_price = price
-                    continue
-                
-                # SHORT: Price breaks below S1 with volume confirmation
-                elif price < s1_val and vol_ratio_val > 2.0:
-                    signals[i] = -0.25
+                elif price < s1_val:
+                    signals[i] = -0.20
                     position = -1
                     entry_price = price
-                    continue
-        
-        # Hold current position
-        if position == 1:
-            signals[i] = 0.25
-        elif position == -1:
-            signals[i] = -0.25
-        else:
-            signals[i] = 0.0
+                else:
+                    signals[i] = 0.0
+            else:
+                signals[i] = 0.0
     
     return signals
 
-name = "4h_FibPivot_Volume_ADX_Filter"
-timeframe = "4h"
+name = "1h_FibPivot_Volume_ADX_Session"
+timeframe = "1h"
 leverage = 1.0
