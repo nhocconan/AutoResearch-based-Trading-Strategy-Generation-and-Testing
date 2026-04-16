@@ -34,7 +34,7 @@ def generate_signals(prices):
     r1 = pivot_point + prev_range * 0.382
     s1 = pivot_point - prev_range * 0.382
     
-    # Align to 6h timeframe
+    # Align to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -42,7 +42,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === Volume confirmation (6h) ===
+    # === Volume confirmation (4h) ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma_20
     
@@ -107,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_FibPivot_R1_S1_EMA34_VolumeSpike"
-timeframe = "6h"
+name = "4h_FibPivot_R1_S1_EMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
