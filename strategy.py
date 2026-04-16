@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d volume spike and 1d ADX trend filter.
-# Long when price breaks above 6h Donchian upper(20) AND 1d volume > 1.5x 20-period average AND 1d ADX > 20.
-# Short when price breaks below 6h Donchian lower(20) AND 1d volume > 1.5x 20-period average AND 1d ADX > 20.
-# Exit when price returns to 6h Donchian midpoint.
+# Hypothesis: 12h Camarilla pivot (R1/S1) breakout with 1d volume spike and 1d ADX trend filter.
+# Long when price breaks above 12h Camarilla R1 AND 1d volume > 1.5x 20-period average AND 1d ADX > 20.
+# Short when price breaks below 12h Camarilla S1 AND 1d volume > 1.5x 20-period average AND 1d ADX > 20.
+# Exit when price returns to 12h Camarilla pivot point (PP).
 # Uses discrete position size 0.25. Volume confirmation reduces false signals, 1d ADX ensures trending regime.
-# Target: 80-160 total trades over 4 years (20-40/year) to balance opportunity and fee drag.
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,23 +20,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 6h data once before loop for Donchian calculation
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
+    # Get 12h data once before loop for Camarilla calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # === 6h Indicators: Donchian channels (20-period) ===
-    upper_20 = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
-    middle_20 = (upper_20 + lower_20) / 2.0
+    # === 12h Indicators: Camarilla pivot levels (using previous bar) ===
+    # PP = (H + L + C) / 3
+    # R1 = PP + (H - L) * 1.1 / 12
+    # S1 = PP - (H - L) * 1.1 / 12
+    pp = (high_12h + low_12h + close_12h) / 3.0
+    r1 = pp + (high_12h - low_12h) * 1.1 / 12.0
+    s1 = pp - (high_12h - low_12h) * 1.1 / 12.0
     
-    # Align Donchian levels to 6h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_6h, upper_20)
-    lower_aligned = align_htf_to_ltf(prices, df_6h, lower_20)
-    middle_aligned = align_htf_to_ltf(prices, df_6h, middle_20)
+    # Align Camarilla levels to 12h timeframe (using previous bar's values)
+    pp_aligned = align_htf_to_ltf(prices, df_12h, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
     
     # Get 1d data once before loop for volume and ADX filters
     df_1d = get_htf_data(prices, '1d')
@@ -98,7 +102,7 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(middle_aligned[i]) or 
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
             np.isnan(vol_ma_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             position = 0
@@ -106,9 +110,9 @@ def generate_signals(prices):
             continue
         
         # Current values
-        upper_val = upper_aligned[i]
-        lower_val = lower_aligned[i]
-        middle_val = middle_aligned[i]
+        pp_val = pp_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
         vol_ma_val = vol_ma_aligned[i]
         adx_val = adx_aligned[i]
         price = close[i]
@@ -124,13 +128,13 @@ def generate_signals(prices):
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price returns to Donchian middle
-            if price <= middle_val:
+            # Exit if price returns to pivot point (PP)
+            if price <= pp_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price returns to Donchian middle
-            if price >= middle_val:
+            # Exit if price returns to pivot point (PP)
+            if price >= pp_val:
                 exit_signal = True
         
         if exit_signal:
@@ -141,14 +145,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: price breaks above Donchian upper with volume and trend confirmation
-            if price > upper_val and vol_filter and trend_filter:
+            # LONG: price breaks above Camarilla R1 with volume and trend confirmation
+            if price > r1_val and vol_filter and trend_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: price breaks below Donchian lower with volume and trend confirmation
-            elif price < lower_val and vol_filter and trend_filter:
+            # SHORT: price breaks below Camarilla S1 with volume and trend confirmation
+            elif price < s1_val and vol_filter and trend_filter:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -158,6 +162,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_1dVolumeSpike_1dADXTrend_V1"
-timeframe = "6h"
+name = "12h_CamarillaR1S1_1dVolumeSpike_1dADXTrend_V1"
+timeframe = "12h"
 leverage = 1.0
