@@ -13,7 +13,11 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Daily data (HTF for key levels) ===
+    # === Weekly data (HTF for trend filter) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # === Daily data (HTF for Pivot) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -23,42 +27,37 @@ def generate_signals(prices):
     prev_close_1d = np.roll(close_1d, 1)
     prev_high_1d = np.roll(high_1d, 1)
     prev_low_1d = np.roll(low_1d, 1)
-    # First day uses current day values (no look-ahead)
     prev_close_1d[0] = close_1d[0]
     prev_high_1d[0] = high_1d[0]
     prev_low_1d[0] = low_1d[0]
     
-    # === Daily Pivot Points (Standard) ===
+    # === Daily Pivot Points ===
     pivot_point = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
-    
-    # Calculate Fibonacci-based levels: R1 at 0.382, S1 at 0.382
     prev_range = prev_high_1d - prev_low_1d
     r1 = pivot_point + prev_range * 0.382
     s1 = pivot_point - prev_range * 0.382
-    
-    # === Additional levels for exit: R2 at 0.618, S2 at 0.618 ===
     r2 = pivot_point + prev_range * 0.618
     s2 = pivot_point - prev_range * 0.618
     
-    # Align all levels to 6h timeframe
+    # Align daily levels to 12h
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
-    # === Volume Confirmation (6h) ===
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma_20
+    # === Weekly EMA Trend Filter ===
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # === ATR for dynamic stop (6h) ===
-    tr_6h = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr_6h[0] = high[0] - low[0]
-    atr_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
+    # === ATR for dynamic stop (12h) ===
+    tr_12h = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr_12h[0] = high[0] - low[0]
+    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     
-    # Warmup: enough for ATR calculation (14) plus buffer
-    warmup = 20
+    # Warmup: enough for weekly EMA (50) and daily pivot
+    warmup = 60
     
     # Track position and entry price for stop management
     position = 0  # 0: flat, 1: long, -1: short
@@ -67,7 +66,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # Skip if any data is NaN
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(vol_ratio[i]) or np.isnan(atr_6h[i])):
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr_12h[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -77,8 +76,8 @@ def generate_signals(prices):
         s1_val = s1_aligned[i]
         r2_val = r2_aligned[i]
         s2_val = s2_aligned[i]
-        vol_ratio_val = vol_ratio[i]
-        atr_val = atr_6h[i]
+        ema_50_val = ema_50_1w_aligned[i]
+        atr_val = atr_12h[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
@@ -97,15 +96,15 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above R1 with volume confirmation
-            if price > r1_val and vol_ratio_val > 2.0:
+            # LONG: Price above weekly EMA50 and breaks above R1
+            if price > ema_50_val and price > r1_val:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 continue
             
-            # SHORT: Price breaks below S1 with volume confirmation
-            elif price < s1_val and vol_ratio_val > 2.0:
+            # SHORT: Price below weekly EMA50 and breaks below S1
+            elif price < ema_50_val and price < s1_val:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -121,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_FibPivot_R1_S1_Breakout_Volume"
-timeframe = "6h"
+name = "12h_WeeklyEMA50_Pivot_R1S1_Breakout"
+timeframe = "12h"
 leverage = 1.0
