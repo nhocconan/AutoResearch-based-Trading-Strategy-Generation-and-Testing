@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ATR-based volume filter (volume > 1.5x ATR-scaled median) and 1w EMA trend filter (price > EMA50)
-# Long when price > Donchian upper band AND 1d volume > 1.5x (ATR(14) * close median) AND weekly close > weekly EMA50
-# Short when price < Donchian lower band AND 1d volume > 1.5x (ATR(14) * close median) AND weekly close < weekly EMA50
+# Hypothesis: 1d Donchian(20) breakout with 1w ATR-based volume filter (volume > 1.3x ATR-scaled median) and 1w EMA trend filter (price > EMA50)
+# Long when price > Donchian upper band AND 1w volume > 1.3x (ATR(14) * close median) AND weekly close > weekly EMA50
+# Short when price < Donchian lower band AND 1w volume > 1.3x (ATR(14) * close median) AND weekly close < weekly EMA50
 # Exit when price crosses Donchian middle band
-# Uses discrete position size 0.25. Target: 75-200 total trades over 4 years.
+# Uses discrete position size 0.25. Target: 30-100 total trades over 4 years.
 # Combines price channel breakout with volatility-adjusted volume confirmation and weekly trend filter for robustness in both bull and bear markets.
 
 def generate_signals(prices):
@@ -20,12 +20,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once before loop for Donchian levels and volume filter
+    # Get 1d data once before loop for Donchian levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d Indicators: Donchian channels (20-period) and ATR-scaled volume median ===
+    # === 1d Indicators: Donchian channels (20-period) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -47,13 +47,14 @@ def generate_signals(prices):
     close_median_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).median().values
     vol_threshold_base = atr_1d * close_median_20_1d  # ATR-scaled base threshold
     
-    # Get weekly data for trend filter (EMA50)
+    # Get weekly data for trend filter and volume confirmation
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
     
-    # === Weekly Indicators: EMA50 trend filter ===
+    # === Weekly Indicators: EMA50 trend filter and volume ===
     close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Align all indicators to primary timeframe
@@ -62,6 +63,7 @@ def generate_signals(prices):
     donchian_middle_aligned = align_htf_to_ltf(prices, df_1d, donchian_middle_20)
     vol_threshold_base_aligned = align_htf_to_ltf(prices, df_1d, vol_threshold_base)
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    volume_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_1w)
     
     signals = np.zeros(n)
     
@@ -76,7 +78,7 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
             np.isnan(donchian_middle_aligned[i]) or np.isnan(vol_threshold_base_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i])):
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -86,19 +88,15 @@ def generate_signals(prices):
         middle = donchian_middle_aligned[i]
         vol_threshold_base_val = vol_threshold_base_aligned[i]
         weekly_ema50 = ema_50_1w_aligned[i]
+        weekly_volume = volume_1w_aligned[i]
         
-        # Current 1d volume (aligned)
-        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-        if np.isnan(vol_1d_aligned[i]):
-            signals[i] = 0.0
-            continue
-            
-        # Volume filter: current 1d volume > 1.5x ATR-scaled base threshold
-        vol_threshold = vol_threshold_base_val * 1.5
-        vol_confirm = vol_1d_aligned[i] > vol_threshold
+        # Volume filter: current 1w volume > 1.3x ATR-scaled base threshold
+        vol_threshold = vol_threshold_base_val * 1.3
+        vol_confirm = weekly_volume > vol_threshold
         
         # Weekly trend filter: price above/below EMA50 indicates trend direction
-        weekly_trend_up = close_1d[-1] > weekly_ema50 if len(close_1d) > 0 else False  # placeholder, will use aligned weekly close below
+        weekly_trend_up = weekly_close_aligned[i] > weekly_ema50
+        weekly_trend_down = weekly_close_aligned[i] < weekly_ema50
         # Get aligned weekly close for proper comparison
         df_1w_close = df_1w['close'].values
         weekly_close_aligned = align_htf_to_ltf(prices, df_1w, df_1w_close)
@@ -146,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dATR_VolumeSpike1.5x_1wEMA50_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wATR_VolumeSpike1.3x_1wEMA50_v1"
+timeframe = "1d"
 leverage = 1.0
