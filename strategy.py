@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and 4h volume confirmation.
-# Long when price breaks above Donchian upper band AND price > 1d EMA50 AND volume > 1.8x 20-bar average.
-# Short when price breaks below Donchian lower band AND price < 1d EMA50 AND volume > 1.8x 20-bar average.
-# Exit when price reverts to Donchian midpoint (mean reversion exit).
-# Uses discrete position size 0.25. Donchian channels provide clear breakout levels with built-in volatility adjustment.
+# Hypothesis: 12h Donchian channel breakout (20) with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above upper Donchian(20) AND price > 1d EMA50 AND volume > 1.8x 20-bar average.
+# Short when price breaks below lower Donchian(20) AND price < 1d EMA50 AND volume > 1.8x 20-bar average.
+# Exit when price reverts to the opposite Donchian band (long exits at lower band, short exits at upper band).
+# Uses discrete position size 0.25. Donchian captures volatility-based breakouts, effective in both trending and ranging markets with volume confirmation.
 # 1d EMA50 ensures we trade with higher timeframe trend. Volume confirms breakout strength.
-# Target: 80-160 trades over 4 years (20-40/year) to avoid fee drag while capturing strong trends.
+# Target: 80-160 trades over 4 years (20-40/year) to stay within fee drag limits.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,15 +21,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Indicators: Donchian Channel (20) ===
-    # Upper band: highest high over 20 periods
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    # Lower band: lowest low over 20 periods
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    # Middle band: average of upper and lower
-    middle_band = (highest_high + lowest_low) / 2.0
+    # === 12h Indicators: Donchian Channel (20) ===
+    donchian_window = 20
+    upper_dc = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    lower_dc = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
-    # === 4h Indicators: Volume MA (20) ===
+    # === 12h Indicators: Volume MA (20) ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Get 1d data once before loop for EMA50 filter
@@ -54,7 +51,7 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+        if (np.isnan(upper_dc[i]) or np.isnan(lower_dc[i]) or 
             np.isnan(vol_ma_20[i]) or np.isnan(ema50_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
@@ -62,9 +59,8 @@ def generate_signals(prices):
             continue
         
         # Current values
-        upper = highest_high[i]
-        lower = lowest_low[i]
-        middle = middle_band[i]
+        upper_val = upper_dc[i]
+        lower_val = lower_dc[i]
         vol_ma_val = vol_ma_20[i]
         ema50_val = ema50_1d_aligned[i]
         price = close[i]
@@ -77,13 +73,13 @@ def generate_signals(prices):
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price reverts to middle band (mean reversion)
-            if price <= middle:
+            # Exit if price breaks below lower Donchian band
+            if price < lower_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price reverts to middle band (mean reversion)
-            if price >= middle:
+            # Exit if price breaks above upper Donchian band
+            if price > upper_val:
                 exit_signal = True
         
         if exit_signal:
@@ -94,14 +90,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above upper band AND price > 1d EMA50 AND volume confirmation
-            if price > upper and price > ema50_val and vol_filter:
+            # LONG: Price breaks above upper Donchian AND price > 1d EMA50 AND volume confirmation
+            if price > upper_val and price > ema50_val and vol_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: Price breaks below lower band AND price < 1d EMA50 AND volume confirmation
-            elif price < lower and price < ema50_val and vol_filter:
+            # SHORT: Price breaks below lower Donchian AND price < 1d EMA50 AND volume confirmation
+            elif price < lower_val and price < ema50_val and vol_filter:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -111,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA50_VolumeFilter_V1"
-timeframe = "4h"
+name = "12h_Donchian20_1dEMA50_VolumeFilter_V1"
+timeframe = "12h"
 leverage = 1.0
