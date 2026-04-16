@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R (14-period) with 1w EMA(50) trend filter and 1d volume spike.
-# Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-# Long when Williams %R < -80 (oversold) AND price > 1w EMA(50) (uptrend) AND volume > 2.0x 20-period 1d average
-# Short when Williams %R > -20 (overbought) AND price < 1w EMA(50) (downtrend) AND volume > 2.0x 20-period 1d average
-# Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts) or ATR-based stoploss (2*ATR from entry).
-# Uses discrete position size 0.25. Designed to capture mean reversions in trending markets with volume confirmation.
-# Works in both bull and bear markets by requiring trend (price vs 1w EMA) and volume confirmation, avoiding ranging markets.
-# Target: 50-150 total trades over 4 years (12-37/year) to balance edge and fee drag.
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ATR-based trailing stop.
+# Long when price breaks above 20-period high AND volume > 1.5x 20-period average volume AND ATR(14) > 0.
+# Short when price breaks below 20-period low AND volume > 1.5x 20-period average volume AND ATR(14) > 0.
+# Exit when price retraces to 10-period Donchian midpoint OR ATR-based stoploss (2*ATR from entry).
+# Uses discrete position size 0.25. Designed to capture strong breakouts in trending markets with volume confirmation.
+# Works in both bull and bear markets by requiring volume confirmation and avoiding false breakouts.
+# Target: 75-200 total trades over 4 years (19-50/year) to balance edge and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,76 +21,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h Indicators: Williams %R (14-period) ===
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    # Handle division by zero (when highest_high == lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # === 4h Indicators: Donchian Channels ===
+    # 20-period high/low for breakout
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 10-period high/low for exit (midpoint)
+    high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
+    low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
+    donchian_mid_10 = (high_10 + low_10) / 2.0
     
-    # === 1w Indicators: EMA(50) for trend filter ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    price_above_ema = close > ema_50_1w_aligned
-    price_below_ema = close < ema_50_1w_aligned
-    
-    # === 1d Indicators: Volume Spike (volume > 2.0x 20-period average) ===
-    df_1d = get_htf_data(prices, '1d')
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    volume_spike = volume > (2.0 * vol_ma_1d_aligned)
-    
-    # === 12h ATR for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss and volume filter ===
     tr1 = pd.Series(high).diff()
     tr2 = pd.Series(low).diff().abs()
     tr3 = pd.Series(close).shift(1).diff().abs()
-    tr_12h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_12h = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # === 4h Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed for EMA/Williams %R)
-    warmup = 100
+    # Warmup: ensure all indicators are valid (max 20 periods needed)
+    warmup = 20
     
     # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     for i in range(warmup, n):
-        # Skip if any required data is NaN or outside session
-        if (np.isnan(williams_r[i]) or np.isnan(price_above_ema[i]) or np.isnan(price_below_ema[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(atr_12h[i]) or
-            not session_filter[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(donchian_mid_10[i]) or
+            np.isnan(atr[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values
         price = close[i]
+        atr_val = atr[i]
         vol_spike = volume_spike[i]
-        atr_val = atr_12h[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if Williams %R crosses above -50 (mean reversion complete)
-            if williams_r[i] > -50:
+            # Exit if price retraces to 10-period Donchian midpoint
+            if price <= donchian_mid_10[i]:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR below entry
             elif price < entry_price - 2.0 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if Williams %R crosses below -50 (mean reversion complete)
-            if williams_r[i] < -50:
+            # Exit if price retraces to 10-period Donchian midpoint
+            if price >= donchian_mid_10[i]:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR above entry
             elif price > entry_price + 2.0 * atr_val:
@@ -105,14 +90,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Williams %R < -80 (oversold) AND price > 1w EMA(50) (uptrend) AND volume spike
-            if williams_r[i] < -80 and price_above_ema[i] and vol_spike:
+            # LONG: Price breaks above 20-period high AND volume spike
+            if price > high_20[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: Williams %R > -20 (overbought) AND price < 1w EMA(50) (downtrend) AND volume spike
-            elif williams_r[i] > -20 and price_below_ema[i] and vol_spike:
+            # SHORT: Price breaks below 20-period low AND volume spike
+            elif price < low_20[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -122,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsR14_1wEMA50_1dVolumeSpike_V1"
-timeframe = "12h"
+name = "4h_Donchian20_VolumeSpike_ATRStop_V1"
+timeframe = "4h"
 leverage = 1.0
