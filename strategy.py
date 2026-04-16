@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d Williams %R extremes with 1w EMA50 trend filter.
+# Hypothesis: 12h strategy using 1d Williams %R extreme + 1w EMA50 trend filter.
 # Long when Williams %R < -80 (oversold) AND close > 1w EMA50 (uptrend).
 # Short when Williams %R > -20 (overbought) AND close < 1w EMA50 (downtrend).
-# Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts).
-# Uses discrete position size 0.25. Williams %R identifies reversal points in ranging markets.
-# 1w EMA50 ensures trading only with higher timeframe trend to avoid whipsaws in chop.
-# 6h timeframe targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
-# Works in bull markets (buy oversold dips in uptrend) and bear markets (sell overbought rallies in downtrend).
+# Exit when Williams %R crosses above -50 (for long) or below -50 (for short) OR price crosses 1w EMA50.
+# Uses discrete position size 0.25. Williams %R identifies overextended moves in both bull and bear markets.
+# 1w EMA50 ensures trading only with higher timeframe trend to avoid whipsaws.
+# 12h timeframe targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
 
 def generate_signals(prices):
     n = len(prices)
@@ -37,18 +37,18 @@ def generate_signals(prices):
     
     close_1w = df_1w['close'].values
     
-    # === 1d Indicators: Williams %R(14) ===
+    # === 1d Indicators: Williams %R (14-period) ===
     # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
     highest_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
     lowest_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     williams_r_1d = (highest_high_1d - close_1d) / (highest_high_1d - lowest_low_1d) * -100
-    # Handle division by zero (when high == low)
+    # Replace division by zero with -50 (neutral)
     williams_r_1d = np.where((highest_high_1d - lowest_low_1d) == 0, -50, williams_r_1d)
     
     # === 1w Indicators: EMA50 for trend filter ===
     ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align all indicators to primary timeframe (6h)
+    # Align all indicators to primary timeframe (12h)
     williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r_1d)
     ema50_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
@@ -76,13 +76,13 @@ def generate_signals(prices):
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit when Williams %R crosses above -50 (momentum fading)
-            if williams_r > -50:
+            # Exit when Williams %R >= -50 (momentum fading) OR price < EMA50 (trend break)
+            if (williams_r >= -50) or (price < ema50):
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit when Williams %R crosses below -50 (momentum fading)
-            if williams_r < -50:
+            # Exit when Williams %R <= -50 (momentum fading) OR price > EMA50 (trend break)
+            if (williams_r <= -50) or (price > ema50):
                 exit_signal = True
         
         if exit_signal:
@@ -107,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1dWilliamsR_Extreme_1wEMA50_TrendFilter_V1"
-timeframe = "6h"
+name = "12h_1dWilliamsRExtreme_1wEMA50_TrendFilter_V1"
+timeframe = "12h"
 leverage = 1.0
