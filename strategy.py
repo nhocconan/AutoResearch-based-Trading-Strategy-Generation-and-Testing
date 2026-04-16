@@ -19,11 +19,13 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Pivot and R2/S2 levels (using close for pivot)
+    # Calculate Pivot and R1/S1 levels (Camarilla standard)
     pivot = (high_1d + low_1d + close_1d) / 3
     range_hl = high_1d - low_1d
-    r2 = pivot + range_hl * 0.618
-    s2 = pivot - range_hl * 0.618
+    r1 = pivot + range_hl * 0.167
+    s1 = pivot - range_hl * 0.167
+    r2 = pivot + range_hl * 0.278
+    s2 = pivot - range_hl * 0.278
     
     # === True Range and ATR (14-period) ===
     tr1 = high_1d[1:] - low_1d[1:]
@@ -33,13 +35,15 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], tr])
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # === 6h EMA for trend filter (60-period) ===
-    ema_6h = pd.Series(close).ewm(span=60, min_periods=60, adjust=False).mean().values
+    # === 12h EMA for trend filter (34-period) ===
+    ema_12h = pd.Series(close).ewm(span=34, min_periods=34, adjust=False).mean().values
     
-    # Align HTF data to 6h timeframe
-    r2_6h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_6h = align_htf_to_ltf(prices, df_1d, s2)
-    atr_14_6h = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Align HTF data to 12h timeframe
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    r2_12h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_12h = align_htf_to_ltf(prices, df_1d, s2)
+    atr_14_12h = align_htf_to_ltf(prices, df_1d, atr_14)
     
     # === Volume spike detection (20-period volume MA) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,44 +59,47 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or
-            np.isnan(atr_14_6h[i]) or np.isnan(ema_6h[i]) or
+        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or
+            np.isnan(r2_12h[i]) or np.isnan(s2_12h[i]) or
+            np.isnan(atr_14_12h[i]) or np.isnan(ema_12h[i]) or
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        r2_level = r2_6h[i]
-        s2_level = s2_6h[i]
-        atr_val = atr_14_6h[i]
-        ema_val = ema_6h[i]
+        r1_level = r1_12h[i]
+        s1_level = s1_12h[i]
+        r2_level = r2_12h[i]
+        s2_level = s2_12h[i]
+        atr_val = atr_14_12h[i]
+        ema_val = ema_12h[i]
         vol_spike = volume_spike[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price drops below S2 or volatility drops significantly
-            if price < s2_level or (i > 0 and atr_val < atr_14_6h[i-1] * 0.7):
+            # Exit when price drops below S1 or volatility drops significantly
+            if price < s1_level or (i > 0 and atr_val < atr_14_12h[i-1] * 0.7):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price rises above R2 or volatility drops significantly
-            if price > r2_level or (i > 0 and atr_val < atr_14_6h[i-1] * 0.7):
+            # Exit when price rises above R1 or volatility drops significantly
+            if price > r1_level or (i > 0 and atr_val < atr_14_12h[i-1] * 0.7):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above R2 with volume spike, above EMA60
+            # LONG: Price breaks above R2 with volume spike, above EMA34
             if price > r2_level and vol_spike and price > ema_val:
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Price breaks below S2 with volume spike, below EMA60
+            # SHORT: Price breaks below S2 with volume spike, below EMA34
             elif price < s2_level and vol_spike and price < ema_val:
                 signals[i] = -0.25
                 position = -1
@@ -108,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Pivot_R2_S2_Breakout_Volume_EMA60Filter"
-timeframe = "6h"
+name = "12h_Pivot_R2_S2_Breakout_Volume_EMA34Filter"
+timeframe = "12h"
 leverage = 1.0
