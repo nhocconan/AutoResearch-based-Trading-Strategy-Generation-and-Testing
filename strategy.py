@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Choppiness Index regime filter + 4h KAMA trend direction + 1d volume confirmation
-# Long when: CHOP > 61.8 (range) AND KAMA rising AND volume > 1.5x 1d average volume
-# Short when: CHOP > 61.8 (range) AND KAMA falling AND volume > 1.5x 1d average volume
-# Chop filter avoids false trends, KAMA adapts to volatility, volume confirms conviction
-# Target: 50-150 total trades over 4 years (12-38/year) to balance opportunity and fee drag
+# Hypothesis: 4h Williams %R(14) + volume spike + 1d ADX trend filter
+# Long when Williams %R crosses above -20 (oversold bounce) AND volume > 1.5x 4h average AND 1d ADX > 25
+# Short when Williams %R crosses below -80 (overbought rejection) AND volume > 1.5x 4h average AND 1d ADX > 25
+# Williams %R captures momentum reversals, volume confirms conviction, ADX filters for trending markets
+# Target: 80-150 total trades over 4 years (20-38/year) to balance opportunity and fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,128 +19,131 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Choppiness Index (14-period) ===
+    # === 4h Williams %R (14-period) ===
     df_4h = get_htf_data(prices, '4h')
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
     
+    # Calculate Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_4h) / (highest_high - lowest_low)
+    williams_r[highest_high == lowest_low] = -50  # avoid division by zero
+    
+    williams_r_aligned = align_htf_to_ltf(prices, df_4h, williams_r)
+    
+    # === 4h Volume Spike (average volume) ===
+    volume_4h = df_4h['volume'].values
+    vol_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values  # 20 periods average
+    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
+    
+    # === 1d ADX trend filter (14-period) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d_arr = df_1d['high'].values
+    low_1d_arr = df_1d['low'].values
+    close_1d_arr = df_1d['close'].values
+    
     # True Range
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    tr1 = high_1d_arr - low_1d_arr
+    tr2 = np.abs(high_1d_arr - np.roll(close_1d_arr, 1))
+    tr3 = np.abs(low_1d_arr - np.roll(close_1d_arr, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # ATR14
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Directional Movement
+    dm_plus = np.where((high_1d_arr - np.roll(high_1d_arr, 1)) > (np.roll(low_1d_arr, 1) - low_1d_arr), 
+                       np.maximum(high_1d_arr - np.roll(high_1d_arr, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d_arr, 1) - low_1d_arr) > (high_1d_arr - np.roll(high_1d_arr, 1)), 
+                        np.maximum(np.roll(low_1d_arr, 1) - low_1d_arr, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Highest high and lowest low over 14 periods
-    hh = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+    # Smoothed values
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
     
-    # Chop = 100 * log10(sum(TR14) / (HH14 - LL14)) / log10(14)
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    range_14 = hh - ll
-    chop = 100 * np.log10(tr_sum / range_14) / np.log10(14)
-    chop[range_14 == 0] = 100  # avoid division by zero
-    chop[np.isnan(chop)] = 50  # neutral value for warmup
-    chop_aligned = align_htf_to_ltf(prices, df_4h, chop)
+    # DI values
+    di_plus = 100 * dm_plus_14 / tr14
+    di_minus = 100 * dm_minus_14 / tr14
     
-    # === 4h KAMA (adaptive moving average) ===
-    # Efficiency Ratio
-    change = np.abs(close_4h - np.roll(close_4h, 10))
-    change[0] = 0
-    volatility = np.sum(np.abs(np.diff(close_4h, prepend=close_4h[0])), axis=0)
-    # Simplified: rolling sum of absolute changes
-    volatility = pd.Series(np.abs(np.diff(close_4h, prepend=close_4h[0]))).rolling(window=10, min_periods=1).sum().values
-    er = change / volatility
-    er[volatility == 0] = 0
-    er[np.isnan(er)] = 0
-    
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # KAMA calculation
-    kama = np.zeros_like(close_4h)
-    kama[0] = close_4h[0]
-    for i in range(1, len(close_4h)):
-        kama[i] = kama[i-1] + sc[i] * (close_4h[i] - kama[i-1])
-    
-    kama_aligned = align_htf_to_ltf(prices, df_4h, kama)
-    
-    # === 1d Volume Confirmation ===
-    df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    dx[np.isnan(dx)] = 0
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     
     # Warmup
-    warmrow = 50
+    warmup = 50
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(warmrow, n):
+    for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(chop_aligned[i]) or 
-            np.isnan(kama_aligned[i]) or
-            np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(vol_ma_4h_aligned[i]) or
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        chop_val = chop_aligned[i]
-        kama_val = kama_aligned[i]
-        vol_ma_val = vol_ma_1d_aligned[i]
+        wr_val = williams_r_aligned[i]
+        vol_ma_val = vol_ma_4h_aligned[i]
+        adx_val = adx_aligned[i]
         
-        # Chop filter: range-bound market (CHOP > 61.8)
-        range_filter = chop_val > 61.8
-        
-        # KAMA direction: rising or falling
-        kama_rising = kama_val > kama_aligned[i-1] if i > 0 else False
-        kama_falling = kama_val < kama_aligned[i-1] if i > 0 else False
-        
-        # Volume confirmation: current volume > 1.5x 1d average volume
+        # Volume confirmation: current volume > 1.5x 4h average volume
         vol_confirm = volume[i] > vol_ma_val * 1.5
         
-        # === ENTRY LOGIC ===
-        if position == 0 and range_filter and vol_confirm:
-            # Long when KAMA rising
-            if kama_rising:
+        # ADX filter: trending market (ADX > 25)
+        trend_filter = adx_val > 25
+        
+        # Williams %R signals
+        wr_oversold = wr_val < -80
+        wr_overbought = wr_val > -20
+        
+        # === EXIT LOGIC (reverse signal) ===
+        if position == 1:  # Long position
+            # Exit long when Williams %R goes overbought (> -20)
+            if wr_overbought:
+                signals[i] = 0.0
+                position = 0
+                continue
+        elif position == -1:  # Short position
+            # Exit short when Williams %R goes oversold (< -80)
+            if wr_oversold:
+                signals[i] = 0.0
+                position = 0
+                continue
+        
+        # === ENTRY LOGIC (only when flat) ===
+        if position == 0:
+            # Long when: Williams %R crosses above -80 from oversold AND volume confirmation AND trend filter
+            if wr_val > -80 and wr_oversold and vol_confirm and trend_filter:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short when KAMA falling
-            elif kama_falling:
+            # Short when: Williams %R crosses below -20 from overbought AND volume confirmation AND trend filter
+            elif wr_val < -20 and wr_overbought and vol_confirm and trend_filter:
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # === EXIT LOGIC: reverse signal when conditions fail ===
+        # Hold current position
         if position == 1:
-            if not (kama_rising and range_filter and vol_confirm):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
+            signals[i] = 0.25
         elif position == -1:
-            if not (kama_falling and range_filter and vol_confirm):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+            signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Choppiness61.8_KAMADir_1dVol1.5x"
+name = "4h_WilliamsR14_Volume1.5x_1dADX25_TrendFollow"
 timeframe = "4h"
 leverage = 1.0
