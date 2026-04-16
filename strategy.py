@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R with 1d EMA trend filter and volume confirmation.
-# Long when Williams %R(14) crosses above -80 AND price > 1d EMA50 AND 1d volume > 1.5x 20-period average.
-# Short when Williams %R(14) crosses below -20 AND price < 1d EMA50 AND 1d volume > 1.5x 20-period average.
-# Exit on ATR-based stoploss (2*ATR from entry) or opposite Williams %R cross.
-# Uses discrete position size 0.25. Works in both bull and bear markets by requiring
-# volume confirmation and trend alignment via 1d EMA50. Target: 75-200 total trades over 4 years (19-50/year).
+# Hypothesis: 4h Williams %R mean reversion with 1d volume regime filter.
+# Long when Williams %R(14) crosses above -80 AND 1d volume < 0.7x 20-day average (low vol regime).
+# Short when Williams %R(14) crosses below -20 AND 1d volume < 0.7x 20-day average.
+# Exit on opposite Williams %R cross (-50) or ATR stoploss (1.5*ATR).
+# Uses discrete position size 0.25. Target: 75-200 total trades over 4 years (19-50/year).
+# Low volume regime filters out high volatility chop, improving mean reversion edge in both bull and bear markets.
 
 def generate_signals(prices):
     n = len(prices)
@@ -27,15 +27,12 @@ def generate_signals(prices):
     williams_r_prev = np.roll(williams_r, 1)
     williams_r_prev[0] = np.nan
     
-    # === 1d Indicators: EMA50 and Volume Spike ===
+    # === 1d Indicators: Volume Regime (Low Volume Filter) ===
     df_1d = get_htf_data(prices, '1d')
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
     vol_1d = df_1d['volume'].values
     vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    volume_spike = volume > (1.5 * vol_ma_1d_aligned)
+    low_volume_regime = volume < (0.7 * vol_ma_1d_aligned)
     
     # === 4h ATR for stoploss ===
     tr1 = pd.Series(high).diff()
@@ -50,7 +47,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed for EMA50)
+    # Warmup: ensure all indicators are valid (max 50 periods needed for EMA/MA)
     warmup = 60
     
     # Track position state and entry price for stoploss
@@ -59,34 +56,34 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(williams_r[i]) or np.isnan(williams_r_prev[i]) or np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(atr_4h_raw[i]) or not session_filter[i]):
+        if (np.isnan(williams_r[i]) or np.isnan(williams_r_prev[i]) or np.isnan(low_volume_regime[i]) or
+            np.isnan(atr_4h_raw[i]) or not session_filter[i]):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values
         price = close[i]
-        vol_spike = volume_spike[i]
+        low_vol = low_volume_regime[i]
         atr_val = atr_4h_raw[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if Williams %R crosses below -50 (momentum loss)
+            # Exit if Williams %R crosses below -50 (mean reversion complete)
             if williams_r[i] < -50 and williams_r_prev[i] >= -50:
                 exit_signal = True
-            # ATR-based stoploss: 2*ATR below entry
-            elif price < entry_price - 2.0 * atr_val:
+            # ATR-based stoploss: 1.5*ATR below entry
+            elif price < entry_price - 1.5 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if Williams %R crosses above -50 (momentum loss)
+            # Exit if Williams %R crosses above -50 (mean reversion complete)
             if williams_r[i] > -50 and williams_r_prev[i] <= -50:
                 exit_signal = True
-            # ATR-based stoploss: 2*ATR above entry
-            elif price > entry_price + 2.0 * atr_val:
+            # ATR-based stoploss: 1.5*ATR above entry
+            elif price > entry_price + 1.5 * atr_val:
                 exit_signal = True
         
         if exit_signal:
@@ -97,16 +94,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Williams %R crosses above -80 AND price > 1d EMA50 AND volume spike
-            if (williams_r[i] > -80 and williams_r_prev[i] <= -80 and 
-                price > ema_50_1d_aligned[i] and vol_spike):
+            # LONG: Williams %R crosses above -80 AND low volume regime
+            if (williams_r[i] > -80 and williams_r_prev[i] <= -80 and low_vol):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: Williams %R crosses below -20 AND price < 1d EMA50 AND volume spike
-            elif (williams_r[i] < -20 and williams_r_prev[i] >= -20 and 
-                  price < ema_50_1d_aligned[i] and vol_spike):
+            # SHORT: Williams %R crosses below -20 AND low volume regime
+            elif (williams_r[i] < -20 and williams_r_prev[i] >= -20 and low_vol):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -116,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_1dEMA50_VolumeSpike_V1"
+name = "4h_WilliamsR_LowVol_MeanReversion_V1"
 timeframe = "4h"
 leverage = 1.0
