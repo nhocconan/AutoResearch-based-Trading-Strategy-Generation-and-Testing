@@ -3,12 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ADX trend filter and volume confirmation
-# Donchian channels provide clear breakout levels that work in both trending and ranging markets.
-# 1d ADX > 25 filters for strong trends, avoiding whipsaws in choppy markets.
-# Volume confirmation (>1.5x 20-period average) ensures breakouts have institutional participation.
-# ATR-based trailing stop (2.5x ATR) manages risk while allowing trends to develop.
-# Target: 100-180 total trades over 4 years (25-45/year) to balance opportunity and fee drag.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Donchian channels provide clear breakout levels; 1d EMA34 filters for higher timeframe trend direction
+# Volume confirmation ensures breakouts have participation. ATR-based stoploss manages risk.
+# Target: 80-160 total trades over 4 years (20-40/year) for optimal balance of opportunity and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,138 +18,118 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data for ADX calculation (HTF) ===
+    # === 1d data for EMA34 trend filter (HTF) ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === ADX Calculation (1d) ===
-    # True Range
-    tr1 = pd.Series(high_1d).diff().abs()
-    tr2 = (pd.Series(high_1d) - pd.Series(close_1d).shift()).abs()
-    tr3 = (pd.Series(low_1d) - pd.Series(close_1d).shift()).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    # === 1d EMA34 ===
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Directional Movement
-    up_move = pd.Series(high_1d).diff()
-    down_move = -pd.Series(low_1d).diff()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # === 12h Donchian(20) channels ===
+    period = 20
+    donchian_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    donchian_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
     
-    # Smoothed values (Wilder's smoothing)
-    def wilders_smoothing(series, period):
-        result = np.zeros_like(series)
-        if len(series) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(series[:period])
-        # Subsequent values: Wilder's smoothing
-        for i in range(period, len(series)):
-            result[i] = (result[i-1] * (period-1) + series[i]) / period
-        return result
-    
-    period = 14
-    atr_1d = wilders_smoothing(tr.values, period)
-    plus_di_1d = 100 * wilders_smoothing(plus_dm, period) / atr_1d
-    minus_di_1d = 100 * wilders_smoothing(minus_dm, period) / atr_1d
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = wilders_smoothing(dx_1d, period)
-    
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # === 4h Donchian Channel (20-period) ===
-    donchian_period = 20
-    dc_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    dc_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
-    
-    # === 4h Volume Confirmation (20-period average) ===
+    # === 12h Volume Confirmation (20-period average) ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === 4h ATR for Trailing Stop (14-period) ===
+    # === ATR(14) for stoploss ===
     atr_period = 14
-    tr_4h = np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1)))
-    tr_4h[0] = high[0] - low[0]  # First TR
-    atr_4h = np.zeros_like(tr_4h)
-    if len(tr_4h) >= atr_period:
-        atr_4h[atr_period-1] = np.mean(tr_4h[:atr_period])
-        for i in range(atr_period, len(tr_4h)):
-            atr_4h[i] = (atr_4h[i-1] * (atr_period-1) + tr_4h[i]) / atr_period
+    tr1 = high - low
+    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = max(donchian_period, 20, atr_period) + 5
+    warmup = 100
     
-    # Track position and extreme price for trailing stop
+    # Track position
     position = 0  # 0: flat, 1: long, -1: short
-    extreme_price = 0.0
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(adx_aligned[i]) or 
-            np.isnan(dc_high[i]) or
-            np.isnan(dc_low[i]) or
+        if (np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or
+            np.isnan(ema34_1d_aligned[i]) or
             np.isnan(vol_ma_20[i]) or
-            np.isnan(atr_4h[i])):
+            np.isnan(atr[i])):
             signals[i] = 0.0
             position = 0
-            extreme_price = 0.0
             continue
         
         price = close[i]
-        adx = adx_aligned[i]
+        upper = donchian_high[i]
+        lower = donchian_low[i]
+        ema34 = ema34_1d_aligned[i]
         vol_ma = vol_ma_20[i]
-        atr = atr_4h[i]
+        atr_val = atr[i]
         
-        # === TRAILING STOP LOGIC ===
+        # Volume confirmation
+        vol_confirm = volume[i] > vol_ma * 1.5
+        
+        # === TRAILING STOP LOGIC (ATR-based) ===
         if position == 1:  # Long position
-            # Update extreme price (highest since entry)
-            if price > extreme_price:
-                extreme_price = price
-            # Trail stop: exit if price drops 2.5*ATR from extreme
-            if atr > 0 and price < extreme_price - 2.5 * atr:
+            # Trail stop: exit if price drops 2.5*ATR from highest since entry
+            if not hasattr(generate_signals, 'long_extreme'):
+                generate_signals.long_extreme = price
+            else:
+                if price > generate_signals.long_extreme:
+                    generate_signals.long_extreme = price
+                if atr_val > 0 and price < generate_signals.long_extreme - 2.5 * atr_val:
+                    signals[i] = 0.0
+                    position = 0
+                    delattr(generate_signals, 'long_extreme')
+                    continue
+        
+        elif position == -1:  # Short position
+            # Trail stop: exit if price rises 2.5*ATR from lowest since entry
+            if not hasattr(generate_signals, 'short_extreme'):
+                generate_signals.short_extreme = price
+            else:
+                if price < generate_signals.short_extreme:
+                    generate_signals.short_extreme = price
+                if atr_val > 0 and price > generate_signals.short_extreme + 2.5 * atr_val:
+                    signals[i] = 0.0
+                    position = 0
+                    delattr(generate_signals, 'short_extreme')
+                    continue
+        
+        # === EXIT LOGIC (Donchian opposite break) ===
+        if position == 1:  # Long position
+            # Exit when price breaks below Donchian low
+            if price < lower:
                 signals[i] = 0.0
                 position = 0
-                extreme_price = 0.0
+                if hasattr(generate_signals, 'long_extreme'):
+                    delattr(generate_signals, 'long_extreme')
                 continue
         
         elif position == -1:  # Short position
-            # Update extreme price (lowest since entry)
-            if price < extreme_price or extreme_price == 0:
-                extreme_price = price
-            # Trail stop: exit if price rises 2.5*ATR from extreme
-            if atr > 0 and price > extreme_price + 2.5 * atr:
+            # Exit when price breaks above Donchian high
+            if price > upper:
                 signals[i] = 0.0
                 position = 0
-                extreme_price = 0.0
-                continue
-        
-        # === EXIT LOGIC (ADX trend weakness) ===
-        if position != 0:
-            # Exit when ADX falls below 20 (trend weakening)
-            if adx < 20.0:
-                signals[i] = 0.0
-                position = 0
-                extreme_price = 0.0
+                if hasattr(generate_signals, 'short_extreme'):
+                    delattr(generate_signals, 'short_extreme')
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            vol_confirm = volume[i] > vol_ma * 1.5  # 1.5x average volume
-            
-            # Long when: Price breaks above Donchian high AND ADX > 25 AND volume confirmation
-            if price > dc_high[i] and adx > 25.0 and vol_confirm:
+            # Long when: price breaks above Donchian high AND above 1d EMA34 AND volume confirmation
+            if price > upper and price > ema34 and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-                extreme_price = price
+                generate_signals.long_extreme = price
                 continue
-            # Short when: Price breaks below Donchian low AND ADX > 25 AND volume confirmation
-            elif price < dc_low[i] and adx > 25.0 and vol_confirm:
+            # Short when: price breaks below Donchian low AND below 1d EMA34 AND volume confirmation
+            elif price < lower and price < ema34 and vol_confirm:
                 signals[i] = -0.25
                 position = -1
-                extreme_price = price
+                generate_signals.short_extreme = price
                 continue
         
         # Hold current position
@@ -162,8 +140,14 @@ def generate_signals(prices):
         else:
             signals[i] = 0.0
     
+    # Clean up
+    if hasattr(generate_signals, 'long_extreme'):
+        delattr(generate_signals, 'long_extreme')
+    if hasattr(generate_signals, 'short_extreme'):
+        delattr(generate_signals, 'short_extreme')
+    
     return signals
 
-name = "4h_Donchian20_1dADXtrend_VolumeConfirm_ATRTrail"
-timeframe = "4h"
+name = "12h_Donchian20_1dEMA34_VolumeConfirm_ATRTrail"
+timeframe = "12h"
 leverage = 1.0
