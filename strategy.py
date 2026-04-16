@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1w EMA trend filter and volume confirmation.
-# Williams Alligator uses SMAs of median price (Jaw=13, Teeth=8, Lips=5) to identify trends.
-# In trending markets (price above/below all lines with separation): trade in direction of alignment.
-# In ranging markets (lines intertwined): avoid trading.
-# 1w EMA filter ensures we only trade in alignment with higher timeframe trend.
-# Volume confirmation (>1.3x average) reduces false signals.
-# Designed for 12h timeframe to capture medium-term trends with low trade frequency.
+# Hypothesis: 4h RSI(14) with 1d Volatility Filter and Volume Confirmation
+# Uses RSI(14) on 4h for mean reversion signals (oversold <30, overbought >70).
+# Filters signals using 1d ATR ratio (ATR(5)/ATR(20)) to avoid low volatility periods.
+# Requires volume > 1.3x average for confirmation.
+# Works in bull markets (buy oversold dips) and bear markets (sell overbought rallies).
+# Position size 0.25 to manage drawdown during extended trends.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,50 +20,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h data (primary timeframe) ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    # === 4h data (primary timeframe) ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    volume_4h = df_4h['volume'].values
     
-    # === 1w data (higher timeframe for trend filter) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # === 1d data (higher timeframe for volatility filter) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === Williams Alligator on 12h ===
-    # Median price = (high + low) / 2
-    median_price = (high_12h + low_12h) / 2
+    # === 4h RSI(14) ===
+    delta = np.diff(close_4h, prepend=close_4h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    rsi_aligned = align_htf_to_ltf(prices, df_4h, rsi_values)
     
-    # Jaw (13-period SMMA of median, shifted 8 bars)
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean()
-    jaw = jaw.shift(8)
+    # === 1d ATR ratio for volatility filter ===
+    # ATR(5)/ATR(20) - low ratio indicates low volatility/chop
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = 0
+    atr_5 = pd.Series(tr).rolling(window=5, min_periods=5).mean()
+    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean()
+    atr_ratio = atr_5 / (atr_20 + 1e-10)
+    atr_ratio_values = atr_ratio.values
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_values)
     
-    # Teeth (8-period SMMA of median, shifted 5 bars)
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean()
-    teeth = teeth.shift(5)
-    
-    # Lips (5-period SMMA of median, shifted 3 bars)
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean()
-    lips = lips.shift(3)
-    
-    # Align Alligator components to lower timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw.values)
-    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth.values)
-    lips_aligned = align_htf_to_ltf(prices, df_12h, lips.values)
-    
-    # === 1w EMA(34) for trend filter ===
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # === 12h volume ratio for confirmation ===
-    vol_ma_10_12h = pd.Series(volume_12h).rolling(window=10, min_periods=10).mean().values
-    vol_ratio_12h = volume_12h / vol_ma_10_12h
+    # === 4h volume confirmation ===
+    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_4h = volume_4h / vol_ma_20_4h
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 100
+    warmup = 50
     
     # Track position and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
@@ -72,49 +72,49 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(ema_34_1w_aligned[i]) or
-            np.isnan(vol_ratio_12h[i])):
+        if (np.isnan(rsi_aligned[i]) or 
+            np.isnan(atr_ratio_aligned[i]) or
+            np.isnan(vol_ratio_4h[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
-        ema_1w = ema_34_1w_aligned[i]
-        vol_ratio = vol_ratio_12h[i]
+        rsi_val = rsi_aligned[i]
+        vol_ratio = vol_ratio_4h[i]
+        vol_filter = atr_ratio_aligned[i]
+        
+        # Volatility filter: only trade when volatility is normal/high (avoid chop)
+        # ATR(5)/ATR(20) > 0.7 indicates sufficient volatility for mean reversion
+        if vol_filter < 0.7:
+            # Low volatility - flatten position
+            if position == 1:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+                continue
+            elif position == -1:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+                continue
+            else:
+                signals[i] = 0.0
+                continue
         
         # === STOPLOSS LOGIC ===
         if position == 1:  # Long position
-            # Stop loss: price closes below the lowest of Jaw/Teeth/Lips
-            if price < min(jaw_val, teeth_val, lips_val):
+            # Dynamic stop: trail by 1.5 * ATR(14) from highest close since entry
+            # Simplified: stop if RSI shows exhaustion
+            if rsi_val > 70:  # Overbought exit for longs
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Stop loss: price closes above the highest of Jaw/Teeth/Lips
-            if price > max(jaw_val, teeth_val, lips_val):
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-                continue
-        
-        # === EXIT LOGIC ===
-        if position == 1:  # Long position
-            # Exit when Alligator lines converge or price crosses below Teeth
-            if (jaw_val <= teeth_val or teeth_val <= lips_val) or price < teeth_val:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-                continue
-        
-        elif position == -1:  # Short position
-            # Exit when Alligator lines converge or price crosses above Teeth
-            if (jaw_val >= teeth_val or teeth_val >= lips_val) or price > teeth_val:
+            # Dynamic stop: cover if RSI shows exhaustion
+            if rsi_val < 30:  # Oversold exit for shorts
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -122,28 +122,19 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Check if Alligator lines are separated (trending market)
-            lips_above_teeth = lips_val > teeth_val
-            teeth_above_jaw = teeth_val > jaw_val
-            
-            # Bullish alignment: Lips > Teeth > Jaw
-            bullish_aligned = lips_above_teeth and teeth_above_jaw
-            
-            # Bearish alignment: Lips < Teeth < Jaw
-            bearish_aligned = lips_val < teeth_val and teeth_val < jaw_val
-            
-            if bullish_aligned and price > ema_1w and vol_ratio > 1.3:
-                # Long: price above 1w EMA, bullish Alligator, volume confirmation
-                signals[i] = 0.25
-                position = 1
-                entry_price = price
-                continue
-            elif bearish_aligned and price < ema_1w and vol_ratio > 1.3:
-                # Short: price below 1w EMA, bearish Alligator, volume confirmation
-                signals[i] = -0.25
-                position = -1
-                entry_price = price
-                continue
+            if vol_ratio > 1.3:  # Volume confirmation
+                # LONG: RSI oversold with volume
+                if rsi_val < 30:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = price
+                    continue
+                # SHORT: RSI overbought with volume
+                elif rsi_val > 70:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = price
+                    continue
         
         # Hold current position
         if position == 1:
@@ -155,6 +146,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsAlligator_1wEMA_Volume_v1"
-timeframe = "12h"
+name = "4h_RSI_VolFilter_Volume_MeanReversion_v1"
+timeframe = "4h"
 leverage = 1.0
