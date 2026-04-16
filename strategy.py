@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -6,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 150:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -30,14 +29,14 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # === 12h EMA34 for trend filter ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # === 4h EMA21 for trend filter ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
     
-    # === Price Momentum (ROC 3-period) ===
-    roc_3 = ((pd.Series(close).pct_change(3) * 100)).values
+    # === Price Momentum (ROC 5-period) ===
+    roc_5 = ((pd.Series(close).pct_change(5) * 100)).values
     
     # === Volume Spike Detection (15-period volume MA) ===
     vol_ma = pd.Series(volume).rolling(window=15, min_periods=15).mean().values
@@ -46,22 +45,22 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators have valid data
-    warmup = 100  # Need ROC(3), EMA34, ATR14
+    warmup = 100  # Need ROC(5), EMA21, ATR14
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(roc_3[i]) or np.isnan(ema_34_12h_aligned[i]) or
+        if (np.isnan(roc_5[i]) or np.isnan(ema_21_4h_aligned[i]) or
             np.isnan(atr_1d_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        roc = roc_3[i]
-        ema34 = ema_34_12h_aligned[i]
+        roc = roc_5[i]
+        ema21 = ema_21_4h_aligned[i]
         atr = atr_1d_aligned[i]
         vol_spike = volume_spike[i]
         
@@ -82,28 +81,28 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Strong positive momentum + price above EMA34 + volume spike
-            if roc > 0.3 and price > ema34 and vol_spike:
-                signals[i] = 0.25
+            # LONG: Strong positive momentum + price above EMA21 + volume spike
+            if roc > 0.5 and price > ema21 and vol_spike:
+                signals[i] = 0.30
                 position = 1
                 continue
             
-            # SHORT: Strong negative momentum + price below EMA34 + volume spike
-            elif roc < -0.3 and price < ema34 and vol_spike:
-                signals[i] = -0.25
+            # SHORT: Strong negative momentum + price below EMA21 + volume spike
+            elif roc < -0.5 and price < ema21 and vol_spike:
+                signals[i] = -0.30
                 position = -1
                 continue
         
         # Hold current position
         if position == 1:
-            signals[i] = 0.25
+            signals[i] = 0.30
         elif position == -1:
-            signals[i] = -0.25
+            signals[i] = -0.30
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "12h_EMA34_ROC3_VolumeSpike_ATRFilter"
-timeframe = "12h"
+name = "4h_EMA21_ROC5_VolumeSpike_ATRFilter"
+timeframe = "4h"
 leverage = 1.0
