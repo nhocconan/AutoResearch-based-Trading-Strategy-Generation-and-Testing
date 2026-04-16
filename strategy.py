@@ -76,30 +76,30 @@ def generate_signals(prices):
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit: close below Donchian lower or 2.5x ATR stop
-            if price < lower_channel or price < entry_price - 2.5 * atr_val:
+            # Exit: close below Donchian lower or 2x ATR stop
+            if price < lower_channel or price < entry_price - 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit: close above Donchian upper or 2.5x ATR stop
-            if price > upper_channel or price > entry_price + 2.5 * atr_val:
+            # Exit: close above Donchian upper or 2x ATR stop
+            if price > upper_channel or price > entry_price + 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Trend filter: price above/below 1d EMA with volume confirmation
-            if price > ema_trend and vol_ratio_val > 1.5:
-                # LONG: price above trend with strong volume
+            # Trend filter: price above/below 1d EMA with volume
+            if price > ema_trend and vol_ratio_val > 1.3:
+                # LONG: price above trend with volume
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 continue
-            elif price < ema_trend and vol_ratio_val > 1.5:
-                # SHORT: price below trend with strong volume
+            elif price < ema_trend and vol_ratio_val > 1.3:
+                # SHORT: price below trend with volume
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -115,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_EMA_Trend_Volume_Strict"
+name = "4h_Donchian_EMA_Trend_Volume"
 timeframe = "4h"
 leverage = 1.0
