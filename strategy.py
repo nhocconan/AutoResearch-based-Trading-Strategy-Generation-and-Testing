@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 1d ADX trend filter.
-# Long when price breaks above 4h Donchian upper (20-period) AND 1d volume > 1.5x 20-period average AND 1d ADX > 20.
-# Short when price breaks below 4h Donchian lower (20-period) AND 1d volume > 1.5x 20-period average AND 1d ADX > 20.
-# Exit when price crosses the 4h Donchian midpoint or ATR-based stoploss (2*ATR from entry).
-# Uses discrete position size 0.25. Designed to capture major breakouts in trending markets with volume confirmation.
-# Works in both bull and bear markets by requiring trend (ADX>20) and volume confirmation, reducing false breakouts.
-# Target: 100-200 total trades over 4 years (25-50/year) to balance edge and fee drag.
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1d ADX > 25 trend filter.
+# Long when price breaks above Donchian upper band AND 1d volume > 2.0x 20-period average AND 1d ADX > 25.
+# Short when price breaks below Donchian lower band AND 1d volume > 2.0x 20-period average AND 1d ADX > 25.
+# Exit when price crosses the Donchian midpoint or ATR-based stoploss (2*ATR from entry).
+# Uses discrete position size 0.25. Designed to capture major breakouts in strong trending markets.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag while maintaining edge.
+# Works in both bull and bear markets by requiring strong trend (ADX>25) and volume confirmation.
 
 def generate_signals(prices):
     n = len(prices)
@@ -27,7 +27,7 @@ def generate_signals(prices):
     low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
     
-    # Donchian levels: upper = max(high, 20), lower = min(low, 20)
+    # Donchian bands: upper = max(high, 20), lower = min(low, 20)
     donchian_upper_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
     donchian_lower_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     donchian_mid_4h = (donchian_upper_4h + donchian_lower_4h) / 2
@@ -37,14 +37,14 @@ def generate_signals(prices):
     donchian_lower_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower_4h)
     donchian_mid_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid_4h)
     
-    # === 1d Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    # === 1d Indicators: Volume Spike (volume > 2.0x 20-period average) ===
     df_1d = get_htf_data(prices, '1d')
     vol_1d = df_1d['volume'].values
     vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    volume_spike = volume > (1.5 * vol_ma_1d_aligned)
+    volume_spike = volume > (2.0 * vol_ma_1d_aligned)
     
-    # === 1d Indicators: ADX > 20 (trending market filter) ===
+    # === 1d Indicators: ADX > 25 (strong trending market filter) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -73,7 +73,7 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    strong_trend = adx_aligned > 20
+    strong_trend = adx_aligned > 25
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -138,13 +138,13 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Donchian upper AND volume spike AND strong trending market
+            # LONG: Price breaks above Donchian upper band AND volume spike AND strong trending market
             if price > donchian_upper_4h_aligned[i] and vol_spike and is_strong_trend:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: Price breaks below Donchian lower AND volume spike AND strong trending market
+            # SHORT: Price breaks below Donchian lower band AND volume spike AND strong trending market
             elif price < donchian_lower_4h_aligned[i] and vol_spike and is_strong_trend:
                 signals[i] = -0.25
                 position = -1
