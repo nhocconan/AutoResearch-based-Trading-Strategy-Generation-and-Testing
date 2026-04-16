@@ -3,11 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA + RSI + Chop Regime Filter
-# Uses KAMA to identify trend direction on 1d, confirmed by RSI(14) momentum and filtered by
-# Choppiness Index (14) > 61.8 for range regime. Works in both bull and bear markets by
-# combining trend following with mean reversion in range regimes.
-# Target: 30-100 total trades over 4 years (7-25/year) with disciplined entries.
+# Hypothesis: 6h Donchian(20) breakout with 12h pivot (R1/S1) and volume confirmation
+# Uses 6h Donchian breakout for entry, filtered by 12h Camarilla pivot (R1/S1) direction
+# and volume > 1.5x average. Works in trending markets by buying breakouts in uptrend
+# and selling breakdowns in downtrend. Target: 80-150 total trades over 4 years (20-38/year).
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,87 +18,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data (primary timeframe) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === 6h data (primary timeframe) ===
+    df_6h = get_htf_data(prices, '6h')
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    volume_6h = df_6h['volume'].values
     
-    # === 1w data (higher timeframe for trend filter) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # === 12h data (for pivot levels) ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # === KAMA (Kaufman Adaptive Moving Average) on 1d ===
-    def kama(close, er_len=10, fast=2, slow=30):
-        if len(close) < er_len:
-            return np.full_like(close, np.nan, dtype=float)
-        change = np.abs(np.diff(close, n=er_len))
-        abs_change = np.abs(np.diff(close, n=1))
-        er = np.zeros_like(close)
-        er[er_len:] = change[er_len:] / np.where(np.sum(abs_change.reshape(-1, er_len), axis=1) == 0, 1, np.sum(abs_change.reshape(-1, er_len), axis=1))
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        kama_arr = np.zeros_like(close)
-        kama_arr[:] = close[0]
-        for i in range(1, len(close)):
-            kama_arr[i] = kama_arr[i-1] + sc[i] * (close[i] - kama_arr[i-1])
-        return kama_arr
+    # === 6h Donchian channels (20-period) ===
+    donch_high = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
     
-    kama_1d = kama(close_1d)
-    kama_1d_prev = np.roll(kama_1d, 1)
-    kama_1d_prev[0] = kama_1d[0]
+    # === 12h Camarilla pivot levels ===
+    # Pivot = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    pivot_12h = (high_12h + low_12h + close_12h) / 3
+    r1_12h = close_12h + (high_12h - low_12h) * 1.1 / 12
+    s1_12h = close_12h - (high_12h - low_12h) * 1.1 / 12
     
-    # === RSI(14) on 1d ===
-    def rsi(close, period=14):
-        if len(close) < period + 1:
-            return np.full_like(close, 50.0, dtype=float)
-        delta = np.diff(close)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.zeros_like(close)
-        avg_loss = np.zeros_like(close)
-        avg_gain[period] = np.mean(gain[:period])
-        avg_loss[period] = np.mean(loss[:period])
-        for i in range(period+1, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-        rs = np.where(avg_loss == 0, 100, avg_gain / avg_loss)
-        rsi_arr = 100 - (100 / (1 + rs))
-        return rsi_arr
+    # Align pivot levels to 6h timeframe
+    pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
     
-    rsi_1d = rsi(close_1d)
-    
-    # === Choppiness Index (14) on 1d ===
-    def choppiness_index(high, low, close, period=14):
-        if len(close) < period:
-            return np.full_like(close, 50.0, dtype=float)
-        atr = np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1)))
-        atr[0] = high[0] - low[0]
-        sum_atr = np.zeros_like(close)
-        for i in range(period, len(close)):
-            sum_atr[i] = np.sum(atr[i-period+1:i+1])
-        hh = np.zeros_like(close)
-        ll = np.zeros_like(close)
-        for i in range(period-1, len(close)):
-            hh[i] = np.max(high[i-period+1:i+1])
-            ll[i] = np.min(low[i-period+1:i+1])
-        chop = np.zeros_like(close)
-        for i in range(period-1, len(close)):
-            if hh[i] - ll[i] == 0:
-                chop[i] = 50.0
-            else:
-                chop[i] = 100 * np.log10(sum_atr[i] / (hh[i] - ll[i])) / np.log10(period)
-        return chop
-    
-    chop_1d = choppiness_index(high_1d, low_1d, close_1d)
-    
-    # === 1w EMA200 for trend filter ===
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # === 6h volume spike detection ===
+    vol_ma_20_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_6h > (1.5 * vol_ma_20_6h)
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 50
+    warmup = 100
     
     # Track position and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
@@ -107,46 +63,42 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(kama_1d[i]) or 
-            np.isnan(kama_1d_prev[i]) or
-            np.isnan(rsi_1d[i]) or
-            np.isnan(chop_1d[i]) or
-            np.isnan(ema200_1w_aligned[i])):
+        if (np.isnan(donch_high[i]) or 
+            np.isnan(donch_low[i]) or
+            np.isnan(pivot_12h_aligned[i]) or
+            np.isnan(r1_12h_aligned[i]) or
+            np.isnan(s1_12h_aligned[i]) or
+            np.isnan(vol_ma_20_6h[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        kama_val = kama_1d[i]
-        kama_prev = kama_1d_prev[i]
-        rsi_val = rsi_1d[i]
-        chop_val = chop_1d[i]
-        ema200 = ema200_1w_aligned[i]
+        donch_high_val = donch_high[i]
+        donch_low_val = donch_low[i]
+        pivot_val = pivot_12h_aligned[i]
+        r1_val = r1_12h_aligned[i]
+        s1_val = s1_12h_aligned[i]
+        vol_spike_val = vol_spike[i]
         
         # === STOPLOSS LOGIC ===
         if position == 1:  # Long position
-            atr_1d = np.maximum(np.maximum(high_1d - low_1d, np.abs(high_1d - np.roll(close_1d, 1))), np.abs(low_1d - np.roll(close_1d, 1)))
-            atr_1d[0] = high_1d[0] - low_1d[0]
-            atr_ma = np.zeros_like(atr_1d)
-            for j in range(14, len(atr_1d)):
-                atr_ma[j] = np.mean(atr_1d[j-13:j+1])
-            atr_aligned = align_htf_to_ltf(prices, df_1d, atr_ma)
+            atr_6h = np.abs(high_6h - low_6h)
+            atr_ma = pd.Series(atr_6h).rolling(window=14, min_periods=14).mean().values
+            atr_aligned = align_htf_to_ltf(prices, df_6h, atr_ma)
             atr_val = atr_aligned[i]
-            if price < entry_price - 2.0 * atr_val:
+            if price < entry_price - 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            atr_1d = np.maximum(np.maximum(high_1d - low_1d, np.abs(high_1d - np.roll(close_1d, 1))), np.abs(low_1d - np.roll(close_1d, 1)))
-            atr_1d[0] = high_1d[0] - low_1d[0]
-            atr_ma = np.zeros_like(atr_1d)
-            for j in range(14, len(atr_1d)):
-                atr_ma[j] = np.mean(atr_1d[j-13:j+1])
-            atr_aligned = align_htf_to_ltf(prices, df_1d, atr_ma)
+            atr_6h = np.abs(high_6h - low_6h)
+            atr_ma = pd.Series(atr_6h).rolling(window=14, min_periods=14).mean().values
+            atr_aligned = align_htf_to_ltf(prices, df_6h, atr_ma)
             atr_val = atr_aligned[i]
-            if price > entry_price + 2.0 * atr_val:
+            if price > entry_price + 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -154,16 +106,16 @@ def generate_signals(prices):
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when KAMA turns down or RSI overbought
-            if kama_val < kama_prev or rsi_val > 70:
+            # Exit when price breaks below S1 pivot level
+            if price < s1_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when KAMA turns up or RSI oversold
-            if kama_val > kama_prev or rsi_val < 30:
+            # Exit when price breaks above R1 pivot level
+            if price > r1_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -171,16 +123,16 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Only trade in range regime (Choppiness > 61.8)
-            if chop_val > 61.8:
-                # Go long when KAMA turns up and RSI > 50
-                if kama_val > kama_prev and rsi_val > 50:
+            # Require volume spike
+            if vol_spike_val:
+                # Go long when price breaks above Donchian high AND above R1 pivot (uptrend confirmation)
+                if price > donch_high_val and price > r1_val:
                     signals[i] = 0.25
                     position = 1
                     entry_price = price
                     continue
-                # Go short when KAMA turns down and RSI < 50
-                elif kama_val < kama_prev and rsi_val < 50:
+                # Go short when price breaks below Donchian low AND below S1 pivot (downtrend confirmation)
+                elif price < donch_low_val and price < s1_val:
                     signals[i] = -0.25
                     position = -1
                     entry_price = price
@@ -196,6 +148,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_RSI_Chop_Filter"
-timeframe = "1d"
+name = "6h_Donchian20_Pivot12h_Volume_Confirmation"
+timeframe = "6h"
 leverage = 1.0
