@@ -3,140 +3,112 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w Williams %R mean reversion with volume confirmation and ATR stoploss.
-# Long when 1w Williams %R < -80 (oversold) + price > 1d EMA50 + 1d volume > 1.5x 20-period median volume.
-# Short when 1w Williams %R > -20 (overbought) + price < 1d EMA50 + 1d volume > 1.5x 20-period median volume.
-# Exit on opposite Williams %R level (-50) or when ATR-based trailing stop is hit (2.0 * ATR).
-# Uses discrete position size 0.25. Williams %R identifies extremes in weekly momentum.
-# EMA50 filter ensures alignment with weekly trend. Volume spike confirms participation.
-# ATR stoploss manages risk. 1d timeframe targets 30-100 trades over 4 years (7-25/year) to minimize fee drag.
-# Works in bull markets (mean reversion from oversold) and bear markets (mean reversion from overbought).
+# Hypothesis: 6h strategy using 12h Elder Ray Bull/Bear Power with 1d EMA34 trend filter.
+# Long when Bull Power > 0 (close > EMA13) AND price > 1d EMA34 (uptrend).
+# Short when Bear Power < 0 (close < EMA13) AND price < 1d EMA34 (downtrend).
+# Exit when power reverses or price crosses 1d EMA34 opposite.
+# Uses discrete position size 0.25. Elder Ray measures bull/bear strength via EMA13.
+# 1d EMA34 filter ensures trading with higher timeframe trend to avoid whipsaws.
+# 6h timeframe targets 12-37 trades/year to minimize fee drag.
+# Works in bull markets (buy strength in uptrend) and bear markets (sell weakness in downtrend).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1w data once before loop for Williams %R
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:  # Williams %R needs 14 periods, plus buffer
+    # Get 12h data once before loop for EMA13 (Elder Ray)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # === 1w Indicators: Williams %R (14-period) ===
-    highest_high_14 = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close_1w) / (highest_high_14 - lowest_low_14)
-    # Handle division by zero (when high == low)
-    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
-    
-    # Get 1d data once before loop for EMA50, volume median, and ATR
+    # Get 1d data once before loop for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # EMA50 needs 50 periods
+    if len(df_1d) < 40:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    vol_1d = df_1d['volume'].values
     
-    # === 1d Indicators: EMA50 ===
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # === 12h Indicators: EMA13 for Elder Ray ===
+    ema13_12h = pd.Series(close_12h).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # === 1d Indicators: Volume Median (20-period) ===
-    vol_median_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).median().values
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power_12h = high_12h - ema13_12h
+    bear_power_12h = low_12h - ema13_12h
     
-    # === 1d Indicators: ATR (14-period) for stoploss ===
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = tr2[0] = tr3[0] = 0  # first period has no previous close
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # === 1d Indicators: EMA34 for trend filter ===
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align all indicators to primary timeframe (1d)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1w, williams_r)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
-    vol_median_aligned = align_htf_to_ltf(prices, df_1d, vol_median_20)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)  # for volume spike
+    # Align all indicators to primary timeframe (6h)
+    bull_power_aligned = align_htf_to_ltf(prices, df_12h, bull_power_12h)
+    bear_power_aligned = align_htf_to_ltf(prices, df_12h, bear_power_12h)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 50  # EMA50 needs 50 periods
+    warmup = 34  # EMA34 needs 34 periods
     
-    # Track position state and entry price for stoploss
+    # Track position state
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
-            np.isnan(vol_median_aligned[i]) or np.isnan(atr_aligned[i]) or 
-            np.isnan(vol_1d_aligned[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(ema34_aligned[i])):
             signals[i] = 0.0
             position = 0
-            entry_price = 0.0
             continue
         
         # Current values (aligned)
+        bull_power = bull_power_aligned[i]
+        bear_power = bear_power_aligned[i]
+        ema34 = ema34_aligned[i]
         price = close[i]
-        wr = williams_r_aligned[i]
-        ema50 = ema_50_aligned[i]
-        vol_median = vol_median_aligned[i]
-        atr = atr_aligned[i]
-        current_vol_1d = vol_1d_aligned[i]
-        
-        # Volume spike filter: current 1d volume > 1.5x median volume
-        volume_spike = current_vol_1d > (vol_median * 1.5)
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit when Williams %R crosses above -50 (mean reversion complete) OR ATR stoploss hit
-            if (wr >= -50) or (price <= entry_price - 2.0 * atr):
+            # Exit when Bear Power >= 0 (weakness) OR price crosses below 1d EMA34
+            if (bear_power >= 0) or (price < ema34):
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit when Williams %R crosses below -50 (mean reversion complete) OR ATR stoploss hit
-            if (wr <= -50) or (price >= entry_price + 2.0 * atr):
+            # Exit when Bull Power <= 0 (strength) OR price crosses above 1d EMA34
+            if (bull_power <= 0) or (price > ema34):
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
-            entry_price = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Williams %R < -80 (oversold) + price > EMA50 + volume spike
-            if (wr < -80) and (price > ema50) and volume_spike:
+            # LONG: Bull Power > 0 (strength) AND price > 1d EMA34 (uptrend)
+            if (bull_power > 0) and (price > ema34):
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
             
-            # SHORT: Williams %R > -20 (overbought) + price < EMA50 + volume spike
-            elif (wr > -20) and (price < ema50) and volume_spike:
+            # SHORT: Bear Power < 0 (weakness) AND price < 1d EMA34 (downtrend)
+            elif (bear_power < 0) and (price < ema34):
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
         
         else:
             signals[i] = position * 0.25  # maintain position
     
     return signals
 
-name = "1d_1wWilliamsR_MeanReversion_VolumeSpike1.5x_EMA50Filter_ATRStop2.0_V1"
-timeframe = "1d"
+name = "6h_12hElderRay_BullBearPower_1dEMA34_TrendFilter_V1"
+timeframe = "6h"
 leverage = 1.0
