@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h TRIX(9) zero-line crossover with 1d volume spike and 1d ADX trend filter.
-# Long when TRIX crosses above zero AND volume > 2.0x 20-period 1d average AND 1d ADX > 25.
-# Short when TRIX crosses below zero AND volume > 2.0x 20-period 1d average AND 1d ADX > 25.
-# Exit when TRIX crosses back across zero or ATR-based stoploss (2*ATR from entry).
-# Uses discrete position size 0.25. Designed to capture momentum shifts in strong trending markets.
-# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag while maintaining edge.
-# Works in both bull and bear markets by requiring strong trend (ADX>25) and volume confirmation.
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1d ADX trend filter.
+# Long when price breaks above 20-period 4h Donchian high AND volume > 1.5x 20-period 1d average AND 1d ADX > 20 (trending market).
+# Short when price breaks below 20-period 4h Donchian low AND volume > 1.5x 20-period 1d average AND 1d ADX > 20.
+# Exit when price crosses the 4h Donchian midpoint or ATR-based stoploss (1.5*ATR from entry).
+# Uses discrete position size 0.25. Designed to capture major breakouts in trending markets with reduced trade frequency.
+# Target: 50-150 total trades over 4 years (12-38/year) to minimize fee drag while maintaining edge.
+# Works in both bull and bear markets by requiring trend (ADX>20) and volume confirmation.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,21 +21,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Indicators: TRIX(9) ===
-    # TRIX = EMA(EMA(EMA(close, 9), 9), 9) - 1 period percent change
-    ema1 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean()
-    ema2 = ema1.ewm(span=9, adjust=False, min_periods=9).mean()
-    ema3 = ema2.ewm(span=9, adjust=False, min_periods=9).mean()
-    trix = ema3.pct_change() * 100  # Convert to percentage
+    # === 4h Indicators: Donchian Channel (20-period) ===
+    high_4h = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_4h = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_high = high_4h
+    donchian_low = low_4h
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # === 1d Indicators: Volume Spike (volume > 2.0x 20-period average) ===
+    # === 1d Indicators: Volume Spike (volume > 1.5x 20-period average) ===
     df_1d = get_htf_data(prices, '1d')
     vol_1d = df_1d['volume'].values
     vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    volume_spike = volume > (2.0 * vol_ma_1d_aligned)
+    volume_spike = volume > (1.5 * vol_ma_1d_aligned)
     
-    # === 1d Indicators: ADX > 25 (strong trending market filter) ===
+    # === 1d Indicators: ADX > 20 (trending market filter) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -64,7 +64,7 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    strong_trend = adx_aligned > 25
+    strong_trend = adx_aligned > 20
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -72,7 +72,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed for TRIX/ADX/ATR)
+    # Warmup: ensure all indicators are valid (max 50 periods needed for ADX/ATR)
     warmup = 100
     
     # Track position state and entry price for stoploss
@@ -88,7 +88,7 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(trix.iloc[i] if hasattr(trix, 'iloc') else trix[i]) or
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(donchian_mid[i]) or
             np.isnan(volume_spike[i]) or np.isnan(strong_trend[i]) or np.isnan(atr_4h_raw[i]) or
             not session_filter[i]):
             signals[i] = 0.0
@@ -97,8 +97,6 @@ def generate_signals(prices):
         
         # Current values
         price = close[i]
-        trix_val = trix.iloc[i] if hasattr(trix, 'iloc') else trix[i]
-        trix_prev = trix.iloc[i-1] if hasattr(trix, 'iloc') else trix[i-1]
         vol_spike = volume_spike[i]
         is_strong_trend = strong_trend[i]
         atr_val = atr_4h_raw[i]
@@ -107,19 +105,19 @@ def generate_signals(prices):
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if TRIX crosses below zero
-            if trix_prev > 0 and trix_val <= 0:
+            # Exit if price crosses below Donchian midpoint
+            if price < donchian_mid[i]:
                 exit_signal = True
-            # ATR-based stoploss: 2*ATR below entry
-            elif price < entry_price - 2.0 * atr_val:
+            # ATR-based stoploss: 1.5*ATR below entry
+            elif price < entry_price - 1.5 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if TRIX crosses above zero
-            if trix_prev < 0 and trix_val >= 0:
+            # Exit if price crosses above Donchian midpoint
+            if price > donchian_mid[i]:
                 exit_signal = True
-            # ATR-based stoploss: 2*ATR above entry
-            elif price > entry_price + 2.0 * atr_val:
+            # ATR-based stoploss: 1.5*ATR above entry
+            elif price > entry_price + 1.5 * atr_val:
                 exit_signal = True
         
         if exit_signal:
@@ -130,14 +128,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: TRIX crosses above zero AND volume spike AND strong trending market
-            if trix_prev <= 0 and trix_val > 0 and vol_spike and is_strong_trend:
+            # LONG: Price breaks above Donchian high AND volume spike AND trending market
+            if price > donchian_high[i] and vol_spike and is_strong_trend:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: TRIX crosses below zero AND volume spike AND strong trending market
-            elif trix_prev >= 0 and trix_val < 0 and vol_spike and is_strong_trend:
+            # SHORT: Price breaks below Donchian low AND volume spike AND trending market
+            elif price < donchian_low[i] and vol_spike and is_strong_trend:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -147,6 +145,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_TRIX9_1dVolumeSpike_1dADX_V1"
+name = "4h_Donchian20_1dVolumeSpike_1dADX_V2"
 timeframe = "4h"
 leverage = 1.0
