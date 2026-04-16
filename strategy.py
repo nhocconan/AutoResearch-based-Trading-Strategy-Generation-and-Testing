@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ATR-based trend filter
-# Long when price breaks above 20-period Donchian high + volume > 1.5x 20-period avg + ATR(14) > ATR(50) (trending volatility)
-# Short when price breaks below 20-period Donchian low + volume > 1.5x 20-period avg + ATR(14) > ATR(50)
+# Hypothesis: 1d Williams %R (14) mean reversion with 1w EMA trend filter and volume confirmation
+# Long when Williams %R < -80 (oversold) + price > 1w EMA34 (uptrend) + volume > 1.3x 20-period avg
+# Short when Williams %R > -20 (overbought) + price < 1w EMA34 (downtrend) + volume > 1.3x 20-period avg
 # Uses discrete position sizing (0.25) to control drawdown and minimize fee drag
-# Target: 75-150 total trades over 4 years (19-37/year) to avoid fee drag
-# Donchian breakouts work in both bull and bear markets; volatility filter ensures we only trade when trends have strength
-# Volume confirmation reduces false breakouts
+# Target: 30-100 total trades over 4 years (7-25/year) to avoid fee drag
+# Williams %R identifies exhaustion points; 1w EMA ensures we trade with the higher timeframe trend
+# Volume confirmation reduces false signals in low-participation moves
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,33 +25,44 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # === Primary Indicators: Donchian Channels (20-period) ===
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Get 1d HTF data once before loop for Williams %R calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # === Volume SMA for confirmation (20-period) ===
+    # === 1d Indicator: Williams %R (14-period) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min()
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    williams_r = williams_r.values  # convert to numpy array
+    
+    # Align Williams %R to 1d timeframe (wait for 1d bar to close)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    
+    # Get 1w HTF data once before loop for EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 40:
+        return np.zeros(n)
+    
+    # === 1w Indicator: EMA (34-period) for trend direction ===
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align EMA34 to 1d timeframe (wait for 1w bar to close)
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Volume SMA for confirmation (20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # === ATR-based Trend Filter: ATR(14) > ATR(50) indicates increasing volatility/trend strength ===
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0  # first period has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    volatility_filter = atr_14 > atr_50  # trending when short-term ATR > long-term ATR
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    # Need Donchian(20) + volume(20) + ATR(50) + buffer
+    # Need 1d data for Williams %R (14) + 1w data for EMA34 (34) + volume(20) + buffer
     warmup = 60
     
     for i in range(warmup, n):
@@ -61,28 +72,30 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(vol_sma_20[i]) or np.isnan(atr_14[i]) or np.isnan(atr_50[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_34_1w_aligned[i]) or
+            np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
+        # Volume filter: current volume > 1.3x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.3)
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above Donchian high (20-period)
-        # 2. Volume confirmation
-        # 3. Volatility filter (ATR14 > ATR50) indicates trending market
-        if (close[i] > donchian_high[i]) and \
-           vol_confirm and volatility_filter[i]:
+        # 1. Williams %R < -80 (oversold condition)
+        # 2. Price above 1w EMA34 (uptrend on higher timeframe)
+        # 3. Volume confirmation
+        if (williams_r_aligned[i] < -80) and \
+           (close[i] > ema_34_1w_aligned[i]) and \
+           vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below Donchian low (20-period)
-        # 2. Volume confirmation
-        # 3. Volatility filter (ATR14 > ATR50) indicates trending market
-        elif (close[i] < donchian_low[i]) and \
-             vol_confirm and volatility_filter[i]:
+        # 1. Williams %R > -20 (overbought condition)
+        # 2. Price below 1w EMA34 (downtrend on higher timeframe)
+        # 3. Volume confirmation
+        elif (williams_r_aligned[i] > -20) and \
+             (close[i] < ema_34_1w_aligned[i]) and \
+             vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -90,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Volume_ATRTrend_Filter_v1"
-timeframe = "4h"
+name = "1d_WilliamsR14_1wEMA34_Volume_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
