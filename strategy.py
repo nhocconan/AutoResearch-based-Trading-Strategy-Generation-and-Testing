@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 80:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,52 +13,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data (HTF for key levels) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 12h data (HTF for key levels) ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # === 1d Previous Day Range Calculation ===
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d[0] = close_1d[0]
-    prev_high_1d[0] = high_1d[0]
-    prev_low_1d[0] = low_1d[0]
+    # === 12h Previous Day Range Calculation ===
+    prev_close_12h = np.roll(close_12h, 1)
+    prev_high_12h = np.roll(high_12h, 1)
+    prev_low_12h = np.roll(low_12h, 1)
+    prev_close_12h[0] = close_12h[0]
+    prev_high_12h[0] = high_12h[0]
+    prev_low_12h[0] = low_12h[0]
     
-    prev_range = prev_high_1d - prev_low_1d
+    prev_range = prev_high_12h - prev_low_12h
     
-    # === Calculate 1d Pivot Points (Standard) ===
-    pivot_point = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
+    # === Calculate 12h Pivot Points (Fibonacci-based) ===
+    pivot_point = (prev_high_12h + prev_low_12h + prev_close_12h) / 3
     
-    # Calculate key levels
-    r1 = pivot_point + prev_range * 0.382  # Fibonacci R1
-    s1 = pivot_point - prev_range * 0.382  # Fibonacci S1
+    # Calculate key levels: R1 and S1 at 0.382 Fibonacci
+    r1 = pivot_point + prev_range * 0.382
+    s1 = pivot_point - prev_range * 0.382
     
-    # Align to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
     
-    # === 1d EMA34 for trend filter ===
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # === 12h EMA34 for trend filter ===
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # === Volume confirmation (12h) ===
+    # === Volume confirmation (4h) ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma_20
-    
-    # === 1d ATR for volatility filter ===
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr2 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, tr2)])
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 80
+    warmup = 60
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,8 +59,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # Skip if any data is NaN
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ratio[i]) or 
-            np.isnan(atr_1d_aligned[i])):
+            np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -75,9 +67,8 @@ def generate_signals(prices):
         price = close[i]
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
-        ema_34_1d_val = ema_34_1d_aligned[i]
+        ema_34_12h_val = ema_34_12h_aligned[i]
         vol_ratio_val = vol_ratio[i]
-        atr_1d_val = atr_1d_aligned[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
@@ -96,14 +87,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above R1 with volume AND above 1d EMA34 (uptrend)
-            if (price > r1_val) and (price > ema_34_1d_val) and (vol_ratio_val > 2.0):
+            # LONG: Price breaks above R1 with volume AND above 12h EMA34 (uptrend)
+            if (price > r1_val) and (price > ema_34_12h_val) and (vol_ratio_val > 2.0):
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Price breaks below S1 with volume AND below 1d EMA34 (downtrend)
-            elif (price < s1_val) and (price < ema_34_1d_val) and (vol_ratio_val > 2.0):
+            # SHORT: Price breaks below S1 with volume AND below 12h EMA34 (downtrend)
+            elif (price < s1_val) and (price < ema_34_12h_val) and (vol_ratio_val > 2.0):
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -118,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_FibPivot_R1_S1_EMA34_VolumeSpike_ATRFilter"
-timeframe = "12h"
+name = "4h_FibPivot_R1_S1_EMA34_VolumeSpike_v3"
+timeframe = "4h"
 leverage = 1.0
