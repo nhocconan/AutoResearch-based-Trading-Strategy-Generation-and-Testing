@@ -1,14 +1,10 @@
+# 12h_Pivot_R1_S1_Breakout_Volume_Confirmation
+# Hypothesis: Price breaking above the daily R1 pivot or below the daily S1 pivot with volume confirmation on 12h timeframe captures institutional breakout moves. Uses 1d pivot levels as key support/resistance and requires volume > 1.5x 20-period average for confirmation. Works in both bull and bear markets by trading breakouts in either direction. Target: 50-150 total trades over 4 years (12-37/year).
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 1h momentum breakout with 4h trend filter (EMA50) and 1d volume confirmation.
-# Long when 1h price crosses above 4h EMA50 AND 1h RSI > 50 AND 1d volume > 1.5x 20-period average.
-# Short when 1h price crosses below 4h EMA50 AND 1h RSI < 50 AND 1d volume > 1.5x 20-period average.
-# Exit on opposite cross or ATR-based stoploss (2*ATR from entry).
-# Uses 4h EMA50 for trend direction, 1h for entry timing, 1d volume for conviction.
-# Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,111 +16,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1h Indicators: RSI(14) ===
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.finfo(float).eps)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_prev = np.roll(rsi, 1)
-    rsi_prev[0] = np.nan
-    
-    # === 4h Indicators: EMA50 ===
-    df_4h = get_htf_data(prices, '4h')
-    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # === 1d Indicators: Volume Spike ===
+    # === 1d Pivot Points (Camarilla style) ===
     df_1d = get_htf_data(prices, '1d')
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    volume_spike = volume > (1.5 * vol_ma_1d_aligned)
+    # Calculate pivot points from previous day
+    pp = (df_1d['high'].shift(1) + df_1d['low'].shift(1) + df_1d['close'].shift(1)) / 3
+    r1 = pp + (df_1d['high'].shift(1) - df_1d['low'].shift(1)) * 1.1 / 6
+    s1 = pp - (df_1d['high'].shift(1) - df_1d['low'].shift(1)) * 1.1 / 6
     
-    # === 1h ATR for stoploss ===
-    tr1 = pd.Series(high).diff()
-    tr2 = pd.Series(low).diff().abs()
-    tr3 = pd.Series(close).shift(1).diff().abs()
-    tr_1h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1h_raw = pd.Series(tr_1h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Align pivot levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # === Volume Confirmation ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed)
-    warmup = 60
+    # Warmup: ensure pivot calculation has previous day data
+    warmup = 24  # Need at least 1 day of 12h data
     
-    # Track position state and entry price for stoploss
+    # Track position state
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
     for i in range(warmup, n):
-        # Skip if any required data is NaN or outside session
-        if (np.isnan(rsi[i]) or np.isnan(rsi_prev[i]) or np.isnan(ema_50_4h_aligned[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(atr_1h_raw[i]) or not session_filter[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Current values
         price = close[i]
-        rsi_val = rsi[i]
-        rsi_prev_val = rsi_prev[i]
-        ema_val = ema_50_4h_aligned[i]
         vol_spike = volume_spike[i]
-        atr_val = atr_1h_raw[i]
         
-        # === EXIT LOGIC ===
-        exit_signal = False
-        
+        # === EXIT LOGIC: Close position when price returns to pivot zone ===
         if position == 1:  # Long position
-            # Exit if price crosses below 4h EMA50
-            if price < ema_val and ema_50_4h_aligned[i-1] <= close[i-1]:
-                exit_signal = True
-            # ATR-based stoploss: 2*ATR below entry
-            elif price < entry_price - 2.0 * atr_val:
-                exit_signal = True
+            # Exit when price crosses back below R1 (failed breakout)
+            if price < r1_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+                continue
         
         elif position == -1:  # Short position
-            # Exit if price crosses above 4h EMA50
-            if price > ema_val and ema_50_4h_aligned[i-1] >= close[i-1]:
-                exit_signal = True
-            # ATR-based stoploss: 2*ATR above entry
-            elif price > entry_price + 2.0 * atr_val:
-                exit_signal = True
-        
-        if exit_signal:
-            signals[i] = 0.0
-            position = 0
-            entry_price = 0.0
-            continue
+            # Exit when price crosses back above S1 (failed breakdown)
+            if price > s1_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+                continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price crosses above 4h EMA50 AND RSI > 50 AND volume spike
-            if (price > ema_val and ema_50_4h_aligned[i-1] <= close[i-1] and 
-                rsi_val > 50 and vol_spike):
-                signals[i] = 0.20
+            # LONG: Price breaks above R1 with volume confirmation
+            if price > r1_aligned[i] and vol_spike:
+                signals[i] = 0.25
                 position = 1
-                entry_price = price
+                continue
             
-            # SHORT: Price crosses below 4h EMA50 AND RSI < 50 AND volume spike
-            elif (price < ema_val and ema_50_4h_aligned[i-1] >= close[i-1] and 
-                  rsi_val < 50 and vol_spike):
-                signals[i] = -0.20
+            # SHORT: Price breaks below S1 with volume confirmation
+            elif price < s1_aligned[i] and vol_spike:
+                signals[i] = -0.25
                 position = -1
-                entry_price = price
+                continue
         
+        # Hold current position
+        if position == 1:
+            signals[i] = 0.25
+        elif position == -1:
+            signals[i] = -0.25
         else:
-            signals[i] = position * 0.20
+            signals[i] = 0.0
     
     return signals
 
-name = "1h_EMA50_RSI_VolumeSpike_SessionFilter_V1"
-timeframe = "1h"
+name = "12h_Pivot_R1_S1_Breakout_Volume_Confirmation"
+timeframe = "12h"
 leverage = 1.0
