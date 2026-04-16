@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h volume spike (2.0x median) and 1d ADX regime filter (ADX > 20)
-# Long when price > Donchian upper band AND 12h volume > 2.0x 20-period median AND 1d ADX > 20
-# Short when price < Donchian lower band AND 12h volume > 2.0x 20-period median AND 1d ADX > 20
-# Exit when price crosses Donchian middle band (mean reversion to equilibrium)
-# Uses discrete position size 0.25 to limit fee drag. Target: 75-200 total trades over 4 years.
-# Combines price channel breakout with volume confirmation and trend regime filter for robustness in bull/bear markets.
+# Hypothesis: 1d Williams Fractal breakout with 1w volume spike (2.5x median) and 1d ADX regime filter (ADX > 25)
+# Long when price breaks above recent bullish fractal high AND 1w volume > 2.5x 20-period median AND 1d ADX > 25
+# Short when price breaks below recent bearish fractal low AND 1w volume > 2.5x 20-period median AND 1d ADX > 25
+# Exit when price crosses 50-period EMA (mean reversion to equilibrium)
+# Uses discrete position size 0.30 to limit fee drag. Target: 30-100 total trades over 4 years.
+# Combines fractal structure breakout with volume confirmation and trend regime filter for robustness in bull/bear markets.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,14 +19,15 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
     # Precompute session hours (08-20 UTC) for filter
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data once before loop for ADX trend filter
+    # Get 1d data once before loop for ADX trend filter and fractals
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # === 1d Indicators: ADX (14-period) for trend regime filter ===
@@ -61,40 +62,55 @@ def generate_signals(prices):
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Get 12h data for volume filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # === 1d Indicators: Williams Fractals ===
+    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n] > high[n+1] and high[n] > high[n+2]
+    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n] < low[n+1] and low[n] < low[n+2]
+    n_1d = len(high_1d)
+    bearish_fractal = np.full(n_1d, np.nan)
+    bullish_fractal = np.full(n_1d, np.nan)
+    
+    for i in range(2, n_1d - 2):
+        # Bearish fractal (sell signal)
+        if (high_1d[i-2] < high_1d[i-1] and 
+            high_1d[i] > high_1d[i-1] and 
+            high_1d[i] > high_1d[i+1] and 
+            high_1d[i] > high_1d[i+2]):
+            bearish_fractal[i] = high_1d[i]
+        
+        # Bullish fractal (buy signal)
+        if (low_1d[i-2] > low_1d[i-1] and 
+            low_1d[i] < low_1d[i-1] and 
+            low_1d[i] < low_1d[i+1] and 
+            low_1d[i] < low_1d[i+2]):
+            bullish_fractal[i] = low_1d[i]
+    
+    # Align fractals with 2-bar extra delay for confirmation (Williams fractals need 2 bars to confirm)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    
+    # Get 1w data for volume filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # === 12h Indicators: Volume median (20-period) ===
-    volume_12h = df_12h['volume'].values
-    vol_median_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).median().values
-    vol_median_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_median_20_12h)
+    # === 1w Indicators: Volume median (20-period) ===
+    volume_1w = df_1w['volume'].values
+    vol_median_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).median().values
+    vol_median_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_median_20_1w)
     
-    # Get 4h data for Donchian channels
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get 1d data for EMA exit
+    df_1d_ema = get_htf_data(prices, '1d')
+    if len(df_1d_ema) < 50:
         return np.zeros(n)
     
-    # === 4h Indicators: Donchian Channels (20-period) ===
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Donchian channels
-    donchian_upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_middle = (donchian_upper + donchian_lower) / 2.0
-    
-    # Align Donchian levels to primary timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
-    donchian_middle_aligned = align_htf_to_ltf(prices, df_4h, donchian_middle)
+    # === 1d Indicators: EMA (50-period) for exit ===
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d_ema, ema_50)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(30, 20, 14)  # 1d ADX, 12h volume, 4h Donchian
+    warmup = max(50, 20, 14)  # 1d EMA, 1w volume, 1d ADX
     
     # Track position state for exits
     position = 0  # 0: flat, 1: long, -1: short
@@ -109,40 +125,40 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(donchian_middle_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
-            np.isnan(vol_median_20_12h_aligned[i])):
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
+            np.isnan(vol_median_20_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Current 12h volume (aligned)
-        vol_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_12h)
-        if np.isnan(vol_12h_aligned[i]):
+        # Current 1w volume (aligned)
+        vol_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_1w)
+        if np.isnan(vol_1w_aligned[i]):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 12h volume > 2.0x 20-period 12h volume median
-        vol_threshold = vol_median_20_12h_aligned[i] * 2.0
-        vol_confirm = vol_12h_aligned[i] > vol_threshold
+        # Volume filter: current 1w volume > 2.5x 20-period 1w volume median
+        vol_threshold = vol_median_20_1w_aligned[i] * 2.5
+        vol_confirm = vol_1w_aligned[i] > vol_threshold
         
-        # Regime filter: 1d ADX > 20 (trending market)
-        regime_filter = adx_1d_aligned[i] > 20
+        # Regime filter: 1d ADX > 25 (trending market)
+        regime_filter = adx_1d_aligned[i] > 25
         
         # Price levels
         price = close[i]
-        upper = donchian_upper_aligned[i]
-        lower = donchian_lower_aligned[i]
-        middle = donchian_middle_aligned[i]
+        ema_50_val = ema_50_aligned[i]
+        bullish_fractal_val = bullish_fractal_aligned[i]
+        bearish_fractal_val = bearish_fractal_aligned[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         if position == 1:  # long position
-            # Exit when price crosses below Donchian middle band (mean reversion)
-            if price < middle:
+            # Exit when price crosses below 50-period EMA (mean reversion)
+            if price < ema_50_val:
                 exit_signal = True
         elif position == -1:  # short position
-            # Exit when price crosses above Donchian middle band (mean reversion)
-            if price > middle:
+            # Exit when price crosses above 50-period EMA (mean reversion)
+            if price > ema_50_val:
                 exit_signal = True
         
         if exit_signal:
@@ -154,24 +170,24 @@ def generate_signals(prices):
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
             # LONG CONDITIONS
-            # Price breaks above Donchian upper band AND volume confirmation AND trend regime
-            if price > upper and vol_confirm and regime_filter:
-                signals[i] = 0.25
+            # Price breaks above recent bullish fractal high AND volume confirmation AND trend regime
+            if not np.isnan(bullish_fractal_val) and price > bullish_fractal_val and vol_confirm and regime_filter:
+                signals[i] = 0.30
                 position = 1
                 entry_price = price
             
             # SHORT CONDITIONS
-            # Price breaks below Donchian lower band AND volume confirmation AND trend regime
-            elif price < lower and vol_confirm and regime_filter:
-                signals[i] = -0.25
+            # Price breaks below recent bearish fractal low AND volume confirmation AND trend regime
+            elif not np.isnan(bearish_fractal_val) and price < bearish_fractal_val and vol_confirm and regime_filter:
+                signals[i] = -0.30
                 position = -1
                 entry_price = price
         
         else:
-            signals[i] = position * 0.25  # maintain position
+            signals[i] = position * 0.30  # maintain position
     
     return signals
 
-name = "4h_Donchian20_12hVolume2.0x_1dADX20_v1"
-timeframe = "4h"
+name = "1d_WilliamsFractal_Breakout_1wVol2.5x_1dADX25_v1"
+timeframe = "1d"
 leverage = 1.0
