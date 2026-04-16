@@ -18,40 +18,43 @@ def generate_signals(prices):
     close_4h = df_4h['close'].values
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
-    volume_4h = df_4h['volume'].values
     
-    # 4x ATR for volatility filter
-    high_low = high_4h - low_4h
-    high_close = np.abs(high_4h - np.roll(close_4h, 1))
-    low_close = np.abs(low_4h - np.roll(close_4h, 1))
-    high_close[0] = np.inf
-    low_close[0] = np.inf
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    # 4x ATR(14) for volatility filter
+    high_1d = df_4h['high'].values
+    low_1d = df_4h['low'].values
+    close_1d = df_4h['close'].values
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = np.inf
+    tr3[0] = np.inf
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
-    
-    # 4h EMA50 for trend filter
-    close_4h_series = pd.Series(close_4h)
-    ema_50_4h = close_4h_series.ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     # === 1d data (HTF for regime) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # 1d ATR for volatility regime
-    high_low_1d = high_1d - low_1d
-    high_close_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    low_close_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    high_close_1d[0] = np.inf
-    low_close_1d[0] = np.inf
-    tr_1d = np.maximum(high_low_1d, np.maximum(high_close_1d, low_close_1d))
+    # 1d ATR for volatility filter
+    tr1_1d = np.abs(high_1d - low_1d)
+    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2_1d[0] = np.inf
+    tr3_1d[0] = np.inf
+    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
     atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # === 1h indicators for entry timing ===
+    # === 4h indicators for entry timing ===
+    # EMA(21) for trend filter
+    close_4h_series = pd.Series(close_4h)
+    ema_21_4h = close_4h_series.ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
+    
     # RSI(14)
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
@@ -78,7 +81,7 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_4h_aligned[i]) or np.isnan(ema_50_4h_aligned[i]) or 
+        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(atr_4h_aligned[i]) or 
             np.isnan(atr_1d_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             position = 0
@@ -88,7 +91,7 @@ def generate_signals(prices):
         in_session = (8 <= hour <= 20)
         
         price = close[i]
-        ema_50_4h_val = ema_50_4h_aligned[i]
+        ema_21_4h_val = ema_21_4h_aligned[i]
         atr_4h_val = atr_4h_aligned[i]
         atr_1d_val = atr_1d_aligned[i]
         rsi_val = rsi[i]
@@ -96,15 +99,15 @@ def generate_signals(prices):
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price closes below EMA50(4h) OR RSI becomes overbought
-            if (price < ema_50_4h_val) or (rsi_val > 70):
+            # Exit when price closes below EMA21 OR RSI becomes overbought
+            if (price < ema_21_4h_val) or (rsi_val > 70):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price closes above EMA50(4h) OR RSI becomes oversold
-            if (price > ema_50_4h_val) or (rsi_val < 30):
+            # Exit when price closes above EMA21 OR RSI becomes oversold
+            if (price > ema_21_4h_val) or (rsi_val < 30):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -113,15 +116,17 @@ def generate_signals(prices):
         if position == 0:
             # Only trade during session
             if in_session:
-                # LONG: Price above EMA50(4h) AND RSI not overbought AND volume spike AND volatility not too high
-                if (price > ema_50_4h_val) and (rsi_val < 60) and \
-                   (vol_ratio_val > 2.0) and (atr_1d_val < np.percentile(atr_1d_aligned[:i+1], 80)):
+                # LONG: Price above EMA21 (trend filter) AND RSI not overbought 
+                # AND volume spike AND 4h volatility below 80th percentile
+                if (price > ema_21_4h_val) and (rsi_val < 60) and \
+                   (vol_ratio_val > 2.0) and (atr_4h_val < np.percentile(atr_4h_aligned[:i+1], 80)):
                     signals[i] = 0.25
                     position = 1
                     continue
                 
-                # SHORT: Price below EMA50(4h) AND RSI not oversold AND volume spike AND volatility not too high
-                elif (price < ema_50_4h_val) and (rsi_val > 40) and \
+                # SHORT: Price below EMA21 (trend filter) AND RSI not oversold 
+                # AND volume spike AND 1d volatility below 80th percentile
+                elif (price < ema_21_4h_val) and (rsi_val > 40) and \
                      (vol_ratio_val > 2.0) and (atr_1d_val < np.percentile(atr_1d_aligned[:i+1], 80)):
                     signals[i] = -0.25
                     position = -1
@@ -137,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_EMA50_4h_RSI_Volume_Trend_Filter"
-timeframe = "1h"
+name = "4h_EMA21_RSI_Volume_Volatility"
+timeframe = "4h"
 leverage = 1.0
