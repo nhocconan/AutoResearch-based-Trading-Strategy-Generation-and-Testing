@@ -3,13 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R combined with 1d EMA filter and volume confirmation.
-# Uses Williams %R(14) on 12h for overbought/oversold signals.
-# In oversold (%R < -80): look for long entries when price > 1d EMA(34) and volume > 1.5x average.
-# In overbought (%R > -20): look for short entries when price < 1d EMA(34) and volume > 1.5x average.
-# EMA filter ensures trading with the higher timeframe trend.
-# Volume confirmation reduces false signals.
-# Designed to work in both bull (buy oversold in uptrend) and bear (sell overbought in downtrend).
+# Hypothesis: 4h Bollinger Band squeeze breakout with 1d volume confirmation and RSI filter.
+# Uses BB width percentile to detect low volatility squeezes (breakout precursors).
+# In squeeze: wait for breakout above/below BB with volume > 2x average and RSI confirming momentum.
+# Position size 0.25 to manage drawdown. Designed to capture explosive moves in both bull and bear markets.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,33 +18,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h data (primary timeframe) ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    # === 4h data (primary timeframe) ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    volume_4h = df_4h['volume'].values
     
-    # === 1d data (higher timeframe for EMA filter) ===
+    # === 1d data (higher timeframe for volume confirmation) ===
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # === 12h Williams %R (14) ===
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min()
-    williams_r = (highest_high - close_12h) / (highest_high - lowest_low) * -100
-    williams_r = williams_r.replace([np.inf, -np.inf], np.nan).fillna(-50).values
-    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
+    # === 4h Bollinger Bands (20, 2) ===
+    bb_middle = pd.Series(close_4h).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close_4h).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
+    bb_width = bb_upper - bb_lower
     
-    # === 1d EMA(34) for trend filter ===
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # === 4h BB width percentile (50) for squeeze detection ===
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
     
-    # === 12h volume ratio for confirmation ===
-    vol_ma_10_12h = pd.Series(volume_12h).rolling(window=10, min_periods=10).mean().values
-    vol_ratio_12h = volume_12h / vol_ma_10_12h
+    # === 4h RSI(14) for momentum confirmation ===
+    delta = pd.Series(close_4h).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.fillna(50).values
+    
+    # === 4h volume ratio for breakout confirmation ===
+    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_4h = volume_4h / vol_ma_20_4h
+    
+    # === 1d volume ratio for higher timeframe confirmation ===
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_1d = volume_1d / vol_ma_20_1d
+    
+    # Align HTF indicators to 4h timeframe
+    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_4h, bb_width_percentile)
+    rsi_aligned = align_htf_to_ltf(prices, df_4h, rsi_values)
+    vol_ratio_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ratio_4h)
+    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
     signals = np.zeros(n)
     
@@ -60,54 +77,51 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(williams_r_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(vol_ratio_12h[i])):
+        if (np.isnan(bb_width_percentile_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or
+            np.isnan(vol_ratio_4h_aligned[i]) or
+            np.isnan(vol_ratio_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        wr = williams_r_aligned[i]
-        ema_34 = ema_34_1d_aligned[i]
-        vol_ratio = vol_ratio_12h[i]
+        bb_width_pct = bb_width_percentile_aligned[i]
+        rsi_val = rsi_aligned[i]
+        vol_ratio_4h = vol_ratio_4h_aligned[i]
+        vol_ratio_1d = vol_ratio_1d_aligned[i]
         
         # === STOPLOSS LOGIC ===
-        # Calculate ATR-based stop using 12h data
-        if i >= 14:  # Need enough data for ATR
-            tr1 = high_12h[i] - low_12h[i]
-            tr2 = abs(high_12h[i] - close_12h[i-1]) if i-1 >= 0 else 0
-            tr3 = abs(low_12h[i] - close_12h[i-1]) if i-1 >= 0 else 0
-            tr = max(tr1, tr2, tr3)
-            # Simplified ATR calculation for stop (using current bar's TR)
-            atr_est = tr  # Using current bar's true range as proxy
-            
-            if position == 1:  # Long position
-                if price < entry_price - 2.0 * atr_est:
-                    signals[i] = 0.0
-                    position = 0
-                    entry_price = 0.0
-                    continue
-            
-            elif position == -1:  # Short position
-                if price > entry_price + 2.0 * atr_est:
-                    signals[i] = 0.0
-                    position = 0
-                    entry_price = 0.0
-                    continue
-        
-        # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when Williams %R returns to overbought or EMA breaks down
-            if wr > -20 or price < ema_34:
+            # Stop loss: price closes below entry - 2.0 * ATR (using BB width as proxy)
+            bb_width_val = bb_width[i]
+            if price < entry_price - 2.0 * bb_width_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when Williams %R returns to oversold or EMA breaks up
-            if wr < -80 or price > ema_34:
+            # Stop loss: price closes above entry + 2.0 * ATR (using BB width as proxy)
+            bb_width_val = bb_width[i]
+            if price > entry_price + 2.0 * bb_width_val:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+                continue
+        
+        # === EXIT LOGIC ===
+        if position == 1:  # Long position
+            # Exit: RSI overbought or BB width expansion (end of squeeze)
+            if rsi_val > 70 or bb_width_pct > 80:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+                continue
+        
+        elif position == -1:  # Short position
+            # Exit: RSI oversold or BB width expansion (end of squeeze)
+            if rsi_val < 30 or bb_width_pct > 80:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -115,16 +129,26 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            if wr < -80 and price > ema_34 and vol_ratio > 1.5:  # Oversold + above EMA + volume
-                signals[i] = 0.25
-                position = 1
-                entry_price = price
-                continue
-            elif wr > -20 and price < ema_34 and vol_ratio > 1.5:  # Overbought + below EMA + volume
-                signals[i] = -0.25
-                position = -1
-                entry_price = price
-                continue
+            # Squeeze condition: BB width in lowest 20th percentile
+            if bb_width_pct < 20:
+                # LONG: breakout above upper BB with volume and RSI confirmation
+                if (price > bb_upper[i] and 
+                    vol_ratio_4h > 2.0 and 
+                    vol_ratio_1d > 1.5 and 
+                    rsi_val > 50):
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = price
+                    continue
+                # SHORT: breakout below lower BB with volume and RSI confirmation
+                elif (price < bb_lower[i] and 
+                      vol_ratio_4h > 2.0 and 
+                      vol_ratio_1d > 1.5 and 
+                      rsi_val < 50):
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = price
+                    continue
         
         # Hold current position
         if position == 1:
@@ -136,6 +160,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsR_1dEMA34_Volume_Filter_v1"
-timeframe = "12h"
+name = "4h_BB_Squeeze_Breakout_Volume_RSI_v1"
+timeframe = "4h"
 leverage = 1.0
