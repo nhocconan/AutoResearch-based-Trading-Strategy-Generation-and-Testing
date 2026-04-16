@@ -13,13 +13,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data (HTF for key levels) ===
+    # === Daily data (HTF for key levels) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === 1d Previous Day Range Calculation ===
+    # === Daily Previous Day Range Calculation ===
     prev_close_1d = np.roll(close_1d, 1)
     prev_high_1d = np.roll(high_1d, 1)
     prev_low_1d = np.roll(low_1d, 1)
@@ -29,22 +29,22 @@ def generate_signals(prices):
     
     prev_range = prev_high_1d - prev_low_1d
     
-    # === Calculate 1d Pivot Points (Fibonacci-based) ===
+    # === Calculate Daily Pivot Points (Fibonacci-based) ===
     pivot_point = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
     
     # Calculate key levels: R1 and S1 at 0.382 Fibonacci
     r1 = pivot_point + prev_range * 0.382
     s1 = pivot_point - prev_range * 0.382
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # === 1d EMA34 for trend filter ===
+    # === Daily EMA34 for trend filter ===
     ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === Volume confirmation (12h) ===
+    # === Volume confirmation (4h) ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma_20
     
@@ -87,13 +87,13 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above R1 with volume AND above 1d EMA34 (uptrend)
+            # LONG: Price breaks above R1 with volume AND above daily EMA34 (uptrend)
             if (price > r1_val) and (price > ema_34_1d_val) and (vol_ratio_val > 2.0):
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Price breaks below S1 with volume AND below 1d EMA34 (downtrend)
+            # SHORT: Price breaks below S1 with volume AND below daily EMA34 (downtrend)
             elif (price < s1_val) and (price < ema_34_1d_val) and (vol_ratio_val > 2.0):
                 signals[i] = -0.25
                 position = -1
@@ -109,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_FibPivot_R1_S1_EMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_FibPivot_R1_S1_EMA34_VolumeSpike_v4"
+timeframe = "4h"
 leverage = 1.0
