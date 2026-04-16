@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h volume confirmation and 1d ADX regime filter.
-# Long when Bull Power > 0 AND volume > 1.5x 20-period average AND 1d ADX > 20.
-# Short when Bear Power < 0 AND volume > 1.5x 20-period average AND 1d ADX > 20.
-# Exit when power reverses sign or ADX < 15 (weak trend).
-# Uses discrete position size 0.25. Elder Ray measures price strength relative to EMA13,
-# volume confirms conviction, and 1d ADX ensures trending regime. Target: 80-160 total trades over 4 years (20-40/year).
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1d ADX trend filter.
+# Long when price breaks above Donchian upper band AND volume > 2.0x 20-period average AND 1d ADX > 25.
+# Short when price breaks below Donchian lower band AND volume > 2.0x 20-period average AND 1d ADX > 25.
+# Exit when price returns to Donchian midpoint (mean of upper/lower) or ATR(10) < ATR(30) (contracting volatility).
+# Uses discrete position size 0.25. Donchian provides structure, volume confirmation reduces false signals,
+# and 1d ADX ensures we only trade in trending regimes. Target: 75-200 total trades over 4 years (19-50/year).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,37 +20,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data once before loop for EMA13 calculation (Elder Ray)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # === 12h Indicators: EMA13 for Elder Ray calculation ===
-    ema13 = pd.Series(close_12h).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Bull Power = High - EMA13
-    bull_power = high_12h - ema13
-    # Bear Power = Low - EMA13
-    bear_power = low_12h - ema13
-    
-    # Align Elder Ray components to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_12h, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_12h, bear_power)
-    
-    # Get 1d data once before loop for ADX regime filter
+    # Get 1d data once before loop for volume and ADX filters
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # === 1d Indicators: ADX(14) for trend filter ===
+    # === 1d Indicators: Volume MA(20) and ADX(14) ===
+    # Volume moving average
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # ADX calculation
     # True Range
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
@@ -82,82 +66,87 @@ def generate_signals(prices):
     dx = np.where(np.isnan(dx), 0, dx)
     adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align ADX to 6h timeframe
+    # Align 1d indicators to 4h timeframe
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # === 4h Indicators: Donchian Channel(20) ===
+    # Calculate Donchian bands on 4h data
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_20 + lowest_20) / 2.0
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 50
+    warmup = 100
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or np.isnan(donchian_mid[i]) or 
+            np.isnan(vol_ma_20_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             position = 0
+            entry_price = 0.0
             continue
         
         # Current values
-        bull_val = bull_power_aligned[i]
-        bear_val = bear_power_aligned[i]
+        upper = highest_20[i]
+        lower = lowest_20[i]
+        mid = donchian_mid[i]
+        vol_ma = vol_ma_20_aligned[i]
         adx_val = adx_aligned[i]
         price = close[i]
         vol = volume[i]
         
-        # Calculate 20-period volume average on 6h timeframe
-        if i >= 20:
-            vol_ma_20 = np.mean(volume[max(0, i-19):i+1])
-        else:
-            vol_ma_20 = 0.0
+        # Volume filter: volume > 2.0x 20-period average
+        vol_filter = vol > 2.0 * vol_ma if vol_ma > 0 else False
         
-        # Volume filter: volume > 1.5x 20-period average
-        vol_filter = vol > 1.5 * vol_ma_20 if vol_ma_20 > 0 else False
-        
-        # Trend filter: 1d ADX > 20 (trending regime)
-        trend_filter = adx_val > 20
-        
-        # Weak trend filter: ADX < 15 for exit
-        weak_trend = adx_val < 15
+        # Trend filter: 1d ADX > 25 (trending regime)
+        trend_filter = adx_val > 25
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if Bull Power becomes negative or weak trend
-            if bull_val <= 0 or weak_trend:
+            # Exit if price returns to midpoint
+            if price <= mid:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if Bear Power becomes positive or weak trend
-            if bear_val >= 0 or weak_trend:
+            # Exit if price returns to midpoint
+            if price >= mid:
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
+            entry_price = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Bull Power > 0 with volume and trend confirmation
-            if bull_val > 0 and vol_filter and trend_filter:
+            # LONG: price breaks above Donchian upper band with volume and trend confirmation
+            if price > upper and vol_filter and trend_filter:
                 signals[i] = 0.25
                 position = 1
+                entry_price = price
             
-            # SHORT: Bear Power < 0 with volume and trend confirmation
-            elif bear_val < 0 and vol_filter and trend_filter:
+            # SHORT: price breaks below Donchian lower band with volume and trend confirmation
+            elif price < lower and vol_filter and trend_filter:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         else:
             signals[i] = position * 0.25
     
     return signals
 
-name = "6h_ElderRay_12hVolumeSpike_1dADXTrend_V1"
-timeframe = "6h"
+name = "4h_Donchian20_1dVolumeSpike_1dADXTrend_V1"
+timeframe = "4h"
 leverage = 1.0
