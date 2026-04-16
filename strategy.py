@@ -1,10 +1,3 @@
-# 4h_ParabolicSAR_Trend_Scalper_v1
-# Hypothesis: Parabolic SAR captures trend direction with built-in acceleration, 
-# providing clear entry/exit signals. Combined with volume confirmation and 
-# daily trend filter (EMA50), it works in both bull (follows uptrends) and 
-# bear (captures downtrends) markets. Using 4h timeframe limits overtrading 
-# while capturing multi-day moves. Target: 20-40 trades/year.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -20,108 +13,125 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h data (primary) ===
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # === 12h data (primary) ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    volume_12h = df_12h['volume'].values
     
-    # === 1d data (HTF for trend filter) ===
+    # === 1d data (HTF for EMA) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # === 4h Parabolic SAR (0.02 step, 0.2 max) ===
-    # Initialize
-    psar = np.zeros(n)
-    bull = True  # Start assuming bullish
-    af = 0.02    # Acceleration factor
-    ep = low[0]  # Extreme point
-    psar[0] = ep
+    # === 1w data (HTF for EMA) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    for i in range(1, n):
-        if bull:
-            psar[i] = psar[i-1] + af * (ep - psar[i-1])
-            # Reverse if price breaks below SAR
-            if low[i] < psar[i]:
-                bull = False
-                psar[i] = ep
-                ep = low[i]
-                af = 0.02
-            else:
-                # Update EP and AF
-                if high[i] > ep:
-                    ep = high[i]
-                    af = min(af + 0.02, 0.2)
-        else:
-            psar[i] = psar[i-1] + af * (ep - psar[i-1])
-            # Reverse if price breaks above SAR
-            if high[i] > psar[i]:
-                bull = True
-                psar[i] = ep
-                ep = high[i]
-                af = 0.02
-            else:
-                # Update EP and AF
-                if low[i] < ep:
-                    ep = low[i]
-                    af = min(af + 0.02, 0.2)
+    # === 12h EMA34 (trend filter from 1d close) ===
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === 1d EMA50 (trend filter) ===
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # === 1w EMA50 (long-term trend filter) ===
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # === 4h volume confirmation (20-period avg) ===
-    vol_ma_20_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_4h = volume / vol_ma_20_4h
+    # === 12h Donchian channel (20-period) ===
+    donch_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    
+    # Shift by 1 to avoid look-ahead (use previous bar's channel)
+    donch_high = np.roll(donch_high, 1)
+    donch_low = np.roll(donch_low, 1)
+    donch_high[0] = np.nan
+    donch_low[0] = np.nan
+    
+    # === 12h volume ratio for confirmation ===
+    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_12h = volume_12h / vol_ma_20_12h
+    
+    # === 12h ATR for stoploss ===
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = np.nan  # first value has no previous close
+    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     
     # Warmup
     warmup = 50
     
-    # Track position
+    # Track position and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(psar[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(vol_ratio_4h[i])):
+        if (np.isnan(donch_high[i]) or 
+            np.isnan(donch_low[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(vol_ratio_12h[i]) or
+            np.isnan(atr_12h[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        sar = psar[i]
-        ema_trend = ema_50_1d_aligned[i]
-        vol_ratio = vol_ratio_4h[i]
+        upper = donch_high[i]
+        lower = donch_low[i]
+        ema_trend = ema_34_1d_aligned[i]
+        ema_long = ema_50_1w_aligned[i]
+        vol_ratio = vol_ratio_12h[i]
+        atr = atr_12h[i]
         
-        # === EXIT LOGIC ===
+        # === STOPLOSS LOGIC ===
         if position == 1:  # Long position
-            # Exit: price closes below SAR (trend reversal)
-            if price < sar:
+            if price < entry_price - 2.0 * atr:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit: price closes above SAR (trend reversal)
-            if price > sar:
+            if price > entry_price + 2.0 * atr:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
+                continue
+        
+        # === EXIT LOGIC ===
+        if position == 1:  # Long position
+            # Exit: price closes below Donchian lower OR trend reverses (below EMA34)
+            if price < lower or price < ema_trend:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+                continue
+        
+        elif position == -1:  # Short position
+            # Exit: price closes above Donchian upper OR trend reverses (above EMA34)
+            if price > upper or price > ema_trend:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price above SAR AND above daily EMA50 (uptrend) with volume
-            if price > sar and price > ema_trend and vol_ratio > 1.5:
+            # LONG: Break above Donchian upper with volume, in uptrend (above both EMAs)
+            if price > upper and vol_ratio > 2.0 and price > ema_trend and price > ema_long:
                 signals[i] = 0.25
                 position = 1
+                entry_price = price
                 continue
-            # SHORT: Price below SAR AND below daily EMA50 (downtrend) with volume
-            elif price < sar and price < ema_trend and vol_ratio > 1.5:
+            # SHORT: Break below Donchian lower with volume, in downtrend (below both EMAs)
+            elif price < lower and vol_ratio > 2.0 and price < ema_trend and price < ema_long:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
                 continue
         
         # Hold current position
@@ -134,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_ParabolicSAR_Trend_Scalper_v1"
-timeframe = "4h"
+name = "12h_Donchian_1dEMA34_1wEMA50_Volume_ATRStop"
+timeframe = "12h"
 leverage = 1.0
