@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ATR stoploss.
-# Long when price breaks above Donchian upper band (20-period high) AND 1d volume > 1.5x 20-period average.
-# Short when price breaks below Donchian lower band (20-period low) AND 1d volume > 1.5x 20-period average.
-# Exit on ATR-based stoploss (2*ATR from entry) or opposite Donchian break.
-# Uses discrete position size 0.25. Designed to capture institutional breakouts with volume confirmation.
-# Works in both bull and bear markets by requiring volume confirmation and using price channels.
-# Target: 75-200 total trades over 4 years (19-50/year) to balance edge and fee drag.
+# Hypothesis: 1d Williams Alligator with 1w trend filter and volume confirmation.
+# Long when Alligator jaws < teeth < lips (bullish alignment) AND price > lips AND 1w EMA200 up trending AND volume > 1.5x 20-period average.
+# Short when Alligator jaws > teeth > lips (bearish alignment) AND price < lips AND 1w EMA200 down trending AND volume > 1.5x 20-period average.
+# Exit on opposite Alligator alignment or ATR-based stoploss (2*ATR from entry).
+# Uses discrete position size 0.25. Designed to catch trends with Alligator alignment while filtering chop via 1w EMA200 slope.
+# Target: 30-100 total trades over 4 years (7-25/year) to balance edge and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,23 +20,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Indicators: Donchian Channel (20-period) ===
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === 1d Indicators: Williams Alligator (SMAs of median price) ===
+    # Median price = (high + low) / 2
+    median_price = (high + low) / 2.0
+    # Alligator lines: Jaw (13-period SMA, 8 bars offset), Teeth (8-period SMA, 5 bars offset), Lips (5-period SMA, 3 bars offset)
+    jaw_raw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth_raw = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips_raw = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # === 1d Indicators: Volume Spike (volume > 1.5x 20-period average) ===
-    df_1d = get_htf_data(prices, '1d')
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    volume_spike = volume > (1.5 * vol_ma_1d_aligned)
+    # === 1w Indicators: EMA200 slope for trend filter ===
+    df_1w = get_htf_data(prices, '1w')
+    ema200_1w_raw = pd.Series(df_1w['close'].values).ewm(span=200, adjust=False, min_periods=200).mean()
+    ema200_1w = ema200_1w_raw.values
+    # Slope: positive if current > previous 5 periods ago
+    ema200_slope_raw = ema200_1w - np.roll(ema200_1w, 5)
+    ema200_slope_raw[:5] = 0  # avoid NaN
     
-    # === 4h ATR for stoploss ===
+    # === 1d Volume Spike (volume > 1.5x 20-period average) ===
+    vol_ma_raw = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_ma = vol_ma_raw.values
+    volume_spike = volume > (1.5 * vol_ma)
+    
+    # === 1d ATR for stoploss ===
     tr1 = pd.Series(high).diff()
     tr2 = pd.Series(low).diff().abs()
     tr3 = pd.Series(close).shift(1).diff().abs()
-    tr_4h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_4h_raw = pd.Series(tr_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_raw = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Align HTF indicators to LTF
+    jaw = align_htf_to_ltf(prices, pd.DataFrame({'close': median_price}), jaw_raw)  # using median_price as close proxy for alignment
+    teeth = align_htf_to_ltf(prices, pd.DataFrame({'close': median_price}), teeth_raw)
+    lips = align_htf_to_ltf(prices, pd.DataFrame({'close': median_price}), lips_raw)
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    ema200_slope_aligned = align_htf_to_ltf(prices, df_1w, ema200_slope_raw)
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -45,8 +61,8 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 20 periods needed)
-    warmup = 50
+    # Warmup: ensure all indicators are valid (max 200 periods needed for EMA200)
+    warmup = 250
     
     # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
@@ -54,8 +70,10 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(volume_spike[i]) or
-            np.isnan(atr_4h_raw[i]) or not session_filter[i]):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(ema200_1w_aligned[i]) or np.isnan(ema200_slope_aligned[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(atr_raw[i]) or
+            not session_filter[i]):
             signals[i] = 0.0
             position = 0
             continue
@@ -63,22 +81,22 @@ def generate_signals(prices):
         # Current values
         price = close[i]
         vol_spike = volume_spike[i]
-        atr_val = atr_4h_raw[i]
+        atr_val = atr_raw[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price breaks below Donchian lower band (strong reversal)
-            if price < donchian_lower[i]:
+            # Exit if Alligator alignment turns bearish (jaws > teeth > lips)
+            if jaw[i] > teeth[i] and teeth[i] > lips[i]:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR below entry
             elif price < entry_price - 2.0 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price breaks above Donchian upper band (strong reversal)
-            if price > donchian_upper[i]:
+            # Exit if Alligator alignment turns bullish (jaws < teeth < lips)
+            if jaw[i] < teeth[i] and teeth[i] < lips[i]:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR above entry
             elif price > entry_price + 2.0 * atr_val:
@@ -92,14 +110,20 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Donchian upper band AND volume spike
-            if price > donchian_upper[i] and vol_spike:
+            # LONG: Bullish Alligator alignment AND price > lips AND 1w EMA200 up trending AND volume spike
+            if (jaw[i] < teeth[i] and teeth[i] < lips[i] and 
+                price > lips[i] and 
+                ema200_slope_aligned[i] > 0 and 
+                vol_spike):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: Price breaks below Donchian lower band AND volume spike
-            elif price < donchian_lower[i] and vol_spike:
+            # SHORT: Bearish Alligator alignment AND price < lips AND 1w EMA200 down trending AND volume spike
+            elif (jaw[i] > teeth[i] and teeth[i] > lips[i] and 
+                  price < lips[i] and 
+                  ema200_slope_aligned[i] < 0 and 
+                  vol_spike):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -109,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dVolumeSpike_ATRStop_V1"
-timeframe = "4h"
+name = "1d_WilliamsAlligator_1wEMA200Slope_VolumeSpike_V1"
+timeframe = "1d"
 leverage = 1.0
