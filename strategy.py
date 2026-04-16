@@ -3,155 +3,101 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Camarilla pivot levels (R1, S1) with volume confirmation and 1w ADX regime filter.
-# Long when price breaks above R1 with volume > 1.5x average AND 1w ADX < 25 (ranging/low trend).
-# Short when price breaks below S1 with volume > 1.5x average AND 1w ADX < 25.
-# Exit when price reverts to 1d close (mean reversion) or ADX > 30 (strong trend).
-# Uses discrete position size 0.25. Camarilla pivots provide intraday support/resistance levels proven effective in crypto.
-# 1w ADX filter avoids trading in strong trends where mean reversion fails.
-# 4h timeframe targets 20-40 trades/year to minimize fee drag while capturing meaningful moves.
-# Works in ranging markets (mean reversion at pivots) and avoids strong trending markets where breakouts fail.
+# Hypothesis: 1d strategy using 1w Williams Alligator (Jaw/Teeth/Lips) with price cross confirmation.
+# Long when price > Lips AND Lips > Teeth > Jaw (bullish alignment).
+# Short when price < Lips AND Lips < Teeth < Jaw (bearish alignment).
+# Exit when price crosses back below/above Lips or alignment breaks.
+# Uses discrete position size 0.25. Williams Alligator identifies trending vs ranging markets.
+# 1w timeframe filter ensures trading only with higher timeframe trend to avoid whipsaws.
+# 1d timeframe targets 15-25 trades/year to minimize fee drag.
+# Works in bull markets (catch uptrends) and bear markets (catch downtrends).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data once before loop for Camarilla pivots
+    # Get 1d data once before loop for Williams Alligator (SMMA13, SMMA8, SMMA5)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Get 1w data once before loop for ADX filter
+    # Get 1w data once before loop for trend filter (EMA50)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    if len(df_1w) < 60:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # === 1d Indicators: Camarilla Pivot Levels (R1, S1) ===
-    # Classic Camarilla formula based on previous day's range
-    # Pivot = (H + L + C) / 3
-    # R1 = C + ((H - L) * 1.1 / 12)
-    # S1 = C - ((H - L) * 1.1 / 12)
-    # Using previous day's data to avoid look-ahead
-    pivot_1d = (high_1d[:-1] + low_1d[:-1] + close_1d[:-1]) / 3.0
-    range_1d = high_1d[:-1] - low_1d[:-1]
-    r1_1d = close_1d[:-1] + (range_1d * 1.1 / 12.0)
-    s1_1d = close_1d[:-1] - (range_1d * 1.1 / 12.0)
-    
-    # Prepend NaN for first day (no previous day data)
-    pivot_1d = np.concatenate([[np.nan], pivot_1d])
-    r1_1d = np.concatenate([[np.nan], r1_1d])
-    s1_1d = np.concatenate([[np.nan], s1_1d])
-    
-    # === 1w Indicators: ADX for regime filter ===
-    # ADX calculation: +DI, -DI, DX, then smoothed ADX
-    period = 14
-    
-    # True Range
-    tr1 = np.abs(high_1w[1:] - low_1w[:-1])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])  # first value NaN
-    
-    # +DM and -DM
-    up_move = high_1w[1:] - high_1w[:-1]
-    down_move = low_1w[:-1] - low_1w[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
-    
-    # Smoothed values using Wilder's smoothing (alpha = 1/period)
-    def wilders_smoothing(values, period):
-        """Wilder's smoothing (equivalent to EMA with alpha=1/period)"""
+    # === 1d Indicators: Williams Alligator (Smoothed Moving Average) ===
+    # Jaw: SMMA13 (13-period)
+    # Teeth: SMMA8 (8-period) 
+    # Lips: SMMA5 (5-period)
+    def smma(values, period):
+        """Smoothed Moving Average"""
         if len(values) < period:
             return np.full(len(values), np.nan)
         result = np.full(len(values), np.nan)
-        # First value is simple average
-        result[period-1] = np.nanmean(values[:period])
-        # Subsequent values: Wilder's smoothing
-        alpha = 1.0 / period
+        # First value is SMA
+        result[period-1] = np.mean(values[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CLOSE) / period
         for i in range(period, len(values)):
-            if np.isnan(result[i-1]):
-                result[i] = np.nan
-            else:
-                result[i] = values[i] * alpha + result[i-1] * (1 - alpha)
+            result[i] = (result[i-1] * (period-1) + values[i]) / period
         return result
     
-    tr_smoothed = wilders_smoothing(tr, period)
-    plus_dm_smoothed = wilders_smoothing(plus_dm, period)
-    minus_dm_smoothed = wilders_smoothing(minus_dm, period)
+    jaw_1d = smma(close_1d, 13)
+    teeth_1d = smma(close_1d, 8)
+    lips_1d = smma(close_1d, 5)
     
-    # +DI and -DI
-    plus_di = 100 * (plus_dm_smoothed / tr_smoothed)
-    minus_di = 100 * (minus_dm_smoothed / tr_smoothed)
+    # === 1w Indicators: EMA50 for trend filter ===
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # DX and ADX
-    dx = np.where((plus_di + minus_di) != 0, 
-                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 
-                  0.0)
-    adx = wilders_smoothing(dx, period)
-    
-    # Align all indicators to primary timeframe (4h)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Volume average (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align all indicators to primary timeframe (1d)
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
+    ema50_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 100  # sufficient for 1d pivots + 1w ADX + volume MA
+    warmup = 50  # SMMA13 needs sufficient warmup + EMA50
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(ema50_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values (aligned)
-        pivot = pivot_aligned[i]
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
-        adx_val = adx_aligned[i]
+        jaw = jaw_aligned[i]
+        teeth = teeth_aligned[i]
+        lips = lips_aligned[i]
+        ema50 = ema50_aligned[i]
         price = close[i]
-        vol = volume[i]
-        vol_avg = vol_ma[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit when price reverts to pivot (mean reversion) OR ADX > 30 (strong trend)
-            if (price <= pivot) or (adx_val > 30.0):
+            # Exit when price crosses below Lips OR Alligator alignment breaks (Lips <= Teeth)
+            if (price < lips) or (lips <= teeth):
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit when price reverts to pivot (mean reversion) OR ADX > 30 (strong trend)
-            if (price >= pivot) or (adx_val > 30.0):
+            # Exit when price crosses above Lips OR Alligator alignment breaks (Lips >= Teeth)
+            if (price > lips) or (lips >= teeth):
                 exit_signal = True
         
         if exit_signal:
@@ -161,19 +107,18 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Volume confirmation: current volume > 1.5x average
-            volume_confirm = vol > (1.5 * vol_avg)
+            # Bullish alignment: Lips > Teeth > Jaw AND price > Lips
+            bullish_alignment = (lips > teeth) and (teeth > jaw)
+            # Bearish alignment: Lips < Teeth < Jaw AND price < Lips
+            bearish_alignment = (lips < teeth) and (teeth < jaw)
             
-            # Regime filter: 1w ADX < 25 (ranging/low trend environment)
-            regime_filter = adx_val < 25.0
-            
-            # LONG: Price breaks above R1 with volume confirmation AND ranging regime
-            if (price > r1) and volume_confirm and regime_filter:
+            # LONG: Bullish alignment AND price > Lips AND price > 1w EMA50 (uptrend filter)
+            if bullish_alignment and (price > lips) and (price > ema50):
                 signals[i] = 0.25
                 position = 1
             
-            # SHORT: Price breaks below S1 with volume confirmation AND ranging regime
-            elif (price < s1) and volume_confirm and regime_filter:
+            # SHORT: Bearish alignment AND price < Lips AND price < 1w EMA50 (downtrend filter)
+            elif bearish_alignment and (price < lips) and (price < ema50):
                 signals[i] = -0.25
                 position = -1
         
@@ -182,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dCamarilla_R1S1_VolumeSpike_1wADXRegimeFilter_V1"
-timeframe = "4h"
+name = "1d_1wWilliamsAlligator_JawTeethLips_1wEMA50_TrendFilter_V1"
+timeframe = "1d"
 leverage = 1.0
