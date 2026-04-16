@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian(20) breakout with weekly EMA(50) trend filter and volume confirmation.
-# Long when price breaks above 20-day high AND weekly EMA(50) is rising AND volume > 1.5x 20-day average.
-# Short when price breaks below 20-day low AND weekly EMA(50) is falling AND volume > 1.5x 20-day average.
-# Uses discrete position size 0.25. Donchian captures breakouts, weekly EMA ensures alignment with higher timeframe trend,
-# volume spike confirms institutional participation. Designed to catch strong trending moves while avoiding chop.
-# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag.
+# Hypothesis: 6h Camarilla pivot breakout with 1d volume confirmation and ATR-based stop.
+# Long when price breaks above Camarilla R4 level AND 1d volume > 1.5x 20-period average.
+# Short when price breaks below Camarilla S4 level AND 1d volume > 1.5x 20-period average.
+# Uses ATR(14) for dynamic stoploss (signal → 0 when price moves against position by 2*ATR).
+# Designed to capture strong breakouts in both bull and bear markets with volume confirmation.
+# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,96 +20,103 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Daily Indicators: Donchian(20) ===
-    high_ma = pd.Series(high).rolling(window=20, min_periods=20).max()
-    low_ma = pd.Series(low).rolling(window=20, min_periods=20).min()
-    donchian_high = high_ma.values
-    donchian_low = low_ma.values
+    # === 6h Indicators: ATR(14) for stoploss ===
+    tr1 = pd.Series(high).diff()
+    tr2 = pd.Series(low).diff().abs()
+    tr3 = pd.Series(close).shift(1).diff().abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    atr_values = atr.values
     
-    # === Daily Indicators: Volume Spike (volume > 1.5x 20-period average) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_spike = volume > (1.5 * vol_ma.values)
+    # === 6h Indicators: Camarilla pivot levels (based on previous bar) ===
+    # Camarilla levels calculated from previous bar's OHLC
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close[0] = prev_close[1] if len(prev_close) > 1 else close[0]
+    prev_high[0] = prev_high[1] if len(prev_high) > 1 else high[0]
+    prev_low[0] = prev_low[1] if len(prev_low) > 1 else low[0]
     
-    # Get weekly data once before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 60:  # Need enough for EMA calculation
+    # Calculate pivot point and ranges
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_hl = prev_high - prev_low
+    
+    # Camarilla levels
+    r4 = pivot + (range_hl * 1.1 / 2.0)
+    r3 = pivot + (range_hl * 1.1 / 4.0)
+    s3 = pivot - (range_hl * 1.1 / 4.0)
+    s4 = pivot - (range_hl * 1.1 / 2.0)
+    
+    # === 1d Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    
-    # === Weekly Indicators: EMA(50) for trend filter ===
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean()
-    ema_50_1w_values = ema_50_1w.values
-    
-    # EMA slope: rising if current > previous, falling if current < previous
-    ema_slope = np.diff(ema_50_1w_values, prepend=ema_50_1w_values[0])
-    ema_rising = ema_slope > 0
-    ema_falling = ema_slope < 0
-    
-    # Align weekly EMA slope to daily timeframe
-    ema_rising_aligned = align_htf_to_ltf(prices, df_1w, ema_rising.astype(float))
-    ema_falling_aligned = align_htf_to_ltf(prices, df_1w, ema_falling.astype(float))
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = vol_1d > (1.5 * vol_ma_1d)
+    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed for EMA, 20 for Donchian/volume)
-    warmup = 60
+    # Warmup: ensure all indicators are valid (max 34 periods needed for ATR, 20 for volume MA)
+    warmup = 40
     
-    # Track position state
+    # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(vol_ma.iloc[i]) or np.isnan(ema_rising_aligned[i]) or
-            np.isnan(ema_falling_aligned[i])):
+        if (np.isnan(atr_values[i]) or np.isnan(r4[i]) or np.isnan(s4[i]) or
+            np.isnan(volume_spike_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
+            entry_price = 0.0
             continue
         
         # Current values
         price = close[i]
-        upper_break = price > donchian_high[i]
-        lower_break = price < donchian_low[i]
-        vol_spike = volume_spike[i]
-        ema_rising_val = bool(ema_rising_aligned[i])
-        ema_falling_val = bool(ema_falling_aligned[i])
+        vol_spike = volume_spike_1d_aligned[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price breaks below 20-day low or weekly EMA starts falling
-            if lower_break or ema_falling_val:
+            # Stoploss: price drops below entry_price - 2*ATR
+            if price < entry_price - 2.0 * atr_values[i]:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price breaks above 20-day high or weekly EMA starts rising
-            if upper_break or ema_rising_val:
+            # Stoploss: price rises above entry_price + 2*ATR
+            if price > entry_price + 2.0 * atr_values[i]:
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
+            entry_price = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above 20-day high AND weekly EMA rising AND volume spike
-            if upper_break and ema_rising_val and vol_spike:
+            # LONG: price breaks above R4 AND 1d volume spike
+            if price > r4[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
+                entry_price = price
             
-            # SHORT: Price breaks below 20-day low AND weekly EMA falling AND volume spike
-            elif lower_break and ema_falling_val and vol_spike:
+            # SHORT: price breaks below S4 AND 1d volume spike
+            elif price < s4[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         else:
             signals[i] = position * 0.25
     
     return signals
 
-name = "1d_Donchian20_1wEMA50_VolumeSpike_V1"
-timeframe = "1d"
+name = "6h_Camarilla_R4_S4_Breakout_1dVolumeSpike_ATRStop_V1"
+timeframe = "6h"
 leverage = 1.0
