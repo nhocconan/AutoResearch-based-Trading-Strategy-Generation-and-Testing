@@ -13,23 +13,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h price (primary timeframe) ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    # === 6h data ===
+    df_6h = get_htf_data(prices, '6h')
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    volume_6h = df_6h['volume'].values
     
-    # Calculate 12-period ATR for volatility filter (12h timeframe)
-    tr_12h = np.maximum(high_12h - low_12h,
-                        np.maximum(np.abs(high_12h - np.roll(close_12h, 1)),
-                                   np.abs(low_12h - np.roll(close_12h, 1))))
-    tr_12h[0] = high_12h[0] - low_12h[0]
-    atr_12h = pd.Series(tr_12h).rolling(window=12, min_periods=12).mean().values
+    # Calculate 6-period ATR for volatility filter (6h timeframe)
+    tr_6h = np.maximum(high_6h - low_6h,
+                       np.maximum(np.abs(high_6h - np.roll(close_6h, 1)),
+                                  np.abs(low_6h - np.roll(close_6h, 1))))
+    tr_6h[0] = high_6h[0] - low_6h[0]
+    atr_6h = pd.Series(tr_6h).rolling(window=6, min_periods=6).mean().values
     
-    # Align 12h data to primary timeframe (12h)
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
-    close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
+    # Align 6h data to primary timeframe (6h)
+    atr_6h_aligned = align_htf_to_ltf(prices, df_6h, atr_6h)
+    close_6h_aligned = align_htf_to_ltf(prices, df_6h, close_6h)
     
     # === Daily ATR and price channel ===
     df_1d = get_htf_data(prices, '1d')
@@ -48,7 +48,7 @@ def generate_signals(prices):
     upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align daily data to 12h timeframe
+    # Align daily data to 6h timeframe
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
     lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
@@ -69,53 +69,53 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_12h_aligned[i]) or np.isnan(close_12h_aligned[i]) or 
+        if (np.isnan(atr_6h_aligned[i]) or np.isnan(close_6h_aligned[i]) or 
             np.isnan(atr_1d_aligned[i]) or np.isnan(upper_20_aligned[i]) or 
             np.isnan(lower_20_aligned[i]) or np.isnan(volume_spike_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        price = close_12h_aligned[i]
+        price = close_6h_aligned[i]
         upper_level = upper_20_aligned[i]
         lower_level = lower_20_aligned[i]
-        atr_12h_val = atr_12h_aligned[i]
+        atr_6h_val = atr_6h_aligned[i]
         atr_1d_val = atr_1d_aligned[i]
         vol_spike = volume_spike_1d_aligned[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price closes below 12h EMA(20) or hits 1.5x ATR stop
-            ema_20_12h = pd.Series(close_12h).ewm(span=20, min_periods=20, adjust=False).mean().values
-            ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
-            if price < ema_20_12h_aligned[i]:
+            # Exit when price closes below 6h EMA(20) or hits 1.5x ATR stop
+            ema_20_6h = pd.Series(close_6h).ewm(span=20, min_periods=20, adjust=False).mean().values
+            ema_20_6h_aligned = align_htf_to_ltf(prices, df_6h, ema_20_6h)
+            if price < ema_20_6h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price closes above 12h EMA(20) or hits 1.5x ATR stop
-            ema_20_12h = pd.Series(close_12h).ewm(span=20, min_periods=20, adjust=False).mean().values
-            ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
-            if price > ema_20_12h_aligned[i]:
+            # Exit when price closes above 6h EMA(20) or hits 1.5x ATR stop
+            ema_20_6h = pd.Series(close_6h).ewm(span=20, min_periods=20, adjust=False).mean().values
+            ema_20_6h_aligned = align_htf_to_ltf(prices, df_6h, ema_20_6h)
+            if price > ema_20_6h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above daily upper Donchian with 12h volume spike and low volatility regime
+            # LONG: Price breaks above daily upper Donchian with 6h volume spike and low volatility regime
             if (price > upper_level and 
-                volume[i] > 1.5 * np.median(volume[max(0, i-50):i+1]) and  # 12h volume spike
-                atr_12h_val < atr_1d_val * 1.2):  # Low volatility regime (12h ATR < 1.2x daily ATR)
+                volume[i] > 1.5 * np.median(volume[max(0, i-50):i+1]) and  # 6h volume spike
+                atr_6h_val < atr_1d_val * 1.2):  # Low volatility regime (6h ATR < 1.2x daily ATR)
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Price breaks below daily lower Donchian with 12h volume spike and low volatility regime
+            # SHORT: Price breaks below daily lower Donchian with 6h volume spike and low volatility regime
             elif (price < lower_level and 
-                  volume[i] > 1.5 * np.median(volume[max(0, i-50):i+1]) and  # 12h volume spike
-                  atr_12h_val < atr_1d_val * 1.2):  # Low volatility regime (12h ATR < 1.2x daily ATR)
+                  volume[i] > 1.5 * np.median(volume[max(0, i-50):i+1]) and  # 6h volume spike
+                  atr_6h_val < atr_1d_val * 1.2):  # Low volatility regime (6h ATR < 1.2x daily ATR)
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -130,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_DonchianBreakout_VolumeSpike_LowVol"
-timeframe = "12h"
+name = "6h_DonchianBreakout_VolumeSpike_LowVol"
+timeframe = "6h"
 leverage = 1.0
