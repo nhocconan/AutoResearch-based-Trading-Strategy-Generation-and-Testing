@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike filter and ATR trailing stop
-# Uses 4h primary timeframe with 1d HTF for volume confirmation.
+# Hypothesis: 4h Donchian(20) breakout with 1d ATR-based volatility regime filter
+# Uses 4h primary timeframe with 1d HTF for volatility regime confirmation.
 # Donchian breakouts capture momentum in both bull and bear markets.
-# Volume spike on breakout adds conviction, reducing false breakouts.
+# ATR regime filter ensures we only trade when volatility is elevated (avoiding chop).
 # ATR trailing stop (2.5x) protects gains and limits drawdown.
 # Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
 
@@ -26,7 +26,7 @@ def generate_signals(prices):
     close_4h = df_4h['close'].values
     volume_4h = df_4h['volume'].values
     
-    # === 1d data (HTF for volume spike) ===
+    # === 1d data (HTF for volatility regime) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -34,17 +34,18 @@ def generate_signals(prices):
     volume_1d = df_1d['volume'].values
     
     # === 4h Donchian Channel (20-period) ===
-    # Upper = max(high, 20), Lower = min(low, 20)
     donch_upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
     donch_lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     donch_upper_aligned = align_htf_to_ltf(prices, df_4h, donch_upper)
     donch_lower_aligned = align_htf_to_ltf(prices, df_4h, donch_lower)
     
-    # === 1d Volume Spike Filter ===
-    # Volume > 1.8x 20-period EMA = significant participation
-    vol_ema = pd.Series(volume_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = volume_1d > (vol_ema * 1.8)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
+    # === 1d ATR Regime Filter (High Volatility) ===
+    # ATR(15) on 1d, then compare to its 50-period EMA
+    atr_1d = np.abs(high_1d - low_1d)
+    atr_ma_1d = pd.Series(atr_1d).ewm(span=15, adjust=False, min_periods=15).mean().values
+    atr_ema_50 = pd.Series(atr_ma_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    vol_regime = atr_ma_1d > atr_ema_50  # High volatility regime
+    vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime.astype(float))
     
     signals = np.zeros(n)
     
@@ -61,13 +62,13 @@ def generate_signals(prices):
         # Skip if any data is NaN
         if (np.isnan(donch_upper_aligned[i]) or 
             np.isnan(donch_lower_aligned[i]) or
-            np.isnan(vol_spike_aligned[i])):
+            np.isnan(vol_regime_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        vol_spike_val = vol_spike_aligned[i] > 0.5  # Boolean from aligned float
+        vol_regime_val = vol_regime_aligned[i] > 0.5  # Boolean from aligned float
         
         # === ATR CALCULATION FOR TRAILING STOP ===
         atr_4h = np.abs(high_4h - low_4h)
@@ -121,16 +122,16 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Require volume spike for conviction
-            if vol_spike_val:
-                # Long on break above Donchian upper with volume
+            # Require high volatility regime for conviction
+            if vol_regime_val:
+                # Long on break above Donchian upper with high volatility
                 if price > donch_upper_aligned[i]:
                     signals[i] = 0.25
                     position = 1
                     entry_price = price
                     highest_since_entry = price
                     continue
-                # Short on break below Donchian lower with volume
+                # Short on break below Donchian lower with high volatility
                 elif price < donch_lower_aligned[i]:
                     signals[i] = -0.25
                     position = -1
@@ -148,6 +149,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dVolumeSpike_ATRTrail"
+name = "4h_Donchian20_1dATRRegime_ATRTrail"
 timeframe = "4h"
 leverage = 1.0
