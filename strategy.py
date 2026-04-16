@@ -13,20 +13,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h data (primary) ===
+    # === 4h data (trend and structure) ===
     df_4h = get_htf_data(prices, '4h')
     close_4h = df_4h['close'].values
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
     volume_4h = df_4h['volume'].values
     
-    # === 12h data (HTF for trend filter) ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # === 1d data (higher timeframe trend filter) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # === 12h EMA34 (trend filter) ===
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # === 1d EMA34 (trend filter) ===
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # === 4h Donchian channel (20-period) ===
     donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
@@ -42,13 +42,8 @@ def generate_signals(prices):
     vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     vol_ratio_4h = volume_4h / vol_ma_20_4h
     
-    # === 4h ATR for volatility filter ===
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr1[0] = tr2[0] = tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # === Session filter: 08-20 UTC ===
+    hours = prices.index.hour  # Already datetime64[ms], .hour works directly
     
     signals = np.zeros(n)
     
@@ -62,9 +57,16 @@ def generate_signals(prices):
         # Skip if any data is NaN
         if (np.isnan(donch_high[i]) or 
             np.isnan(donch_low[i]) or 
-            np.isnan(ema_34_12h_aligned[i]) or 
-            np.isnan(vol_ratio_4h[i]) or
-            np.isnan(atr_4h[i])):
+            np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_ratio_4h[i])):
+            signals[i] = 0.0
+            position = 0
+            continue
+        
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)  # UTC 8-20
+        
+        if not in_session:
             signals[i] = 0.0
             position = 0
             continue
@@ -72,9 +74,8 @@ def generate_signals(prices):
         price = close[i]
         upper = donch_high[i]
         lower = donch_low[i]
-        ema_trend = ema_34_12h_aligned[i]
+        ema_trend = ema_34_1d_aligned[i]
         vol_ratio = vol_ratio_4h[i]
-        atr = atr_4h[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
@@ -93,27 +94,27 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Break above Donchian upper with volume, in uptrend (above EMA34), low volatility
-            if price > upper and vol_ratio > 1.8 and price > ema_trend and atr < np.percentile(atr_4h[max(0, i-100):i+1], 70):
-                signals[i] = 0.25
+            # LONG: Break above Donchian upper with volume, in uptrend (above EMA34)
+            if price > upper and vol_ratio > 2.0 and price > ema_trend:
+                signals[i] = 0.20
                 position = 1
                 continue
-            # SHORT: Break below Donchian lower with volume, in downtrend (below EMA34), low volatility
-            elif price < lower and vol_ratio > 1.8 and price < ema_trend and atr < np.percentile(atr_4h[max(0, i-100):i+1], 70):
-                signals[i] = -0.25
+            # SHORT: Break below Donchian lower with volume, in downtrend (below EMA34)
+            elif price < lower and vol_ratio > 2.0 and price < ema_trend:
+                signals[i] = -0.20
                 position = -1
                 continue
         
         # Hold current position
         if position == 1:
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif position == -1:
-            signals[i] = -0.25
+            signals[i] = -0.20
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian_12hEMA34_Volume_ATRFilter"
-timeframe = "4h"
+name = "1h_Donchian_1dEMA34_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
