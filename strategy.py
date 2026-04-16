@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull Power/Bear Power) with 1d ADX regime filter and volume confirmation
-# Long when Bull Power > 0 (close > EMA13) AND Bear Power < 0 AND 1d ADX > 20 AND volume > 1.2x 20-period SMA
-# Short when Bear Power < 0 (close < EMA13) AND Bull Power < 0 AND 1d ADX > 20 AND volume > 1.2x 20-period SMA
-# Elder Ray measures bull/bear strength relative to EMA13, ADX ensures trending market, volume confirms conviction
-# Discrete position sizing (0.25) to control drawdown. Target: 50-150 total trades over 4 years
+# Hypothesis: 4h Williams %R mean reversion with 1d trend filter and volume confirmation
+# Long when Williams %R < -80 (oversold) AND price > 200 EMA (uptrend bias) AND 1d ADX > 25 AND volume > 1.5x 20-period SMA
+# Short when Williams %R > -20 (overbought) AND price < 200 EMA (downtrend bias) AND 1d ADX > 25 AND volume > 1.5x 20-period SMA
+# Williams %R identifies extreme reversals, 200 EMA provides trend bias, ADX filters choppy markets, volume confirms conviction
+# Discrete position sizing (0.25) to control drawdown. Target: 75-200 total trades over 4 years
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,30 +23,28 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 6h data once before loop for Elder Ray calculation
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 30:
+    # Get 4h data once before loop for Williams %R calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Get 1d data once before loop for volume and ADX filters
+    # Get 1d data once before loop for EMA200, ADX, and volume filters
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 6h Indicator: Elder Ray (Bull Power/Bear Power) ===
-    # EMA13 as the reference
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # === 4h Indicator: Williams %R (14-period) ===
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * ((highest_high - close) / (highest_high - lowest_low))
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid division by zero
     
-    # Bull Power = High - EMA13 (buying strength)
-    bull_power = high - ema13
+    # Align Williams %R to 4h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_4h, williams_r)
     
-    # Bear Power = Low - EMA13 (selling strength)
-    bear_power = low - ema13
-    
-    # Align Elder Ray components to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_6h, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_6h, bear_power)
-    ema13_aligned = align_htf_to_ltf(prices, df_6h, ema13)
+    # === 1d Indicator: EMA200 for trend bias ===
+    ema200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
     # === 1d Indicator: Volume SMA (20-period) for confirmation ===
     volume_1d = df_1d['volume'].values
@@ -92,8 +90,8 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (need 13 periods for EMA13 + 14 for ADX)
-    warmup = 50
+    # Warmup: ensure all indicators are valid (need 200 periods for EMA200 + 14 for Williams %R + ADX)
+    warmup = 250
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -102,32 +100,31 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
-            np.isnan(ema13_aligned[i]) or np.isnan(vol_sma_20_1d_aligned[i]) or 
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema200_aligned[i]) or
+            np.isnan(vol_sma_20_1d_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current 1d volume > 1.2x 20-period 1d volume SMA
+        # Volume filter: current 1d volume > 1.5x 20-period 1d volume SMA
         vol_1d_series = df_1d['volume'].values
         vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d_series)
         vol_confirm = False
         if not np.isnan(vol_1d_aligned[i]):
-            vol_threshold = vol_sma_20_1d_aligned[i] * 1.2
+            vol_threshold = vol_sma_20_1d_aligned[i] * 1.5
             vol_confirm = vol_1d_aligned[i] > vol_threshold
         
         # === LONG CONDITIONS ===
-        # Bull Power > 0 (buying pressure) AND Bear Power < 0 (no selling pressure) 
-        # AND ADX > 20 (trending market) AND volume confirmation
-        if (bull_power_aligned[i] > 0) and (bear_power_aligned[i] < 0) and \
-           (adx_aligned[i] > 20) and vol_confirm:
+        # Williams %R < -80 (oversold) AND price > 200 EMA (uptrend bias) 
+        # AND ADX > 25 (trending market) AND volume confirmation
+        if (williams_r_aligned[i] < -80) and (close[i] > ema200_aligned[i]) and \
+           (adx_aligned[i] > 25) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # Bear Power < 0 (selling pressure) AND Bull Power < 0 (no buying pressure)
-        # AND ADX > 20 (trending market) AND volume confirmation
-        elif (bear_power_aligned[i] < 0) and (bull_power_aligned[i] < 0) and \
-             (adx_aligned[i] > 20) and vol_confirm:
+        # Williams %R > -20 (overbought) AND price < 200 EMA (downtrend bias)
+        # AND ADX > 25 (trending market) AND volume confirmation
+        elif (williams_r_aligned[i] > -20) and (close[i] < ema200_aligned[i]) and \
+             (adx_aligned[i] > 25) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -135,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_1dADX_Volume_Filter_v3"
-timeframe = "6h"
+name = "4h_WilliamsR_1dEMA200_ADX_Volume_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
