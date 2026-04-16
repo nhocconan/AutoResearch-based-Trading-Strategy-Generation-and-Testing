@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Donchian channel breakout with volume confirmation and choppiness regime filter.
-# Long when price breaks above Donchian(20) upper + volume > 1.5x 20-period median volume + CHOP(14) > 61.8 (ranging market).
-# Short when price breaks below Donchian(20) lower + volume > 1.5x 20-period median volume + CHOP(14) > 61.8.
-# Uses discrete position size 0.25. Exits when price returns to Donchian middle (avg of upper/lower) or when chop regime shifts to trending (CHOP < 38.2).
-# Donchian breakouts capture volatility expansion. Volume confirmation ensures institutional participation.
-# Chop regime filter ensures we only trade in ranging markets where mean reversion at channel extremes works best.
-# 12h timeframe targets 12-37 trades/year to minimize fee drag. Works in both bull and bear markets by fading extremes in ranging conditions.
+# Hypothesis: 4h strategy using 12h Supertrend(10,3) for trend direction + 4h Donchian(20) breakout + volume confirmation.
+# Long when 12h Supertrend is bullish AND price breaks above 4h Donchian(20) upper + volume > 1.3x 20-period median volume.
+# Short when 12h Supertrend is bearish AND price breaks below 4h Donchian(20) lower + volume > 1.3x 20-period median volume.
+# Exit when price returns to Donchian middle (avg of upper/lower) OR Supertrend flips.
+# Uses discrete position size 0.25. Targets 20-50 trades/year to minimize fee drag.
+# Supertrend filters for strong trends, Donchian captures breakouts, volume confirms institutional participation.
+# Works in both bull and bear markets by only trading in the direction of the 12h trend.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,73 +21,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once before loop for Donchian, volume, and chop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    # Get 12h data once before loop for Supertrend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    vol_1d = df_1d['volume'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # === 1d Indicators: Donchian Channel (20) ===
-    highest_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # === 12h Indicators: Supertrend(10,3) ===
+    # True Range
+    high_low_12h = high_12h - low_12h
+    high_close_12h = np.abs(high_12h - np.roll(close_12h, 1))
+    low_close_12h = np.abs(low_12h - np.roll(close_12h, 1))
+    true_range_12h = np.maximum(high_low_12h, np.maximum(high_close_12h, low_close_12h))
+    
+    # ATR(10)
+    atr_10 = pd.Series(true_range_12h).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # Basic Upper and Lower Bands
+    hl2_12h = (high_12h + low_12h) / 2.0
+    upper_basic = hl2_12h + (3.0 * atr_10)
+    lower_basic = hl2_12h - (3.0 * atr_10)
+    
+    # Initialize Supertrend
+    supertrend = np.zeros_like(close_12h)
+    direction = np.ones_like(close_12h)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(1, len(close_12h)):
+        # Upper Band
+        if upper_basic[i] < supertrend[i-1] or close_12h[i-1] > supertrend[i-1]:
+            upper_band = upper_basic[i]
+        else:
+            upper_band = supertrend[i-1]
+        
+        # Lower Band
+        if lower_basic[i] > supertrend[i-1] or close_12h[i-1] < supertrend[i-1]:
+            lower_band = lower_basic[i]
+        else:
+            lower_band = supertrend[i-1]
+        
+        # Supertrend
+        if direction[i-1] == 1 and close_12h[i] <= lower_band:
+            direction[i] = -1
+            supertrend[i] = upper_band
+        elif direction[i-1] == -1 and close_12h[i] >= upper_band:
+            direction[i] = 1
+            supertrend[i] = lower_band
+        else:
+            direction[i] = direction[i-1]
+            if direction[i] == 1:
+                supertrend[i] = lower_band
+            else:
+                supertrend[i] = upper_band
+    
+    # Supertrend direction (1 = uptrend, -1 = downtrend)
+    supertrend_direction = direction
+    
+    # === 4h Indicators: Donchian Channel (20) ===
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     donchian_upper = highest_20
     donchian_lower = lowest_20
     donchian_middle = (highest_20 + lowest_20) / 2.0
     
-    # === 1d Indicators: Volume Median (20-period) ===
-    vol_median_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).median().values
+    # === 4h Indicators: Volume Median (20-period) ===
+    vol_median_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
     
-    # === 1d Indicators: Choppiness Index (14) ===
-    # True Range
-    high_low_1d = high_1d - low_1d
-    high_close_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    low_close_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    true_range_1d = np.maximum(high_low_1d, np.maximum(high_close_1d, low_close_1d))
-    
-    # Sum of True Range over 14 periods
-    atr_sum_14 = pd.Series(true_range_1d).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index formula: CHOP = 100 * log10(atr_sum_14 / (highest_high_14 - lowest_low_14)) / log10(14)
-    # Avoid division by zero
-    range_14 = highest_high_14 - lowest_low_14
-    chop_14 = np.where(
-        range_14 > 0,
-        100 * np.log10(atr_sum_14 / range_14) / np.log10(14),
-        50  # neutral when range is zero
-    )
-    
-    # Regime filters: CHOP > 61.8 = ranging (mean revert), CHOP < 38.2 = trending (trend follow)
-    chop_ranging = chop_14 > 61.8
-    chop_trending = chop_14 < 38.2
-    
-    # Align all indicators to primary timeframe (12h)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
-    donchian_middle_aligned = align_htf_to_ltf(prices, df_1d, donchian_middle)
-    vol_median_aligned = align_htf_to_ltf(prices, df_1d, vol_median_20)
-    chop_ranging_aligned = align_htf_to_ltf(prices, df_1d, chop_ranging)
-    chop_trending_aligned = align_htf_to_ltf(prices, df_1d, chop_trending)
+    # Align all indicators to primary timeframe (4h)
+    supertrend_dir_aligned = align_htf_to_ltf(prices, df_12h, supertrend_direction)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
+    donchian_middle_aligned = align_htf_to_ltf(prices, df_12h, donchian_middle)
+    vol_median_aligned = align_htf_to_ltf(prices, df_12h, vol_median_20)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(20, 20, 14)  # Donchian20 needs 20, volume median needs 20, chop needs 14
+    warmup = max(20, 20)  # Donchian20 needs 20, volume median needs 20
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or np.isnan(donchian_middle_aligned[i]) or
-            np.isnan(vol_median_aligned[i]) or np.isnan(chop_ranging_aligned[i]) or np.isnan(chop_trending_aligned[i])):
+        if (np.isnan(supertrend_dir_aligned[i]) or np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
+            np.isnan(donchian_middle_aligned[i]) or np.isnan(vol_median_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -98,27 +118,22 @@ def generate_signals(prices):
         lower = donchian_lower_aligned[i]
         middle = donchian_middle_aligned[i]
         vol_median = vol_median_aligned[i]
-        chop_ranging_val = chop_ranging_aligned[i]
-        chop_trending_val = chop_trending_aligned[i]
+        st_dir = supertrend_dir_aligned[i]
         
-        # Get current 1d volume for volume spike filter
-        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
-        current_vol_1d = vol_1d_aligned[i]
-        
-        # Volume spike filter: current 1d volume > 1.5x median volume
-        volume_spike = current_vol_1d > (vol_median * 1.5)
+        # Volume spike filter: current 4h volume > 1.3x median volume
+        volume_spike = volume[i] > (vol_median * 1.3)
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit when price returns to middle OR chop regime shifts to trending
-            if (price <= middle) or chop_trending_val:
+            # Exit when price returns to middle OR Supertrend turns bearish
+            if (price <= middle) or (st_dir == -1):
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit when price returns to middle OR chop regime shifts to trending
-            if (price >= middle) or chop_trending_val:
+            # Exit when price returns to middle OR Supertrend turns bullish
+            if (price >= middle) or (st_dir == 1):
                 exit_signal = True
         
         if exit_signal:
@@ -128,13 +143,13 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above upper Donchian + volume spike + ranging market
-            if (price > upper) and volume_spike and chop_ranging_val:
+            # LONG: Supertrend bullish AND price breaks above upper Donchian + volume spike
+            if (st_dir == 1) and (price > upper) and volume_spike:
                 signals[i] = 0.25
                 position = 1
             
-            # SHORT: Price breaks below lower Donchian + volume spike + ranging market
-            elif (price < lower) and volume_spike and chop_ranging_val:
+            # SHORT: Supertrend bearish AND price breaks below lower Donchian + volume spike
+            elif (st_dir == -1) and (price < lower) and volume_spike:
                 signals[i] = -0.25
                 position = -1
         
@@ -143,6 +158,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dDonchian20_VolumeSpike1.5x_ChopRangingFilter_V1"
-timeframe = "12h"
+name = "4h_12hSupertrend10_3_Donchian20_VolumeSpike1.3x_V1"
+timeframe = "4h"
 leverage = 1.0
