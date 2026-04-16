@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using Donchian(20) breakout + volume confirmation + choppiness regime filter.
-# Long when price breaks above Donchian upper AND volume > 1.5x volume MA(20) AND chop > 61.8 (range).
-# Short when price breaks below Donchian lower AND volume > 1.5x volume MA(20) AND chop > 61.8 (range).
-# Exit when price crosses Donchian midline (median of upper/lower) OR chop < 38.2 (trend).
-# Uses discrete position size 0.25. Choppiness filter avoids false breakouts in strong trends.
-# Volume confirmation ensures breakouts have conviction. Targets 75-200 total trades over 4 years.
-# Works in bull markets (catch breakouts) and bear markets (catch breakdowns) via range reversion.
+# Hypothesis: 1d strategy using weekly Donchian channel breakout with volume confirmation and ATR-based position sizing.
+# Long when price breaks above weekly Donchian(20) high AND volume > 1.5x 20-period average volume.
+# Short when price breaks below weekly Donchian(20) low AND volume > 1.5x 20-period average volume.
+# Uses ATR(14) for dynamic stoploss (signal→0 when price moves against position by 2x ATR).
+# Position size: 0.25 (discrete levels to minimize fee churn).
+# Weekly Donchian captures major trend breaks; volume confirmation reduces false breakouts.
+# Works in bull markets (catch breakouts) and bear markets (catch breakdowns).
+# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,109 +22,99 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once before loop for choppiness filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data once before loop for Donchian channel
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # === 4h Indicators: Donchian(20) and volume MA(20) ===
-    # Donchian upper = max(high, lookback=20)
-    # Donchian lower = min(low, lookback=20)
-    # Donchian midline = (upper + lower) / 2
-    lookback = 20
-    donchian_upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    donchian_lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    donchian_mid = (donchian_upper + donchian_lower) / 2.0
+    # Calculate weekly Donchian(20) channels
+    highest_high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Volume MA(20) for confirmation
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align weekly Donchian levels to daily timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, highest_high_20)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, lowest_low_20)
     
-    # === 1d Indicators: Choppiness Index(14) ===
-    # True Range = max(high-low, abs(high-close_prev), abs(low-close_prev))
-    # Sum of TR over 14 periods
-    # Choppiness = 100 * log10(sumTR / (ATR14 * 14)) / log10(14)
-    # Simplified: CHOP = 100 * log10( sumTR / (true_range * 14) ) / log10(14)
-    # Where true_range = max(high_1d) - min(low_1d) over 14 periods
-    tr1 = np.maximum(high_1d - low_1d, np.abs(high_1d - np.roll(close_1d, 1)))
-    tr2 = np.maximum(tr1, np.abs(low_1d - np.roll(close_1d, 1)))
-    tr = tr2
-    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(sum_tr / (hh - ll)) / np.log10(14)
+    # Calculate daily ATR(14) for stoploss
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align all indicators to primary timeframe (4h)
-    donchian_upper_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high}), donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, pd.DataFrame({'low': low}), donchian_lower)
-    donchian_mid_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), donchian_mid)
-    volume_ma_aligned = align_htf_to_ltf(prices, pd.DataFrame({'volume': volume}), volume_ma)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Calculate daily volume average for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 50  # Donchian(20) + chop needs sufficient warmup
+    warmup = 50  # Donchian20 + ATR14 + VolMA20 need sufficient warmup
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(donchian_mid_aligned[i]) or np.isnan(volume_ma_aligned[i]) or 
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(atr_14[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             position = 0
+            entry_price = 0.0
             continue
         
-        # Current values (aligned)
+        # Current values
         price = close[i]
+        donchian_high = donchian_high_aligned[i]
+        donchian_low = donchian_low_aligned[i]
+        atr = atr_14[i]
+        vol_ma = vol_ma_20[i]
         vol = volume[i]
-        donchian_upper = donchian_upper_aligned[i]
-        donchian_lower = donchian_lower_aligned[i]
-        donchian_mid = donchian_mid_aligned[i]
-        vol_ma = volume_ma_aligned[i]
-        chop = chop_aligned[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit when price < Donchian midline OR chop < 38.2 (trending)
-            if (price < donchian_mid) or (chop < 38.2):
+            # Exit when price <= weekly Donchian low OR price moves against position by 2x ATR
+            if (price <= donchian_low) or (price < entry_price - 2.0 * atr):
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit when price > Donchian midline OR chop < 38.2 (trending)
-            if (price > donchian_mid) or (chop < 38.2):
+            # Exit when price >= weekly Donchian high OR price moves against position by 2x ATR
+            if (price >= donchian_high) or (price > entry_price + 2.0 * atr):
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
+            entry_price = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: price > Donchian upper AND volume > 1.5x volume MA AND chop > 61.8 (range)
-            if (price > donchian_upper) and (vol > 1.5 * vol_ma) and (chop > 61.8):
+            # Volume confirmation: current volume > 1.5x 20-period average
+            volume_confirm = vol > 1.5 * vol_ma
+            
+            # LONG: Price breaks above weekly Donchian high with volume confirmation
+            if (price > donchian_high) and volume_confirm:
                 signals[i] = 0.25
                 position = 1
+                entry_price = price
             
-            # SHORT: price < Donchian lower AND volume > 1.5x volume MA AND chop > 61.8 (range)
-            elif (price < donchian_lower) and (vol > 1.5 * vol_ma) and (chop > 61.8):
+            # SHORT: Price breaks below weekly Donchian low with volume confirmation
+            elif (price < donchian_low) and volume_confirm:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         else:
             signals[i] = position * 0.25  # maintain position
     
     return signals
 
-name = "4h_Donchian20_VolumeConfirmation_ChopFilter_V1"
-timeframe = "4h"
+name = "1d_1wDonchian20_VolumeConfirmation_ATRStop_V1"
+timeframe = "1d"
 leverage = 1.0
