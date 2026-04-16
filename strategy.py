@@ -3,11 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R with 1d EMA200 filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions. In ranging markets (2025+),
-# buying near oversold (-80) and selling near overbought (-20) works well.
-# Filtered by 1d EMA200 for trend alignment and volume > 1.3x average for confirmation.
-# Uses discrete position sizing (0.25) to minimize fee churn. Target: 50-120 trades/year.
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA50 trend filter + volume confirmation
+# Donchian breakouts capture momentum in both bull and bear markets.
+# Filtered by 1d EMA50 to avoid counter-trend trades and volume > 1.5x average for confirmation.
+# Uses discrete position sizing (0.25) to minimize fee churn. Target: 30-80 trades/year.
 
 def generate_signals(prices):
     n = len(prices)
@@ -30,23 +29,17 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # === Williams %R on 4h (14-period) ===
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where(
-        (highest_high - lowest_low) != 0,
-        ((highest_high - close_4h) / (highest_high - lowest_low)) * -100,
-        -50.0  # neutral when range is zero
-    )
+    # === 4h Donchian Channel (20-period) ===
+    highest_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # === 1d EMA200 for trend filter ===
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # === 1d EMA50 for trend filter ===
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # === 4h volume confirmation ===
     vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume_4h > (1.3 * vol_ma_20_4h)
+    vol_confirm = volume_4h > (1.5 * vol_ma_20_4h)
     
     signals = np.zeros(n)
     
@@ -59,16 +52,18 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(williams_r[i]) or 
-            np.isnan(ema200_1d_aligned[i]) or
+        if (np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or
+            np.isnan(ema50_1d_aligned[i]) or
             np.isnan(vol_ma_20_4h[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        wr = williams_r[i]
-        ema200 = ema200_1d_aligned[i]
+        hh = highest_high[i]
+        ll = lowest_low[i]
+        ema50 = ema50_1d_aligned[i]
         vol_conf = vol_confirm[i]
         
         # === STOPLOSS LOGIC (ATR-based) ===
@@ -96,16 +91,16 @@ def generate_signals(prices):
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when Williams %R reaches overbought (-20) or Alligator death cross (not used here)
-            if wr >= -20.0:
+            # Exit when price closes below Donchian lower band
+            if price < ll:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when Williams %R reaches oversold (-80)
-            if wr <= -80.0:
+            # Exit when price closes above Donchian upper band
+            if price > hh:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -115,14 +110,14 @@ def generate_signals(prices):
         if position == 0:
             # Require volume confirmation
             if vol_conf:
-                # Go long when oversold (-80) and price above 1d EMA200 (uptrend bias)
-                if wr <= -80.0 and price > ema200:
+                # Go long when price breaks above Donchian upper band and price above 1d EMA50 (uptrend)
+                if price > hh and price > ema50:
                     signals[i] = 0.25
                     position = 1
                     entry_price = price
                     continue
-                # Go short when overbought (-20) and price below 1d EMA200 (downtrend bias)
-                elif wr >= -20.0 and price < ema200:
+                # Go short when price breaks below Donchian lower band and price below 1d EMA50 (downtrend)
+                elif price < ll and price < ema50:
                     signals[i] = -0.25
                     position = -1
                     entry_price = price
@@ -138,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_1dEMA200_Volume_Filter"
+name = "4h_Donchian20_1dEMA50_Volume_Filter"
 timeframe = "4h"
 leverage = 1.0
