@@ -1,17 +1,22 @@
-# 6h strategy with 1-day pivot point reversal zones (R1/S1) and volume confirmation
-# Uses R1/S1 as dynamic support/resistance with volume spike confirmation for entries
-# Exits when price reverses back to pivot level
-# Designed for 6h timeframe with 1d pivot calculation to work in both trending and ranging markets
-# Target: 50-150 total trades over 4 years (12-37/year)
-
 #!/usr/bin/env python3
+"""
+4h_Triple_RSI_Trend_With_Volume
+Hypothesis: RSI(14) combined with EMA trend and volume confirmation creates robust entries.
+Long when RSI crosses above 50 with EMA9 > EMA21 and volume spike.
+Short when RSI crosses below 50 with EMA9 < EMA21 and volume spike.
+Exit when RSI reverts to opposite extreme (30/70) or trend fails.
+Uses 12h EMA200 for higher timeframe trend filter.
+Designed for 4h timeframe to balance trade frequency and signal quality.
+Targets 20-40 trades/year (80-160 over 4 years) to minimize fee drag.
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,85 +24,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Daily data for pivot points ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # RSI calculation
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate standard pivot points: P, R1, S1, R2, S2
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_hl = high_1d - low_1d
-    r1 = pivot + range_hl
-    s1 = pivot - range_hl
-    r2 = pivot + 2 * range_hl
-    s2 = pivot - 2 * range_hl
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.concatenate([[np.nan], rsi])  # align length
     
-    # Align daily pivot levels to 6h timeframe
-    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
-    r2_6h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_6h = align_htf_to_ltf(prices, df_1d, s2)
+    # EMA9 and EMA21 for trend
+    ema9 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Volume spike detection (20-period volume MA)
+    # Volume spike detection (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (1.8 * vol_ma)
+    
+    # 12h EMA200 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    ema200_12h = pd.Series(df_12h['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_12h_aligned = align_htf_to_ltf(prices, df_12h, ema200_12h)
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators have valid data
-    warmup = 50
+    # Warmup
+    warmup = 100
     
-    # Track position state
+    # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
-        # Skip if any required data is NaN
-        if (np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or
-            np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or np.isnan(volume_spike[i])):
+        # Skip if any data invalid
+        if (np.isnan(rsi[i]) or np.isnan(ema9[i]) or np.isnan(ema21[i]) or 
+            np.isnan(volume_spike[i]) or np.isnan(ema200_12h_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        pivot_level = pivot_6h[i]
-        r1_level = r1_6h[i]
-        s1_level = s1_6h[i]
-        r2_level = r2_6h[i]
-        s2_level = s2_6h[i]
+        rsi_val = rsi[i]
+        ema9_val = ema9[i]
+        ema21_val = ema21[i]
         vol_spike = volume_spike[i]
+        ema200_12h_val = ema200_12h_aligned[i]
         
-        # === EXIT LOGIC ===
-        if position == 1:  # Long position
-            # Exit when price returns to pivot level (mean reversion)
-            if price <= pivot_level:
+        # Exit conditions
+        if position == 1:  # Long
+            # Exit: RSI < 30 (oversold) OR trend fails (EMA9 < EMA21) OR price below 12h EMA200
+            if rsi_val < 30 or ema9_val < ema21_val or price < ema200_12h_val:
+                signals[i] = 0.0
+                position = 0
+                continue
+                
+        elif position == -1:  # Short
+            # Exit: RSI > 70 (overbought) OR trend fails (EMA9 > EMA21) OR price above 12h EMA200
+            if rsi_val > 70 or ema9_val > ema21_val or price > ema200_12h_val:
                 signals[i] = 0.0
                 position = 0
                 continue
         
-        elif position == -1:  # Short position
-            # Exit when price returns to pivot level (mean reversion)
-            if price >= pivot_level:
-                signals[i] = 0.0
-                position = 0
-                continue
-        
-        # === ENTRY LOGIC (only when flat) ===
+        # Entry conditions (only when flat)
         if position == 0:
-            # LONG: Price breaks above R1 with volume spike (breakout continuation)
-            if price > r1_level and vol_spike:
+            # Long: RSI > 50, EMA9 > EMA21, volume spike, price above 12h EMA200 (uptrend)
+            if rsi_val > 50 and ema9_val > ema21_val and vol_spike and price > ema200_12h_val:
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Price breaks below S1 with volume spike (breakout continuation)
-            elif price < s1_level and vol_spike:
+            # Short: RSI < 50, EMA9 < EMA21, volume spike, price below 12h EMA200 (downtrend)
+            elif rsi_val < 50 and ema9_val < ema21_val and vol_spike and price < ema200_12h_val:
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Hold current position
+        # Hold position
         if position == 1:
             signals[i] = 0.25
         elif position == -1:
@@ -107,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Pivot_R1_S1_Breakout_Volume"
-timeframe = "6h"
+name = "4h_Triple_RSI_Trend_With_Volume"
+timeframe = "4h"
 leverage = 1.0
