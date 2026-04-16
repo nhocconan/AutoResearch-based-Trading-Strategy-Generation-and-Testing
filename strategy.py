@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h timeframe with 4h Donchian breakout + 1d volume filter + RSI filter
-# Long when price breaks above 4h Donchian upper channel (20) AND 1d volume > 1.5x average AND RSI < 60
-# Short when price breaks below 4h Donchian lower channel (20) AND 1d volume > 1.5x average AND RSI > 40
-# Uses 4h for signal direction (Donchian breakout), 1h only for entry timing
-# Volume filter ensures conviction, RSI filter avoids overextended moves
-# Target: 60-150 total trades over 4 years (15-37/year) to balance opportunity and fee drag
-# Session filter: 08-20 UTC to reduce noise
+# Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and 1d EMA50 trend filter
+# Long when price closes above Donchian upper band AND volume > 1.5x 1d average volume AND price > 1d EMA50
+# Short when price closes below Donchian lower band AND volume > 1.5x 1d average volume AND price < 1d EMA50
+# ATR trailing stop (2.0x ATR) to manage risk
+# Donchian channels provide clear breakout levels with built-in trend following
+# Volume confirmation ensures institutional participation
+# EMA50 filter ensures alignment with medium-term trend
+# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,104 +22,116 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Donchian channel (20-period) ===
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # === 1d EMA50 trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    
+    # === 12h Donchian channels (20-period) ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
     # Calculate Donchian channels
-    donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donch_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Align to 1h timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_4h, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_4h, donch_low)
+    # Align Donchian channels to 12h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low)
     
-    # === 1d volume confirmation ===
-    df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=30, min_periods=30).mean().values  # 30 days average
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # === 1d Volume Confirmation ===
+    vol_ma_1d = pd.Series(volume).rolling(window=24, min_periods=24).mean().values  # 24 periods of 1h = 1d (12h data)
     
-    # === RSI(14) on 1h ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # === 12h ATR for trailing stop (14-period) ===
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     
     # Warmup
     warmup = 50
     
-    # Track position
+    # Track position and entry price for trailing stop
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(donch_high_aligned[i]) or 
+        if (np.isnan(ema_50_aligned[i]) or 
+            np.isnan(donch_high_aligned[i]) or
             np.isnan(donch_low_aligned[i]) or
-            np.isnan(vol_ma_1d_aligned[i]) or
-            np.isnan(rsi[i])):
+            np.isnan(vol_ma_1d[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
+        ema_val = ema_50_aligned[i]
         upper = donch_high_aligned[i]
         lower = donch_low_aligned[i]
-        vol_ma = vol_ma_1d_aligned[i]
-        rsi_val = rsi[i]
+        vol_confirm = volume[i] > vol_ma_1d[i] * 1.5  # 1.5x average volume for confirmation
+        atr_val = atr[i]
         
-        # Volume confirmation: current volume > 1.5x 1d average
-        vol_confirm = volume[i] > vol_ma * 1.5
-        
-        # Session filter: 08-20 UTC
-        hour = pd.Timestamp(prices.iloc[i]['open_time']).hour
-        in_session = 8 <= hour <= 20
-        
-        # === EXIT LOGIC ===
+        # === TRAILING STOP LOGIC ===
         if position == 1:  # Long position
-            # Exit when price touches middle of Donchian channel or RSI > 70
-            mid = (upper + lower) / 2
-            if price <= mid or rsi_val > 70:
+            # Update highest price since entry
+            if price > highest_since_entry:
+                highest_since_entry = price
+            # Trail stop: exit if price drops 2.0*ATR from highest
+            if atr_val > 0 and price < highest_since_entry - 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
+                highest_since_entry = 0.0
                 continue
+        
         elif position == -1:  # Short position
-            # Exit when price touches middle of Donchian channel or RSI < 30
-            mid = (upper + lower) / 2
-            if price >= mid or rsi_val < 30:
+            # Update lowest price since entry
+            if price < lowest_since_entry or lowest_since_entry == 0:
+                lowest_since_entry = price
+            # Trail stop: exit if price rises 2.0*ATR from lowest
+            if atr_val > 0 and price > lowest_since_entry + 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
+                lowest_since_entry = 0.0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
-        if position == 0 and in_session:
-            # Long when: price breaks above Donchian upper AND volume confirmation AND RSI < 60
-            if price > upper and vol_confirm and rsi_val < 60:
-                signals[i] = 0.20
+        if position == 0:
+            # Long when: price closes above Donchian upper band AND price > EMA50 AND volume confirmation
+            if price > upper and price > ema_val and vol_confirm:
+                signals[i] = 0.25
                 position = 1
+                entry_price = price
+                highest_since_entry = price
                 continue
-            # Short when: price breaks below Donchian lower AND volume confirmation AND RSI > 40
-            elif price < lower and vol_confirm and rsi_val > 40:
-                signals[i] = -0.20
+            # Short when: price closes below Donchian lower band AND price < EMA50 AND volume confirmation
+            elif price < lower and price < ema_val and vol_confirm:
+                signals[i] = -0.25
                 position = -1
+                entry_price = price
+                lowest_since_entry = price
                 continue
         
         # Hold current position
         if position == 1:
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif position == -1:
-            signals[i] = -0.20
+            signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1h_Donchian20_1dVolume1.5x_RSIFilter"
-timeframe = "1h"
+name = "12h_Donchian20_1dEMA50_Volume1.5x_ATRTrail_2.0x"
+timeframe = "12h"
 leverage = 1.0
