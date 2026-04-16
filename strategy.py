@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian channel breakout with 1d volume confirmation and ATR-based risk management.
-# Long when price breaks above 12h Donchian upper channel (20-period) AND 1d volume > 1.3x 20-period average.
-# Short when price breaks below 12h Donchian lower channel (20-period) AND 1d volume > 1.3x 20-period average.
-# Exit on ATR-based stoploss (2.5*ATR from entry) or opposite Donchian break.
-# Uses discrete position size 0.25. Designed to capture medium-term breakouts with volume confirmation.
-# Works in both bull and bear markets by requiring volume confirmation and using symmetric price channels.
-# Target: 50-150 total trades over 4 years (12-37/year) to balance edge and fee drag.
+# Hypothesis: 4h Donchian channel breakout with 1d volume spike and ADX trend filter.
+# Long when price breaks above Donchian(20) high AND 1d volume > 1.8x 20-period average AND ADX(14) > 25.
+# Short when price breaks below Donchian(20) low AND 1d volume > 1.8x 20-period average AND ADX(14) > 25.
+# Exit on ATR(14) stoploss (2.5*ATR from entry) or opposite Donchian break.
+# Uses discrete position size 0.30. Designed to capture strong trends with volume confirmation in both bull and bear markets.
+# Target: 100-200 total trades over 4 years (25-50/year) to balance edge and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,40 +20,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h Indicators: Donchian Channel (20-period) ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # === 4h Indicators: Donchian Channel (20) ===
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Donchian channels on 12h data
-    donchian_upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donchian_middle = (donchian_upper + donchian_lower) / 2.0
-    
-    # Align 12h Donchian levels to primary timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
-    donchian_middle_aligned = align_htf_to_ltf(prices, df_12h, donchian_middle)
-    
-    # === 1d Indicators: Volume Spike (volume > 1.3x 20-period average) ===
+    # === 1d Indicators: Volume Spike (volume > 1.8x 20-period average) ===
     df_1d = get_htf_data(prices, '1d')
     vol_1d = df_1d['volume'].values
     vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    volume_spike = volume > (1.3 * vol_ma_1d_aligned)
+    volume_spike = volume > (1.8 * vol_ma_1d_aligned)
     
-    # === 12h ATR for stoploss ===
-    tr1 = pd.Series(high_12h).diff()
-    tr2 = pd.Series(low_12h).diff().abs()
-    tr3 = pd.Series(close_12h).shift(1).diff().abs()
-    tr_12h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_12h_raw = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h_raw)
+    # === 4h ADX for trend filter ===
+    # True Range
+    tr1 = pd.Series(high).diff()
+    tr2 = pd.Series(low).diff().abs()
+    tr3 = pd.Series(close).shift(1).diff().abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    # Directional Movement
+    dm_plus = pd.Series(high).diff()
+    dm_minus = -pd.Series(low).diff()
+    dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0.0)
+    dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0.0)
+    # Smoothed values
+    atr_4h = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / atr_4h
+    di_minus = 100 * dm_minus_smooth / atr_4h
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # === 4h ATR for stoploss ===
+    atr_4h_raw = atr_4h  # reuse calculated ATR
     
     signals = np.zeros(n)
     
@@ -66,10 +66,9 @@ def generate_signals(prices):
     entry_price = 0.0
     
     for i in range(warmup, n):
-        # Skip if any required data is NaN or outside session
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(donchian_middle_aligned[i]) or np.isnan(volume_spike[i]) or 
-            np.isnan(atr_12h_aligned[i]) or not session_filter[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(volume_spike[i]) or np.isnan(adx[i]) or np.isnan(atr_4h_raw[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -77,22 +76,23 @@ def generate_signals(prices):
         # Current values
         price = close[i]
         vol_spike = volume_spike[i]
-        atr_val = atr_12h_aligned[i]
+        adx_val = adx[i]
+        atr_val = atr_4h_raw[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price breaks below 12h Donchian lower channel (strong reversal)
-            if price < donchian_lower_aligned[i]:
+            # Exit if price breaks below Donchian low (trend reversal)
+            if price < donchian_low[i]:
                 exit_signal = True
             # ATR-based stoploss: 2.5*ATR below entry
             elif price < entry_price - 2.5 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price breaks above 12h Donchian upper channel (strong reversal)
-            if price > donchian_upper_aligned[i]:
+            # Exit if price breaks above Donchian high (trend reversal)
+            if price > donchian_high[i]:
                 exit_signal = True
             # ATR-based stoploss: 2.5*ATR above entry
             elif price > entry_price + 2.5 * atr_val:
@@ -106,23 +106,23 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above 12h Donchian upper channel AND volume spike
-            if price > donchian_upper_aligned[i] and vol_spike:
-                signals[i] = 0.25
+            # LONG: Price breaks above Donchian high AND volume spike AND ADX > 25 (strong trend)
+            if price > donchian_high[i] and vol_spike and adx_val > 25:
+                signals[i] = 0.30
                 position = 1
                 entry_price = price
             
-            # SHORT: Price breaks below 12h Donchian lower channel AND volume spike
-            elif price < donchian_lower_aligned[i] and vol_spike:
-                signals[i] = -0.25
+            # SHORT: Price breaks below Donchian low AND volume spike AND ADX > 25 (strong trend)
+            elif price < donchian_low[i] and vol_spike and adx_val > 25:
+                signals[i] = -0.30
                 position = -1
                 entry_price = price
         
         else:
-            signals[i] = position * 0.25
+            signals[i] = position * 0.30
     
     return signals
 
-name = "12h_Donchian20_1dVolumeSpike_V1"
-timeframe = "12h"
+name = "4h_Donchian20_1dVolumeSpike_ADXFilter_V1"
+timeframe = "4h"
 leverage = 1.0
