@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d HMA21 trend filter + volume confirmation + ATR trailing stop
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA34 trend filter + volume confirmation + ATR trailing stop
 # Entry on breakout above Donchian upper band (long) or below lower band (short) on 4h timeframe.
-# 1d HMA21 acts as trend filter: only long when price > HMA21, short when price < HMA21.
+# 1d EMA34 acts as trend filter: only long when price > EMA34, short when price < EMA34.
 # Volume confirmation: current 4h volume > 1.5x 20-period average of 4h volume.
 # ATR-based trailing stop (2.5x ATR) to manage risk and reduce whipsaws.
 # Designed for low trade frequency (target: 75-200 total trades over 4 years) to minimize fee drag.
@@ -48,17 +48,11 @@ def generate_signals(prices):
     atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
     
-    # === 1d HMA21 (trend filter) ===
+    # === 1d EMA34 (trend filter) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    # Hull Moving Average: WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-    half_len = 21 // 2
-    sqrt_len = int(np.sqrt(21))
-    wma_half = pd.Series(close_1d).ewm(span=half_len, adjust=False).mean().values
-    wma_full = pd.Series(close_1d).ewm(span=21, adjust=False).mean().values
-    raw_hma = 2 * wma_half - wma_full
-    hma21_1d = pd.Series(raw_hma).ewm(span=sqrt_len, adjust=False).mean().values
-    hma21_aligned = align_htf_to_ltf(prices, df_1d, hma21_1d)
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     signals = np.zeros(n)
     
@@ -75,7 +69,7 @@ def generate_signals(prices):
         # Skip if any data is NaN
         if (np.isnan(upper_aligned[i]) or 
             np.isnan(lower_aligned[i]) or
-            np.isnan(hma21_aligned[i]) or
+            np.isnan(ema34_aligned[i]) or
             np.isnan(vol_ma_aligned[i]) or
             np.isnan(atr_aligned[i])):
             signals[i] = 0.0
@@ -85,7 +79,7 @@ def generate_signals(prices):
         price = close[i]
         upper_val = upper_aligned[i]
         lower_val = lower_aligned[i]
-        hma21_val = hma21_aligned[i]
+        ema34_val = ema34_aligned[i]
         vol_confirm = volume[i] > vol_ma_aligned[i] * 1.5  # 1.5x average volume
         atr_val = atr_aligned[i]
         
@@ -114,16 +108,16 @@ def generate_signals(prices):
         
         # === EXIT LOGIC (trend filter reversal) ===
         if position == 1:  # Long position
-            # Exit when price crosses below 1d HMA21
-            if price < hma21_val:
+            # Exit when price crosses below 1d EMA34
+            if price < ema34_val:
                 signals[i] = 0.0
                 position = 0
                 highest_since_entry = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price crosses above 1d HMA21
-            if price > hma21_val:
+            # Exit when price crosses above 1d EMA34
+            if price > ema34_val:
                 signals[i] = 0.0
                 position = 0
                 lowest_since_entry = 0.0
@@ -131,15 +125,15 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Long when: price breaks above upper band AND price > HMA21 AND volume confirmation
-            if price > upper_val and price > hma21_val and vol_confirm:
+            # Long when: price breaks above upper band AND price > EMA34 AND volume confirmation
+            if price > upper_val and price > ema34_val and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 highest_since_entry = price
                 continue
-            # Short when: price breaks below lower band AND price < HMA21 AND volume confirmation
-            elif price < lower_val and price < hma21_val and vol_confirm:
+            # Short when: price breaks below lower band AND price < EMA34 AND volume confirmation
+            elif price < lower_val and price < ema34_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -156,6 +150,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dHMA21_VolumeConfirm_ATRTrail"
+name = "4h_Donchian20_1dEMA34_VolumeConfirm_ATRTrail"
 timeframe = "4h"
 leverage = 1.0
