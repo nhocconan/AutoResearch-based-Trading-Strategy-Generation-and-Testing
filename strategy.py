@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h KAMA trend filter and 1d Donchian breakout with volume confirmation.
-# Long when 4h KAMA slope > 0 AND price breaks above 1d Donchian upper band (20) AND volume > 1.5x 20-period 4h average volume.
-# Short when 4h KAMA slope < 0 AND price breaks below 1d Donchian lower band (20) AND volume > 1.5x 20-period 4h average volume.
-# Exit when price crosses 1d Donchian midline or ATR-based stop (1.5*ATR from entry).
-# Uses discrete position size 0.20. Designed to capture strong breakouts in trending markets with volume confirmation.
-# Target: 60-150 total trades over 4 years (15-37/year) to balance opportunity and fee drag.
+# Hypothesis: 6h Camarilla pivot breakout with 1d volume confirmation and 1w trend filter.
+# Long when price breaks above Camarilla R3 AND 1d volume > 1.3x 20-period average AND 1w ADX > 20.
+# Short when price breaks below Camarilla S3 AND 1d volume > 1.3x 20-period average AND 1w ADX > 20.
+# Exit when price reaches Camarilla R4/S4 (profit target) or crosses R3/S3 in opposite direction (stop).
+# Uses discrete position size 0.25. Designed to capture institutional breakout/continuation moves.
+# Target: 80-180 total trades over 4 years (20-45/year) balancing edge and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,61 +20,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Indicators: KAMA trend filter ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # === 6h Indicators: Camarilla Pivot Levels (based on prior 6h bar) ===
+    df_6h = get_htf_data(prices, '6h')
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
     
-    # Efficiency Ratio (ER) for KAMA
-    change = np.abs(np.diff(close_4h, prepend=close_4h[0]))
-    volatility = np.sum(np.abs(np.diff(close_4h, prepend=close_4h[0])), axis=0)  # placeholder, will compute properly below
+    # Calculate prior 6h bar's Camarilla levels
+    # Using prior bar to avoid look-ahead: R3/S3 based on bar i-1
+    prev_high_6h = np.roll(high_6h, 1)
+    prev_low_6h = np.roll(low_6h, 1)
+    prev_close_6h = np.roll(close_6h, 1)
+    prev_high_6h[0] = np.nan
+    prev_low_6h[0] = np.nan
+    prev_close_6h[0] = np.nan
     
-    # Proper ER calculation: |current - close N periods ago| / sum(|diff|) over N periods
-    lookback = 10
-    diff = np.diff(close_4h, prepend=close_4h[0])
-    volatility = np.zeros_like(close_4h)
-    for i in range(lookback, len(close_4h)):
-        volatility[i] = np.sum(np.abs(diff[i-lookback+1:i+1]))
-    price_change = np.abs(np.subtract(close_4h[lookback:], close_4h[:-lookback]))
-    price_change = np.concatenate([np.full(lookback, np.nan), price_change])
-    er = np.divide(price_change, volatility, out=np.full_like(price_change, np.nan), where=volatility!=0)
-    er = np.nan_to_num(er, nan=0.0)
+    pivot_6h = (prev_high_6h + prev_low_6h + prev_close_6h) / 3
+    range_6h = prev_high_6h - prev_low_6h
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Camarilla levels
+    r3_6h = pivot_6h + range_6h * 1.1 / 4
+    s3_6h = pivot_6h - range_6h * 1.1 / 4
+    r4_6h = pivot_6h + range_6h * 1.1 / 2
+    s4_6h = pivot_6h - range_6h * 1.1 / 2
     
-    # KAMA calculation
-    kama = np.full_like(close_4h, np.nan)
-    kama[lookback] = close_4h[lookback]  # seed
-    for i in range(lookback + 1, len(close_4h)):
-        kama[i] = kama[i-1] + sc[i] * (close_4h[i] - kama[i-1])
+    # Align 6h Camarilla levels to 6h primary timeframe (no shift needed as based on prior bar)
+    r3_6h_aligned = r3_6h
+    s3_6h_aligned = s3_6h
+    r4_6h_aligned = r4_6h
+    s4_6h_aligned = s4_6h
     
-    # KAMA slope (trend direction)
-    kama_slope = np.diff(kama, prepend=0)
-    kama_slope_aligned = align_htf_to_ltf(prices, df_4h, kama_slope)
-    
-    # === 1d Indicators: Donchian Channel (20-period) ===
+    # === 1d Indicators: Volume Spike ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    volume_spike = volume > (1.3 * vol_ma_1d_aligned)
     
-    # Donchian upper and lower bands (20-period)
-    dc_upper_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    dc_lower_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    dc_mid_1d = (dc_upper_1d + dc_lower_1d) / 2
+    # === 1w Indicators: ADX > 20 (trend filter) ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Align to 1h timeframe
-    dc_upper_1d_aligned = align_htf_to_ltf(prices, df_1d, dc_upper_1d)
-    dc_lower_1d_aligned = align_htf_to_ltf(prices, df_1d, dc_lower_1d)
-    dc_mid_1d_aligned = align_htf_to_ltf(prices, df_1d, dc_mid_1d)
+    # True Range
+    tr1 = pd.Series(high_1w).diff()
+    tr2 = pd.Series(low_1w).diff().abs()
+    tr3 = pd.Series(close_1w).shift(1).diff().abs()
+    tr_1w = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1w = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # === 4h Indicators: Volume Spike (volume > 1.5x 20-period average) ===
-    vol_4h = df_4h['volume'].values
-    vol_ma_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
-    volume_spike = volume > (1.5 * vol_ma_4h_aligned)
+    # Directional Movement
+    dm_plus = pd.Series(high_1w).diff()
+    dm_minus = pd.Series(low_1w).diff().abs()
+    dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
+    dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
+    
+    # Smoothed DM and TR
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_smooth = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * (dm_plus_smooth / atr_smooth)
+    di_minus = 100 * (dm_minus_smooth / atr_smooth)
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    strong_trend = adx_aligned > 20
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -85,21 +98,14 @@ def generate_signals(prices):
     # Warmup: ensure all indicators are valid
     warmup = 100
     
-    # Track position state and entry price for stoploss
+    # Track position state and entry price
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Calculate 1h ATR for stoploss
-    tr1 = pd.Series(high).diff()
-    tr2 = pd.Series(low).diff().abs()
-    tr3 = pd.Series(close).shift(1).diff().abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_raw = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(kama_slope_aligned[i]) or np.isnan(dc_upper_1d_aligned[i]) or np.isnan(dc_lower_1d_aligned[i]) or
-            np.isnan(dc_mid_1d_aligned[i]) or np.isnan(volume_spike[i]) or np.isnan(atr_raw[i]) or
+        if (np.isnan(r3_6h_aligned[i]) or np.isnan(s3_6h_aligned[i]) or np.isnan(r4_6h_aligned[i]) or np.isnan(s4_6h_aligned[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(strong_trend[i]) or
             not session_filter[i]):
             signals[i] = 0.0
             position = 0
@@ -107,27 +113,20 @@ def generate_signals(prices):
         
         # Current values
         price = close[i]
-        kama_slope_val = kama_slope_aligned[i]
         vol_spike = volume_spike[i]
-        atr_val = atr_raw[i]
+        is_strong_trend = strong_trend[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price crosses below midline
-            if price < dc_mid_1d_aligned[i]:
-                exit_signal = True
-            # ATR-based stoploss: 1.5*ATR below entry
-            elif price < entry_price - 1.5 * atr_val:
+            # Exit if price reaches R4 (profit target) or crosses below R3 (stop)
+            if price >= r4_6h_aligned[i] or price < r3_6h_aligned[i]:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price crosses above midline
-            if price > dc_mid_1d_aligned[i]:
-                exit_signal = True
-            # ATR-based stoploss: 1.5*ATR above entry
-            elif price > entry_price + 1.5 * atr_val:
+            # Exit if price reaches S4 (profit target) or crosses above S3 (stop)
+            if price <= s4_6h_aligned[i] or price > s3_6h_aligned[i]:
                 exit_signal = True
         
         if exit_signal:
@@ -138,23 +137,23 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: 4h KAMA slope > 0 AND price breaks above 1d Donchian upper AND volume spike
-            if kama_slope_val > 0 and price > dc_upper_1d_aligned[i] and vol_spike:
-                signals[i] = 0.20
+            # LONG: Price breaks above R3 AND volume spike AND strong trending market
+            if price > r3_6h_aligned[i] and vol_spike and is_strong_trend:
+                signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: 4h KAMA slope < 0 AND price breaks below 1d Donchian lower AND volume spike
-            elif kama_slope_val < 0 and price < dc_lower_1d_aligned[i] and vol_spike:
-                signals[i] = -0.20
+            # SHORT: Price breaks below S3 AND volume spike AND strong trending market
+            elif price < s3_6h_aligned[i] and vol_spike and is_strong_trend:
+                signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         else:
-            signals[i] = position * 0.20
+            signals[i] = position * 0.25
     
     return signals
 
-name = "1h_KAMA4hTrend_Donchian1d_VolumeSpike_V1"
-timeframe = "1h"
+name = "6h_Camarilla_R3_S3_Breakout_1dVolumeSpike_1wADX_V1"
+timeframe = "6h"
 leverage = 1.0
