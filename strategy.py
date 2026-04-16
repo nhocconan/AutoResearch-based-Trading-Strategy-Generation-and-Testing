@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1w ADX trend filter.
-# Long when price breaks above 4h Donchian upper(20) AND 1d volume > 2.0x 20-period average AND 1w ADX > 25.
-# Short when price breaks below 4h Donchian lower(20) AND 1d volume > 2.0x 20-period average AND 1w ADX > 25.
-# Exit when price returns to 4h Donchian midpoint or ATR(10) < ATR(30) (contracting volatility).
-# Uses discrete position size 0.25. Donchian provides structure, volume confirmation reduces false signals,
+# Hypothesis: 4h Williams Alligator (Jaw/Teeth/Lips) with 1d volume spike and 1w ADX trend filter.
+# Long when Alligator is bullish (Lips > Teeth > Jaw) AND price breaks above 4h Donchian upper(20) AND 1d volume > 2.0x 20-period average AND 1w ADX > 25.
+# Short when Alligator is bearish (Lips < Teeth < Jaw) AND price breaks below 4h Donchian lower(20) AND 1d volume > 2.0x 20-period average AND 1w ADX > 25.
+# Exit when Alligator changes direction or price returns to 4h Donchian midpoint.
+# Uses discrete position size 0.25. Alligator provides trend direction, Donchian provides structure, volume confirmation reduces false signals,
 # and 1w ADX ensures we only trade in trending regimes. Target: 50-120 total trades over 4 years (12-30/year).
 
 def generate_signals(prices):
@@ -20,18 +20,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data once before loop for Donchian calculation
+    # Get 4h data once before loop for Donchian and Alligator calculation
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    if len(df_4h) < 34:
         return np.zeros(n)
     
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
     # === 4h Indicators: Donchian channels (20-period) ===
-    # Upper = highest high over 20 periods
-    # Lower = lowest low over 20 periods
-    # Middle = (upper + lower) / 2
     upper_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
     lower_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     middle_20 = (upper_20 + lower_20) / 2.0
@@ -40,6 +38,19 @@ def generate_signals(prices):
     upper_aligned = align_htf_to_ltf(prices, df_4h, upper_20)
     lower_aligned = align_htf_to_ltf(prices, df_4h, lower_20)
     middle_aligned = align_htf_to_ltf(prices, df_4h, middle_20)
+    
+    # === 4h Indicators: Williams Alligator (13,8,5) ===
+    # Jaw: 13-period SMMA, shifted 8 bars
+    jaw = pd.Series(close_4h).rolling(window=13, min_periods=13).mean().shift(8).values
+    # Teeth: 8-period SMMA, shifted 5 bars
+    teeth = pd.Series(close_4h).rolling(window=8, min_periods=8).mean().shift(5).values
+    # Lips: 5-period SMMA, shifted 3 bars
+    lips = pd.Series(close_4h).rolling(window=5, min_periods=5).mean().shift(3).values
+    
+    # Align Alligator lines to 4h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_4h, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_4h, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_4h, lips)
     
     # Get 1d data once before loop for volume filter
     df_1d = get_htf_data(prices, '1d')
@@ -108,6 +119,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # Skip if any required data is NaN
         if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(middle_aligned[i]) or 
+            np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
             np.isnan(vol_ma_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             position = 0
@@ -118,6 +130,9 @@ def generate_signals(prices):
         upper_val = upper_aligned[i]
         lower_val = lower_aligned[i]
         middle_val = middle_aligned[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
         vol_ma_val = vol_ma_aligned[i]
         adx_val = adx_aligned[i]
         price = close[i]
@@ -129,17 +144,21 @@ def generate_signals(prices):
         # Trend filter: 1w ADX > 25 (trending regime)
         trend_filter = adx_val > 25
         
+        # Alligator direction
+        alligator_bullish = lips_val > teeth_val and teeth_val > jaw_val
+        alligator_bearish = lips_val < teeth_val and teeth_val < jaw_val
+        
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price returns to Donchian middle
-            if price <= middle_val:
+            # Exit if Alligator turns bearish or price returns to Donchian middle
+            if not alligator_bullish or price <= middle_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price returns to Donchian middle
-            if price >= middle_val:
+            # Exit if Alligator turns bullish or price returns to Donchian middle
+            if not alligator_bearish or price >= middle_val:
                 exit_signal = True
         
         if exit_signal:
@@ -150,14 +169,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: price breaks above Donchian upper with volume and trend confirmation
-            if price > upper_val and vol_filter and trend_filter:
+            # LONG: Alligator bullish AND price breaks above Donchian upper with volume and trend confirmation
+            if alligator_bullish and price > upper_val and vol_filter and trend_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: price breaks below Donchian lower with volume and trend confirmation
-            elif price < lower_val and vol_filter and trend_filter:
+            # SHORT: Alligator bearish AND price breaks below Donchian lower with volume and trend confirmation
+            elif alligator_bearish and price < lower_val and vol_filter and trend_filter:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -167,6 +186,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dVolumeSpike_1wADXTrend_V1"
+name = "4h_Alligator_1dVolumeSpike_1wADXTrend_V1"
 timeframe = "4h"
 leverage = 1.0
