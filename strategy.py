@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 1d ADX trend filter.
-# Long when price breaks above 20-period 4h high AND volume > 1.3x 20-period 1d average volume AND 1d ADX > 20.
-# Short when price breaks below 20-period 4h low AND volume > 1.3x 20-period 1d average volume AND 1d ADX > 20.
-# Exit when price crosses the 4h midpoint (upper+lower)/2 or ATR-based stoploss (2*ATR from entry).
-# Uses discrete position size 0.25. Designed to capture breakouts in trending markets with volume confirmation.
-# Target: 50-150 total trades over 4 years (12-38/year) to balance edge and fee drag.
+# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 1w ADX trend filter.
+# Long when price breaks above 20-period 4h high AND volume > 1.3x 20-period 1d average AND 1w ADX > 20.
+# Short when price breaks below 20-period 4h low AND volume > 1.3x 20-period 1d average AND 1w ADX > 20.
+# Exit when price crosses the 4h midpoint or ATR-based stoploss (2*ATR from entry).
+# Uses discrete position size 0.25. Designed to capture breakouts with volume confirmation in trending markets.
+# Target: 80-180 total trades over 4 years (20-45/year) to balance edge and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -32,46 +32,47 @@ def generate_signals(prices):
     dc_mid_4h = (dc_upper_4h + dc_lower_4h) / 2
     
     # Align to 4h timeframe (primary timeframe)
-    dc_upper_4h_aligned = align_htf_to_ltf(prices, df_4h, dc_upper_4h)
-    dc_lower_4h_aligned = align_htf_to_ltf(prices, df_4h, dc_lower_4h)
-    dc_mid_4h_aligned = align_htf_to_ltf(prices, df_4h, dc_mid_4h)
+    dc_upper_4h_aligned = dc_upper_4h
+    dc_lower_4h_aligned = dc_lower_4h
+    dc_mid_4h_aligned = dc_mid_4h
     
-    # === 1d Indicators: Volume Confirmation (volume > 1.3x 20-period average) ===
+    # === 1d Indicators: Volume Spike (volume > 1.3x 20-period average) ===
     df_1d = get_htf_data(prices, '1d')
     vol_1d = df_1d['volume'].values
     vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    volume_confirm = volume > (1.3 * vol_ma_1d_aligned)
+    volume_spike = volume > (1.3 * vol_ma_1d_aligned)
     
-    # === 1d Indicators: ADX > 20 (trending market filter) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 1w Indicators: ADX > 20 (trending market filter) ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # True Range
-    tr1 = pd.Series(high_1d).diff()
-    tr2 = pd.Series(low_1d).diff().abs()
-    tr3 = pd.Series(close_1d).shift(1).diff().abs()
-    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    tr1 = pd.Series(high_1w).diff()
+    tr2 = pd.Series(low_1w).diff().abs()
+    tr3 = pd.Series(close_1w).shift(1).diff().abs()
+    tr_1w = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1w = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # Directional Movement
-    dm_plus = pd.Series(high_1d).diff()
-    dm_minus = pd.Series(low_1d).diff().abs()
+    dm_plus = pd.Series(high_1w).diff()
+    dm_minus = pd.Series(low_1w).diff().abs()
     dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
     dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
     
     # Smoothed DM and TR
     dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_smooth = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_smooth = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # Directional Indicators
     di_plus = 100 * (dm_plus_smooth / atr_smooth)
     di_minus = 100 * (dm_minus_smooth / atr_smooth)
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     trending_market = adx_aligned > 20
     
     # Session filter: 08-20 UTC
@@ -93,12 +94,12 @@ def generate_signals(prices):
     tr3_4h = pd.Series(close_4h).shift(1).diff().abs()
     tr_4h = pd.concat([tr1_4h, tr2_4h, tr3_4h], axis=1).max(axis=1)
     atr_4h_raw = pd.Series(tr_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h_raw)
+    atr_4h_aligned = atr_4h_raw  # Already aligned as primary timeframe
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
         if (np.isnan(dc_upper_4h_aligned[i]) or np.isnan(dc_lower_4h_aligned[i]) or np.isnan(dc_mid_4h_aligned[i]) or
-            np.isnan(volume_confirm[i]) or np.isnan(trending_market[i]) or np.isnan(atr_4h_aligned[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(trending_market[i]) or np.isnan(atr_4h_aligned[i]) or
             not session_filter[i]):
             signals[i] = 0.0
             position = 0
@@ -106,7 +107,7 @@ def generate_signals(prices):
         
         # Current values
         price = close[i]
-        vol_conf = volume_confirm[i]
+        vol_spike = volume_spike[i]
         is_trending = trending_market[i]
         atr_val = atr_4h_aligned[i]
         
@@ -137,14 +138,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Donchian upper AND volume confirmation AND trending market
-            if price > dc_upper_4h_aligned[i] and vol_conf and is_trending:
+            # LONG: Price breaks above Donchian upper AND volume spike AND trending market
+            if price > dc_upper_4h_aligned[i] and vol_spike and is_trending:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: Price breaks below Donchian lower AND volume confirmation AND trending market
-            elif price < dc_lower_4h_aligned[i] and vol_conf and is_trending:
+            # SHORT: Price breaks below Donchian lower AND volume spike AND trending market
+            elif price < dc_lower_4h_aligned[i] and vol_spike and is_trending:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -154,6 +155,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dVolumeConfirm_1dADX_V1"
+name = "4h_Donchian20_1dVolumeSpike_1wADX_V1"
 timeframe = "4h"
 leverage = 1.0
