@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d volume spike (2.0x) and 1w trend filter (close > EMA50)
-# Long when price > Donchian upper band AND 1d volume > 2.0x 20-period median volume AND weekly close > weekly EMA50
-# Short when price < Donchian lower band AND 1d volume > 2.0x 20-period median volume AND weekly close < weekly EMA50
+# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation (1.5x median) and 1w trend filter (EMA50)
+# Long when price > Donchian upper band AND 1d volume > 1.5x 20-period median volume AND weekly close > weekly EMA50
+# Short when price < Donchian lower band AND 1d volume > 1.5x 20-period median volume AND weekly close < weekly EMA50
 # Exit when price crosses Donchian middle band (mean reversion to equilibrium)
-# Uses discrete position size 0.25 to limit fee drag. Target: 50-150 total trades over 4 years.
+# Uses discrete position size 0.25 to limit fee drag. Target: 75-200 total trades over 4 years.
 # Combines price channel breakout with volume confirmation and weekly trend filter for robustness in bull/bear markets.
 
 def generate_signals(prices):
@@ -85,8 +85,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 1d volume > 2.0x 20-period 1d volume median
-        vol_threshold = vol_median * 2.0
+        # Volume filter: current 1d volume > 1.5x 20-period 1d volume median
+        vol_threshold = vol_median * 1.5
         vol_confirm = vol_1d_aligned[i] > vol_threshold
         
         # Weekly trend filter: need weekly close aligned
@@ -139,6 +139,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dVolumeSpike2x_1wTrend_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dVolumeSpike1.5x_1wTrend_v1"
+timeframe = "4h"
 leverage = 1.0
