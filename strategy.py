@@ -36,7 +36,7 @@ def generate_signals(prices):
     r3 = camarilla_base + camarilla_range * 1.1 / 4
     s3 = camarilla_base - camarilla_range * 1.1 / 4
     
-    # Align to 4h timeframe
+    # Align to 1d timeframe
     camarilla_base_aligned = align_htf_to_ltf(prices, df_1d, camarilla_base)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
@@ -45,11 +45,11 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === Volume confirmation (4h) ===
+    # === Volume confirmation (1d) ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma_20
     
-    # === Choppiness regime filter (4h) ===
+    # === Choppiness regime filter (1d) ===
     # Chop = 100 * log(sum(TR, n) / (max(high, n) - min(low, n))) / log(n)
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]
@@ -124,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_Volume_EMA34_ChopFilter"
-timeframe = "4h"
+name = "1d_Camarilla_R3_S3_Breakout_Volume_EMA34_ChopFilter"
+timeframe = "1d"
 leverage = 1.0
