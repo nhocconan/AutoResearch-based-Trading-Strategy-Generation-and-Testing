@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Supertrend with 1d volume regime filter and ATR-based position sizing.
-# Long when Supertrend turns bullish AND 1d volume > 1.5x 20-period average.
-# Short when Supertrend turns bearish AND 1d volume > 1.5x 20-period average.
-# Position size scales with volatility: 0.30 when ATR(14) < 1.5*ATR(50), else 0.15.
-# Uses discrete position sizes (0.0, ±0.15, ±0.30) to minimize fee churn.
-# Supertrend captures trend, volume filter ensures participation, ATR scaling manages risk.
-# Works in both bull and bear markets by following the trend with volume confirmation.
+# Hypothesis: 12h Donchian(20) breakout + 1d volume spike + ADX regime filter.
+# Long when price breaks above Donchian(20) high AND 1d volume > 1.5x 20-period average AND ADX(14) < 25 (range regime).
+# Short when price breaks below Donchian(20) low AND 1d volume > 1.5x 20-period average AND ADX(14) < 25.
+# Exit on ATR-based stoploss (2*ATR from entry) or opposite Donchian breakout.
+# Uses discrete position size 0.25. Target: 50-150 total trades over 4 years (12-37/year).
+# Works in both bull and bear markets by requiring volume confirmation and range regime (ADX < 25) to avoid trending whipsaws.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,67 +20,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Indicators: Supertrend (ATR=10, mult=3.0) ===
-    # True Range
-    tr1 = pd.Series(high).diff()
-    tr2 = pd.Series(low).diff().abs()
-    tr3 = pd.Series(close).shift(1).diff().abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = pd.Series(tr).ewm(alpha=1/10, adjust=False, min_periods=10).mean().values
+    # === 12h Indicators: Donchian(20) ===
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_high_prev = np.roll(highest_high, 1)
+    donchian_low_prev = np.roll(lowest_low, 1)
+    donchian_high_prev[0] = np.nan
+    donchian_low_prev[0] = np.nan
     
-    # Basic Upper and Lower Bands
-    hl2 = (high + low) / 2
-    upper_band = hl2 + 3.0 * atr
-    lower_band = hl2 - 3.0 * atr
-    
-    # Final Upper and Lower Bands
-    final_upper = np.zeros(n)
-    final_lower = np.zeros(n)
-    final_upper[-1] = upper_band[-1]
-    final_lower[-1] = lower_band[-1]
-    
-    for i in range(n-2, -1, -1):
-        final_upper[i] = upper_band[i] if (close[i] <= final_upper[i+1] or final_upper[i+1] == 0) else final_upper[i+1]
-        final_lower[i] = lower_band[i] if (close[i] >= final_lower[i+1] or final_lower[i+1] == 0) else final_lower[i+1]
-    
-    # Supertrend
-    supertrend = np.zeros(n)
-    direction = np.ones(n)  # 1 for uptrend, -1 for downtrend
-    supertrend[-1] = final_lower[-1]
-    direction[-1] = 1
-    
-    for i in range(n-2, -1, -1):
-        if close[i] <= final_upper[i]:
-            direction[i] = -1
-            supertrend[i] = final_upper[i]
-        elif close[i] >= final_lower[i]:
-            direction[i] = 1
-            supertrend[i] = final_lower[i]
-        else:
-            direction[i] = direction[i+1]
-            supertrend[i] = supertrend[i+1] if direction[i] == 1 else final_upper[i]
-    
-    # Supertrend trend change signals
-    supertrend_prev = np.roll(supertrend, 1)
-    supertrend_prev[0] = supertrend[0]
-    trend_change = (supertrend != supertrend_prev) & (np.arange(n) > 0)
-    bullish_signal = trend_change & (direction == 1)
-    bearish_signal = trend_change & (direction == -1)
-    
-    # === 1d Indicators: Volume Regime Filter ===
+    # === 1d Indicators: Volume Spike and ADX ===
     df_1d = get_htf_data(prices, '1d')
     vol_1d = df_1d['volume'].values
     vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     volume_spike = volume > (1.5 * vol_ma_1d_aligned)
     
-    # === ATR for position sizing ===
-    atr_14 = atr  # Already calculated ATR(10), but we need ATR(14) for comparison
-    # Recalculate ATR(14) for volatility regime
-    tr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_50 = pd.Series(tr).ewm(alpha=1/50, adjust=False, min_periods=50).mean().values
-    atr_ratio = atr_14 / atr_50
-    vol_regime_low = atr_ratio < 1.5  # Low volatility regime
+    # ADX(14) on 1d
+    plus_dm = pd.Series(df_1d['high']).diff()
+    minus_dm = pd.Series(df_1d['low']).diff().abs()
+    plus_dm[plus_dm < 0] = 0
+    minus_dm[minus_dm < 0] = 0
+    
+    tr1 = pd.Series(df_1d['high']).diff()
+    tr2 = pd.Series(df_1d['low']).diff().abs()
+    tr3 = pd.Series(df_1d['close']).diff().abs()
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    plus_di = 100 * (pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d)
+    minus_di = 100 * (pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d)
+    dx = (np.abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # === 12h ATR for stoploss ===
+    tr1_12h = pd.Series(high).diff()
+    tr2_12h = pd.Series(low).diff().abs()
+    tr3_12h = pd.Series(close).shift(1).diff().abs()
+    tr_12h = pd.concat([tr1_12h, tr2_12h, tr3_12h], axis=1).max(axis=1)
+    atr_12h = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -89,49 +66,74 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed)
+    # Warmup: ensure all indicators are valid (max 50 periods needed for EMA/ADX)
     warmup = 60
     
-    # Track position state
+    # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(supertrend[i]) or np.isnan(supertrend_prev[i]) or 
-            np.isnan(volume_spike[i]) or np.isnan(atr_ratio[i]) or not session_filter[i]):
+        if (np.isnan(donchian_high_prev[i]) or np.isnan(donchian_low_prev[i]) or np.isnan(volume_spike[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(atr_12h[i]) or not session_filter[i]):
             signals[i] = 0.0
             position = 0
             continue
         
-        # === EXIT LOGIC: Reverse on opposite Supertrend signal ===
-        if position == 1 and bearish_signal[i]:
+        # Current values
+        price = close[i]
+        vol_spike = volume_spike[i]
+        adx_val = adx_aligned[i]
+        atr_val = atr_12h[i]
+        
+        # Range regime filter: ADX < 25
+        in_range = adx_val < 25
+        
+        # === EXIT LOGIC ===
+        exit_signal = False
+        
+        if position == 1:  # Long position
+            # Exit if price breaks below Donchian(20) low
+            if price < donchian_low_prev[i]:
+                exit_signal = True
+            # ATR-based stoploss: 2*ATR below entry
+            elif price < entry_price - 2.0 * atr_val:
+                exit_signal = True
+        
+        elif position == -1:  # Short position
+            # Exit if price breaks above Donchian(20) high
+            if price > donchian_high_prev[i]:
+                exit_signal = True
+            # ATR-based stoploss: 2*ATR above entry
+            elif price > entry_price + 2.0 * atr_val:
+                exit_signal = True
+        
+        if exit_signal:
             signals[i] = 0.0
             position = 0
-            continue
-        elif position == -1 and bullish_signal[i]:
-            signals[i] = 0.0
-            position = 0
+            entry_price = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
-        if position == 0:
-            # LONG: Bullish Supertrend turn AND volume spike
-            if bullish_signal[i] and volume_spike[i]:
-                # Position size: 0.30 in low vol, 0.15 in high vol
-                signals[i] = 0.30 if vol_regime_low[i] else 0.15
+        if position == 0 and in_range and vol_spike:
+            # LONG: price breaks above Donchian(20) high
+            if price > donchian_high_prev[i]:
+                signals[i] = 0.25
                 position = 1
+                entry_price = price
             
-            # SHORT: Bearish Supertrend turn AND volume spike
-            elif bearish_signal[i] and volume_spike[i]:
-                # Position size: 0.30 in low vol, 0.15 in high vol
-                signals[i] = -0.30 if vol_regime_low[i] else -0.15
+            # SHORT: price breaks below Donchian(20) low
+            elif price < donchian_low_prev[i]:
+                signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         else:
-            signals[i] = position * (0.30 if vol_regime_low[i] else 0.15)
+            signals[i] = position * 0.25
     
     return signals
 
-name = "4h_Supertrend_1dVolumeRegime_ATRSize_V1"
-timeframe = "4h"
+name = "12h_Donchian20_1dVolumeSpike_ADXRange_V1"
+timeframe = "12h"
 leverage = 1.0
