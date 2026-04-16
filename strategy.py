@@ -13,22 +13,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Donchian Channel (20-period) ===
-    df_1d = get_htf_data(prices, '1d')
-    donchian_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
+    # === 12h Donchian Channel (20-period) ===
+    df_12h = get_htf_data(prices, '12h')
+    donchian_high = pd.Series(df_12h['high']).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(df_12h['low']).rolling(window=20, min_periods=20).min().values
     
-    # Align Donchian levels to 1d timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Align Donchian levels to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
     
     # === Volume Confirmation (20-period volume MA) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)  # Moderate volume spike
     
-    # === 1d EMA Trend Filter (50-period) ===
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # === 12h EMA Trend Filter (50-period) ===
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     
@@ -41,14 +41,14 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # Skip if any required data is NaN
         if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(ema_50_1d_aligned[i])):
+            np.isnan(volume_spike[i]) or np.isnan(ema_50_12h_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
         vol_spike = volume_spike[i]
-        ema50 = ema_50_1d_aligned[i]
+        ema50 = ema_50_12h_aligned[i]
         
         # === EXIT LOGIC: Exit when price returns to midline (average of Donchian) ===
         midline = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2
@@ -91,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1d_Volume_EMA50Filter"
-timeframe = "1d"
+name = "6h_Donchian20_12h_Volume_EMA50Filter"
+timeframe = "6h"
 leverage = 1.0
