@@ -13,142 +13,135 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h data (HTF for trend) ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # === 4h data (primary timeframe) ===
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # 12h EMA34 for trend filter
-    close_12h_series = pd.Series(close_12h)
-    ema_34_12h = close_12h_series.ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # 4h Donchian(20) for breakout detection
+    high_20_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    low_20_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_upper_4h = align_htf_to_ltf(prices, df_4h, high_20_4h)
+    donchian_lower_4h = align_htf_to_ltf(prices, df_4h, low_20_4h)
     
-    # === 6h data (primary timeframe) ===
-    df_6h = get_htf_data(prices, '6h')
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
+    # 4h ATR for volatility filter and stoploss
+    tr4h = np.maximum(high_4h - low_4h,
+                      np.maximum(np.abs(high_4h - np.roll(close_4h, 1)),
+                                 np.abs(low_4h - np.roll(close_4h, 1))))
+    tr4h[0] = np.inf
+    atr_4h = pd.Series(tr4h).rolling(window=14, min_periods=14).mean().values
+    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
     
-    # 6h Donchian(20) for entry/exit levels
-    high_20_6h = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
-    low_20_6h = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
-    donchian_upper_6h = align_htf_to_ltf(prices, df_6h, high_20_6h)
-    donchian_lower_6h = align_htf_to_ltf(prices, df_6h, low_20_6h)
-    
-    # === 1d data (HTF for pivot levels) ===
+    # === 1d data (HTF for trend and regime) ===
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate classic pivot points from previous day
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
-    r2_1d = pivot_1d + (high_1d - low_1d)
-    s2_1d = pivot_1d - (high_1d - low_1d)
-    r3_1d = high_1d + 2 * (pivot_1d - low_1d)
-    s3_1d = low_1d - 2 * (high_1d - pivot_1d)
+    # 1d EMA50 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_50_1d = close_1d_series.ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align pivot levels to 6h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    # 1d ADX for regime filter (trending vs ranging)
+    # Calculate +DI and -DI
+    up_move = np.diff(high_1d, prepend=high_1d[0])
+    down_move = np.diff(low_1d, prepend=low_1d[0])
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # === 6h indicators for entry timing ===
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # True Range for ADX
+    tr1d = np.maximum(high_1d - low_1d,
+                      np.maximum(np.abs(high_1d - np.roll(close_1d, 1)),
+                                 np.abs(low_1d - np.roll(close_1d, 1))))
+    tr1d[0] = np.inf
     
-    # Volume spike detection
-    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
-    vol_ratio = volume / vol_ma_10
+    # Smoothed values
+    atr_1d_adx = pd.Series(tr1d).ewm(alpha=1/14, adjust=False).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values / (atr_1d_adx + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values / (atr_1d_adx + 1e-10)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # === Volume confirmation (1h) ===
+    df_1h = get_htf_data(prices, '1h')
+    volume_1h = df_1h['volume'].values
+    vol_ma_20 = pd.Series(volume_1h).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_1h = volume_1h / (vol_ma_20 + 1e-10)
+    vol_ratio_1h_aligned = align_htf_to_ltf(prices, df_1h, vol_ratio_1h)
     
     # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators have valid data
+    # Warmup
     warmup = 100
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper_6h[i]) or np.isnan(donchian_lower_6h[i]) or 
-            np.isnan(ema_34_12h_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(vol_ratio[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(r2_1d_aligned[i]) or 
-            np.isnan(s2_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
-            np.isnan(s3_1d_aligned[i])):
+        if (np.isnan(donchian_upper_4h[i]) or np.isnan(donchian_lower_4h[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(vol_ratio_1h_aligned[i]) or np.isnan(atr_4h_aligned[i])):
             signals[i] = 0.0
             position = 0
+            entry_price = 0.0
             continue
         
         hour = hours[i]
         in_session = (8 <= hour <= 20)
         
         price = close[i]
-        upper_6h = donchian_upper_6h[i]
-        lower_6h = donchian_lower_6h[i]
-        ema_34_12h_val = ema_34_12h_aligned[i]
-        rsi_val = rsi[i]
-        vol_ratio_val = vol_ratio[i]
-        r1 = r1_1d_aligned[i]
-        s1 = s1_1d_aligned[i]
-        r2 = r2_1d_aligned[i]
-        s2 = s2_1d_aligned[i]
-        r3 = r3_1d_aligned[i]
-        s3 = s3_1d_aligned[i]
+        upper_4h = donchian_upper_4h[i]
+        lower_4h = donchian_lower_4h[i]
+        ema_50_1d_val = ema_50_1d_aligned[i]
+        adx_val = adx_aligned[i]
+        vol_ratio_val = vol_ratio_1h_aligned[i]
+        atr_4h_val = atr_4h_aligned[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price closes below S1 or RSI becomes overbought
-            if (price < s1) or (rsi_val > 70):
+            # Exit when price closes below Donchian lower OR ADX weakens
+            if (price < lower_4h) or (adx_val < 20):
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price closes above R1 or RSI becomes oversold
-            if (price > r1) or (rsi_val < 30):
+            # Exit when price closes above Donchian upper OR ADX weakens
+            if (price > upper_4h) or (adx_val < 20):
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
             # Only trade during session
             if in_session:
-                # LONG: Price breaks above R1 AND above 12h EMA34 (trend filter) 
-                # AND RSI not overbought AND volume spike
-                if (price > r1) and (price > ema_34_12h_val) and (rsi_val < 60) and \
-                   (vol_ratio_val > 2.0):
+                # LONG: Price breaks above Donchian upper AND above EMA50 (trend filter)
+                # AND strong trend (ADX > 25) AND volume spike
+                if (price > upper_4h) and (price > ema_50_1d_val) and \
+                   (adx_val > 25) and (vol_ratio_val > 1.5):
                     signals[i] = 0.25
                     position = 1
+                    entry_price = price
                     continue
                 
-                # SHORT: Price breaks below S1 AND below 12h EMA34 (trend filter) 
-                # AND RSI not oversold AND volume spike
-                elif (price < s1) and (price < ema_34_12h_val) and (rsi_val > 40) and \
-                     (vol_ratio_val > 2.0):
+                # SHORT: Price breaks below Donchian lower AND below EMA50 (trend filter)
+                # AND strong trend (ADX > 25) AND volume spike
+                elif (price < lower_4h) and (price < ema_50_1d_val) and \
+                     (adx_val > 25) and (vol_ratio_val > 1.5):
                     signals[i] = -0.25
                     position = -1
+                    entry_price = price
                     continue
         
         # Hold current position
@@ -161,6 +154,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Pivot_R1_S1_Breakout_EMA34_Volume"
-timeframe = "6h"
+name = "4h_Donchian_Breakout_ADX_Volume"
+timeframe = "4h"
 leverage = 1.0
