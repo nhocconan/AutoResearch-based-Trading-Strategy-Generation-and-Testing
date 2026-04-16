@@ -13,29 +13,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h data (primary timeframe) ===
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    # === 6h data (primary timeframe) ===
+    df_6h = get_htf_data(prices, '6h')
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    volume_6h = df_6h['volume'].values
     
     # === 1d data (HTF) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # === 4h ATR (14) for volatility and stop sizing ===
-    tr_4h = np.maximum(high_4h - low_4h,
-                       np.maximum(np.abs(high_4h - np.roll(close_4h, 1)),
-                                  np.abs(low_4h - np.roll(close_4h, 1))))
-    tr_4h[0] = high_4h[0] - low_4h[0]
-    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
-    
-    # === 1d ATR (14) for volatility regime ===
+    # === 1d ATR for volatility regime ===
     tr_1d = np.maximum(high_1d - low_1d,
                        np.maximum(np.abs(high_1d - np.roll(close_1d, 1)),
                                   np.abs(low_1d - np.roll(close_1d, 1))))
@@ -43,7 +34,7 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # === 1d Bollinger Band Width for volatility regime detection ===
+    # === 1d Bollinger Bands (20, 2) for volatility regime ===
     sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
     std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
     upper_band = sma_20 + (2 * std_20)
@@ -56,15 +47,15 @@ def generate_signals(prices):
         lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
     ).values
     
-    # === 4h Donchian Channel (20) for breakout signals ===
-    highest_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # === 6h Donchian Channel (20) for breakout signals ===
+    highest_20 = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
     donchian_upper = highest_20
     donchian_lower = lowest_20
     
-    # === 4h Volume spike detection ===
-    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume_4h / vol_ma_20
+    # === 6h Volume spike detection ===
+    vol_ma_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume_6h / vol_ma_20
     
     signals = np.zeros(n)
     
@@ -76,15 +67,14 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_4h_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(bb_width_percentile[i]) or np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(atr_1d_aligned[i]) or np.isnan(bb_width_percentile[i]) or 
+            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        price = close_4h[i]
-        atr_4h_val = atr_4h_aligned[i]
+        price = close_6h[i]
         bb_width_pct = bb_width_percentile[i]
         vol_ratio_val = vol_ratio[i]
         
@@ -127,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_LowVol_Volume"
-timeframe = "4h"
+name = "6h_Donchian_Breakout_LowVol_Volume"
+timeframe = "6h"
 leverage = 1.0
