@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,29 +13,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h data (primary timeframe) ===
-    # We'll use 12h for signal generation directly from prices
-    # But we need higher timeframes for trend and regime
+    # === 4h data (HTF for direction) ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    volume_4h = df_4h['volume'].values
     
-    # === 1d data (HTF for trend and regime) ===
+    # 4x4 Donchian upper and lower bands (16 periods - 4x4)
+    high_16_4h = pd.Series(high_4h).rolling(window=16, min_periods=16).max().values
+    low_16_4h = pd.Series(low_4h).rolling(window=16, min_periods=16).min().values
+    donchian_upper_4h = align_htf_to_ltf(prices, df_4h, high_16_4h)
+    donchian_lower_4h = align_htf_to_ltf(prices, df_4h, low_16_4h)
+    
+    # 4x4 EMA16 for trend filter
+    close_4h_series = pd.Series(close_4h)
+    ema_16_4h = close_4h_series.ewm(span=16, min_periods=16, adjust=False).mean().values
+    ema_16_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_16_4h)
+    
+    # === 1d data (HTF for regime) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # 1d Donchian channels (20 periods) for trend
-    high_20_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_upper_1d = align_htf_to_ltf(prices, df_1d, high_20_1d)
-    donchian_lower_1d = align_htf_to_ltf(prices, df_1d, low_20_1d)
-    
-    # 1d EMA20 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema_20_1d = close_1d_series.ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
-    
-    # 1d ATR for volatility regime filter
+    # 1d ATR for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     tr1 = np.abs(high_1d - low_1d)
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -45,36 +48,36 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # 1d RSI for momentum filter
-    delta_1d = np.diff(close_1d, prepend=close_1d[0])
-    gain_1d = np.where(delta_1d > 0, delta_1d, 0)
-    loss_1d = np.where(delta_1d < 0, -delta_1d, 0)
-    avg_gain_1d = pd.Series(gain_1d).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    avg_loss_1d = pd.Series(loss_1d).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    rs_1d = avg_gain_1d / (avg_loss_1d + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs_1d))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # === 4h indicators for entry timing ===
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # === Volume spike detection on primary timeframe ===
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / (vol_ma_20 + 1e-10)
+    # Volume spike detection (relative to 16-period average)
+    vol_ma_16 = pd.Series(volume).rolling(window=16, min_periods=16).mean().values
+    vol_ratio = volume / vol_ma_16
     
-    # Session filter: 08-20 UTC (using index which is already datetime)
+    # Session filter: 08-20 UTC
     hours = prices.index.hour
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators have valid data
-    warmup = 50
+    warmup = 100
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper_1d[i]) or np.isnan(donchian_lower_1d[i]) or 
-            np.isnan(ema_20_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(donchian_upper_4h[i]) or np.isnan(donchian_lower_4h[i]) or 
+            np.isnan(ema_16_4h_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(rsi[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -83,24 +86,24 @@ def generate_signals(prices):
         in_session = (8 <= hour <= 20)
         
         price = close[i]
-        upper_1d = donchian_upper_1d[i]
-        lower_1d = donchian_lower_1d[i]
-        ema_20_1d_val = ema_20_1d_aligned[i]
+        upper_4h = donchian_upper_4h[i]
+        lower_4h = donchian_lower_4h[i]
+        ema_16_4h_val = ema_16_4h_aligned[i]
         atr_1d_val = atr_1d_aligned[i]
-        rsi_1d_val = rsi_1d_aligned[i]
+        rsi_val = rsi[i]
         vol_ratio_val = vol_ratio[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price closes below 1d Donchian lower OR RSI becomes overbought
-            if (price < lower_1d) or (rsi_1d_val > 70):
+            # Exit when price closes below Donchian lower OR RSI becomes overbought
+            if (price < lower_4h) or (rsi_val > 70):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price closes above 1d Donchian upper OR RSI becomes oversold
-            if (price > upper_1d) or (rsi_1d_val < 30):
+            # Exit when price closes above Donchian upper OR RSI becomes oversold
+            if (price > upper_4h) or (rsi_val < 30):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -109,17 +112,17 @@ def generate_signals(prices):
         if position == 0:
             # Only trade during session
             if in_session:
-                # LONG: Price breaks above 1d Donchian upper AND above EMA20 (trend filter) 
+                # LONG: Price breaks above 4x4 Donchian upper AND above EMA16 (trend filter) 
                 # AND RSI not overbought AND volume spike AND volatility not too high
-                if (price > upper_1d) and (price > ema_20_1d_val) and (rsi_1d_val < 60) and \
+                if (price > upper_4h) and (price > ema_16_4h_val) and (rsi_val < 60) and \
                    (vol_ratio_val > 2.0) and (atr_1d_val < np.percentile(atr_1d_aligned[:i+1], 80)):
                     signals[i] = 0.25
                     position = 1
                     continue
                 
-                # SHORT: Price breaks below 1d Donchian lower AND below EMA20 (trend filter) 
+                # SHORT: Price breaks below 4x4 Donchian lower AND below EMA16 (trend filter) 
                 # AND RSI not oversold AND volume spike AND volatility not too high
-                elif (price < lower_1d) and (price < ema_20_1d_val) and (rsi_1d_val > 40) and \
+                elif (price < lower_4h) and (price < ema_16_4h_val) and (rsi_val > 40) and \
                      (vol_ratio_val > 2.0) and (atr_1d_val < np.percentile(atr_1d_aligned[:i+1], 80)):
                     signals[i] = -0.25
                     position = -1
@@ -135,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_EMA20_RSI_Volume_1dTrend"
-timeframe = "12h"
+name = "4x4_Donchian_Breakout_EMA16_RSI_Volume"
+timeframe = "4h"
 leverage = 1.0
