@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above Donchian(20) high AND price > 1d EMA34 AND volume > 1.5x 20-period average volume
-# Short when price breaks below Donchian(20) low AND price < 1d EMA34 AND volume > 1.5x 20-period average volume
+# Hypothesis: 4h Camarilla pivot S1/R1 touch with 1d EMA34 trend filter and volume confirmation
+# Long when price touches or crosses above S1 (support) AND price > 1d EMA34 AND volume > 1.5x 20-period average volume
+# Short when price touches or crosses below R1 (resistance) AND price < 1d EMA34 AND volume > 1.5x 20-period average volume
 # ATR trailing stop (2.0x ATR) to manage risk
-# Designed for low trade frequency (target: 50-150 total trades over 4 years) to minimize fee drag on 12h timeframe
-# Donchian breakouts capture trending moves, EMA34 filter avoids counter-trend trades, volume confirmation adds conviction
+# Designed for low trade frequency (target: 75-200 total trades over 4 years) to minimize fee drag on 4h timeframe
+# Camarilla pivots identify intraday support/resistance, EMA34 filter avoids counter-trend trades, volume confirmation adds conviction
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,30 +26,43 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === 12h Donchian(20) channels ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    # === 4h Camarilla pivot levels from previous 1d OHLC ===
+    # Using previous day's OHLC to calculate today's Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_for_pivot = df_1d['close'].values
     
-    # === 12h Volume Spike Confirmation (20-period average) ===
-    vol_12h = df_12h['volume'].values
-    vol_ma_20 = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
+    # Calculate pivot point and ranges
+    pivot_1d = (high_1d + low_1d + close_1d_for_pivot) / 3.0
+    range_1d = high_1d - low_1d
     
-    # === 12h ATR for trailing stop (14-period) ===
-    # Need 12h high/low/close for TR calculation
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(df_12h['close'].values, 1))
-    tr3 = np.abs(low_12h - np.roll(df_12h['close'].values, 1))
+    # Camarilla levels: S1 = C - (H-L)*1.1/12, R1 = C + (H-L)*1.1/12
+    s1_1d = close_1d_for_pivot - (range_1d * 1.1 / 12)
+    r1_1d = close_1d_for_pivot + (range_1d * 1.1 / 12)
+    
+    # Align to 4h timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    
+    # === 4h Volume Spike Confirmation (20-period average) ===
+    df_4h = get_htf_data(prices, '4h')
+    vol_4h = df_4h['volume'].values
+    vol_ma_20 = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20)
+    
+    # === 4h ATR for trailing stop (14-period) ===
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
+    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
     
     signals = np.zeros(n)
     
@@ -65,8 +78,8 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # Skip if any data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(donchian_high_aligned[i]) or
-            np.isnan(donchian_low_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
+            np.isnan(r1_aligned[i]) or
             np.isnan(vol_ma_aligned[i]) or
             np.isnan(atr_aligned[i])):
             signals[i] = 0.0
@@ -75,8 +88,8 @@ def generate_signals(prices):
         
         price = close[i]
         ema_34_val = ema_34_1d_aligned[i]
-        donchian_high_val = donchian_high_aligned[i]
-        donchian_low_val = donchian_low_aligned[i]
+        s1_val = s1_aligned[i]
+        r1_val = r1_aligned[i]
         vol_confirm = volume[i] > vol_ma_aligned[i] * 1.5  # 1.5x average volume for spike
         atr_val = atr_aligned[i]
         
@@ -105,15 +118,15 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Long when: price breaks above Donchian(20) high AND price > 1d EMA34 AND volume spike
-            if price > donchian_high_val and price > ema_34_val and vol_confirm:
+            # Long when: price touches or crosses above S1 AND price > 1d EMA34 AND volume spike
+            if price >= s1_val and price > ema_34_val and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 highest_since_entry = price
                 continue
-            # Short when: price breaks below Donchian(20) low AND price < 1d EMA34 AND volume spike
-            elif price < donchian_low_val and price < ema_34_val and vol_confirm:
+            # Short when: price touches or crosses below R1 AND price < 1d EMA34 AND volume spike
+            elif price <= r1_val and price < ema_34_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -130,6 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dEMA34_VolumeSpike_ATRTrail"
-timeframe = "12h"
+name = "4h_Camarilla_S1R1_1dEMA34_VolumeSpike_ATRTrail"
+timeframe = "4h"
 leverage = 1.0
