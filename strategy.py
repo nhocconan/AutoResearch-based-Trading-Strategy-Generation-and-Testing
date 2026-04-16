@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band squeeze breakout with 1d volume confirmation.
-# Uses Bollinger Band width (20,2) on 6h to detect low volatility squeezes.
-# Breakout occurs when price closes outside Bollinger Bands with volume > 1.5x average.
-# Direction determined by 1d EMA(50) trend: long if price > EMA50, short if price < EMA50.
-# Works in both bull (breakouts with trend) and bear (mean reversion in squeeze) markets.
-# Target: 50-150 total trades over 4 years = 12-37/year.
+# Hypothesis: 12h Williams Alligator with 1w EMA trend filter and volume confirmation.
+# Williams Alligator uses SMAs of median price (Jaw=13, Teeth=8, Lips=5) to identify trends.
+# In trending markets (price above/below all lines with separation): trade in direction of alignment.
+# In ranging markets (lines intertwined): avoid trading.
+# 1w EMA filter ensures we only trade in alignment with higher timeframe trend.
+# Volume confirmation (>1.3x average) reduces false signals.
+# Designed for 12h timeframe to capture medium-term trends with low trade frequency.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,47 +21,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 6h data (primary timeframe) ===
-    df_6h = get_htf_data(prices, '6h')
-    close_6h = df_6h['close'].values
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    volume_6h = df_6h['volume'].values
+    # === 12h data (primary timeframe) ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # === 1d data (higher timeframe for trend filter) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # === 1w data (higher timeframe for trend filter) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # === 6h Bollinger Bands (20,2) ===
-    sma_20 = pd.Series(close_6h).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_6h).rolling(window=20, min_periods=20).std().values
-    bb_upper = sma_20 + 2 * std_20
-    bb_lower = sma_20 - 2 * std_20
-    bb_width = (bb_upper - bb_lower) / sma_20  # Normalized width
+    # === Williams Alligator on 12h ===
+    # Median price = (high + low) / 2
+    median_price = (high_12h + low_12h) / 2
     
-    # === 6h Bollinger Band squeeze detection ===
-    # Squeeze when BB width is below 20-period low
-    bb_width_low = pd.Series(bb_width).rolling(window=20, min_periods=20).min().values
-    squeeze = bb_width <= bb_width_low
+    # Jaw (13-period SMMA of median, shifted 8 bars)
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean()
+    jaw = jaw.shift(8)
     
-    # === 6h volume ratio for confirmation ===
-    vol_ma_10_6h = pd.Series(volume_6h).rolling(window=10, min_periods=10).mean().values
-    vol_ratio_6h = volume_6h / vol_ma_10_6h
+    # Teeth (8-period SMMA of median, shifted 5 bars)
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean()
+    teeth = teeth.shift(5)
     
-    # === 1d EMA(50) for trend filter ===
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Lips (5-period SMMA of median, shifted 3 bars)
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean()
+    lips = lips.shift(3)
     
-    # Align all indicators to 6h timeframe
-    bb_upper_aligned = align_htf_to_ltf(prices, df_6h, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_6h, bb_lower)
-    squeeze_aligned = align_htf_to_ltf(prices, df_6h, squeeze.astype(float))
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_6h, vol_ratio_6h)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align Alligator components to lower timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw.values)
+    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth.values)
+    lips_aligned = align_htf_to_ltf(prices, df_12h, lips.values)
+    
+    # === 1w EMA(34) for trend filter ===
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # === 12h volume ratio for confirmation ===
+    vol_ma_10_12h = pd.Series(volume_12h).rolling(window=10, min_periods=10).mean().values
+    vol_ratio_12h = volume_12h / vol_ma_10_12h
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 50
+    warmup = 100
     
     # Track position and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,37 +72,32 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(bb_upper_aligned[i]) or 
-            np.isnan(bb_lower_aligned[i]) or
-            np.isnan(squeeze_aligned[i]) or
-            np.isnan(vol_ratio_aligned[i]) or
-            np.isnan(ema_50_aligned[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(ema_34_1w_aligned[i]) or
+            np.isnan(vol_ratio_12h[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        bb_upper = bb_upper_aligned[i]
-        bb_lower = bb_lower_aligned[i]
-        squeeze_val = squeeze_aligned[i]
-        vol_ratio = vol_ratio_aligned[i]
-        ema_50 = ema_50_aligned[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        ema_1w = ema_34_1w_aligned[i]
+        vol_ratio = vol_ratio_12h[i]
         
         # === STOPLOSS LOGIC ===
         if position == 1:  # Long position
-            # Stop loss: price closes below entry - 2.5 * ATR(14)
-            # Approximate ATR using BB width
-            atr_approx = (bb_upper - bb_lower) / 4  # Rough approximation
-            if price < entry_price - 2.5 * atr_approx:
+            # Stop loss: price closes below the lowest of Jaw/Teeth/Lips
+            if price < min(jaw_val, teeth_val, lips_val):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Stop loss: price closes above entry + 2.5 * ATR(14)
-            atr_approx = (bb_upper - bb_lower) / 4
-            if price > entry_price + 2.5 * atr_approx:
+            # Stop loss: price closes above the highest of Jaw/Teeth/Lips
+            if price > max(jaw_val, teeth_val, lips_val):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -106,36 +105,45 @@ def generate_signals(prices):
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price touches opposite Bollinger Band or squeeze ends
-            if price >= bb_lower or squeeze_val < 0.5:  # Touch lower band or squeeze ended
+            # Exit when Alligator lines converge or price crosses below Teeth
+            if (jaw_val <= teeth_val or teeth_val <= lips_val) or price < teeth_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price touches opposite Bollinger Band or squeeze ends
-            if price <= bb_upper or squeeze_val < 0.5:  # Touch upper band or squeeze ended
+            # Exit when Alligator lines converge or price crosses above Teeth
+            if (jaw_val >= teeth_val or teeth_val >= lips_val) or price > teeth_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
-        if position == 0 and squeeze_val > 0.5:  # Only enter during squeeze
-            # Volume confirmation required
-            if vol_ratio > 1.5:
-                # Determine direction based on 1d EMA(50) trend
-                if price > bb_upper and price > ema_50:  # Break above upper band in uptrend
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = price
-                    continue
-                elif price < bb_lower and price < ema_50:  # Break below lower band in downtrend
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = price
-                    continue
+        if position == 0:
+            # Check if Alligator lines are separated (trending market)
+            lips_above_teeth = lips_val > teeth_val
+            teeth_above_jaw = teeth_val > jaw_val
+            
+            # Bullish alignment: Lips > Teeth > Jaw
+            bullish_aligned = lips_above_teeth and teeth_above_jaw
+            
+            # Bearish alignment: Lips < Teeth < Jaw
+            bearish_aligned = lips_val < teeth_val and teeth_val < jaw_val
+            
+            if bullish_aligned and price > ema_1w and vol_ratio > 1.3:
+                # Long: price above 1w EMA, bullish Alligator, volume confirmation
+                signals[i] = 0.25
+                position = 1
+                entry_price = price
+                continue
+            elif bearish_aligned and price < ema_1w and vol_ratio > 1.3:
+                # Short: price below 1w EMA, bearish Alligator, volume confirmation
+                signals[i] = -0.25
+                position = -1
+                entry_price = price
+                continue
         
         # Hold current position
         if position == 1:
@@ -147,6 +155,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_BB_Squeeze_Breakout_Volume_EMA50_v1"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1wEMA_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
