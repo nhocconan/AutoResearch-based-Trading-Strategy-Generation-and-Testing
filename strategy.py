@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot R1/S1 breakout with 1d volume spike and ADX regime filter
-# Long when price breaks above R1 AND 1d volume > 1.5x 20-period volume SMA AND 1d ADX > 25 (trending)
-# Short when price breaks below S1 AND same filters
-# Camarilla levels from 1d provide intraday support/resistance, volume confirms conviction, ADX ensures trend
-# Position size 0.25 to limit drawdown. Target: 75-200 total trades over 4 years
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and ADX regime filter
+# Long when price breaks above 20-period Donchian high AND 1d volume > 1.3x 20-period volume SMA AND 1d ADX > 20
+# Short when price breaks below 20-period Donchian low AND same filters
+# Donchian channels provide clear trend structure, volume confirms conviction, ADX ensures trending market
+# Position size 0.25 to balance drawdown and return. Target: 75-200 total trades over 4 years
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,27 +23,27 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 4h data once before loop for price action
+    # Get 4h data once before loop for Donchian calculation
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Get 1d data once before loop for Camarilla, volume, and ADX
+    # Get 1d data once before loop for volume and ADX
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d Indicator: Camarilla Pivot Levels (R1, S1) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 4h Indicator: Donchian Channel (20-period) ===
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = pivot + 1.1 * (high_1d - low_1d) / 12.0
-    s1 = pivot - 1.1 * (high_1d - low_1d) / 12.0
+    # Donchian high: rolling max of high over 20 periods
+    donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    # Donchian low: rolling min of low over 20 periods
+    donch_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    donch_high_aligned = align_htf_to_ltf(prices, df_4h, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_4h, donch_low)
     
     # === 1d Indicator: Volume SMA (20-period) for confirmation ===
     volume_1d = df_1d['volume'].values
@@ -75,7 +75,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (need 20 for volume SMA, 14*3 for ADX smoothing)
+    # Warmup: ensure all indicators are valid (need 20 for Donchian and volume SMA, 14*3 for ADX smoothing)
     warmup = 40
     
     for i in range(warmup, n):
@@ -85,7 +85,7 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or
             np.isnan(vol_sma_20_1d_aligned[i]) or np.isnan(adx_14_aligned[i])):
             signals[i] = 0.0
             continue
@@ -97,21 +97,21 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 1d volume > 1.5x 20-period 1d volume SMA
-        vol_threshold = vol_sma_20_1d_aligned[i] * 1.5
+        # Volume filter: current 1d volume > 1.3x 20-period 1d volume SMA
+        vol_threshold = vol_sma_20_1d_aligned[i] * 1.3
         vol_confirm = vol_1d_aligned[i] > vol_threshold
         
-        # Trend filter: ADX > 25 indicates strong trend
-        trend_filter = adx_14_aligned[i] > 25.0
+        # Trend filter: ADX > 20 indicates trending market (lower threshold for more signals)
+        trend_filter = adx_14_aligned[i] > 20.0
         
         # === LONG CONDITIONS ===
-        # Price breaks above R1 AND volume confirmation AND trend filter
-        if (close[i] > r1_aligned[i]) and vol_confirm and trend_filter:
+        # Price breaks above Donchian high AND volume confirmation AND trend filter
+        if (close[i] > donch_high_aligned[i]) and vol_confirm and trend_filter:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # Price breaks below S1 AND volume confirmation AND trend filter
-        elif (close[i] < s1_aligned[i]) and vol_confirm and trend_filter:
+        # Price breaks below Donchian low AND volume confirmation AND trend filter
+        elif (close[i] < donch_low_aligned[i]) and vol_confirm and trend_filter:
             signals[i] = -0.25
         
         else:
@@ -119,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_1dVolumeSpike_ADX_Filter_v1"
+name = "4h_Donchian20_1dVolumeSpike_ADX_Filter_v1"
 timeframe = "4h"
 leverage = 1.0
