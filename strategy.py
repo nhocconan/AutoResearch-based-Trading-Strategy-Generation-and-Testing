@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h volume confirmation and 1d ADX trend filter
-# Long when price breaks above 1d Camarilla R3 + 4h volume > 1.5x 20-period avg + 1d ADX > 25
-# Short when price breaks below 1d Camarilla S3 + 4h volume > 1.5x 20-period avg + 1d ADX > 25
-# Uses 1h for entry timing, 4h/1d for signal direction/filters to reduce trades and avoid fee drag
-# Discrete position sizing (0.20) to control drawdown. Target: 60-150 total trades over 4 years
+# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction and 1d volume confirmation
+# Long when price breaks above 6h Donchian upper (20) + weekly pivot bias bullish (close > weekly pivot) + 1d volume > 1.3x 20-period avg
+# Short when price breaks below 6h Donchian lower (20) + weekly pivot bias bearish (close < weekly pivot) + 1d volume > 1.3x 20-period avg
+# Weekly pivot bias provides structural filter to avoid counter-trend trades in ranging markets
+# Discrete position sizing (0.25) to control drawdown. Target: 50-150 total trades over 4 years
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,71 +23,47 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d HTF data once before loop for Camarilla levels and ADX
+    # Get 6h data once before loop for Donchian channels
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 30:
+        return np.zeros(n)
+    
+    # Get 1w data once before loop for pivot bias
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    # Get 1d data once before loop for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Get 4h HTF data once before loop for volume confirmation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
+    # === 6h Indicator: Donchian Channels (20-period) ===
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
     
-    # === 1d Indicator: Camarilla Pivot Levels (R3, S3) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    donchian_upper = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla R3 and S3
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    # Align Donchian levels to 6h timeframe (already aligned, but ensure proper shifting)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_6h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_6h, donchian_lower)
     
-    # Align Camarilla levels to 1h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # === 1w Indicator: Weekly Pivot Point for bias ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # === 1d Indicator: ADX (14-period) for trend strength ===
-    high_1d_series = pd.Series(high_1d)
-    low_1d_series = pd.Series(low_1d)
-    close_1d_series = pd.Series(close_1d)
+    # Weekly pivot point
+    weekly_pivot = (high_1w + low_1w + close_1w) / 3.0
     
-    # True Range
-    tr1 = high_1d_series - low_1d_series
-    tr2 = abs(high_1d_series - close_1d_series.shift(1))
-    tr3 = abs(low_1d_series - close_1d_series.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean()
+    # Align weekly pivot to 6h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
     
-    # +DM and -DM
-    up_move = high_1d_series.diff()
-    down_move = low_1d_series.shift(1) - low_1d_series
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed +DM, -DM, TR
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean()
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean()
-    atr_smooth = atr.rolling(window=14, min_periods=14).mean()
-    
-    # +DI and -DI
-    plus_di = 100 * (plus_dm_smooth / atr_smooth)
-    minus_di = 100 * (minus_dm_smooth / atr_smooth)
-    
-    # DX and ADX
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = dx.rolling(window=14, min_periods=14).mean()
-    
-    # Align ADX to 1h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx.values)
-    
-    # === 4h Indicator: Volume SMA (20-period) for confirmation ===
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
-    
-    vol_sma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_sma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_sma_20_4h)
+    # === 1d Indicator: Volume SMA (20-period) for confirmation ===
+    volume_1d = df_1d['volume'].values
+    vol_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_20_1d)
     
     signals = np.zeros(n)
     
@@ -101,31 +77,56 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(vol_sma_20_4h_aligned[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_sma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current 4h volume > 1.5x 20-period 4h volume SMA
-        # We need to map 1h index to 4h volume data - use the aligned array directly
-        vol_confirm = volume_4h[i // 4] > (vol_sma_20_4h[i // 4] * 1.5) if i // 4 < len(volume_4h) else False
+        # Weekly pivot bias: bullish if close > pivot, bearish if close < pivot
+        weekly_close_1w = close_1w[-1] if len(close_1w) > 0 else 0  # latest weekly close
+        # Map current price to weekly context - use aligned weekly pivot for bias
+        bullish_bias = close[i] > weekly_pivot_aligned[i]
+        bearish_bias = close[i] < weekly_pivot_aligned[i]
         
-        # ADX filter: only trade when trending (ADX > 25)
-        trending = adx_aligned[i] > 25
+        # Volume filter: current 1d volume > 1.3x 20-period 1d volume SMA
+        # Need to get 1d volume for current day - use aligned array to check if we have volume data
+        vol_confirm = True  # default to true if we can't verify, will be overridden below
+        
+        # Simple volume confirmation: use the aligned volume SMA directly
+        # We'll check if current 1d volume exceeds threshold by using the aligned arrays
+        # Since we don't have intraday 1d volume, we use the fact that volume tends to persist
+        # and check if the volume environment is elevated
+        vol_threshold = vol_sma_20_1d_aligned[i] * 1.3
+        
+        # Approximate current 1d volume using the fact that 6h bars roll into 1d
+        # We use the current 6h volume as proxy, scaled appropriately
+        # But simpler: just use the volume condition as a regime filter based on recent average
+        # Actually, let's use the 1d volume directly from the aligned daily volume series
+        # We need to get the 1d volume value - we can approximate by using the aligned volume
+        # For now, we'll use a simpler approach: check if volume environment is active
+        
+        # Use the aligned 1d volume series (we need to extract it)
+        # Get 1d OHLCV data
+        df_1d_for_vol = get_htf_data(prices, '1d')  # Already fetched above, but we need volume series
+        if 'volume' in df_1d_for_vol.columns:
+            vol_1d_series = df_1d_for_vol['volume'].values
+            vol_1d_aligned = align_htf_to_ltf(prices, df_1d_for_vol, vol_1d_series)
+            if not np.isnan(vol_1d_aligned[i]):
+                vol_confirm = vol_1d_aligned[i] > vol_threshold
         
         # === LONG CONDITIONS ===
-        if (close[i] > camarilla_r3_aligned[i]) and trending and vol_confirm:
-            signals[i] = 0.20
+        if (close[i] > donchian_upper_aligned[i]) and bullish_bias and vol_confirm:
+            signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        elif (close[i] < camarilla_s3_aligned[i]) and trending and vol_confirm:
-            signals[i] = -0.20
+        elif (close[i] < donchian_lower_aligned[i]) and bearish_bias and vol_confirm:
+            signals[i] = -0.25
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "1h_Camarilla_R3S3_4hVol_1dADX_Filter_v1"
-timeframe = "1h"
+name = "6h_Donchian20_1wPivotBias_1dVol_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
