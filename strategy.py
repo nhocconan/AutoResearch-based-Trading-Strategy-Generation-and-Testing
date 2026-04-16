@@ -13,42 +13,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Daily data for 1d ATR and volume ===
+    # === 1d data (HTF for ATR and levels) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # === Weekly data for trend filter ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # === Calculate 14-day ATR on daily data ===
+    # === Calculate ATR(14) on 1d for volatility filter ===
+    atr_period = 14
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First day
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    tr[0] = tr1[0]  # First value
+    atr_1d = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # === Calculate 50-period EMA on weekly close ===
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # === 12h data (HTF for EMA trend filter) ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # === Align ATR and EMA to daily timeframe ===
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # === 12h EMA34 for trend filter ===
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # === Daily volume ratio (volume / 20-day average) ===
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1d = volume_1d / vol_ma_20
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    # === 12h price action: Calculate 12-period high/low for breakout ===
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    high_12h_max = pd.Series(high_12h).rolling(window=12, min_periods=12).max().values
+    low_12h_min = pd.Series(low_12h).rolling(window=12, min_periods=12).min().values
+    high_12h_max_aligned = align_htf_to_ltf(prices, df_12h, high_12h_max)
+    low_12h_min_aligned = align_htf_to_ltf(prices, df_12h, low_12h_min)
     
     signals = np.zeros(n)
     
-    # Warmup - need enough data for ATR and EMA
+    # Warmup
     warmup = 100
     
     # Track position
@@ -56,56 +55,76 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(atr_14_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(vol_ratio_aligned[i])):
+        if (np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(ema_34_12h_aligned[i]) or 
+            np.isnan(high_12h_max_aligned[i]) or 
+            np.isnan(low_12h_min_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        atr_val = atr_14_aligned[i]
-        ema_50_1w_val = ema_50_1w_aligned[i]
-        vol_ratio_val = vol_ratio_aligned[i]
+        atr_val = atr_1d_aligned[i]
+        ema_34_12h_val = ema_34_12h_aligned[i]
+        high_break = high_12h_max_aligned[i]
+        low_break = low_12h_min_aligned[i]
+        
+        # === VOLATILITY FILTER: Only trade when volatility is elevated ===
+        # Use ATR relative to its 50-period average
+        if i >= 50:  # Need enough history for ATR average
+            atr_ma_50 = np.mean(np.trim_zeros(atr_1d_aligned[max(0, i-49):i+1]) or [0])
+            if atr_ma_50 > 0:
+                atr_ratio = atr_val / atr_ma_50
+                # Only trade when volatility is above average (avoid low volatility chop)
+                if atr_ratio < 0.8:
+                    # Hold current position or stay flat
+                    if position == 1:
+                        signals[i] = 0.20
+                    elif position == -1:
+                        signals[i] = -0.20
+                    else:
+                        signals[i] = 0.0
+                    continue
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price closes below EMA50 weekly (trend change) or ATR-based stop
-            if price < ema_50_1w_val or price < close[i-1] - 2.0 * atr_val:
+            # Exit when price closes below 12-period low or ATR-based stop
+            if price < low_break or price < (high_break - 1.5 * atr_val):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price closes above EMA50 weekly (trend change) or ATR-based stop
-            if price > ema_50_1w_val or price > close[i-1] + 2.0 * atr_val:
+            # Exit when price closes above 12-period high or ATR-based stop
+            if price > high_break or price > (low_break + 1.5 * atr_val):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price above weekly EMA50 (uptrend) + volume spike + momentum
-            if (price > ema_50_1w_val) and (vol_ratio_val > 2.0) and (close[i] > close[i-1]):
-                signals[i] = 0.25
+            # LONG: Price breaks above 12-period high with trend filter
+            if (price > high_break) and (price > ema_34_12h_val):
+                signals[i] = 0.20
                 position = 1
                 continue
             
-            # SHORT: Price below weekly EMA50 (downtrend) + volume spike + momentum
-            elif (price < ema_50_1w_val) and (vol_ratio_val > 2.0) and (close[i] < close[i-1]):
-                signals[i] = -0.25
+            # SHORT: Price breaks below 12-period low with trend filter
+            elif (price < low_break) and (price < ema_34_12h_val):
+                signals[i] = -0.20
                 position = -1
                 continue
         
         # Hold current position
         if position == 1:
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif position == -1:
-            signals[i] = -0.25
+            signals[i] = -0.20
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1d_EMA50_Trend_VolumeSpike_ATRStop"
-timeframe = "1d"
+name = "12h_Volatility_Filtered_Breakout_EMA34"
+timeframe = "12h"
 leverage = 1.0
