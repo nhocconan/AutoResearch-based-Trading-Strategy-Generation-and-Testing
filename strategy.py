@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1S1_Breakout_Volume
-# Hypothesis: On 12h timeframe, Camarilla pivot levels (R1/S1) from the prior day act as strong support/resistance.
-# In trending regimes (ADX>25), breakouts of R1/S1 with volume confirmation capture momentum.
-# In ranging regimes (ADX<25), mean reversion at R3/S3 with volume exhaustion provides counter-trend edges.
-# Uses 12h for execution, 1d for Camarilla pivots and ADX regime filter.
-# Target: 50-150 total trades over 4 years (12-37/year) with disciplined entries.
+"""
+12h_Pivot_R1S1_Breakout_Trend
+Hypothesis: On 12h timeframe, breakouts of daily Camarilla R1/S1 levels with ADX>25 and volume confirmation capture medium-term trends.
+Works in both bull and bear markets by filtering for trending regimes only, avoiding range-bound whipsaws.
+Target: 15-35 trades per year (60-140 total over 4 years) with strict entry conditions.
+Uses 12h for execution, 1d for Camarilla pivots, ADX, and volume confirmation.
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -26,38 +28,29 @@ def generate_signals(prices):
     low_12h = df_12h['low'].values
     volume_12h = df_12h['volume'].values
     
-    # === 1d data (HTF for Camarilla pivots and ADX) ===
+    # === 1d data (HTF for Camarilla pivots, ADX, volume) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
     # === Camarilla pivot levels (using previous day's OHLC) ===
-    camarilla_r4 = np.zeros_like(close_1d)
-    camarilla_r3 = np.zeros_like(close_1d)
-    camarilla_r2 = np.zeros_like(close_1d)
     camarilla_r1 = np.zeros_like(close_1d)
-    camarilla_pivot = np.zeros_like(close_1d)
     camarilla_s1 = np.zeros_like(close_1d)
-    camarilla_s2 = np.zeros_like(close_1d)
+    camarilla_r3 = np.zeros_like(close_1d)
     camarilla_s3 = np.zeros_like(close_1d)
-    camarilla_s4 = np.zeros_like(close_1d)
     
     for i in range(1, len(close_1d)):
         h = high_1d[i-1]
         l = low_1d[i-1]
         c = close_1d[i-1]
-        camarilla_pivot[i] = (h + l + c) / 3.0
         camarilla_r1[i] = c + ((h - l) * 1.1 / 12)
         camarilla_s1[i] = c - ((h - l) * 1.1 / 12)
-        camarilla_r2[i] = c + ((h - l) * 1.1 / 6)
-        camarilla_s2[i] = c - ((h - l) * 1.1 / 6)
         camarilla_r3[i] = c + ((h - l) * 1.1 / 4)
         camarilla_s3[i] = c - ((h - l) * 1.1 / 4)
-        camarilla_r4[i] = c + ((h - l) * 1.1 / 2)
-        camarilla_s4[i] = c - ((h - l) * 1.1 / 2)
     
-    # === ADX for regime filter (14-period) ===
+    # === ADX for trend filter (14-period) ===
     tr1 = high_1d[1:] - low_1d[1:]
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
@@ -89,26 +82,21 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx = wilders_smoothing(dx, 14)
     
-    # === 12h volume ratio for confirmation ===
-    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_12h = volume_12h / vol_ma_20_12h
+    # === 1d volume ratio for confirmation ===
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_1d = volume_1d / vol_ma_20_1d
     
     # Align all HTF data to 12h timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_r2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r2)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    camarilla_s2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s2)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    vol_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio_12h)
+    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
     signals = np.zeros(n)
     
-    # Warmup: enough for Camarilla and ADX calculations
+    # Warmup: enough for calculations
     warmup = 50
     
     # Track position
@@ -121,7 +109,7 @@ def generate_signals(prices):
             np.isnan(camarilla_r3_aligned[i]) or 
             np.isnan(camarilla_s3_aligned[i]) or 
             np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ratio_12h_aligned[i])):
+            np.isnan(vol_ratio_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -132,45 +120,34 @@ def generate_signals(prices):
         r3 = camarilla_r3_aligned[i]
         s3 = camarilla_s3_aligned[i]
         adx_val = adx_aligned[i]
-        vol_ratio = vol_ratio_12h_aligned[i]
+        vol_ratio = vol_ratio_1d_aligned[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit: price closes below S1 (trend) OR reaches R3 (profit target in range)
-            if price < s1 or (adx_val < 25 and price > r3):
+            # Exit: price closes below S1 (stop) OR reaches R3 (target)
+            if price < s1 or price > r3:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit: price closes above R1 (trend) OR reaches S3 (profit target in range)
-            if price > r1 or (adx_val < 25 and price < s3):
+            # Exit: price closes above R1 (stop) OR reaches S3 (target)
+            if price > r1 or price < s3:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Regime-based entries
-            if adx_val > 25:  # Trending regime: breakout continuation
-                # LONG: Break above R1 with volume
-                if price > r1 and vol_ratio > 1.5:
+            # Only trade in trending regimes (ADX > 25)
+            if adx_val > 25:
+                # LONG: Break above R1 with volume confirmation
+                if price > r1 and vol_ratio > 1.3:
                     signals[i] = 0.25
                     position = 1
                     continue
-                # SHORT: Break below S1 with volume
-                elif price < s1 and vol_ratio > 1.5:
-                    signals[i] = -0.25
-                    position = -1
-                    continue
-            else:  # Ranging regime (ADX < 25): mean reversion at extremes
-                # LONG: Reversion from S3 with volume exhaustion (volume < average)
-                if price < s3 and vol_ratio < 0.7:
-                    signals[i] = 0.25
-                    position = 1
-                    continue
-                # SHORT: Reversion from R3 with volume exhaustion
-                elif price > r3 and vol_ratio < 0.7:
+                # SHORT: Break below S1 with volume confirmation
+                elif price < s1 and vol_ratio > 1.3:
                     signals[i] = -0.25
                     position = -1
                     continue
@@ -185,6 +162,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_Volume"
+name = "12h_Pivot_R1S1_Breakout_Trend"
 timeframe = "12h"
 leverage = 1.0
