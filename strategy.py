@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1d EMA34 trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions on 6h chart
-# Long when Williams %R < -80 (oversold) AND price > 1d EMA34 (uptrend) AND volume > 1.3x 20-period average
-# Short when Williams %R > -20 (overbought) AND price < 1d EMA34 (downtrend) AND volume > 1.3x 20-period average
-# ATR-based trailing stop (2.5x ATR) to manage risk
-# Williams %R works well in ranging markets (2025+ bear/range) while EMA34 filter avoids counter-trend trades
-# Designed for low trade frequency (target: 50-150 total trades over 4 years) to minimize fee drag
+# Hypothesis: 4h Camarilla R1/S1 breakout with 12h EMA34 trend filter, volume confirmation, and ATR stoploss
+# Long when price breaks above Camarilla R1 AND price > 12h EMA34 AND volume > 1.5x 20-period average
+# Short when price breaks below Camarilla S1 AND price < 12h EMA34 AND volume > 1.5x 20-period average
+# ATR-based trailing stop (2.0x ATR) to manage risk
+# Camarilla levels provide high-probability reversal zones, EMA34 filters for higher-timeframe trend
+# Designed for low trade frequency (target: 75-200 total trades over 4 years) to minimize fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,28 +20,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d EMA34 (trend filter) ===
+    # === 12h EMA34 (trend filter) ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    
+    # === 1d Camarilla pivot levels (R1, S1) ===
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === 6h Williams %R (14-period) ===
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14 + 1e-10)
+    # Calculate Camarilla levels for 1d
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r1 = pivot + (range_1d * 1.1 / 12)
+    s1 = pivot - (range_1d * 1.1 / 12)
     
-    # === 6h Volume Confirmation (20-period average) ===
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # === 6h ATR for trailing stop (14-period) ===
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # === 4h Volume Confirmation (20-period average) ===
+    df_4h = get_htf_data(prices, '4h')
+    vol_ma_20 = pd.Series(df_4h['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20)
+    
+    # === 4h ATR for trailing stop (14-period) ===
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(df_4h['close'].values, 1))
+    tr3 = np.abs(low_4h - np.roll(df_4h['close'].values, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
     
     signals = np.zeros(n)
     
@@ -57,27 +69,29 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(williams_r[i]) or
-            np.isnan(vol_ma_20[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(ema_34_12h_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
+            np.isnan(vol_ma_aligned[i]) or
+            np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        wr = williams_r[i]
-        ema_34_val = ema_34_1d_aligned[i]
-        vol_confirm = volume[i] > vol_ma_20[i] * 1.3  # 1.3x average volume
-        atr_val = atr[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema_34_val = ema_34_12h_aligned[i]
+        vol_confirm = volume[i] > vol_ma_aligned[i] * 1.5  # 1.5x average volume
+        atr_val = atr_aligned[i]
         
         # === TRAILING STOP LOGIC ===
         if position == 1:  # Long position
             # Update highest price since entry
             if price > highest_since_entry:
                 highest_since_entry = price
-            # Trail stop: exit if price drops 2.5*ATR from highest
-            if atr_val > 0 and price < highest_since_entry - 2.5 * atr_val:
+            # Trail stop: exit if price drops 2.0*ATR from highest
+            if atr_val > 0 and price < highest_since_entry - 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 highest_since_entry = 0.0
@@ -87,25 +101,25 @@ def generate_signals(prices):
             # Update lowest price since entry
             if price < lowest_since_entry or lowest_since_entry == 0:
                 lowest_since_entry = price
-            # Trail stop: exit if price rises 2.5*ATR from lowest
-            if atr_val > 0 and price > lowest_since_entry + 2.5 * atr_val:
+            # Trail stop: exit if price rises 2.0*ATR from lowest
+            if atr_val > 0 and price > lowest_since_entry + 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 lowest_since_entry = 0.0
                 continue
         
-        # === EXIT LOGIC (Williams %R mean reversion) ===
+        # === EXIT LOGIC (Camarilla opposite touch) ===
         if position == 1:  # Long position
-            # Exit when Williams %R crosses above -50 (return from oversold)
-            if wr > -50:
+            # Exit when price touches or crosses below S1
+            if price <= s1_val:
                 signals[i] = 0.0
                 position = 0
                 highest_since_entry = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when Williams %R crosses below -50 (return from overbought)
-            if wr < -50:
+            # Exit when price touches or crosses above R1
+            if price >= r1_val:
                 signals[i] = 0.0
                 position = 0
                 lowest_since_entry = 0.0
@@ -113,15 +127,15 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Long when: Williams %R < -80 (oversold) AND price > 1d EMA34 AND volume confirmation
-            if wr < -80 and price > ema_34_val and vol_confirm:
+            # Long when: price breaks above R1 AND price > 12h EMA34 AND volume confirmation
+            if price > r1_val and price > ema_34_val and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 highest_since_entry = price
                 continue
-            # Short when: Williams %R > -20 (overbought) AND price < 1d EMA34 AND volume confirmation
-            elif wr > -20 and price < ema_34_val and vol_confirm:
+            # Short when: price breaks below S1 AND price < 12h EMA34 AND volume confirmation
+            elif price < s1_val and price < ema_34_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -138,6 +152,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_1dEMA34_VolumeConfirm_ATRTrail"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_12hEMA34_VolumeConfirm_ATRTrail"
+timeframe = "4h"
 leverage = 1.0
