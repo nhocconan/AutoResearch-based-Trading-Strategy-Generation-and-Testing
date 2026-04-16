@@ -8,7 +8,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Short when price breaks below 20-period 4h Donchian low AND volume > 2.0x 20-period 1d average AND 1d ADX > 25.
 # Exit when price crosses the 4h Donchian midpoint or ATR-based stoploss (2*ATR from entry).
 # Uses discrete position size 0.25. Designed to capture major breakouts in strong trending markets.
-# Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag while maintaining edge.
+# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag while maintaining edge.
 # Works in both bull and bear markets by requiring strong trend (ADX>25) and volume confirmation.
 
 def generate_signals(prices):
