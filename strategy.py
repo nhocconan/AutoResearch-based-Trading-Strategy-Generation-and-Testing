@@ -13,7 +13,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data for pivot points ===
+    # === Weekly data for primary trend (1w) ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly ATR (14-period) for volatility filter
+    tr_1w = np.maximum(high_1w - low_1w,
+                       np.maximum(np.abs(high_1w - np.roll(close_1w, 1)),
+                                  np.abs(low_1w - np.roll(close_1w, 1))))
+    tr_1w[0] = high_1w[0] - low_1w[0]
+    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
+    
+    # Align weekly data to daily timeframe
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    
+    # === Daily data for pivot points ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -25,18 +41,10 @@ def generate_signals(prices):
     r1_1d = pivot_1d + range_1d
     s1_1d = pivot_1d - range_1d
     
-    # Align 1d data to 4h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # === 1w data for trend filter ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # 1w EMA(34) for trend direction
-    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Align daily data to daily timeframe (no shift needed for same timeframe)
+    pivot_1d_aligned = pivot_1d  # Already aligned to daily
+    r1_1d_aligned = r1_1d
+    s1_1d_aligned = s1_1d
     
     # Volume spike detection (20-period volume MA)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,8 +60,8 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(ema_1w_aligned[i]) or 
+        if (np.isnan(atr_1w_aligned[i]) or np.isnan(pivot_1d_aligned[i]) or 
+            np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
             position = 0
@@ -63,19 +71,19 @@ def generate_signals(prices):
         pivot_level = pivot_1d_aligned[i]
         r1_level = r1_1d_aligned[i]
         s1_level = s1_1d_aligned[i]
-        ema_trend = ema_1w_aligned[i]
+        atr = atr_1w_aligned[i]
         vol_spike = volume_spike[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price returns to 1d pivot level (mean reversion)
+            # Exit when price returns to daily pivot level (mean reversion)
             if price <= pivot_level:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price returns to 1d pivot level (mean reversion)
+            # Exit when price returns to daily pivot level (mean reversion)
             if price >= pivot_level:
                 signals[i] = 0.0
                 position = 0
@@ -83,14 +91,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above R1 with volume spike and uptrend filter
-            if price > r1_level and vol_spike and price > ema_trend:
+            # LONG: Price breaks above R1 with volume spike and volatility filter
+            if price > r1_level and vol_spike and atr > 0:
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Price breaks below S1 with volume spike and downtrend filter
-            elif price < s1_level and vol_spike and price < ema_trend:
+            # SHORT: Price breaks below S1 with volume spike and volatility filter
+            elif price < s1_level and vol_spike and atr > 0:
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -105,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Pivot_R1_S1_Breakout_Volume_WeeklyTrendFilter"
-timeframe = "4h"
+name = "1d_Pivot_R1_S1_Breakout_Volume_ATRFilter_1wTrend"
+timeframe = "1d"
 leverage = 1.0
