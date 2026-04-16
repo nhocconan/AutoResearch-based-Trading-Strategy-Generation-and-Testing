@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Choppiness Index regime filter + 12h Donchian(20) breakout with volume confirmation
-# In choppy markets (CHOP > 61.8): mean reversion at Donchian bands
-# In trending markets (CHOP < 38.2): breakout continuation
-# Uses daily timeframe for trend filter (price > daily EMA50 for long, < daily EMA50 for short)
-# Designed for low trade frequency (target: 50-150 total trades over 4 years) to minimize fee drag on 12h timeframe
-# Combines regime detection with price channels for robust performance in both bull and bear markets
+# Hypothesis: 4h 14-period RSI with 1-day trend filter and volume spike
+# Long when RSI < 30 (oversold) AND price > daily EMA200 AND volume > 1.5x 20-period average volume
+# Short when RSI > 70 (overbought) AND price < daily EMA200 AND volume > 1.5x 20-period average volume
+# Exit when RSI crosses back to neutral (40-60 range)
+# Designed for low trade frequency (target: 75-200 total trades over 4 years) to minimize fee drag on 4h timeframe
+# RSI mean reversion works in both bull and bear markets when filtered by higher timeframe trend
+# Volume spike adds confirmation to avoid false signals
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,51 +21,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Daily EMA50 filter ===
+    # === Daily EMA200 trend filter ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # === 12h Choppiness Index (14-period) ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # === 4h RSI(14) ===
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # True Range
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
     
-    # Sum of True Range over 14 periods
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Initialize first average
+    avg_gain[14] = np.mean(gain[1:15])
+    avg_loss[14] = np.mean(loss[1:15])
     
-    # Highest high and lowest low over 14 periods
-    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    # Wilder's smoothing
+    for i in range(15, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Choppiness Index: 100 * log10(atr_sum / (highest_high - lowest_low)) / log10(14)
-    # Avoid division by zero
-    hl_range = highest_high - lowest_low
-    chop_raw = np.where(hl_range > 0, atr_sum / hl_range, 1.0)
-    chop = 100 * np.log10(chop_raw) / np.log10(14)
-    chop = np.where(hl_range > 0, chop, 50.0)  # Set to 50 when range is zero
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[:14] = 50  # Neutral before enough data
     
-    # === 12h Donchian(20) channels ===
-    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
-    
-    # === 12h Volume Confirmation (20-period average) ===
-    vol_12h = df_12h['volume'].values
-    vol_ma_20 = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
+    # === 4h Volume Confirmation (20-period average) ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
@@ -77,59 +62,55 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # Skip if any data is NaN
         if (np.isnan(ema_1d_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or
-            np.isnan(donchian_high_aligned[i]) or
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(vol_ma_aligned[i])):
+            np.isnan(rsi[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
+        rsi_val = rsi[i]
         ema_val = ema_1d_aligned[i]
-        chop_val = chop_aligned[i]
-        donchian_high_val = donchian_high_aligned[i]
-        donchian_low_val = donchian_low_aligned[i]
-        vol_confirm = volume[i] > vol_ma_aligned[i] * 1.5  # 1.5x average volume for confirmation
+        vol_confirm = volume[i] > vol_ma_20[i] * 1.5  # 1.5x average volume for confirmation
         
-        # Regime-based logic
-        if chop_val > 61.8:  # Choppy market - mean reversion
-            # Long when price touches lower Donchian band AND price > daily EMA50
-            if price <= donchian_low_val and price > ema_val and vol_confirm:
-                signals[i] = 0.25
-                position = 1
-            # Short when price touches upper Donchian band AND price < daily EMA50
-            elif price >= donchian_high_val and price < ema_val and vol_confirm:
-                signals[i] = -0.25
-                position = -1
-            # Exit mean reversion positions when price moves back toward center
-            elif position == 1 and price >= (donchian_low_val + donchian_high_val) / 2:
+        # === EXIT LOGIC ===
+        if position == 1:  # Long position
+            # Exit when RSI crosses above 40 (back to neutral)
+            if rsi_val >= 40:
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and price <= (donchian_low_val + donchian_high_val) / 2:
+                continue
+        
+        elif position == -1:  # Short position
+            # Exit when RSI crosses below 60 (back to neutral)
+            if rsi_val <= 60:
                 signals[i] = 0.0
                 position = 0
-            else:
-                # Hold position
-                signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
-        elif chop_val < 38.2:  # Trending market - breakout continuation
-            # Long when price breaks above Donchian high AND price > daily EMA50
-            if price > donchian_high_val and price > ema_val and vol_confirm:
+                continue
+        
+        # === ENTRY LOGIC (only when flat) ===
+        if position == 0:
+            # Long when: RSI < 30 (oversold) AND price > EMA200 AND volume confirmation
+            if rsi_val < 30 and price > ema_val and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short when price breaks below Donchian low AND price < daily EMA50
-            elif price < donchian_low_val and price < ema_val and vol_confirm:
+                continue
+            # Short when: RSI > 70 (overbought) AND price < EMA200 AND volume confirmation
+            elif rsi_val > 70 and price < ema_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
-            else:
-                # Hold position
-                signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
-        else:  # Transition zone - no clear regime
+                continue
+        
+        # Hold current position
+        if position == 1:
+            signals[i] = 0.25
+        elif position == -1:
+            signals[i] = -0.25
+        else:
             signals[i] = 0.0
-            position = 0
     
     return signals
 
-name = "12h_ChopRegime_Donchian20_1dEMA50_Volume1.5x"
-timeframe = "12h"
+name = "4h_RSI14_1dEMA200_Volume1.5x"
+timeframe = "4h"
 leverage = 1.0
