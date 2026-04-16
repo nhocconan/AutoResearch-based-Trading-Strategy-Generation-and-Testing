@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray with 1d EMA13 trend filter and volume confirmation
-# Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-# Long when Bull Power > 0 AND Bear Power < 0 AND price > 1d EMA13 AND volume > 1.5x average
-# Short when Bear Power < 0 AND Bull Power < 0 AND price < 1d EMA13 AND volume > 1.5x average
+# Hypothesis: 12h Donchian breakout with 1d volume confirmation and 1w EMA50 trend filter
+# Long when price breaks above Donchian(20) high AND price > 1w EMA50 AND volume > 1.5x 1d average volume
+# Short when price breaks below Donchian(20) low AND price < 1w EMA50 AND volume > 1.5x 1d average volume
 # ATR trailing stop (2.0x ATR) to manage risk
-# Works in bull/bear: Elder Ray shows power balance, EMA13 filters trend, volume confirms conviction
-# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and fee drag
+# Donchian channels provide clear breakout levels that work in trending markets
+# EMA50 filter ensures alignment with long-term trend
+# Volume confirmation adds conviction to breakouts
+# Target: 60-120 total trades over 4 years (15-30/year) to balance opportunity and fee drag
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,35 +22,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d EMA13 trend filter ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema_13_aligned = align_htf_to_ltf(prices, df_1d, ema_13)
+    # === 12h Donchian channel (20-period) ===
+    donchian_period = 20
+    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # === 6th EMA13 for Elder Ray calculation ===
-    ema_13_6th = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).values
+    # === 1w EMA50 trend filter ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
-    # Elder Ray components
-    bull_power = high - ema_13_6th  # High - EMA13
-    bear_power = low - ema_13_6th   # Low - EMA13
+    # === 1d Volume Confirmation ===
+    # Volume average over 1d (12 periods of 2h = 1d, but we use 12h data so 2 periods = 1d)
+    vol_ma_1d = pd.Series(volume).rolling(window=2, min_periods=2).mean().values  # 2 periods of 12h = 1d
     
-    # === 6th Volume Confirmation ===
-    vol_ma_6th = pd.Series(volume).rolling(window=4, min_periods=4).mean().values  # 4 periods of 6h = 1 day
-    
-    # === 6th ATR for trailing stop (10-period) ===
+    # === 12h ATR for trailing stop (14-period) ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 20
+    warmup = 60
     
     # Track position and entry price for trailing stop
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,20 +59,20 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_13_aligned[i]) or 
-            np.isnan(bull_power[i]) or
-            np.isnan(bear_power[i]) or
-            np.isnan(vol_ma_6th[i]) or
+        if (np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or
+            np.isnan(ema_50_aligned[i]) or
+            np.isnan(vol_ma_1d[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        ema_val = ema_13_aligned[i]
-        bull = bull_power[i]
-        bear = bear_power[i]
-        vol_confirm = volume[i] > vol_ma_6th[i] * 1.5  # 1.5x average volume for confirmation
+        donch_high = donchian_high[i]
+        donch_low = donchian_low[i]
+        ema_val = ema_50_aligned[i]
+        vol_confirm = volume[i] > vol_ma_1d[i] * 1.5  # 1.5x average volume for confirmation
         atr_val = atr[i]
         
         # === TRAILING STOP LOGIC ===
@@ -100,15 +100,15 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Long when: Bull Power > 0 AND Bear Power < 0 AND price > EMA13 AND volume confirmation
-            if bull > 0 and bear < 0 and price > ema_val and vol_confirm:
+            # Long when: price breaks above Donchian high AND price > EMA50 AND volume confirmation
+            if price > donch_high and price > ema_val and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 highest_since_entry = price
                 continue
-            # Short when: Bear Power < 0 AND Bull Power < 0 AND price < EMA13 AND volume confirmation
-            elif bear < 0 and bull < 0 and price < ema_val and vol_confirm:
+            # Short when: price breaks below Donchian low AND price < EMA50 AND volume confirmation
+            elif price < donch_low and price < ema_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -125,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_1dEMA13_Volume1.5x_ATRTrail_2.0x"
-timeframe = "6h"
+name = "12h_Donchian20_1wEMA50_Volume1.5x_ATRTrail_2.0x"
+timeframe = "12h"
 leverage = 1.0
