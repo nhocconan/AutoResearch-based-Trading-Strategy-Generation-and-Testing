@@ -1,17 +1,17 @@
-# Solution: 12h_Camarilla_R1S1_Breakout_Volume_ATRFilter_V1
-# Hypothesis: Camarilla pivot levels (R1, S1) from 1d timeframe act as support/resistance.
-# Price breaking above R1 with volume > 1.5x average and ATR > 0.5% of price indicates bullish momentum.
-# Price breaking below S1 with volume > 1.5x average and ATR > 0.5% of price indicates bearish momentum.
-# Position size 0.25 for risk control. Works in both bull (buy breakouts) and bear (sell breakdowns).
-# Uses 12h timeframe to reduce trade frequency and avoid fee drag.
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 6h Donchian channel breakout with 12h pivot point bias and volume confirmation.
+# In bull markets: buy breakouts above upper Donchian(20) when 12h pivot bias is bullish (price > pivot).
+# In bear markets: sell breakdowns below lower Donchian(20) when 12h pivot bias is bearish (price < pivot).
+# Volume > 1.5x average confirms breakout strength. Position size 0.25 for risk control.
+# Uses price channels for structure and pivot bias for trend filtering to work in both regimes.
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,50 +19,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h data (primary timeframe) ===
+    # === 6h data (primary timeframe) ===
+    df_6h = get_htf_data(prices, '6h')
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    volume_6h = df_6h['volume'].values
+    
+    # === 12h data (higher timeframe for pivot bias) ===
     df_12h = get_htf_data(prices, '12h')
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
     
-    # === 1d data (higher timeframe for Camarilla pivot levels) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 6h Donchian Channel (20) ===
+    highest_high = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    upper_channel = highest_high
+    lower_channel = lowest_low
     
-    # === Calculate Camarilla pivot levels (R1, S1) from 1d data ===
-    # Pivot point = (High + Low + Close) / 3
-    # R1 = Close + 1.1 * (High - Low) / 12
-    # S1 = Close - 1.1 * (High - Low) / 12
-    pp_1d = (high_1d + low_1d + close_1d) / 3
-    r1_1d = close_1d + 1.1 * (high_1d - low_1d) / 12
-    s1_1d = close_1d - 1.1 * (high_1d - low_1d) / 12
+    # === 12h Pivot Points (standard calculation) ===
+    # Pivot = (High + Low + Close) / 3
+    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
+    # Support 1 = (2 * Pivot) - High
+    s1_12h = (2 * pivot_12h) - high_12h
+    # Resistance 1 = (2 * Pivot) - Low
+    r1_12h = (2 * pivot_12h) - low_12h
     
-    # Align Camarilla levels to 12h timeframe
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align 12h pivot levels to 6s timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
+    s1_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    r1_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
     
-    # === 12h ATR for volatility filter ===
-    tr_12h = np.maximum(
-        high_12h - low_12h,
-        np.maximum(
-            np.abs(high_12h - np.roll(close_12h, 1)),
-            np.abs(low_12h - np.roll(close_12h, 1))
-        )
-    )
-    tr_12h[0] = high_12h[0] - low_12h[0]  # First value
-    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
+    # Pivot bias: bullish if price > pivot, bearish if price < pivot
+    # We'll use the close price for bias determination
+    bias_bullish = close_12h > pivot_12h
+    bias_bearish = close_12h < pivot_12h
+    bias_bullish_aligned = align_htf_to_ltf(prices, df_12h, bias_bullish.astype(float))
+    bias_bearish_aligned = align_htf_to_ltf(prices, df_12h, bias_bearish.astype(float))
     
-    # === 12h volume ratio for confirmation ===
-    vol_ma_10_12h = pd.Series(volume_12h).rolling(window=10, min_periods=10).mean().values
-    vol_ratio_12h = volume_12h / vol_ma_10_12h
+    # === 6h volume ratio for confirmation ===
+    vol_ma_10_6h = pd.Series(volume_6h).rolling(window=10, min_periods=10).mean().values
+    vol_ratio_6h = volume_6h / vol_ma_10_6h
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 50
+    warmup = 100
     
     # Track position and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
@@ -70,20 +73,27 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
-            np.isnan(atr_12h[i]) or np.isnan(vol_ratio_12h[i])):
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(bias_bullish_aligned[i]) or
+            np.isnan(bias_bearish_aligned[i]) or np.isnan(vol_ratio_6h[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        r1 = r1_12h[i]
-        s1 = s1_12h[i]
-        atr_val = atr_12h[i]
-        vol_ratio = vol_ratio_12h[i]
+        uc = upper_channel[i]
+        lc = lower_channel[i]
+        pivot = pivot_aligned[i]
+        bullish_bias = bias_bullish_aligned[i] > 0.5
+        bearish_bias = bias_bearish_aligned[i] > 0.5
+        vol_ratio = vol_ratio_6h[i]
         
         # === STOPLOSS LOGIC ===
         if position == 1:  # Long position
+            atr_6h = np.abs(high_6h - low_6h)
+            atr_ma = pd.Series(atr_6h).rolling(window=14, min_periods=14).mean().values
+            atr_aligned = align_htf_to_ltf(prices, df_6h, atr_ma)
+            atr_val = atr_aligned[i]
             if price < entry_price - 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
@@ -91,6 +101,10 @@ def generate_signals(prices):
                 continue
         
         elif position == -1:  # Short position
+            atr_6h = np.abs(high_6h - low_6h)
+            atr_ma = pd.Series(atr_6h).rolling(window=14, min_periods=14).mean().values
+            atr_aligned = align_htf_to_ltf(prices, df_6h, atr_ma)
+            atr_val = atr_aligned[i]
             if price > entry_price + 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
@@ -99,16 +113,16 @@ def generate_signals(prices):
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price breaks below S1
-            if price < s1:
+            # Exit when price breaks below lower Donchian or bias turns bearish
+            if price < lc or bearish_bias:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price breaks above R1
-            if price > r1:
+            # Exit when price breaks above upper Donchian or bias turns bullish
+            if price > uc or bullish_bias:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -116,20 +130,18 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Require sufficient volatility (ATR > 0.5% of price)
-            if atr_val > 0.005 * price:
-                # Buy when price breaks above R1 with volume confirmation
-                if price > r1 and vol_ratio > 1.5:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = price
-                    continue
-                # Sell when price breaks below S1 with volume confirmation
-                elif price < s1 and vol_ratio > 1.5:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = price
-                    continue
+            # Bullish breakout: price breaks above upper Donchian with bullish bias and volume
+            if price > uc and bullish_bias and vol_ratio > 1.5:
+                signals[i] = 0.25
+                position = 1
+                entry_price = price
+                continue
+            # Bearish breakdown: price breaks below lower Donchian with bearish bias and volume
+            elif price < lc and bearish_bias and vol_ratio > 1.5:
+                signals[i] = -0.25
+                position = -1
+                entry_price = price
+                continue
         
         # Hold current position
         if position == 1:
@@ -141,6 +153,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_Volume_ATRFilter_V1"
-timeframe = "12h"
+name = "6h_Donchian_PivotBias_VolumeFilter_v1"
+timeframe = "6h"
 leverage = 1.0
