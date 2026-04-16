@@ -13,40 +13,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Weekly data for trend filter ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly EMA20 for trend filter
-    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # === Daily data for price channels ===
+    # === Daily data for pivot points and volatility ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily Donchian channels (20-period)
-    highest_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate daily pivot points: P, R1, S1
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_hl = high_1d - low_1d
+    r1 = pivot + range_hl
+    s1 = pivot - range_hl
     
-    # Align daily channels to 1d timeframe (no additional shift needed)
-    highest_high_aligned = align_htf_to_ltf(prices, df_1d, highest_high)
-    lowest_low_aligned = align_htf_to_ltf(prices, df_1d, lowest_low)
-    
-    # === Daily ATR for volatility filter ===
+    # Calculate daily ATR (14-period) for volatility filter
     tr_1d = np.maximum(high_1d - low_1d,
                        np.maximum(np.abs(high_1d - np.roll(close_1d, 1)),
                                   np.abs(low_1d - np.roll(close_1d, 1))))
     tr_1d[0] = high_1d[0] - low_1d[0]
     atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # === Daily volume for volume spike detection ===
-    vol_ma_1d = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    volume_spike = volume > (2.0 * vol_ma_1d_aligned)
+    # Align daily data to 12h timeframe
+    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # 12h EMA34 for trend filter (primary timeframe)
+    ema_12h = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Volume spike detection (20-period volume MA on 12h)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     
@@ -58,45 +55,45 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(highest_high_aligned[i]) or 
-            np.isnan(lowest_low_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or
+            np.isnan(atr_12h[i]) or np.isnan(ema_12h[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        weekly_trend = ema_1w_aligned[i]
-        upper_channel = highest_high_aligned[i]
-        lower_channel = lowest_low_aligned[i]
-        atr = atr_1d_aligned[i]
+        pivot_level = pivot_12h[i]
+        r1_level = r1_12h[i]
+        s1_level = s1_12h[i]
+        atr = atr_12h[i]
+        ema_trend = ema_12h[i]
         vol_spike = volume_spike[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price returns to weekly EMA (trend reversal)
-            if price <= weekly_trend:
+            # Exit when price returns to pivot level (mean reversion to daily pivot)
+            if price <= pivot_level:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price returns to weekly EMA (trend reversal)
-            if price >= weekly_trend:
+            # Exit when price returns to pivot level (mean reversion to daily pivot)
+            if price >= pivot_level:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above upper Donchian channel with volume spike and uptrend
-            if price > upper_channel and vol_spike and atr > 0 and price > weekly_trend:
+            # LONG: Price breaks above R1 with volume spike, volatility filter, and uptrend
+            if price > r1_level and vol_spike and atr > 0 and price > ema_trend:
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Price breaks below lower Donchian channel with volume spike and downtrend
-            elif price < lower_channel and vol_spike and atr > 0 and price < weekly_trend:
+            # SHORT: Price breaks below S1 with volume spike, volatility filter, and downtrend
+            elif price < s1_level and vol_spike and atr > 0 and price < ema_trend:
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -111,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_WeeklyEMA20_VolumeSpike"
-timeframe = "1d"
+name = "12h_Pivot_R1_S1_Breakout_Volume_EMA34Trend"
+timeframe = "12h"
 leverage = 1.0
