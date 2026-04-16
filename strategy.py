@@ -13,47 +13,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h data (primary timeframe) ===
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
-    
-    # Calculate ATR on 4h (14-period)
-    tr_4h = np.maximum(high_4h - low_4h,
-                       np.maximum(np.abs(high_4h - np.roll(close_4h, 1)),
-                                  np.abs(low_4h - np.roll(close_4h, 1))))
-    tr_4h[0] = high_4h[0] - low_4h[0]
-    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
-    
-    # === 1d data (HTF) ===
+    # === 1d data (primary timeframe) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d EMA(34) for trend
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # === 1w data (HTF) ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # === 1d Williams %R (14-period) for overbought/oversold ===
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
-    williams_r[highest_high_14 == lowest_low_14] = -50  # avoid division by zero
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # === 1d ATR (14) for stop loss and sizing ===
+    tr_1d = np.maximum(high_1d - low_1d,
+                       np.maximum(np.abs(high_1d - np.roll(close_1d, 1)),
+                                  np.abs(low_1d - np.roll(close_1d, 1))))
+    tr_1d[0] = high_1d[0] - low_1d[0]
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # === 4h Donchian Channel (20) for breakout signals ===
-    highest_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # === 1d Bollinger Bands (20, 2) for volatility regime ===
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_band = sma_20 + (2 * std_20)
+    lower_band = sma_20 - (2 * std_20)
+    bb_width = (upper_band - lower_band) / sma_20
+    bb_width_aligned = align_htf_to_ltf(prices, df_1d, bb_width)
+    
+    # Percentile of BB width over 50 days for regime detection
+    bb_width_percentile = pd.Series(bb_width_aligned).rolling(window=50, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
+    
+    # === 1d Donchian Channel (20) for breakout signals ===
+    highest_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     donchian_upper = highest_20
     donchian_lower = lowest_20
     
-    # === 4h Volume spike detection ===
-    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume_4h / vol_ma_20
+    # === 1d Volume spike detection ===
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume_1d / vol_ma_20
+    
+    # === 1w EMA (21) for trend filter ===
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
     signals = np.zeros(n)
     
@@ -65,44 +71,44 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_4h_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(williams_r_aligned[i]) or np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(atr_1d_aligned[i]) or np.isnan(bb_width_percentile[i]) or 
+            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(vol_ratio[i]) or np.isnan(ema_21_1w_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        price = close_4h[i]
-        atr_4h_val = atr_4h_aligned[i]
-        ema_trend = ema_34_1d_aligned[i]
-        wr = williams_r_aligned[i]
+        price = close_1d[i]
+        atr_1d_val = atr_1d_aligned[i]
+        bb_width_pct = bb_width_percentile[i]
         vol_ratio_val = vol_ratio[i]
+        ema_21_1w_val = ema_21_1w_aligned[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price closes below Donchian lower OR trend turns bearish
-            if (price < donchian_lower[i]) or (ema_trend < price):
+            # Exit when price closes below Donchian lower OR volatility regime shifts to high
+            if (price < donchian_lower[i]) or (bb_width_pct > 80):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price closes above Donchian upper OR trend turns bullish
-            if (price > donchian_upper[i]) or (ema_trend > price):
+            # Exit when price closes above Donchian upper OR volatility regime shifts to high
+            if (price > donchian_upper[i]) or (bb_width_pct > 80):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Donchian upper AND bullish 1d trend AND oversold Williams %R AND volume spike
-            if (price > donchian_upper[i]) and (ema_trend > price) and (wr < -80) and (vol_ratio_val > 1.8):
+            # LONG: Price breaks above Donchian upper AND low volatility regime AND volume spike AND 1w uptrend
+            if (price > donchian_upper[i]) and (bb_width_pct < 30) and (vol_ratio_val > 1.5) and (price > ema_21_1w_val):
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Price breaks below Donchian lower AND bearish 1d trend AND overbought Williams %R AND volume spike
-            elif (price < donchian_lower[i]) and (ema_trend < price) and (wr > -20) and (vol_ratio_val > 1.8):
+            # SHORT: Price breaks below Donchian lower AND low volatility regime AND volume spike AND 1w downtrend
+            elif (price < donchian_lower[i]) and (bb_width_pct < 30) and (vol_ratio_val > 1.5) and (price < ema_21_1w_val):
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -117,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Williams_EMA_Trend"
-timeframe = "4h"
+name = "1d_Donchian_Breakout_LowVol_Volume_1wTrend"
+timeframe = "1d"
 leverage = 1.0
