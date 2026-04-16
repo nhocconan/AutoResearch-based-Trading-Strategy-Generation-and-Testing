@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using daily pivot point R1/S1 breakout with volume confirmation.
-# Long when price breaks above daily R1 pivot with volume > 1.5x 20-period median.
-# Short when price breaks below daily S1 pivot with volume > 1.5x 20-period median.
-# Uses discrete position size 0.25. Exits when price returns to daily pivot (mean reversion).
-# Daily pivots provide structure from higher timeframe, volume confirms breakout validity.
-# 12h timeframe targets 12-37 trades/year (50-150 total over 4 years) to minimize fee drag.
+# Hypothesis: 1d strategy using weekly Donchian channel breakout with volume confirmation and ATR-based stoploss.
+# Long when price breaks above weekly Donchian upper channel (20-period) with volume > 1.5x 20-period median.
+# Short when price breaks below weekly Donchian lower channel (20-period) with volume > 1.5x 20-period median.
+# Uses discrete position size 0.25. Exits when price crosses the weekly Donchian middle (mean reversion) or ATR stoploss hits.
+# Weekly Donchian provides structure from higher timeframe, volume confirms breakout validity.
+# 1d timeframe targets 7-25 trades/year (30-100 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,98 +20,117 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once before loop for pivot points
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    # Get weekly data once before loop for Donchian channels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # === Daily Indicators: Pivot Points (based on prior day) ===
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L
-    # S1 = 2*P - H
-    # Using prior day's values to avoid look-ahead
-    pivot_1d = (np.roll(high_1d, 1) + np.roll(low_1d, 1) + np.roll(close_1d, 1)) / 3
-    r1_1d = 2 * pivot_1d - np.roll(low_1d, 1)
-    s1_1d = 2 * pivot_1d - np.roll(high_1d, 1)
+    # === Weekly Indicators: Donchian Channel (20-period) ===
+    # Upper = max(high, lookback=20)
+    # Lower = min(low, lookback=20)
+    # Middle = (upper + lower) / 2
+    lookback = 20
+    high_roll_max = pd.Series(high_1w).rolling(window=lookback, min_periods=lookback).max().values
+    low_roll_min = pd.Series(low_1w).rolling(window=lookback, min_periods=lookback).min().values
+    upper_1w = high_roll_max
+    lower_1w = low_roll_min
+    middle_1w = (upper_1w + lower_1w) / 2
     
-    # === Daily Indicators: Volume Median (20-period) ===
-    vol_median_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).median().values
+    # === Weekly Indicators: Volume Median (20-period) ===
+    vol_median_20 = pd.Series(volume_1w).rolling(window=20, min_periods=20).median().values
     
-    # Align all indicators to primary timeframe (12h)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    vol_median_aligned = align_htf_to_ltf(prices, df_1d, vol_median_20)
+    # === Daily Indicators: ATR (14-period) for stoploss ===
+    high_low = high - low
+    high_close = np.abs(high - np.roll(close, 1))
+    low_close = np.abs(low - np.roll(close, 1))
+    true_range = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr_14 = pd.Series(true_range).rolling(window=14, min_periods=14).mean().values
+    
+    # Align all indicators to primary timeframe (1d)
+    upper_aligned = align_htf_to_ltf(prices, df_1w, upper_1w)
+    lower_aligned = align_htf_to_ltf(prices, df_1w, lower_1w)
+    middle_aligned = align_htf_to_ltf(prices, df_1w, middle_1w)
+    vol_median_aligned = align_htf_to_ltf(prices, df_1w, vol_median_20)
+    # ATR is already on primary timeframe
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 20  # Volume median needs 20 periods
+    warmup = max(20, 20, 14)  # Donchian lookback, volume median, ATR
     
-    # Track position state
+    # Track position state and entry price for ATR stoploss
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(vol_median_aligned[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(middle_aligned[i]) or
+            np.isnan(vol_median_aligned[i]) or np.isnan(atr_14[i])):
             signals[i] = 0.0
             position = 0
+            entry_price = 0.0
             continue
         
         # Current values (aligned)
         price = close[i]
         vol_median = vol_median_aligned[i]
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
+        upper = upper_aligned[i]
+        lower = lower_aligned[i]
+        middle = middle_aligned[i]
+        atr = atr_14[i]
         
         # Get current daily volume for volume spike filter
-        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-        current_vol_1d = vol_1d_aligned[i]
+        vol_1d_aligned = align_htf_to_ltf(prices, df_1w, volume_1w)
+        current_vol_1w = vol_1d_aligned[i]
         
-        # Volume spike filter: current daily volume > 1.5x median volume
-        volume_spike = current_vol_1d > (vol_median * 1.5)
+        # Volume spike filter: current weekly volume > 1.5x median volume
+        volume_spike = current_vol_1w > (vol_median * 1.5)
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit when price reaches or falls below daily pivot (mean reversion)
-            if price <= pivot_aligned[i]:
+            # Exit when price reaches or falls below weekly middle (mean reversion)
+            # OR ATR stoploss hit (2 * ATR below entry)
+            if price <= middle or price <= entry_price - 2.0 * atr:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit when price reaches or rises above daily pivot (mean reversion)
-            if price >= pivot_aligned[i]:
+            # Exit when price reaches or rises above weekly middle (mean reversion)
+            # OR ATR stoploss hit (2 * ATR above entry)
+            if price >= middle or price >= entry_price + 2.0 * atr:
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
+            entry_price = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: price breaks above daily R1 with volume spike
-            if price > r1 and volume_spike:
+            # LONG: price breaks above weekly upper channel with volume spike
+            if price > upper and volume_spike:
                 signals[i] = 0.25
                 position = 1
+                entry_price = price
             
-            # SHORT: price breaks below daily S1 with volume spike
-            elif price < s1 and volume_spike:
+            # SHORT: price breaks below weekly lower channel with volume spike
+            elif price < lower and volume_spike:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         else:
             signals[i] = position * 0.25  # maintain position
     
     return signals
 
-name = "12h_DailyPivot_R1S1_Breakout_VolumeSpike1.5x_v1"
-timeframe = "12h"
+name = "1d_WeeklyDonchian20_VolumeSpike1.5x_ATRTrail2.0_v1"
+timeframe = "1d"
 leverage = 1.0
