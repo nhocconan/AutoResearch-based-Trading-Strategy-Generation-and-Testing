@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Choppiness Index regime filter + 1-day Williams %R mean reversion + volume confirmation
-# Long when: 12h Choppiness > 61.8 (range) AND 1d Williams %R < -80 (oversold) AND volume > 1.5x 20-period average
-# Short when: 12h Choppiness > 61.8 (range) AND 1d Williams %R > -20 (overbought) AND volume > 1.5x 20-period average
-# Exit when Choppiness < 38.2 (trending) or opposite Williams %R signal
-# Designed for low trade frequency (target: 50-150 total trades over 4 years) on 12h timeframe
-# Choppiness filter avoids whipsaws in trends, Williams %R captures mean reversion in ranges, volume adds conviction
+# Hypothesis: 4h Donchian(40) breakout with 1-day EMA50 filter and volume spike confirmation
+# Long when price breaks above Donchian(40) high AND price > daily EMA50 AND volume > 2x 20-period average volume
+# Short when price breaks below Donchian(40) low AND price < daily EMA50 AND volume > 2x 20-period average volume
+# ATR trailing stop (2.5x ATR) to manage risk
+# Designed for low trade frequency (target: 75-200 total trades over 4 years) to minimize fee drag on 4h timeframe
+# Donchian(40) breakouts capture longer-term trends, daily EMA50 filter avoids counter-trend trades, volume spike adds conviction
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,102 +20,104 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h Choppiness Index (14-period) ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # === Daily EMA50 filter ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # True Range
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    # === 4h Donchian(40) channels ===
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    donchian_high = pd.Series(high_4h).rolling(window=40, min_periods=40).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=40, min_periods=40).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    
+    # === 4h Volume Confirmation (20-period average) ===
+    vol_4h = df_4h['volume'].values
+    vol_ma_20 = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20)
+    
+    # === 4h ATR for trailing stop (14-period) ===
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(df_4h['close'].values, 1))
+    tr3 = np.abs(low_4h - np.roll(df_4h['close'].values, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Chop = 100 * log10(sum(TR14) / (max(HH14) - min(LL14))) / log10(14)
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    max_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
-    denominator = max_high - min_low
-    # Avoid division by zero
-    denominator = np.where(denominator == 0, 1e-10, denominator)
-    chop_raw = 100 * np.log10(atr_sum / denominator) / np.log10(14)
-    chop_12h = np.where(denominator == 0, 50.0, chop_raw)  # Set to 50 when range is zero
-    chop_12h_aligned = align_htf_to_ltf(prices, df_12h, chop_12h)
-    
-    # === 1-day Williams %R (14-period) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    # Williams %R = -100 * (HH - Close) / (HH - LL)
-    williams_raw = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
-    # Handle division by zero when HH == LL
-    williams_1d = np.where((highest_high - lowest_low) == 0, -50.0, williams_raw)
-    williams_1d_aligned = align_htf_to_ltf(prices, df_1d, williams_1d)
-    
-    # === 12h Volume Confirmation (20-period average) ===
-    vol_12h = df_12h['volume'].values
-    vol_ma_20 = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
+    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
     
     signals = np.zeros(n)
     
     # Warmup
     warmup = 100
     
-    # Track position
+    # Track position and entry price for trailing stop
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(chop_12h_aligned[i]) or 
-            np.isnan(williams_1d_aligned[i]) or
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(donchian_high_aligned[i]) or
+            np.isnan(donchian_low_aligned[i]) or
+            np.isnan(vol_ma_aligned[i]) or
+            np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        chop_val = chop_12h_aligned[i]
-        williams_val = williams_1d_aligned[i]
-        vol_confirm = volume[i] > vol_ma_aligned[i] * 1.5  # 1.5x average volume for confirmation
+        ema_val = ema_1d_aligned[i]
+        donchian_high_val = donchian_high_aligned[i]
+        donchian_low_val = donchian_low_aligned[i]
+        vol_confirm = volume[i] > vol_ma_aligned[i] * 2.0  # 2x average volume for confirmation
+        atr_val = atr_aligned[i]
         
-        # === EXIT CONDITIONS ===
+        # === TRAILING STOP LOGIC ===
         if position == 1:  # Long position
-            # Exit when: chop < 38.2 (trending) OR Williams %R > -50 (mean reversion unwinds)
-            if chop_val < 38.2 or williams_val > -50:
+            # Update highest price since entry
+            if price > highest_since_entry:
+                highest_since_entry = price
+            # Trail stop: exit if price drops 2.5*ATR from highest
+            if atr_val > 0 and price < highest_since_entry - 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
+                highest_since_entry = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when: chop < 38.2 (trending) OR Williams %R < -50 (mean reversion unwinds)
-            if chop_val < 38.2 or williams_val < -50:
+            # Update lowest price since entry
+            if price < lowest_since_entry or lowest_since_entry == 0:
+                lowest_since_entry = price
+            # Trail stop: exit if price rises 2.5*ATR from lowest
+            if atr_val > 0 and price > lowest_since_entry + 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
+                lowest_since_entry = 0.0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Only trade in ranging markets (Choppiness > 61.8)
-            if chop_val > 61.8 and vol_confirm:
-                # Long when Williams %R < -80 (oversold)
-                if williams_val < -80:
-                    signals[i] = 0.25
-                    position = 1
-                    continue
-                # Short when Williams %R > -20 (overbought)
-                elif williams_val > -20:
-                    signals[i] = -0.25
-                    position = -1
-                    continue
+            # Long when: price breaks above Donchian(40) high AND price > EMA50 AND volume confirmation
+            if price > donchian_high_val and price > ema_val and vol_confirm:
+                signals[i] = 0.25
+                position = 1
+                entry_price = price
+                highest_since_entry = price
+                continue
+            # Short when: price breaks below Donchian(40) low AND price < EMA50 AND volume confirmation
+            elif price < donchian_low_val and price < ema_val and vol_confirm:
+                signals[i] = -0.25
+                position = -1
+                entry_price = price
+                lowest_since_entry = price
+                continue
         
         # Hold current position
         if position == 1:
@@ -127,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Chop61.8_Williams%R_Volume1.5x"
-timeframe = "12h"
+name = "4h_Donchian40_1dEMA50_Volume2x_ATRTrail"
+timeframe = "4h"
 leverage = 1.0
