@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA trend direction + RSI(2) mean reversion + volume spike filter.
-# KAMA identifies adaptive trend direction (long when price > KAMA, short when price < KAMA).
-# RSI(2) provides short-term mean reversion signals (long when RSI(2) < 10, short when RSI(2) > 90).
-# Volume spike (>2.0x 20-period 1d average) confirms institutional participation.
-# Only trade when KAMA trend and RSI(2) extreme agree, reducing false signals.
-# Designed to capture trending moves with pullback entries in both bull and bear markets.
-# Uses discrete position size 0.25. Target: 50-120 total trades over 4 years (12-30/year).
+# Hypothesis: 6h Bollinger Band Squeeze breakout with 1d volume confirmation and 12h trend filter.
+# Long when price breaks above upper BB(20,2) AND volume > 1.5x 1d average AND 12h close > 12h EMA50.
+# Short when price breaks below lower BB(20,2) AND volume > 1.5x 1d average AND 12h close < 12h EMA50.
+# Exit when price reverts to middle BB(20) or ATR-based stoploss (2*ATR from entry).
+# Uses discrete position size 0.25. Designed to capture low-volatility breakouts in trending markets.
+# Works in both bull and bear markets by requiring 12h trend alignment and volume confirmation, avoiding false breakouts in ranging conditions.
+# Target: 50-150 total trades over 4 years (12-37/year) to balance edge and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,47 +21,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Indicators: KAMA (adaptive trend) ===
+    # === 6h Indicators: Bollinger Bands (20,2) ===
+    close_s = pd.Series(close)
+    bb_middle = close_s.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_s.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2.0 * bb_std
+    bb_lower = bb_middle - 2.0 * bb_std
+    bb_width = (bb_upper - bb_lower) / bb_middle  # Squeeze indicator
+    
+    # === 1d Indicators: Volume Spike (volume > 1.5x 20-period average) ===
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    
-    # Efficiency Ratio (ER) over 10 periods
-    change_1d = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility_1d = np.sum(np.abs(np.diff(close_1d, prepend=close_1d[0])), axis=0) if False else None
-    # Proper ER calculation: |close[t] - close[t-10]| / sum(|close[t] - close[t-1]|) over 10 periods
-    er_num = np.abs(np.subtract(close_1d[10:], close_1d[:-10]))  # length n-10
-    er_den = np.sum(np.abs(np.diff(close_1d, prepend=close_1d[0])[1:]), axis=0) if False else None
-    # Vectorized ER calculation
-    er = np.full_like(close_1d, np.nan)
-    for i in range(10, len(close_1d)):
-        num = np.abs(close_1d[i] - close_1d[i-10])
-        den = np.sum(np.abs(np.diff(close_1d[i-9:i+1])))
-        er[i] = num / den if den != 0 else 0
-    
-    # Smoothing constants (fast=2, slow=30)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.full_like(close_1d, np.nan)
-    kama[9] = close_1d[9]  # seed
-    for i in range(10, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    
-    # === 1d Indicators: RSI(2) ===
-    delta = pd.Series(close_1d).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    rs = avg_gain / np.where(avg_loss == 0, 1e-10, avg_loss)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    
-    # === 1d Indicators: Volume Spike (>2.0x 20-period average) ===
     vol_1d = df_1d['volume'].values
     vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    volume_spike = volume > (2.0 * vol_ma_1d_aligned)
+    volume_spike = volume > (1.5 * vol_ma_1d_aligned)
+    
+    # === 12h Indicators: EMA50 trend filter ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    uptrend_12h = close_12h > ema_50_12h_aligned  # Using aligned for proper timing
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -69,15 +49,25 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 30 periods needed for KAMA/RSI)
-    warmup = 50
+    # Warmup: ensure all indicators are valid (max 50 periods needed for EMA50/BB)
+    warmup = 100
     
-    # Track position state and entry price for clarity (though not used for stoploss)
+    # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    
+    # Calculate 6h ATR for stoploss
+    tr1_6h = pd.Series(high).diff()
+    tr2_6h = pd.Series(low).diff().abs()
+    tr3_6h = pd.Series(close).shift(1).diff().abs()
+    tr_6h = pd.concat([tr1_6h, tr2_6h, tr3_6h], axis=1).max(axis=1)
+    atr_6h_raw = pd.Series(tr_6h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or np.isnan(volume_spike[i]) or
+        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(bb_middle[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(uptrend_12h[i]) or
+            np.isnan(atr_6h_raw[i]) or
             not session_filter[i]):
             signals[i] = 0.0
             position = 0
@@ -85,45 +75,54 @@ def generate_signals(prices):
         
         # Current values
         price = close[i]
-        kama_val = kama_aligned[i]
-        rsi_val = rsi_aligned[i]
         vol_spike = volume_spike[i]
+        is_uptrend = uptrend_12h[i]
+        atr_val = atr_6h_raw[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if KAMA turns bearish OR RSI(2) > 50 (mean reversion complete)
-            if price <= kama_val or rsi_val > 50:
+            # Exit if price reverts to middle BB
+            if price <= bb_middle[i]:
+                exit_signal = True
+            # ATR-based stoploss: 2*ATR below entry
+            elif price < entry_price - 2.0 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if KAMA turns bullish OR RSI(2) < 50 (mean reversion complete)
-            if price >= kama_val or rsi_val < 50:
+            # Exit if price reverts to middle BB
+            if price >= bb_middle[i]:
+                exit_signal = True
+            # ATR-based stoploss: 2*ATR above entry
+            elif price > entry_price + 2.0 * atr_val:
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
+            entry_price = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price > KAMA (bullish trend) AND RSI(2) < 10 (oversold) AND volume spike
-            if price > kama_val and rsi_val < 10 and vol_spike:
+            # LONG: Price breaks above upper BB AND volume spike AND 12h uptrend
+            if price > bb_upper[i] and vol_spike and is_uptrend:
                 signals[i] = 0.25
                 position = 1
+                entry_price = price
             
-            # SHORT: Price < KAMA (bearish trend) AND RSI(2) > 90 (overbought) AND volume spike
-            elif price < kama_val and rsi_val > 90 and vol_spike:
+            # SHORT: Price breaks below lower BB AND volume spike AND 12h downtrend
+            elif price < bb_lower[i] and vol_spike and not is_uptrend:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         else:
             signals[i] = position * 0.25
     
     return signals
 
-name = "1d_KAMA_RSI2_VolumeSpike_V1"
-timeframe = "1d"
+name = "6h_BollingerSqueeze_1dVolumeSpike_12hEMA50_V1"
+timeframe = "6h"
 leverage = 1.0
