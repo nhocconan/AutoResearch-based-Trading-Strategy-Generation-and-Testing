@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h momentum strategy using 4h Donchian(20) breakout with volume confirmation and 1d EMA200 trend filter.
-# Long when price > 4h upper Donchian band, 1h volume > 1.5x median, and 1d close > 1d EMA200.
-# Short when price < 4h lower Donchian band, same volume condition, and 1d close < 1d EMA200.
-# Exit when price crosses the 4h middle Donchian band.
+# Hypothesis: 1h mean-reversion strategy using 4h RSI(14) extreme levels with 1h Bollinger Band mean reversion and volume filter.
+# Long when 4h RSI < 30 (oversold), price touches 1h lower Bollinger Band (20,2), and 1h volume > 1.2x median.
+# Short when 4h RSI > 70 (overbought), price touches 1h upper Bollinger Band (20,2), and 1h volume > 1.2x median.
+# Exit when price crosses 1h middle Bollinger Band (20-period SMA).
 # Uses discrete position size 0.20. Session filter: 08-20 UTC to avoid low-liquidity hours.
-# Target: 60-150 total trades over 4 years (15-37/year). Uses 4h/1d for direction, 1h for timing.
+# Target: 60-150 total trades over 4 years (15-37/year). Uses 4h for extreme regime filter, 1h for mean-reversion timing.
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,51 +24,53 @@ def generate_signals(prices):
     # Pre-compute hour for session filter (08-20 UTC)
     hours = pd.DatetimeIndex(open_time).hour
     
-    # Get 4h data once before loop for Donchian levels
+    # Get 4h data once before loop for RSI
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # === 4h Indicators: Donchian channel (20-period) ===
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # === 4h Indicators: RSI(14) for extreme regime detection ===
     close_4h = df_4h['close'].values
+    delta = pd.Series(close_4h).diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
+    rs = gain / loss
+    rsi_14 = 100 - (100 / (1 + rs))
+    rsi_14_values = rsi_14.values
     
-    # Calculate Donchian channels
-    upper_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    middle_20 = (upper_20 + lower_20) / 2.0
-    
-    # Get 1h data for volume confirmation
+    # Get 1h data for Bollinger Bands and volume
     df_1h = get_htf_data(prices, '1h')
     if len(df_1h) < 30:
         return np.zeros(n)
     
-    # === 1h Indicators: Volume median for spike detection ===
+    # === 1h Indicators: Bollinger Bands (20,2) and Volume median ===
+    close_1h = df_1h['close'].values
+    high_1h = df_1h['high'].values
+    low_1h = df_1h['low'].values
     vol_1h = df_1h['volume'].values
+    
+    # Bollinger Bands
+    sma_20 = pd.Series(close_1h).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1h).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + (2 * std_20)
+    lower_bb = sma_20 - (2 * std_20)
+    middle_bb = sma_20
+    
+    # Volume median for spike detection
     vol_median_20 = pd.Series(vol_1h).rolling(window=20, min_periods=20).median().values
     
-    # Get 1d data for trend filter (EMA200)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
-        return np.zeros(n)
-    
-    # === 1d Indicators: EMA200 trend filter ===
-    close_1d = df_1d['close'].values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    
     # Align all indicators to primary timeframe (1h)
-    upper_20_aligned = align_htf_to_ltf(prices, df_4h, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_4h, lower_20)
-    middle_20_aligned = align_htf_to_ltf(prices, df_4h, middle_20)
+    rsi_14_aligned = align_htf_to_ltf(prices, df_4h, rsi_14_values)
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1h, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1h, lower_bb)
+    middle_bb_aligned = align_htf_to_ltf(prices, df_1h, middle_bb)
     vol_median_aligned = align_htf_to_ltf(prices, df_1h, vol_median_20)
     vol_1h_aligned = align_htf_to_ltf(prices, df_1h, vol_1h)
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(20, 20, 200, 20)  # Donchian(20), 1h volume median(20), 1d EMA200
+    warmup = max(14, 20, 20)  # RSI(14), BB(20), volume median(20)
     
     # Track position state for exits
     position = 0  # 0: flat, 1: long, -1: short
@@ -82,39 +84,35 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
-            np.isnan(middle_20_aligned[i]) or np.isnan(vol_median_aligned[i]) or 
-            np.isnan(vol_1h_aligned[i]) or np.isnan(ema_200_1d_aligned[i])):
+        if (np.isnan(rsi_14_aligned[i]) or np.isnan(upper_bb_aligned[i]) or 
+            np.isnan(lower_bb_aligned[i]) or np.isnan(middle_bb_aligned[i]) or 
+            np.isnan(vol_median_aligned[i]) or np.isnan(vol_1h_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values (aligned)
-        upper = upper_20_aligned[i]
-        lower = lower_20_aligned[i]
-        middle = middle_20_aligned[i]
+        rsi = rsi_14_aligned[i]
+        upper = upper_bb_aligned[i]
+        lower = lower_bb_aligned[i]
+        middle = middle_bb_aligned[i]
         vol_median = vol_median_aligned[i]
         vol_1h = vol_1h_aligned[i]
-        ema_200_1d = ema_200_1d_aligned[i]
-        
-        # Get aligned 1d close for proper trend comparison
-        df_1d_close = df_1d['close'].values
-        close_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d_close)
-        daily_trend_up = close_1d_aligned[i] > ema_200_1d  # Using 1d close vs 1d EMA200 for trend
-        daily_trend_down = close_1d_aligned[i] < ema_200_1d
         
         # Price levels
         price = close[i]
+        high_price = high[i]
+        low_price = low[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         if position == 1:  # long position
-            # Exit when price crosses below middle band (mean reversion)
-            if price < middle:
+            # Exit when price crosses above middle Bollinger Band (mean reversion complete)
+            if price > middle:
                 exit_signal = True
         elif position == -1:  # short position
-            # Exit when price crosses above middle band (mean reversion)
-            if price > middle:
+            # Exit when price crosses below middle Bollinger Band (mean reversion complete)
+            if price < middle:
                 exit_signal = True
         
         if exit_signal:
@@ -124,18 +122,18 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Volume spike filter: current 1h volume > 1.5x median volume
-            volume_spike = vol_1h > (vol_median * 1.5)
+            # Volume filter: current 1h volume > 1.2x median volume (avoid low-volume false signals)
+            volume_filter = vol_1h > (vol_median * 1.2)
             
             # LONG CONDITIONS
-            # Price breaks above upper Donchian band AND volume spike AND 1d uptrend
-            if price > upper and volume_spike and daily_trend_up:
+            # 4h RSI oversold (<30) AND price touches lower Bollinger Band AND volume filter
+            if rsi < 30 and low_price <= lower and volume_filter:
                 signals[i] = 0.20
                 position = 1
             
             # SHORT CONDITIONS
-            # Price breaks below lower Donchian band AND volume spike AND 1d downtrend
-            elif price < lower and volume_spike and daily_trend_down:
+            # 4h RSI overbought (>70) AND price touches upper Bollinger Band AND volume filter
+            elif rsi > 70 and high_price >= upper and volume_filter:
                 signals[i] = -0.20
                 position = -1
         
@@ -144,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_Donchian20_1hVolumeSpike1.5x_1dEMA200_v1"
+name = "1h_RSI14_Extreme_1hBB20_2_VolumeFilter1.2x_v1"
 timeframe = "1h"
 leverage = 1.0
