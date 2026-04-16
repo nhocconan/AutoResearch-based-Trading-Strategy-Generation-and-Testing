@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 12h Camarilla pivot levels with volume confirmation and ATR trailing stop.
-# Long when price breaks above R4 with volume > 1.3x 20-period median volume.
-# Short when price breaks below S4 with volume > 1.3x 20-period median volume.
-# Uses discrete position size 0.25. Exits when price reaches R3/S3 (mean reversion) or ATR stoploss hits (2.5x ATR).
-# Camarilla pivots from 12h provide intraday support/resistance levels that work in both trending and ranging markets.
-# Volume confirmation filters false breakouts. 6h timeframe targets 12-37 trades/year (50-150 total over 4 years) to minimize fee drag.
+# Hypothesis: 6h strategy using Bollinger Band squeeze breakout from 1d timeframe.
+# Long when price breaks above upper BB(20,2) with volume > 1.5x 20-period median volume AND BB width at 20-period low (squeeze).
+# Short when price breaks below lower BB(20,2) with volume > 1.5x 20-period median volume AND BB width at 20-period low.
+# Uses discrete position size 0.25. Exits when price reaches opposite BB band (mean reversion) or ATR stoploss hits (2.0x ATR).
+# Bollinger squeeze identifies low volatility periods primed for explosive moves. Volume confirmation filters false breakouts.
+# 6h timeframe targets 12-37 trades/year (50-150 total over 4 years) to minimize fee drag. Works in both bull/bear markets as it trades volatility expansion.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,36 +20,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data once before loop for Camarilla pivots
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 1d data once before loop for Bollinger Bands
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # === 12h Indicators: Camarilla Pivot Levels (based on previous 12h bar) ===
-    # R4 = close + 1.5 * (high - low)
-    # R3 = close + 1.1 * (high - low)
-    # S3 = close - 1.1 * (high - low)
-    # S4 = close - 1.5 * (high - low)
-    # Using previous bar's values to avoid look-ahead
-    high_prev = np.roll(high_12h, 1)
-    low_prev = np.roll(low_12h, 1)
-    close_prev = np.roll(close_12h, 1)
-    high_prev[0] = np.nan  # First value has no previous
-    low_prev[0] = np.nan
-    close_prev[0] = np.nan
+    # === 1d Indicators: Bollinger Bands (20,2) ===
+    bb_middle = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
+    bb_width = bb_upper - bb_lower
     
-    r4 = close_prev + 1.5 * (high_prev - low_prev)
-    r3 = close_prev + 1.1 * (high_prev - low_prev)
-    s3 = close_prev - 1.1 * (high_prev - low_prev)
-    s4 = close_prev - 1.5 * (high_prev - low_prev)
+    # === 1d Indicators: BB Width percentile (20-period) for squeeze detection ===
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=20, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
     
-    # === 12h Indicators: Volume Median (20-period) ===
-    vol_median_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).median().values
+    # === 1d Indicators: Volume Median (20-period) ===
+    vol_median_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).median().values
     
     # === 6h Indicators: ATR (14-period) for stoploss ===
     high_low = high - low
@@ -59,17 +54,16 @@ def generate_signals(prices):
     atr_14 = pd.Series(true_range).rolling(window=14, min_periods=14).mean().values
     
     # Align all indicators to primary timeframe (6h)
-    r4_aligned = align_htf_to_ltf(prices, df_12h, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_12h, s4)
-    vol_median_aligned = align_htf_to_ltf(prices, df_12h, vol_median_20)
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
+    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_1d, bb_width_percentile)
+    vol_median_aligned = align_htf_to_ltf(prices, df_1d, vol_median_20)
     # ATR is already on primary timeframe
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(20, 14)  # Volume median, ATR
+    warmup = max(20, 14)  # BB calculations, ATR
     
     # Track position state and entry price for ATR stoploss
     position = 0  # 0: flat, 1: long, -1: short
@@ -77,8 +71,9 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(s4_aligned[i]) or np.isnan(vol_median_aligned[i]) or np.isnan(atr_14[i])):
+        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or
+            np.isnan(bb_width_percentile_aligned[i]) or np.isnan(vol_median_aligned[i]) or
+            np.isnan(atr_14[i])):
             signals[i] = 0.0
             position = 0
             entry_price = 0.0
@@ -86,33 +81,35 @@ def generate_signals(prices):
         
         # Current values (aligned)
         price = close[i]
+        bb_upper = bb_upper_aligned[i]
+        bb_lower = bb_lower_aligned[i]
+        bb_width_percentile = bb_width_percentile_aligned[i]
         vol_median = vol_median_aligned[i]
-        r4 = r4_aligned[i]
-        r3 = r3_aligned[i]
-        s3 = s3_aligned[i]
-        s4 = s4_aligned[i]
         atr = atr_14[i]
         
-        # Get current 12h volume for volume spike filter
-        vol_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_12h)
-        current_vol_12h = vol_12h_aligned[i]
+        # Get current 1d volume for volume spike filter
+        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+        current_vol_1d = vol_1d_aligned[i]
         
-        # Volume spike filter: current 12h volume > 1.3x median volume
-        volume_spike = current_vol_12h > (vol_median * 1.3)
+        # Volume spike filter: current 1d volume > 1.5x median volume
+        volume_spike = current_vol_1d > (vol_median * 1.5)
+        
+        # Squeeze filter: BB width at 20-period low (bottom 20% percentile)
+        squeeze = bb_width_percentile <= 20
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit when price reaches or falls below R3 (mean reversion)
-            # OR ATR stoploss hit (2.5 * ATR below entry)
-            if price <= r3 or price <= entry_price - 2.5 * atr:
+            # Exit when price reaches or falls below lower BB (mean reversion)
+            # OR ATR stoploss hit (2.0 * ATR below entry)
+            if price <= bb_lower or price <= entry_price - 2.0 * atr:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit when price reaches or rises above S3 (mean reversion)
-            # OR ATR stoploss hit (2.5 * ATR above entry)
-            if price >= s3 or price >= entry_price + 2.5 * atr:
+            # Exit when price reaches or rises above upper BB (mean reversion)
+            # OR ATR stoploss hit (2.0 * ATR above entry)
+            if price >= bb_upper or price >= entry_price + 2.0 * atr:
                 exit_signal = True
         
         if exit_signal:
@@ -123,14 +120,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: price breaks above R4 with volume spike
-            if price > r4 and volume_spike:
+            # LONG: price breaks above upper BB with volume spike AND squeeze
+            if price > bb_upper and volume_spike and squeeze:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: price breaks below S4 with volume spike
-            elif price < s4 and volume_spike:
+            # SHORT: price breaks below lower BB with volume spike AND squeeze
+            elif price < bb_lower and volume_spike and squeeze:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -140,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R4_S4_Breakout_VolumeSpike1.3x_ATRTrail2.5_v1"
+name = "6h_BollingerSqueeze_Breakout_VolumeSpike1.5x_ATRTrail2.0_v1"
 timeframe = "6h"
 leverage = 1.0
