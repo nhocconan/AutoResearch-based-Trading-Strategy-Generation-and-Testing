@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,41 +13,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Donchian Breakout with Volume & Trend Confirmation ===
-    # Long: Close > Donchian(20) High + Volume Spike + 4h Close > 4h EMA34
-    # Short: Close < Donchian(20) Low + Volume Spike + 4h Close < 4h EMA34
+    # === 1w Price Channel (Donchian 20-week) ===
+    df_1w = get_htf_data(prices, '1w')
+    highest = pd.Series(df_1w['high']).rolling(window=20, min_periods=20).max().values
+    lowest = pd.Series(df_1w['low']).rolling(window=20, min_periods=20).min().values
     
-    # Get 4h data for Donchian and EMA
-    df_4h = get_htf_data(prices, '4h')
+    # Align to daily
+    highest_aligned = align_htf_to_ltf(prices, df_1w, highest)
+    lowest_aligned = align_htf_to_ltf(prices, df_1w, lowest)
     
-    # Donchian(20) on 4h
-    donch_high = pd.Series(df_4h['high']).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(df_4h['low']).rolling(window=20, min_periods=20).min().values
-    
-    # EMA34 on 4h
-    ema34 = pd.Series(df_4h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align to 4h timeframe (primary)
-    donch_high_4h = align_htf_to_ltf(prices, df_4h, donch_high)
-    donch_low_4h = align_htf_to_ltf(prices, df_4h, donch_low)
-    ema34_4h = align_htf_to_ltf(prices, df_4h, ema34)
-    
-    # Volume confirmation (on 4h)
+    # === Volume Confirmation (daily) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     
-    # Warmup for 4h calculations
-    warmup = 80  # 20 for Donchian + 34 for EMA + buffer
+    # Warmup: ensure 20 weeks of data
+    warmup = 20 * 7  # 20 weeks in days
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(donch_high_4h[i]) or np.isnan(donch_low_4h[i]) or 
-            np.isnan(ema34_4h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(highest_aligned[i]) or np.isnan(lowest_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -55,31 +45,33 @@ def generate_signals(prices):
         price = close[i]
         vol_spike = volume_spike[i]
         
-        # === EXIT LOGIC ===
+        # === EXIT LOGIC: Close position when price returns to channel ===
         if position == 1:  # Long position
-            # Exit on Donchian low break or trend reversal
-            if price < donch_low_4h[i] or close[i] < ema34_4h[i]:
+            # Exit when price crosses back below midline
+            midline = (highest_aligned[i] + lowest_aligned[i]) / 2
+            if price < midline:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit on Donchian high break or trend reversal
-            if price > donch_high_4h[i] or close[i] > ema34_4h[i]:
+            # Exit when price crosses back above midline
+            midline = (highest_aligned[i] + lowest_aligned[i]) / 2
+            if price > midline:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Break above Donchian high with volume + trend
-            if price > donch_high_4h[i] and vol_spike and close[i] > ema34_4h[i]:
+            # LONG: Price breaks above 20-week high with volume confirmation
+            if price > highest_aligned[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Break below Donchian low with volume + trend
-            elif price < donch_low_4h[i] and vol_spike and close[i] < ema34_4h[i]:
+            # SHORT: Price breaks below 20-week low with volume confirmation
+            elif price < lowest_aligned[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -94,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_Trend"
-timeframe = "4h"
+name = "1d_Donchian20_1w_Breakout_Volume_Confirmation"
+timeframe = "1d"
 leverage = 1.0
