@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot breakout with 1d EMA filter and volume confirmation
-# Uses 1d Camarilla levels (R1/S1 for breakout, R3/S3 for reversal) with 1d EMA34 trend filter
-# Long when price breaks above R1 with EMA34 up and volume > 1.5x average
-# Short when price breaks below S1 with EMA34 down and volume > 1.5x average
-# Avoids overtrading by requiring confluence of pivot, trend, and volume
-# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and fee drag
+# Hypothesis: 4h price action with 12h trend filter and volume confirmation
+# Long when price closes above 12h EMA50 AND 4h RSI < 30 (oversold bounce) AND 4h volume > 1.5x 20-period average
+# Short when price closes below 12h EMA50 AND 4h RSI > 70 (overbought rejection) AND 4h volume > 1.5x 20-period average
+# Exit when price crosses back across 12h EMA50
+# Uses 12h EMA for trend filter (avoids whipsaw in ranging markets) and 4h RSI for mean-reversion entries
+# Volume confirms momentum behind the move. Target: 80-150 total trades over 4 years (20-38/year)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,99 +20,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Camarilla Pivot Levels ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 12h EMA50 trend filter ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate pivot point and ranges
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # === 4h RSI(14) for mean reversion ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # Camarilla levels
-    r1_1d = pivot_1d + range_1d * 1.1 / 12
-    s1_1d = pivot_1d - range_1d * 1.1 / 12
-    r3_1d = pivot_1d + range_1d * 1.1 / 4
-    s3_1d = pivot_1d - range_1d * 1.1 / 4
-    r4_1d = pivot_1d + range_1d * 1.1 / 2
-    s4_1d = pivot_1d - range_1d * 1.1 / 2
+    # RSI calculation
+    delta = np.diff(close_4h, prepend=close_4h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Align Camarilla levels to 6h timeframe
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # === 1d EMA34 Trend Filter ===
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_aligned = align_htf_to_ltf(prices, df_4h, rsi)
     
-    # === 1d Volume Confirmation (average volume) ===
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(volume_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # === 4h Volume confirmation ===
+    volume_4h = df_4h['volume'].values
+    vol_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 50
+    warmup = 60
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or
-            np.isnan(r3_1d_aligned[i]) or
-            np.isnan(s3_1d_aligned[i]) or
-            np.isnan(r4_1d_aligned[i]) or
-            np.isnan(s4_1d_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or
+            np.isnan(vol_ma_4h_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        r1 = r1_1d_aligned[i]
-        s1 = s1_1d_aligned[i]
-        r3 = r3_1d_aligned[i]
-        s3 = s3_1d_aligned[i]
-        r4 = r4_1d_aligned[i]
-        s4 = s4_1d_aligned[i]
-        ema = ema_34_1d_aligned[i]
-        vol_ma = vol_ma_1d_aligned[i]
+        ema_12h_val = ema_50_12h_aligned[i]
+        rsi_val = rsi_aligned[i]
+        vol_ma_val = vol_ma_4h_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x 1d average volume
-        vol_confirm = volume[i] > vol_ma * 1.5
+        # Volume confirmation: current volume > 1.5x 4h average volume
+        vol_confirm = volume[i] > vol_ma_val * 1.5
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit if price drops below S3 (reversal zone)
-            if price < s3:
+            # Exit if price crosses below 12h EMA50
+            if price < ema_12h_val:
                 signals[i] = 0.0
                 position = 0
                 continue
+        
         elif position == -1:  # Short position
-            # Exit if price rises above R3 (reversal zone)
-            if price > r3:
+            # Exit if price crosses above 12h EMA50
+            if price > ema_12h_val:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Long when: price breaks above R1 AND EMA34 up AND volume confirmation
-            if price > r1 and ema > close_1d[-1] if len(close_1d) > 0 else False and vol_confirm:
+            # Long when: price above 12h EMA50 AND RSI < 30 (oversold) AND volume confirmation
+            if price > ema_12h_val and rsi_val < 30 and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short when: price breaks below S1 AND EMA34 down AND volume confirmation
-            elif price < s1 and ema < close_1d[-1] if len(close_1d) > 0 else False and vol_confirm:
+            # Short when: price below 12h EMA50 AND RSI > 70 (overbought) AND volume confirmation
+            elif price < ema_12h_val and rsi_val > 70 and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -127,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R1_S1_1dEMA34_Volume1.5x"
-timeframe = "6h"
+name = "4h_12hEMA50_4hRSI_Vol1.5x"
+timeframe = "4h"
 leverage = 1.0
