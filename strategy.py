@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ATR-based trailing stop.
-# Long when price breaks above 20-period high AND volume > 1.5x median volume.
-# Short when price breaks below 20-period low AND volume > 1.5x median volume.
-# Exit when price retraces to 10-period EMA OR ATR-based stoploss (2.5x ATR).
-# Uses discrete position size 0.25. Target: 20-50 trades/year to minimize fee drag.
-# Donchian channels provide clear structure; volume confirms institutional interest.
-# ATR stoploss adapts to volatility, reducing whipsaw in choppy markets.
+# Hypothesis: 1d strategy using 1w Donchian breakout with volume confirmation and ATR stoploss.
+# Long when price breaks above 1w Donchian(20) high AND volume > 1.5x median volume.
+# Short when price breaks below 1w Donchian(20) low AND volume > 1.5x median volume.
+# Exit when price crosses 1w Donchian(10) midline OR ATR-based stoploss triggers.
+# Uses discrete position size 0.25. Targets 7-25 trades/year (30-100 total over 4 years).
+# Weekly Donchian captures major trend breaks; volume confirmation filters false breakouts.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,99 +20,108 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Donchian Channel (20-period) ===
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get 1w data once before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
     
-    # === 10-period EMA for exit ===
-    close_s = pd.Series(close)
-    ema_10 = close_s.ewm(span=10, min_periods=10, adjust=False).mean().values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # === ATR (14-period) for stoploss ===
-    high_low = high - low
-    high_close = np.abs(high - np.roll(close, 1))
-    low_close = np.abs(low - np.roll(close, 1))
-    true_range = np.maximum(high_low, np.maximum(high_close, low_close))
-    atr_14 = pd.Series(true_range).rolling(window=14, min_periods=14).mean().values
+    # === 1w Indicators: Donchian Channels ===
+    # Donchian(20) for breakout
+    highest_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Donchian(10) for exit midline
+    highest_10 = pd.Series(high_1w).rolling(window=10, min_periods=10).max().values
+    lowest_10 = pd.Series(low_1w).rolling(window=10, min_periods=10).min().values
+    donchian_mid_10 = (highest_10 + lowest_10) / 2
     
-    # === Volume median (20-period) for confirmation ===
-    vol_median_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
+    # === 1w Indicators: ATR (14-period) for stoploss ===
+    high_low_1w = high_1w - low_1w
+    high_close_1w = np.abs(high_1w - np.roll(close_1w, 1))
+    low_close_1w = np.abs(low_1w - np.roll(close_1w, 1))
+    true_range_1w = np.maximum(high_low_1w, np.maximum(high_close_1w, low_close_1w))
+    atr_14_1w = pd.Series(true_range_1w).rolling(window=14, min_periods=14).mean().values
+    
+    # === 1w Indicators: Volume Median (20-period) ===
+    vol_median_20 = pd.Series(volume_1w).rolling(window=20, min_periods=20).median().values
+    
+    # Align all indicators to primary timeframe (1d)
+    highest_20_aligned = align_htf_to_ltf(prices, df_1w, highest_20)
+    lowest_20_aligned = align_htf_to_ltf(prices, df_1w, lowest_20)
+    donchian_mid_10_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid_10)
+    atr_14_aligned = align_htf_to_ltf(prices, df_1w, atr_14_1w)
+    vol_median_aligned = align_htf_to_ltf(prices, df_1w, vol_median_20)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(20, 10, 14, 20)  # Donchian needs 20, EMA needs 10, ATR needs 14, volume median needs 20
+    warmup = max(20, 14)  # Donchian(20) needs 20, ATR needs 14
     
-    # Track position state and entry price for ATR stop
+    # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    highest_since_entry = 0.0  # for long trailing stop
-    lowest_since_entry = 0.0   # for short trailing stop
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
-            np.isnan(ema_10[i]) or np.isnan(atr_14[i]) or
-            np.isnan(vol_median_20[i])):
+        if (np.isnan(highest_20_aligned[i]) or np.isnan(lowest_20_aligned[i]) or
+            np.isnan(donchian_mid_10_aligned[i]) or np.isnan(atr_14_aligned[i]) or
+            np.isnan(vol_median_aligned[i])):
             signals[i] = 0.0
             position = 0
+            entry_price = 0.0
             continue
         
-        # Current values
+        # Current values (aligned)
         price = close[i]
-        atr = atr_14[i]
-        vol_median = vol_median_20[i]
+        vol = volume[i]
+        atr = atr_14_aligned[i]
+        vol_median = vol_median_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x median volume
-        volume_confirm = volume[i] > (vol_median * 1.5)
+        # Volume spike filter: current 1d volume > 1.5x median volume
+        volume_spike = vol > (vol_median * 1.5)
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Update highest price since entry
-            if price > highest_since_entry:
-                highest_since_entry = price
-            # Exit when price retraces to 10 EMA OR price drops 2.5x ATR from high
-            if (price <= ema_10[i]) or (price < highest_since_entry - 2.5 * atr):
+            # Exit when price < Donchian(10) midline OR ATR stoploss (2.0 * ATR)
+            if (price < donchian_mid_10_aligned[i]) or (price < entry_price - 2.0 * atr):
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Update lowest price since entry
-            if price < lowest_since_entry:
-                lowest_since_entry = price
-            # Exit when price retraces to 10 EMA OR price rises 2.5x ATR from low
-            if (price >= ema_10[i]) or (price > lowest_since_entry + 2.5 * atr):
+            # Exit when price > Donchian(10) midline OR ATR stoploss (2.0 * ATR)
+            if (price > donchian_mid_10_aligned[i]) or (price > entry_price + 2.0 * atr):
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
-            highest_since_entry = 0.0
-            lowest_since_entry = 0.0
+            entry_price = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: break above 20-period high + volume confirmation
-            if (price > highest_20[i]) and volume_confirm:
+            # LONG: price > Donchian(20) high AND volume spike
+            if (price > highest_20_aligned[i]) and volume_spike:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-                highest_since_entry = price
             
-            # SHORT: break below 20-period low + volume confirmation
-            elif (price < lowest_20[i]) and volume_confirm:
+            # SHORT: price < Donchian(20) low AND volume spike
+            elif (price < lowest_20_aligned[i]) and volume_spike:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
-                lowest_since_entry = price
         
         else:
             signals[i] = position * 0.25  # maintain position
     
     return signals
 
-name = "4h_Donchian20_VolumeConfirm_EMA10Exit_ATRStop2.5_v1"
-timeframe = "4h"
+name = "1d_1wDonchian20_Breakout_VolumeSpike1.5x_ATRStop2.0_MidlineExit_v1"
+timeframe = "1d"
 leverage = 1.0
