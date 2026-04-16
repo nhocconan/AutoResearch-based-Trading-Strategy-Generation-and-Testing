@@ -13,55 +13,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data (primary timeframe) ===
+    # === 6h data (primary timeframe) ===
+    df_6h = get_htf_data(prices, '6h')
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    volume_6h = df_6h['volume'].values
+    
+    # === 1d data (HTF) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate ATR on 1d
-    tr_1d = np.maximum(high_1d - low_1d,
-                       np.maximum(np.abs(high_1d - np.roll(close_1d, 1)),
-                                  np.abs(low_1d - np.roll(close_1d, 1))))
-    tr_1d[0] = high_1d[0] - low_1d[0]
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Calculate RSI on 1d
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # === 1w data (HTF) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Calculate 6h EMA for trend
+    ema_fast = pd.Series(close_6h).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema_slow = pd.Series(close_6h).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Calculate 50-week EMA for trend
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # === 1d Bollinger Bands (20, 2) for volatility regime ===
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_band = sma_20 + (2 * std_20)
-    lower_band = sma_20 - (2 * std_20)
-    bb_width = (upper_band - lower_band) / sma_20
-    bb_width_aligned = align_htf_to_ltf(prices, df_1d, bb_width)
-    
-    # Percentile of BB width over 50 days for regime detection
-    bb_width_percentile = pd.Series(bb_width_aligned).rolling(window=50, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
-    
-    # === 1d Donchian Channel (20) for breakout signals ===
-    highest_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_upper = highest_20
-    donchian_lower = lowest_20
-    
-    # === 1d Volume spike detection ===
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume_1d / vol_ma_20
+    # Calculate 6h ATR for volatility filter
+    tr_6h = np.maximum(high_6h - low_6h,
+                       np.maximum(np.abs(high_6h - np.roll(close_6h, 1)),
+                                  np.abs(low_6h - np.roll(close_6h, 1))))
+    tr_6h[0] = high_6h[0] - low_6h[0]
+    atr_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators have valid data
+    # Warmup
     warmup = 100
     
     # Track position state
@@ -69,44 +57,41 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(bb_width_percentile[i]) or np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(ema_fast[i]) or 
+            np.isnan(ema_slow[i]) or np.isnan(atr_6h[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        price = close_1d[i]
-        atr_1d_val = atr_1d_aligned[i]
-        ema_50_1w_val = ema_50_1w_aligned[i]
-        bb_width_pct = bb_width_percentile[i]
-        vol_ratio_val = vol_ratio[i]
+        price = close_6h[i]
+        rsi_val = rsi_1d_aligned[i]
+        atr_val = atr_6h[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price closes below Donchian lower OR volatility regime shifts to high OR trend turns bearish
-            if (price < donchian_lower[i]) or (bb_width_pct > 80) or (price < ema_50_1w_val):
+            # Exit when EMA trend turns bearish OR RSI overbought
+            if (ema_fast[i] < ema_slow[i]) or (rsi_val > 70):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price closes above Donchian upper OR volatility regime shifts to high OR trend turns bullish
-            if (price > donchian_upper[i]) or (bb_width_pct > 80) or (price > ema_50_1w_val):
+            # Exit when EMA trend turns bullish OR RSI oversold
+            if (ema_fast[i] > ema_slow[i]) or (rsi_val < 30):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Donchian upper AND low volatility regime AND volume spike AND bullish weekly trend
-            if (price > donchian_upper[i]) and (bb_width_pct < 30) and (vol_ratio_val > 1.5) and (price > ema_50_1w_val):
+            # LONG: EMA bullish crossover AND RSI not overbought
+            if (ema_fast[i] > ema_slow[i]) and (ema_fast[i-1] <= ema_slow[i-1]) and (rsi_val < 70):
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Price breaks below Donchian lower AND low volatility regime AND volume spike AND bearish weekly trend
-            elif (price < donchian_lower[i]) and (bb_width_pct < 30) and (vol_ratio_val > 1.5) and (price < ema_50_1w_val):
+            # SHORT: EMA bearish crossover AND RSI not oversold
+            elif (ema_fast[i] < ema_slow[i]) and (ema_fast[i-1] >= ema_slow[i-1]) and (rsi_val > 30):
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -121,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian_Breakout_LowVol_Volume_WeeklyTrend"
-timeframe = "1d"
+name = "6h_EMA_RSI_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
