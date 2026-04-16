@@ -3,12 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Price Action + Volume Spike + ADX Trend Filter
-# Uses price action (close > open for bullish, close < open for bearish) combined with
-# volume spikes and ADX trend strength to capture momentum moves in both bull and bear markets.
-# In trending markets (ADX > 25), go long on bullish candles with volume spikes,
-# short on bearish candles with volume spikes.
-# Volume spike defined as volume > 1.5x 20-period average.
+# Hypothesis: 4h ADX Trend + RSI Pullback Entry with Volume Confirmation
+# Uses ADX(14) > 25 to identify trending markets, then enters on RSI(14) pullbacks
+# (long when RSI < 40 in uptrend, short when RSI > 60 in downtrend) with volume > 1.5x average.
+# Works in both bull and bear markets by following the trend direction.
 # Target: 80-180 total trades over 4 years (20-45/year) with disciplined entries.
 
 def generate_signals(prices):
@@ -35,11 +33,17 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === 4x price action signals ===
-    bullish_candle = close_4h > open_4h
-    bearish_candle = close_4h < open_4h
+    # === 4x RSI(14) calculation ===
+    delta = pd.Series(close_4h).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # === 4h volume spike detection ===
+    # === 4x volume spike detection ===
     vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume_4h > (1.5 * vol_ma_20_4h)
     
@@ -64,6 +68,16 @@ def generate_signals(prices):
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
+    # Determine trend direction from +DI/-DI crossover
+    plus_di_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_di_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    di_diff = plus_di_smooth - minus_di_smooth
+    # Uptrend when +DI > -DI, downtrend when -DI > +DI
+    uptrend = di_diff > 0
+    downtrend = di_diff < 0
+    uptrend_aligned = align_htf_to_ltf(prices, df_1d, uptrend.astype(float))
+    downtrend_aligned = align_htf_to_ltf(prices, df_1d, downtrend.astype(float))
+    
     signals = np.zeros(n)
     
     # Warmup
@@ -76,18 +90,20 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # Skip if any data is NaN
         if (np.isnan(adx_aligned[i]) or 
+            np.isnan(rsi_values[i]) or
             np.isnan(vol_ma_20_4h[i]) or
-            np.isnan(bullish_candle[i]) or
-            np.isnan(bearish_candle[i])):
+            np.isnan(uptrend_aligned[i]) or
+            np.isnan(downtrend_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
         adx_val = adx_aligned[i]
+        rsi_val = rsi_values[i]
         vol_spike_val = vol_spike[i]
-        bullish = bullish_candle[i]
-        bearish = bearish_candle[i]
+        is_uptrend = uptrend_aligned[i] > 0.5
+        is_downtrend = downtrend_aligned[i] > 0.5
         
         # === STOPLOSS LOGIC ===
         if position == 1:  # Long position
@@ -114,16 +130,16 @@ def generate_signals(prices):
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when trend weakens or opposite signal appears
-            if adx_val < 20 or bearish:
+            # Exit when trend weakens or RSI overbought
+            if adx_val < 20 or rsi_val > 70:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when trend weakens or opposite signal appears
-            if adx_val < 20 or bullish:
+            # Exit when trend weakens or RSI oversold
+            if adx_val < 20 or rsi_val < 30:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -133,14 +149,14 @@ def generate_signals(prices):
         if position == 0:
             # Require trending market (ADX > 25) and volume spike
             if adx_val > 25 and vol_spike_val:
-                # Go long on bullish candle with volume spike
-                if bullish:
+                # Go long in uptrend on RSI pullback (< 40)
+                if is_uptrend and rsi_val < 40:
                     signals[i] = 0.25
                     position = 1
                     entry_price = price
                     continue
-                # Go short on bearish candle with volume spike
-                elif bearish:
+                # Go short in downtrend on RSI bounce (> 60)
+                elif is_downtrend and rsi_val > 60:
                     signals[i] = -0.25
                     position = -1
                     entry_price = price
@@ -156,6 +172,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_PriceAction_VolumeSpike_ADXTrend_v1"
+name = "4h_ADXTrend_RSIPullback_Volume_v1"
 timeframe = "4h"
 leverage = 1.0
