@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and 1w ADX regime filter.
-# Long when price breaks above 20-period high AND 1d volume > 1.5x 20-period average AND 1w ADX > 25 (trending).
-# Short when price breaks below 20-period low AND 1d volume > 1.5x 20-period average AND 1w ADX > 25 (trending).
-# Uses discrete position size 0.25. Designed to capture strong trends in BTC/ETH/SOL during trending regimes
-# while avoiding whipsaws in ranging markets via ADX filter. Volume confirmation ensures breakout validity.
-# Target: 80-120 total trades over 4 years (20-30/year) to balance opportunity and fee drag.
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA(34) trend filter and volume confirmation.
+# Long when price breaks above Donchian upper band AND 12h EMA(34) is rising AND volume > 1.5x 20-period average.
+# Short when price breaks below Donchian lower band AND 12h EMA(34) is falling AND volume > 1.5x 20-period average.
+# Uses discrete position size 0.25. Donchian captures breakouts, 12h EMA ensures higher timeframe trend alignment,
+# volume spike confirms institutional participation. Designed to catch strong trends in both bull and bear markets.
+# Target: 100-200 trades over 4 years (25-50/year) to balance opportunity and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,68 +20,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h Indicators: Donchian Channel (20) ===
-    high_ma = pd.Series(high).rolling(window=20, min_periods=20).max()
-    low_ma = pd.Series(low).rolling(window=20, min_periods=20).min()
-    donchian_high = high_ma.values
-    donchian_low = low_ma.values
+    # === 4h Indicators: Donchian(20) ===
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume Spike (volume > 1.5x 20-period average) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_spike = volume > (1.5 * vol_ma.values)
+    # === 4h Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
-    # Get 1d data once before loop for volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data once before loop for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 40:  # Need enough for EMA calculation
         return np.zeros(n)
     
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean()
-    volume_spike_1d = volume_1d > (1.5 * vol_ma_1d.values)
-    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
+    close_12h = df_12h['close'].values
     
-    # Get 1w data once before loop for ADX regime filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
+    # === 12h Indicators: EMA(34) for trend filter ===
+    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate EMA slope (rising/falling)
+    ema_slope = np.diff(ema_12h, prepend=ema_12h[0])
+    ema_rising = ema_slope > 0
+    ema_falling = ema_slope < 0
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # === 1w Indicators: ADX(14) for regime filter ===
-    # True Range
-    tr1 = pd.Series(high_1w).diff()
-    tr2 = pd.Series(low_1w).diff().abs()
-    tr3 = pd.Series(close_1w).shift(1).diff().abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1w = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    
-    # Directional Movement
-    up_move = pd.Series(high_1w).diff()
-    down_move = -pd.Series(low_1w).diff()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed DM
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / atr_1w
-    minus_di = 100 * minus_dm_smooth / atr_1w
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx_1w = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    adx_values = adx_1w.values
-    
-    # Align 1w ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx_values)
+    # Align 12h EMA and slope to 4h timeframe
+    ema_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    ema_rising_aligned = align_htf_to_ltf(prices, df_12h, ema_rising.astype(float))
+    ema_falling_aligned = align_htf_to_ltf(prices, df_12h, ema_falling.astype(float))
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 34 periods needed for ADX, 20 for Donchian/volume MA)
+    # Warmup: ensure all indicators are valid (max 34 periods needed for EMA, 20 for Donchian/volume MA)
     warmup = 40
     
     # Track position state
@@ -89,31 +57,32 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(volume_spike_1d_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(ema_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values
         price = close[i]
-        vol_spike_12h = volume_spike[i]
-        vol_spike_1d = volume_spike_1d_aligned[i]
-        adx_val = adx_aligned[i]
+        upper_band = highest_high[i]
+        lower_band = lowest_low[i]
+        ema_val = ema_aligned[i]
+        ema_rise = ema_rising_aligned[i] > 0.5
+        ema_fall = ema_falling_aligned[i] > 0.5
+        vol_spike = volume_spike[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price returns to midpoint of Donchian channel or ADX < 20 (range regime)
-            midpoint = (donchian_high[i] + donchian_low[i]) / 2
-            if price <= midpoint or adx_val < 20:
+            # Exit if price breaks below Donchian lower band or EMA turns flat/falling
+            if price < lower_band or not ema_rise:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price returns to midpoint of Donchian channel or ADX < 20 (range regime)
-            midpoint = (donchian_high[i] + donchian_low[i]) / 2
-            if price >= midpoint or adx_val < 20:
+            # Exit if price breaks above Donchian upper band or EMA turns flat/rising
+            if price > upper_band or not ema_fall:
                 exit_signal = True
         
         if exit_signal:
@@ -123,13 +92,13 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price > Donchian high AND 12h volume spike AND 1d volume spike AND 1w ADX > 25 (trending)
-            if (price > donchian_high[i] and vol_spike_12h and vol_spike_1d and adx_val > 25):
+            # LONG: Price breaks above upper band AND 12h EMA rising AND volume spike
+            if price > upper_band and ema_rise and vol_spike:
                 signals[i] = 0.25
                 position = 1
             
-            # SHORT: Price < Donchian low AND 12h volume spike AND 1d volume spike AND 1w ADX > 25 (trending)
-            elif (price < donchian_low[i] and vol_spike_12h and vol_spike_1d and adx_val > 25):
+            # SHORT: Price breaks below lower band AND 12h EMA falling AND volume spike
+            elif price < lower_band and ema_fall and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
@@ -138,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dVolumeSpike_1wADX25_V1"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA34_VolumeSpike_V1"
+timeframe = "4h"
 leverage = 1.0
