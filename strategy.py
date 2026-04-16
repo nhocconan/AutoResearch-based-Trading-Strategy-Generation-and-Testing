@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 4h volume confirmation (1.5x 20-bar average) and 1d ADX > 25 trend filter.
-# Long when price breaks above Donchian upper band AND volume > 1.5x 20-bar average AND 1d ADX > 25.
-# Short when price breaks below Donchian lower band AND volume > 1.5x 20-bar average AND 1d ADX > 25.
-# Exit when price returns to Donchian midpoint (mean of upper and lower bands).
-# Uses discrete position size 0.25. Donchian provides objective structure, volume confirms breakout strength,
-# 1d ADX ensures we trade only in trending regimes (avoids chop). Target: 80-160 trades over 4 years (20-40/year).
+# Hypothesis: 1d Williams Alligator (Jaw/Teeth/Lips) crossover with 1d volume confirmation and 1w ADX > 20 trend filter.
+# Long when Alligator Lips cross above Teeth AND volume > 1.3x 20-bar average AND 1w ADX > 20.
+# Short when Alligator Lips cross below Teeth AND volume > 1.3x 20-bar average AND 1w ADX > 20.
+# Exit when Lips cross back over Teeth (reverse crossover).
+# Uses discrete position size 0.25. Alligator identifies trend direction and entry timing,
+# volume confirms breakout strength, 1w ADX ensures we trade only in trending regimes (avoids chop).
+# Target: 40-100 trades over 4 years (10-25/year).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,40 +21,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Indicators: Donchian Channel (20) ===
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper = highest_20
-    donchian_lower = lowest_20
-    donchian_mid = (donchian_upper + donchian_lower) / 2.0
+    # === 1d Indicators: Williams Alligator (13,8,5) ===
+    # Median price = (high + low) / 2
+    median_price = (high + low) / 2.0
     
-    # === 4h Indicators: Volume MA (20) ===
+    # Jaw (13-period SMMA, 8 bars ahead)
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
+    # Teeth (8-period SMMA, 5 bars ahead)
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
+    # Lips (5-period SMMA, 3 bars ahead)
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
+    
+    # === 1d Indicators: Volume MA (20) ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 1d data once before loop for ADX filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need enough for ADX calculation
+    # Get 1w data once before loop for ADX filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:  # Need enough for ADX calculation
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # === 1d Indicators: ADX(14) for trend filter ===
+    # === 1w Indicators: ADX(14) for trend filter ===
     # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr1[0] = 0
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
     # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w),
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)),
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
     dm_plus[0] = 0
     dm_minus[0] = 0
     
@@ -71,80 +76,94 @@ def generate_signals(prices):
     dx = np.where(np.isnan(dx), 0, dx)
     adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align ADX to 1d timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid
-    warmup = 50
+    # Warmup: ensure all indicators are valid (max shift is 8 for Jaw)
+    warmup = 15
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(donchian_mid[i]) or 
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
             np.isnan(vol_ma_20[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             position = 0
-            entry_price = 0.0
             continue
         
         # Current values
-        upper = donchian_upper[i]
-        lower = donchian_lower[i]
-        mid = donchian_mid[i]
+        lips_val = lips[i]
+        teeth_val = teeth[i]
+        jaw_val = jaw[i]
         vol_ma_val = vol_ma_20[i]
         adx_val = adx_aligned[i]
         price = close[i]
         vol = volume[i]
         
-        # Volume filter: volume > 1.5x 20-period average
-        vol_filter = vol > 1.5 * vol_ma_val if vol_ma_val > 0 else False
+        # Volume filter: volume > 1.3x 20-period average
+        vol_filter = vol > 1.3 * vol_ma_val if vol_ma_val > 0 else False
         
-        # Trend filter: 1d ADX > 25 (strong trending regime)
-        trend_filter = adx_val > 25
+        # Trend filter: 1w ADX > 20 (trending regime)
+        trend_filter = adx_val > 20
         
-        # === EXIT LOGIC ===
+        # === Crossover Detection ===
+        # Lips above Teeth (bullish alignment)
+        lips_above_teeth = lips_val > teeth_val
+        # Lips below Teeth (bearish alignment)
+        lips_below_teeth = lips_val < teeth_val
+        
+        # Previous values for crossover detection
+        if i > 0:
+            prev_lips_above_teeth = lips[i-1] > teeth[i-1]
+            prev_lips_below_teeth = lips[i-1] < teeth[i-1]
+        else:
+            prev_lips_above_teeth = False
+            prev_lips_below_teeth = False
+        
+        # Bullish crossover: Lips cross above Teeth
+        bullish_cross = lips_above_teeth and not prev_lips_above_teeth
+        # Bearish crossover: Lips cross below Teeth
+        bearish_cross = lips_below_teeth and not prev_lips_below_teeth
+        
+        # === EXIT LOGIC (reverse crossover) ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price returns to Donchian midpoint
-            if price <= mid:
+            # Exit if Lips cross back below Teeth
+            if lips_below_teeth and prev_lips_above_teeth:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price returns to Donchian midpoint
-            if price >= mid:
+            # Exit if Lips cross back above Teeth
+            if lips_above_teeth and prev_lips_below_teeth:
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
-            entry_price = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: price breaks above Donchian upper band with volume and trend confirmation
-            if price > upper and vol_filter and trend_filter:
+            # LONG: Lips cross above Teeth with volume and trend confirmation
+            if bullish_cross and vol_filter and trend_filter:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
             
-            # SHORT: price breaks below Donchian lower band with volume and trend confirmation
-            elif price < lower and vol_filter and trend_filter:
+            # SHORT: Lips cross below Teeth with volume and trend confirmation
+            elif bearish_cross and vol_filter and trend_filter:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
         
         else:
             signals[i] = position * 0.25
     
     return signals
 
-name = "4h_Donchian20_4hVolumeSpike_1dADX25Trend_V1"
-timeframe = "4h"
+name = "1d_Alligator_1dVolumeSpike_1wADX20Trend_V1"
+timeframe = "1d"
 leverage = 1.0
