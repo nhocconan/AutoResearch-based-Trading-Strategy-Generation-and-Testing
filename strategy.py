@@ -13,12 +13,11 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h data (primary timeframe) ===
+    # === 12h data (HTF for direction) ===
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
-    volume_12h = df_12h['volume'].values
     
     # 12h Donchian upper and lower bands (20 periods)
     high_20_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
@@ -31,11 +30,11 @@ def generate_signals(prices):
     ema_20_12h = close_12h_series.ewm(span=20, min_periods=20, adjust=False).mean().values
     ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
     
-    # === 1d data (HTF for regime) ===
+    # === 1d data (HTF for volatility filter) ===
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # 1d ATR for volatility filter
     tr1 = np.abs(high_1d - low_1d)
@@ -47,7 +46,7 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # === 12h indicators for entry timing ===
+    # === 4h indicators for entry timing ===
     # RSI(14)
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
@@ -57,7 +56,7 @@ def generate_signals(prices):
     rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
     
-    # Volume spike detection
+    # Volume spike detection (4h)
     vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     vol_ratio = volume / vol_ma_10
     
@@ -137,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_EMA20_RSI_Volume"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_EMA20_RSI_Volume_12h"
+timeframe = "4h"
 leverage = 1.0
