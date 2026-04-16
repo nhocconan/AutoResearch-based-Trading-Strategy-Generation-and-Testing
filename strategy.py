@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA trend + RSI momentum + 1w volatility regime filter
-# Long when KAMA trending up AND RSI > 50 AND 1w volatility low (below 50th percentile)
-# Short when KAMA trending down AND RSI < 50 AND 1w volatility low
-# Uses 1d timeframe with 1w volatility filter to reduce whipsaw in choppy markets
-# Target: 20-60 total trades over 4 years (5-15/year) to minimize fee drag
+# Hypothesis: 6h Donchian(20) breakout + weekly pivot direction + volume confirmation
+# Long when price breaks above Donchian high + weekly pivot price is above daily open + volume > 1.2x 6h average volume
+# Short when price breaks below Donchian low + weekly pivot price is below daily open + volume > 1.2x 6h average volume
+# ATR trailing stop (2.5x ATR) for risk management
+# Donchian provides trend-following structure, weekly pivot adds higher timeframe bias, volume confirms conviction
+# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,108 +20,134 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d KAMA (adaptive moving average) ===
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=10))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    # Vectorized calculation of ER
-    er = np.zeros_like(close)
-    for i in range(10, len(close)):
-        if volatility[i] != 0:
-            er[i] = change[i] / volatility[i]
-        else:
-            er[i] = 0
+    # === 6h Donchian(20) channels ===
+    donchian_period = 20
+    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # === 1d Weekly Pivot (from Monday open) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    open_1d = df_1d['open'].values
     
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Weekly pivot: average of Monday's open, weekly high, weekly low
+    # We'll use daily data to approximate: weekly pivot = (weekly high + weekly low + Monday's open) / 3
+    # Calculate rolling weekly high/low (5 trading days)
+    week_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
+    week_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
+    # Monday's open: we'll use the first day of the week's open (simplified as current day's open for proxy)
+    weekly_pivot = (week_high + week_low + open_1d) / 3
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
     
-    # === 1d RSI (14-period) ===
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # === 6h Volume Confirmation (average volume) ===
+    df_6h = get_htf_data(prices, '6h')
+    volume_6h = df_6h['volume'].values
+    vol_ma_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values  # 20 periods average
+    vol_ma_6h_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_6h)
     
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    # === 6h ATR for trailing stop (14-period) ===
+    high_6h_arr = df_6h['high'].values
+    low_6h_arr = df_6h['low'].values
+    close_6h_arr = df_6h['close'].values
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[:14] = 50  # Initialize first values
-    
-    # === 1w Volatility (ATR percentile rank) ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate ATR
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate percentile rank of current ATR (50-period lookback)
-    atr_percentile = np.zeros_like(atr_1w)
-    for i in range(50, len(atr_1w)):
-        if i >= 50:
-            window = atr_1w[i-50:i]
-            atr_percentile[i] = (np.sum(window <= atr_1w[i]) / len(window)) * 100
-    
-    atr_percentile_aligned = align_htf_to_ltf(prices, df_1w, atr_percentile)
-    
-    # Align KAMA and RSI to lower timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1w, kama)  # Using 1w index for alignment
-    rsi_aligned = align_htf_to_ltf(prices, df_1w, rsi)
+    tr1_6h = high_6h_arr - low_6h_arr
+    tr2_6h = np.abs(high_6h_arr - np.roll(close_6h_arr, 1))
+    tr3_6h = np.abs(low_6h_arr - np.roll(close_6h_arr, 1))
+    tr2_6h[0] = tr1_6h[0]
+    tr3_6h[0] = tr1_6h[0]
+    tr_6h = np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))
+    atr_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
+    atr_6h_aligned = align_htf_to_ltf(prices, df_6h, atr_6h)
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 60
+    warmup = 50
+    
+    # Track position and entry price for trailing stop
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(kama_aligned[i]) or 
-            np.isnan(rsi_aligned[i]) or
-            np.isnan(atr_percentile_aligned[i])):
+        if (np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or
+            np.isnan(weekly_pivot_aligned[i]) or
+            np.isnan(vol_ma_6h_aligned[i]) or
+            np.isnan(atr_6h_aligned[i])):
             signals[i] = 0.0
+            position = 0
             continue
         
         price = close[i]
-        kama_val = kama_aligned[i]
-        rsi_val = rsi_aligned[i]
-        vol_percentile = atr_percentile_aligned[i]
+        donch_high = donchian_high[i]
+        donch_low = donchian_low[i]
+        weekly_pivot_val = weekly_pivot_aligned[i]
+        vol_ma_val = vol_ma_6h_aligned[i]
+        atr_val = atr_6h_aligned[i]
+        daily_open = open_1d[i] if i < len(open_1d) else open_1d[-1]  # approximate daily open
         
-        # Volatility filter: only trade when volatility is low (below 50th percentile)
-        low_volatility = vol_percentile < 50
+        # Volume confirmation: current volume > 1.2x 6h average volume
+        vol_confirm = volume[i] > vol_ma_val * 1.2
         
-        # KAMA trend: price above/below KAMA
-        kama_up = price > kama_val
-        kama_down = price < kama_val
+        # Weekly pivot bias: pivot above daily open = bullish bias, below = bearish bias
+        weekly_bullish = weekly_pivot_val > daily_open
+        weekly_bearish = weekly_pivot_val < daily_open
         
-        # RSI momentum
-        rsi_bullish = rsi_val > 50
-        rsi_bearish = rsi_val < 50
+        # === TRAILING STOP LOGIC ===
+        if position == 1:  # Long position
+            # Update highest price since entry
+            if price > highest_since_entry:
+                highest_since_entry = price
+            # Trail stop: exit if price drops 2.5*ATR from highest
+            if atr_val > 0 and price < highest_since_entry - 2.5 * atr_val:
+                signals[i] = 0.0
+                position = 0
+                highest_since_entry = 0.0
+                continue
         
-        # Entry conditions
-        if kama_up and rsi_bullish and low_volatility:
+        elif position == -1:  # Short position
+            # Update lowest price since entry
+            if price < lowest_since_entry or lowest_since_entry == 0:
+                lowest_since_entry = price
+            # Trail stop: exit if price rises 2.5*ATR from lowest
+            if atr_val > 0 and price > lowest_since_entry + 2.5 * atr_val:
+                signals[i] = 0.0
+                position = 0
+                lowest_since_entry = 0.0
+                continue
+        
+        # === ENTRY LOGIC (only when flat) ===
+        if position == 0:
+            # Long when: price breaks above Donchian high AND weekly bullish bias AND volume confirmation
+            if price > donch_high and weekly_bullish and vol_confirm:
+                signals[i] = 0.25
+                position = 1
+                entry_price = price
+                highest_since_entry = price
+                continue
+            # Short when: price breaks below Donchian low AND weekly bearish bias AND volume confirmation
+            elif price < donch_low and weekly_bearish and vol_confirm:
+                signals[i] = -0.25
+                position = -1
+                entry_price = price
+                lowest_since_entry = price
+                continue
+        
+        # Hold current position
+        if position == 1:
             signals[i] = 0.25
-        elif kama_down and rsi_bearish and low_volatility:
+        elif position == -1:
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1d_KAMA_RSI_1wVolatilityPercentile"
-timeframe = "1d"
+name = "6h_Donchian20_WeeklyPivotBias_Volume1.2x_ATRTrail_2.5x"
+timeframe = "6h"
 leverage = 1.0
