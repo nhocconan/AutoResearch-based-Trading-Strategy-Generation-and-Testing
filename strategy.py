@@ -3,11 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R + 1d EMA50 filter + volume confirmation
-# Long when Williams %R(14) crosses above -50 (bullish momentum) AND price > 1d EMA50 AND volume > 1.5x 20-period avg volume
-# Short when Williams %R(14) crosses below -50 (bearish momentum) AND price < 1d EMA50 AND volume > 1.5x 20-period avg volume
-# Williams %R identifies momentum extremes and reversals; EMA50 ensures trend alignment; volume adds conviction
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag on 6h timeframe
+# Hypothesis: 12h Donchian(20) breakout with 1w trend filter and volume confirmation
+# Long when price breaks above 20-period high AND 1w EMA34 upward AND volume > 1.5x 24-period avg
+# Short when price breaks below 20-period low AND 1w EMA34 downward AND volume > 1.5x 24-period avg
+# ATR trailing stop (2x ATR) to manage risk
+# Donchian provides clear breakout levels, 1w EMA34 filters counter-trend trades
+# Volume confirmation adds conviction to breakouts
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag on 12h timeframe
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,83 +21,108 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d EMA50 filter ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # === 1w EMA34 trend filter ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1w_slope = np.diff(ema_1w, prepend=ema_1w[0])  # positive = upward, negative = downward
+    ema_1w_slope_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_slope)
     
-    # === Williams %R (14-period) ===
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    # Handle division by zero (when highest_high == lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # === 12h Donchian Channel (20-period) ===
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 60-period Volume Confirmation (10-period average for 6h: 10*6h = 60h ≈ 2.5 days) ===
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # === 12h Volume Confirmation (24-period average = 12 days) ===
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    
+    # === 12h ATR for trailing stop (14-period) ===
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     
     # Warmup
     warmup = 100
     
-    # Track position
+    # Track position and entry price for trailing stop
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_1d_aligned[i]) or 
-            np.isnan(williams_r[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_1w_slope_aligned[i]) or 
+            np.isnan(highest_20[i]) or
+            np.isnan(lowest_20[i]) or
+            np.isnan(vol_ma_24[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        ema_val = ema_1d_aligned[i]
-        williams_r_val = williams_r[i]
-        vol_confirm = volume[i] > vol_ma_20[i] * 1.5  # 1.5x average volume for confirmation
+        ema_slope = ema_1w_slope_aligned[i]
+        high_20 = highest_20[i]
+        low_20 = lowest_20[i]
+        vol_confirm = volume[i] > vol_ma_24[i] * 1.5  # 1.5x average volume for confirmation
+        atr_val = atr[i]
         
-        # Williams %R crossover signals
-        williams_r_prev = williams_r[i-1] if i > 0 else -50
-        crossed_above_50 = williams_r_prev <= -50 and williams_r_val > -50
-        crossed_below_50 = williams_r_prev >= -50 and williams_r_val < -50
+        # === TRAILING STOP LOGIC ===
+        if position == 1:  # Long position
+            # Update highest price since entry
+            if price > highest_since_entry:
+                highest_since_entry = price
+            # Trail stop: exit if price drops 2*ATR from highest
+            if atr_val > 0 and price < highest_since_entry - 2 * atr_val:
+                signals[i] = 0.0
+                position = 0
+                highest_since_entry = 0.0
+                continue
+        
+        elif position == -1:  # Short position
+            # Update lowest price since entry
+            if price < lowest_since_entry or lowest_since_entry == 0:
+                lowest_since_entry = price
+            # Trail stop: exit if price rises 2*ATR from lowest
+            if atr_val > 0 and price > lowest_since_entry + 2 * atr_val:
+                signals[i] = 0.0
+                position = 0
+                lowest_since_entry = 0.0
+                continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Long when: Williams %R crosses above -50 AND price > EMA50 AND volume confirmation
-            if crossed_above_50 and price > ema_val and vol_confirm:
+            # Long when: price breaks above Donchian high AND 1w EMA34 upward AND volume confirmation
+            if price > high_20 and ema_slope > 0 and vol_confirm:
                 signals[i] = 0.25
                 position = 1
+                entry_price = price
+                highest_since_entry = price
                 continue
-            # Short when: Williams %R crosses below -50 AND price < EMA50 AND volume confirmation
-            elif crossed_below_50 and price < ema_val and vol_confirm:
+            # Short when: price breaks below Donchian low AND 1w EMA34 downward AND volume confirmation
+            elif price < low_20 and ema_slope < 0 and vol_confirm:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
+                lowest_since_entry = price
                 continue
         
-        # === EXIT LOGIC ===
-        elif position == 1:
-            # Exit long when Williams %R crosses below -80 (overbought) OR price < EMA50
-            if williams_r_val < -80 or price < ema_val:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
+        # Hold current position
+        if position == 1:
+            signals[i] = 0.25
         elif position == -1:
-            # Exit short when Williams %R crosses above -20 (oversold) OR price > EMA50
-            if williams_r_val > -20 or price > ema_val:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+            signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "6h_WilliamsR_1dEMA50_Volume1.5x"
-timeframe = "6h"
+name = "12h_Donchian20_1wEMA34_Volume1.5x_ATRTrail"
+timeframe = "12h"
 leverage = 1.0
