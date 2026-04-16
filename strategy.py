@@ -1,14 +1,14 @@
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
+# 12h_Donchian20_1dVolume1.5x_1dADX25_12hATRTrail_2.5x
 # Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and ADX trend filter
 # Long when price breaks above 20-period high AND 1d volume > 1.5x 20-period average AND 1d ADX > 25
 # Short when price breaks below 20-period low AND 1d volume > 1.5x 20-period average AND 1d ADX > 25
 # ATR trailing stop (2.5x ATR) for risk management
 # Donchian channels capture breakouts, volume confirms conviction, ADX filters for trending markets
 # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
