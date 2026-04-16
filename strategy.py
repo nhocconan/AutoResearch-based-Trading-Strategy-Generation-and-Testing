@@ -36,7 +36,7 @@ def generate_signals(prices):
     r3 = camarilla_base + camarilla_range * 1.1 / 4
     s3 = camarilla_base - camarilla_range * 1.1 / 4
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     camarilla_base_aligned = align_htf_to_ltf(prices, df_1d, camarilla_base)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
@@ -45,9 +45,19 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === Volume confirmation (12h) ===
+    # === Volume confirmation (4h) ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma_20
+    
+    # === Choppiness regime filter (4h) ===
+    # Chop = 100 * log(sum(TR, n) / (max(high, n) - min(low, n))) / log(n)
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log(atr_sum / (max_high - min_low + 1e-10)) / np.log(14)
+    chop = np.where((max_high - min_low) > 0, chop, 50.0)  # Avoid division by zero
     
     signals = np.zeros(n)
     
@@ -60,7 +70,8 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # Skip if any data is NaN
         if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ratio[i]) or 
+            np.isnan(chop[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -70,6 +81,7 @@ def generate_signals(prices):
         s3_val = s3_aligned[i]
         ema_34_1d_val = ema_34_1d_aligned[i]
         vol_ratio_val = vol_ratio[i]
+        chop_val = chop[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
@@ -89,13 +101,15 @@ def generate_signals(prices):
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
             # LONG: Price breaks above R3 with volume AND above 1d EMA34 (uptrend)
-            if (price > r3_val) and (price > ema_34_1d_val) and (vol_ratio_val > 2.0):
+            # Only in trending market (chop < 61.8)
+            if (price > r3_val) and (price > ema_34_1d_val) and (vol_ratio_val > 2.0) and (chop_val < 61.8):
                 signals[i] = 0.25
                 position = 1
                 continue
             
             # SHORT: Price breaks below S3 with volume AND below 1d EMA34 (downtrend)
-            elif (price < s3_val) and (price < ema_34_1d_val) and (vol_ratio_val > 2.0):
+            # Only in trending market (chop < 61.8)
+            elif (price < s3_val) and (price < ema_34_1d_val) and (vol_ratio_val > 2.0) and (chop_val < 61.8):
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -110,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_Volume_EMA34"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_Volume_EMA34_ChopFilter"
+timeframe = "4h"
 leverage = 1.0
