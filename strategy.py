@@ -4,12 +4,11 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1d ADX trend filter.
-# Long when price breaks above 20-period 4h high AND 1d volume > 1.5x 20-period 1d average AND 1d ADX > 25 (strong trending market).
-# Short when price breaks below 20-period 4h low AND 1d volume > 1.5x 20-period 1d average AND 1d ADX > 25.
+# Long when price breaks above 20-period 4h high AND volume > 1.5x 20-period 1d average AND 1d ADX > 25 (strong trending market).
+# Short when price breaks below 20-period 4h low AND volume > 1.5x 20-period 1d average AND 1d ADX > 25.
 # Exit when price crosses the 4h midpoint (upper+lower)/2 or ATR-based stoploss (2*ATR from entry).
 # Uses discrete position size 0.25. Designed to capture major breakouts in strong trending markets.
 # Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag while maintaining edge.
-# Works in both bull and bear markets by requiring strong trend filter (ADX>25) and volume confirmation.
 
 def generate_signals(prices):
     n = len(prices)
@@ -32,7 +31,7 @@ def generate_signals(prices):
     dc_lower_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     dc_mid_4h = (dc_upper_4h + dc_lower_4h) / 2
     
-    # Align 4h HTF data to LTF
+    # Align to 4h timeframe
     dc_upper_4h_aligned = align_htf_to_ltf(prices, df_4h, dc_upper_4h)
     dc_lower_4h_aligned = align_htf_to_ltf(prices, df_4h, dc_lower_4h)
     dc_mid_4h_aligned = align_htf_to_ltf(prices, df_4h, dc_mid_4h)
