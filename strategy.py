@@ -3,9 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 1d weekly Donchian breakout with volume confirmation and weekly trend filter
+# Works in bull markets via breakout momentum, in bear via short breakdowns
+# Weekly trend filter avoids counter-trend trades, volume confirms institutional interest
+# Target: 20-40 trades/year to minimize fee drag
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,103 +18,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h data (primary timeframe) ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
-    
-    # Calculate ATR on 12h
-    tr_12h = np.maximum(high_12h - low_12h,
-                        np.maximum(np.abs(high_12h - np.roll(close_12h, 1)),
-                                   np.abs(low_12h - np.roll(close_12h, 1))))
-    tr_12h[0] = high_12h[0] - low_12h[0]
-    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
-    
-    # === 1w data (HTF) ===
+    # === Weekly data (HTF) ===
     df_1w = get_htf_data(prices, '1w')
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     volume_1w = df_1w['volume'].values
     
-    # Calculate weekly moving average
-    ma_20_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
-    ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ma_20_1w)
+    # Weekly Donchian channels (20-period)
+    highest_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Calculate weekly volume average
-    vol_avg_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_avg_20_1w)
+    # Weekly EMA(34) for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, min_periods=34, adjust=False).mean().values
     
-    # === 12h EMA(34) for trend filter ===
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Align to daily timeframe
+    highest_20_aligned = align_htf_to_ltf(prices, df_1w, highest_20)
+    lowest_20_aligned = align_htf_to_ltf(prices, df_1w, lowest_20)
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # === 12h RSI(14) for momentum filter ===
-    delta = np.diff(close_12h, prepend=close_12h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_14 = 100 - (100 / (1 + rs))
+    # Daily volume confirmation - 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators have valid data
-    warmup = 100
+    warmup = 50
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_12h_aligned[i]) or np.isnan(ema_34_12h_aligned[i]) or 
-            np.isnan(ma_20_1w_aligned[i]) or np.isnan(vol_avg_20_1w_aligned[i]) or 
-            np.isnan(rsi_14[i])):
+        if (np.isnan(highest_20_aligned[i]) or np.isnan(lowest_20_aligned[i]) or 
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_avg_20[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        price = close_12h[i]
-        vol = volume_12h[i]
-        ema_34_val = ema_34_12h_aligned[i]
-        atr_12h_val = atr_12h_aligned[i]
-        ma_20_1w_val = ma_20_1w_aligned[i]
-        vol_avg_20_1w_val = vol_avg_20_1w_aligned[i]
-        rsi_val = rsi_14[i]
+        price = close[i]
+        vol = volume[i]
+        highest_20_val = highest_20_aligned[i]
+        lowest_20_val = lowest_20_aligned[i]
+        ema_34_val = ema_34_1w_aligned[i]
+        vol_avg = vol_avg_20[i]
+        
+        # Volume confirmation: current volume > 1.5x average
+        vol_confirm = vol > 1.5 * vol_avg if vol_avg > 0 else False
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price closes below 12h EMA(34) OR RSI > 70 (overbought)
-            if (price < ema_34_val) or (rsi_val > 70):
+            # Exit when price closes below weekly Donchian lower band OR trend turns bearish
+            if (price < lowest_20_val) or (price < ema_34_val):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price closes above 12h EMA(34) OR RSI < 30 (oversold)
-            if (price > ema_34_val) or (rsi_val < 30):
+            # Exit when price closes above weekly Donchian upper band OR trend turns bullish
+            if (price > highest_20_val) or (price > ema_34_val):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price above 12h EMA(34) AND RSI between 40 and 60 (neutral momentum)
-            # AND weekly trend is up (price > 20w MA) AND volume above average
-            if (price > ema_34_val) and (40 <= rsi_val <= 60) and \
-               (price > ma_20_1w_val) and (vol > vol_avg_20_1w_val):
+            # LONG: Price breaks above weekly Donchian upper band + volume confirmation + bullish trend
+            if (price > highest_20_val) and vol_confirm and (price > ema_34_val):
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Price below 12h EMA(34) AND RSI between 40 and 60 (neutral momentum)
-            # AND weekly trend is down (price < 20w MA) AND volume above average
-            elif (price < ema_34_val) and (40 <= rsi_val <= 60) and \
-                 (price < ma_20_1w_val) and (vol > vol_avg_20_1w_val):
+            # SHORT: Price breaks below weekly Donchian lower band + volume confirmation + bearish trend
+            elif (price < lowest_20_val) and vol_confirm and (price < ema_34_val):
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -124,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA34_1wTrend_RSI_VolumeFilter"
-timeframe = "12h"
+name = "1d_WeeklyDonchian_Breakout_Volume_TrendFilter"
+timeframe = "1d"
 leverage = 1.0
