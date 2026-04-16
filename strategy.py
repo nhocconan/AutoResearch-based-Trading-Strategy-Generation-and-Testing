@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R mean reversion with 1d trend filter and volume confirmation.
-# Long when Williams %R(14) crosses above -80 (oversold) AND price > 1d EMA50 (uptrend filter) AND volume > 1.2x 20-period average.
-# Short when Williams %R(14) crosses below -20 (overbought) AND price < 1d EMA50 (downtrend filter) AND volume > 1.2x 20-period average.
-# Exit when Williams %R crosses the opposite threshold (-20 for long, -80 for short) or price crosses 1d EMA50.
-# Uses discrete position size 0.25. Designed to capture mean reversals in trending markets with volume confirmation.
-# Target: 80-180 total trades over 4 years (20-45/year) to balance opportunity and fee drag.
+# Hypothesis: 12h Camarilla pivot R1/S1 breakout with 1d volume spike and 1w ADX trend filter.
+# Long when price breaks above 12h Camarilla R1 AND volume > 2.0x 20-period 1d average AND 1w ADX > 25.
+# Short when price breaks below 12h Camarilla S1 AND volume > 2.0x 20-period 1d average AND 1w ADX > 25.
+# Exit when price crosses the 12h Camarilla midpoint (H+L)/2 or ATR-based stoploss (1.5*ATR from entry).
+# Uses discrete position size 0.25. Designed to capture breakouts in strong trending markets with volume confirmation.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag while maintaining edge.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,84 +20,151 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 6h Indicators: Williams %R (14-period) ===
-    highest_high_6h = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_6h = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r_6h = -100 * (highest_high_6h - close) / (highest_high_6h - lowest_low_6h)
-    # Handle division by zero (when high == low)
-    williams_r_6h = np.where((highest_high_6h - lowest_low_6h) == 0, -50, williams_r_6h)
-    
-    # === 1d Indicators: EMA50 for trend filter ===
+    # === 12h Indicators: Camarilla Pivot Levels (based on prior 1d) ===
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === Volume Confirmation: volume > 1.2x 20-period average ===
-    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.2 * vol_ma_6h)
+    # Camarilla levels for 12h timeframe (using prior 1d OHLC)
+    camarilla_H = high_1d
+    camarilla_L = low_1d
+    camarilla_C = close_1d
+    camarilla_range = camarilla_H - camarilla_L
+    
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12, M = (H+L)/2
+    camarilla_R1 = camarilla_C + camarilla_range * 1.1 / 12
+    camarilla_S1 = camarilla_C - camarilla_range * 1.1 / 12
+    camarilla_M = (camarilla_H + camarilla_L) / 2
+    
+    # Align 1d Camarilla levels to 12h timeframe
+    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
+    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
+    camarilla_M_aligned = align_htf_to_ltf(prices, df_1d, camarilla_M)
+    
+    # === 1d Indicators: Volume Spike (volume > 2.0x 20-period average) ===
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    volume_spike = volume > (2.0 * vol_ma_1d_aligned)
+    
+    # === 1w Indicators: ADX > 25 (strong trending market filter) ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # True Range
+    tr1 = pd.Series(high_1w).diff()
+    tr2 = pd.Series(low_1w).diff().abs()
+    tr3 = pd.Series(close_1w).shift(1).diff().abs()
+    tr_1w = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1w = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Movement
+    dm_plus = pd.Series(high_1w).diff()
+    dm_minus = pd.Series(low_1w).diff().abs()
+    dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
+    dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
+    
+    # Smoothed DM and TR
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_smooth = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * (dm_plus_smooth / atr_smooth)
+    di_minus = 100 * (dm_minus_smooth / atr_smooth)
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    strong_trend = adx_aligned > 25
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed for EMA50)
+    # Warmup: ensure all indicators are valid (max 50 periods needed for ADX/ATR)
     warmup = 100
     
-    # Track position state
+    # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    
+    # Calculate 12h ATR for stoploss (using 12h data)
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    tr1_12h = pd.Series(high_12h).diff()
+    tr2_12h = pd.Series(low_12h).diff().abs()
+    tr3_12h = pd.Series(close_12h).shift(1).diff().abs()
+    tr_12h = pd.concat([tr1_12h, tr2_12h, tr3_12h], axis=1).max(axis=1)
+    atr_12h_raw = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h_raw)
     
     for i in range(warmup, n):
-        # Skip if any required data is NaN
-        if (np.isnan(williams_r_6h[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(volume_confirm[i])):
+        # Skip if any required data is NaN or outside session
+        if (np.isnan(camarilla_R1_aligned[i]) or np.isnan(camarilla_S1_aligned[i]) or np.isnan(camarilla_M_aligned[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(strong_trend[i]) or np.isnan(atr_12h_aligned[i]) or
+            not session_filter[i]):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values
         price = close[i]
-        williams_r = williams_r_6h[i]
-        ema_trend = ema_50_1d_aligned[i]
-        vol_conf = volume_confirm[i]
-        
-        # Williams %R thresholds
-        oversold = -80
-        overbought = -20
+        vol_spike = volume_spike[i]
+        is_strong_trend = strong_trend[i]
+        atr_val = atr_12h_aligned[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if Williams %R crosses above overbought (-20) OR price crosses below EMA50
-            if williams_r > overbought or price < ema_trend:
+            # Exit if price crosses below Camarilla midpoint
+            if price < camarilla_M_aligned[i]:
+                exit_signal = True
+            # ATR-based stoploss: 1.5*ATR below entry
+            elif price < entry_price - 1.5 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if Williams %R crosses below oversold (-80) OR price crosses above EMA50
-            if williams_r < oversold or price > ema_trend:
+            # Exit if price crosses above Camarilla midpoint
+            if price > camarilla_M_aligned[i]:
+                exit_signal = True
+            # ATR-based stoploss: 1.5*ATR above entry
+            elif price > entry_price + 1.5 * atr_val:
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
+            entry_price = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Williams %R crosses above oversold (-80) AND price > EMA50 AND volume confirmation
-            if williams_r > oversold and williams_r_6h[i-1] <= oversold and price > ema_trend and vol_conf:
+            # LONG: Price breaks above Camarilla R1 AND volume spike AND strong trending market
+            if price > camarilla_R1_aligned[i] and vol_spike and is_strong_trend:
                 signals[i] = 0.25
                 position = 1
+                entry_price = price
             
-            # SHORT: Williams %R crosses below overbought (-20) AND price < EMA50 AND volume confirmation
-            elif williams_r < overbought and williams_r_6h[i-1] >= overbought and price < ema_trend and vol_conf:
+            # SHORT: Price breaks below Camarilla S1 AND volume spike AND strong trending market
+            elif price < camarilla_S1_aligned[i] and vol_spike and is_strong_trend:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         else:
             signals[i] = position * 0.25
     
     return signals
 
-name = "6h_WilliamsR_1dEMA50_VolumeConfirm_V1"
-timeframe = "6h"
+name = "12h_CamarillaR1S1_1dVolumeSpike_1wADX_V1"
+timeframe = "12h"
 leverage = 1.0
