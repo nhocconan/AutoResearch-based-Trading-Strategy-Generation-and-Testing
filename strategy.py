@@ -60,6 +60,9 @@ def generate_signals(prices):
     atr_aligned = align_htf_to_ltf(prices, df_4h, atr_14)
     vol_median_aligned = align_htf_to_ltf(prices, df_1d, vol_median_20)
     
+    # Pre-compute 1d volume aligned to avoid calling get_htf_data inside loop
+    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+    
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
@@ -73,7 +76,8 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # Skip if any required data is NaN
         if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(atr_aligned[i]) or np.isnan(vol_median_aligned[i])):
+            np.isnan(atr_aligned[i]) or np.isnan(vol_median_aligned[i]) or 
+            np.isnan(vol_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             highest_since_entry = 0.0
@@ -86,11 +90,6 @@ def generate_signals(prices):
         atr = atr_aligned[i]
         vol_median = vol_median_aligned[i]
         price = close[i]
-        
-        # Get current 1d volume for volume spike filter
-        df_1d = get_htf_data(prices, '1d')
-        vol_1d = df_1d['volume'].values
-        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
         current_vol_1d = vol_1d_aligned[i]
         
         # Volume spike filter: current 1d volume > 1.5x median volume
