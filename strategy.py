@@ -13,96 +13,133 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Weekly data (HTF) for market regime ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # === Daily data for entry levels ===
+    # === Daily data (HTF for key levels) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === Weekly EMA for trend bias ===
-    close_1w_series = pd.Series(close_1w)
-    ema_50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # === Daily Pivot Points (Standard) ===
+    # === Previous Day Values for Pivot Calculation ===
     prev_close_1d = np.roll(close_1d, 1)
     prev_high_1d = np.roll(high_1d, 1)
     prev_low_1d = np.roll(low_1d, 1)
+    # First day uses current day values (no look-ahead)
     prev_close_1d[0] = close_1d[0]
     prev_high_1d[0] = high_1d[0]
     prev_low_1d[0] = low_1d[0]
     
+    # === Daily Pivot Points (Standard) ===
     pivot_point = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
+    
+    # Calculate Fibonacci-based levels: R1 at 0.382, S1 at 0.382
     prev_range = prev_high_1d - prev_low_1d
     r1 = pivot_point + prev_range * 0.382
     s1 = pivot_point - prev_range * 0.382
+    
+    # === Additional levels for exit: R2 at 0.618, S2 at 0.618 ===
     r2 = pivot_point + prev_range * 0.618
     s2 = pivot_point - prev_range * 0.618
     
-    # === ATR for dynamic stop ===
-    tr_6h = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr_6h[0] = high[0] - low[0]
-    atr_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
-    
-    # === Volume confirmation ===
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma_20
-    
-    # Align all to 6h
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align all levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)  # Volume ratio aligned to daily
-    atr_6h_aligned = align_htf_to_ltf(prices, df_1d, atr_6h)  # Actually compute on 6h, but align for simplicity
     
-    # Recompute ATR on 6h directly for accuracy
-    atr_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
+    # === ADX Trend Filter (Daily) ===
+    # Calculate True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # First TR uses high-low only (no look-ahead)
+    tr[0] = high_1d[0] - low_1d[0]
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    # First period DM is zero (no look-ahead)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smooth with Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            # First value is simple average
+            result[period-1] = np.mean(data[:period])
+            # Subsequent values: Wilder's smoothing
+            for i in range(period, len(data)):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    period = 14
+    tr14 = wilders_smooth(tr, period)
+    dm_plus14 = wilders_smooth(dm_plus, period)
+    dm_minus14 = wilders_smooth(dm_minus, period)
+    
+    # Avoid division by zero
+    dm_plus14_safe = np.where(tr14 == 0, 1, dm_plus14)
+    dm_minus14_safe = np.where(tr14 == 0, 1, dm_minus14)
+    tr14_safe = np.where(tr14 == 0, 1, tr14)
+    
+    di_plus = 100 * dm_plus14 / tr14_safe
+    di_minus = 100 * dm_minus14 / tr14_safe
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    # First DX value may be NaN if di_plus+di_minus=0
+    adx = wilders_smooth(dx, period)
+    
+    # Align ADX to 4h
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # === Volume Confirmation (4h) ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma_20
+    
+    # === ATR for dynamic stop (4h) ===
+    tr_4h = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr_4h[0] = high[0] - low[0]
+    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     
-    # Warmup
+    # Warmup: enough for ADX calculation (14+14+14=42) plus buffer
     warmup = 50
     
-    # Track position
+    # Track position and entry price for stop management
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(atr_6h[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ratio[i]) or 
+            np.isnan(atr_4h[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        ema_bull = ema_50_1w_aligned[i] > close_1w[i // (7*24//6)] if i >= (7*24//6) else False  # Simplified: use aligned EMA > current weekly close proxy
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
         r2_val = r2_aligned[i]
         s2_val = s2_aligned[i]
-        atr_val = atr_6h[i]
+        adx_val = adx_aligned[i]
         vol_ratio_val = vol_ratio[i]
-        
-        # Simplified weekly trend: aligned EMA > price (proxy)
-        weekly_close_proxy = np.full_like(close, np.nan)
-        # This is approximate; better to use proper alignment but keeping simple
-        weekly_trend = ema_50_1w_aligned[i] > price  # Bullish if EMA above price
+        atr_val = atr_4h[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
+            # Exit conditions: stop at S1, target at R2, or adverse 2x ATR move
             if price < s1_val or price > r2_val or price < entry_price - 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
+            # Exit conditions: stop at R1, target at S2, or adverse 2x ATR move
             if price > r1_val or price < s2_val or price > entry_price + 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
@@ -110,17 +147,17 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Weekly trend filter: only trade in direction of weekly trend
-            if weekly_trend:
+            # Strong trend filter: ADX > 25
+            if adx_val > 25:
                 # LONG: Price breaks above R1 with volume confirmation
-                if price > r1_val and vol_ratio_val > 1.5:
+                if price > r1_val and vol_ratio_val > 2.0:
                     signals[i] = 0.25
                     position = 1
                     entry_price = price
                     continue
-            else:
+                
                 # SHORT: Price breaks below S1 with volume confirmation
-                if price < s1_val and vol_ratio_val > 1.5:
+                elif price < s1_val and vol_ratio_val > 2.0:
                     signals[i] = -0.25
                     position = -1
                     entry_price = price
@@ -136,6 +173,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyTrend_PivotBreak_Volume"
-timeframe = "6h"
+name = "4h_FibPivot_Volume_ADX_Filter"
+timeframe = "4h"
 leverage = 1.0
