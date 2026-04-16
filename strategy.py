@@ -18,20 +18,17 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
     # === 12h data (HTF for trend filter) ===
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
     
     # === Calculate 1d Camarilla pivot levels ===
     # Using previous day's OHLC
     prev_close_1d = np.roll(close_1d, 1)
     prev_high_1d = np.roll(high_1d, 1)
     prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d[0] = close_1d[0]  # First value
+    prev_close_1d[0] = close_1d[0]
     prev_high_1d[0] = high_1d[0]
     prev_low_1d[0] = low_1d[0]
     
@@ -45,7 +42,7 @@ def generate_signals(prices):
     r4 = camarilla_base + camarilla_range * 1.1 / 2
     s4 = camarilla_base - camarilla_range * 1.1 / 2
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     camarilla_base_aligned = align_htf_to_ltf(prices, df_1d, camarilla_base)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
@@ -56,7 +53,7 @@ def generate_signals(prices):
     ema_34_12h = pd.Series(close_12h).ewm(span=34, min_periods=34, adjust=False).mean().values
     ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # === Volume confirmation (12h) ===
+    # === Volume confirmation (4h) ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma_20
     
@@ -124,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_Volume_EMA34"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_Volume_EMA34"
+timeframe = "4h"
 leverage = 1.0
