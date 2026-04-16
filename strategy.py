@@ -1,9 +1,3 @@
-# 1d_Camarilla_R1_S1_Breakout_Volume_ATRFilter_1w
-# Hypothesis: 1d Camarilla R1/S1 breakout with volume spike and 1w ATR filter.
-# Uses 1w trend direction to filter entries: only long when 1w close > 1w EMA200, short when <.
-# Target: 20-50 trades over 4 years (5-12/year) to avoid fee drag.
-# Works in bull/bear: breakouts capture momentum, 1w EMA200 avoids counter-trend in bear.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -11,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 150:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,19 +13,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Daily OHLC for Camarilla pivot calculation ===
+    # Get daily data for higher timeframe analysis
     df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate daily ATR (14-period) for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels (R1-S1)
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_hl = high_1d - low_1d
-    r1 = close_1d + range_hl * 1.1 / 12
-    s1 = close_1d - range_hl * 1.1 / 12
-    
-    # === ATR for volatility filter (14-period) ===
+    # True Range calculation
     tr1 = high_1d[1:] - low_1d[1:]
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
@@ -39,79 +29,67 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], tr])
     
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1d_avg = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
+    atr_ma_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
     
-    # === 1w EMA200 for trend filter ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Align ATR to 4h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
     
-    # Align HTF data to daily timeframe
-    r1_daily = align_htf_to_ltf(prices, df_1d, r1)
-    s1_daily = align_htf_to_ltf(prices, df_1d, s1)
-    atr_1d_avg_daily = align_htf_to_ltf(prices, df_1d, atr_1d_avg)
-    ema_200_1w_daily = align_htf_to_ltf(prices, df_1w, ema_200_1w)
-    
-    # === Volume spike detection (20-period volume MA) ===
+    # Volume spike detection (volume > 2x 20-period MA)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
-    # === Price distance from pivot (avoid chop) ===
-    mid_pivot = (r1_daily + s1_daily) / 2
-    dist_from_pivot = np.abs(close - mid_pivot)
-    avg_dist = pd.Series(dist_from_pivot).rolling(window=50, min_periods=50).mean().values
-    too_close = dist_from_pivot < (0.5 * avg_dist)
+    # Calculate 4-period RSI for entry timing
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).rolling(window=4, min_periods=4).mean().values
+    avg_loss = pd.Series(loss).rolling(window=4, min_periods=4).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    # Prepend NaN for first element
+    rsi = np.concatenate([[np.nan], rsi])
     
     signals = np.zeros(n)
-    
-    # Warmup: ensure all indicators have valid data
-    warmup = 200
-    
-    # Track position state
     position = 0  # 0: flat, 1: long, -1: short
+    
+    # Warmup period
+    warmup = 50
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_daily[i]) or np.isnan(s1_daily[i]) or
-            np.isnan(atr_1d_avg_daily[i]) or np.isnan(volume_spike[i]) or
-            np.isnan(too_close[i]) or np.isnan(ema_200_1w_daily[i])):
+        if (np.isnan(atr_1d_aligned[i]) or np.isnan(atr_ma_1d_aligned[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(rsi[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        price = close[i]
-        r1_level = r1_daily[i]
-        s1_level = s1_daily[i]
-        atr_avg = atr_1d_avg_daily[i]
-        vol_spike = volume_spike[i]
-        too_close_to_pivot = too_close[i]
-        ema_200 = ema_200_1w_daily[i]
-        
-        # === EXIT LOGIC: Exit when price moves against level or volatility drops ===
+        # Exit conditions
         if position == 1:  # Long position
-            if price < s1_level or atr_avg < (atr_1d_avg_daily[i-1] * 0.7 if i > 0 else atr_avg):
+            # Exit when RSI becomes overbought or volatility drops
+            if rsi[i] > 70 or atr_1d_aligned[i] < atr_ma_1d_aligned[i] * 0.8:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            if price > r1_level or atr_avg < (atr_1d_avg_daily[i-1] * 0.7 if i > 0 else atr_avg):
+            # Exit when RSI becomes oversold or volatility drops
+            if rsi[i] < 30 or atr_1d_aligned[i] < atr_ma_1d_aligned[i] * 0.8:
                 signals[i] = 0.0
                 position = 0
                 continue
         
-        # === ENTRY LOGIC (only when flat) ===
+        # Entry conditions (only when flat)
         if position == 0:
-            # LONG: Price breaks above R1 with volume spike, sufficient volatility,
-            # not too close to pivot, and 1w above EMA200 (bullish trend)
-            if price > r1_level and vol_spike and atr_avg > 0 and not too_close_to_pivot and close > ema_200:
+            # LONG: RSI oversold, volume spike, sufficient volatility
+            if rsi[i] < 30 and volume_spike[i] and atr_1d_aligned[i] > atr_ma_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Price breaks below S1 with volume spike, sufficient volatility,
-            # not too close to pivot, and 1w below EMA200 (bearish trend)
-            elif price < s1_level and vol_spike and atr_avg > 0 and not too_close_to_pivot and close < ema_200:
+            # SHORT: RSI overbought, volume spike, sufficient volatility
+            elif rsi[i] > 70 and volume_spike[i] and atr_1d_aligned[i] > atr_ma_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -126,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_Volume_ATRFilter_1w"
-timeframe = "1d"
+name = "4h_RSI_VolumeSpike_ATRFilter_v1"
+timeframe = "4h"
 leverage = 1.0
