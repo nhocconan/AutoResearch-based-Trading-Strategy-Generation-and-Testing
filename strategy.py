@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d volume confirmation and ATR-based risk management.
-# Long when price breaks above 20-period Donchian high AND 1d volume > 1.3x 20-period average.
-# Short when price breaks below 20-period Donchian low AND 1d volume > 1.3x 20-period average.
-# Exit on ATR-based stoploss (2*ATR from entry) or opposite Donchian break.
-# Uses discrete position size 0.25. Designed to capture breakouts with volume confirmation.
-# Works in both bull and bear markets by requiring volume confirmation and using symmetric structure.
-# Target: 75-200 total trades over 4 years (19-50/year) to balance edge and fee drag.
+# Hypothesis: 6h Camarilla R1/S1 breakout with 1d volume confirmation and ATR-based risk management.
+# Long when price breaks above Camarilla R1 level AND 1d volume > 1.3x 20-period average.
+# Short when price breaks below Camarilla S1 level AND 1d volume > 1.3x 20-period average.
+# Exit on ATR-based stoploss (2*ATR from entry) or opposite Camarilla break (R4/S4).
+# Uses discrete position size 0.25. Camarilla R1/S1 are tighter breakout levels than R3/S3,
+# increasing trade frequency while volume confirmation filters false breakouts.
+# Designed to work in both bull and bear markets by requiring volume confirmation and using
+# symmetric pivot levels. Target: 75-175 total trades over 4 years (19-44/year).
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,9 +22,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Indicators: Donchian Channel (20-period) ===
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === 6h Indicators: Camarilla Pivot Levels (using prior 6h bar) ===
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close[0] = close[0]
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_val = prev_high - prev_low
+    
+    camarilla_r1 = pivot + range_val * 1.1 / 12.0
+    camarilla_s1 = pivot - range_val * 1.1 / 12.0
+    camarilla_r4 = pivot + range_val * 1.1 / 2.0
+    camarilla_s4 = pivot - range_val * 1.1 / 2.0
     
     # === 1d Indicators: Volume Spike (volume > 1.3x 20-period average) ===
     df_1d = get_htf_data(prices, '1d')
@@ -32,12 +45,12 @@ def generate_signals(prices):
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     volume_spike = volume > (1.3 * vol_ma_1d_aligned)
     
-    # === 4h ATR for stoploss ===
+    # === 6h ATR for stoploss ===
     tr1 = pd.Series(high).diff()
     tr2 = pd.Series(low).diff().abs()
     tr3 = pd.Series(close).shift(1).diff().abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_4h_raw = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    tr_6h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_6h_raw = pd.Series(tr_6h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -54,8 +67,8 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_spike[i]) or np.isnan(atr_4h_raw[i]) or
+        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or np.isnan(camarilla_r4[i]) or
+            np.isnan(camarilla_s4[i]) or np.isnan(volume_spike[i]) or np.isnan(atr_6h_raw[i]) or
             not session_filter[i]):
             signals[i] = 0.0
             position = 0
@@ -64,22 +77,22 @@ def generate_signals(prices):
         # Current values
         price = close[i]
         vol_spike = volume_spike[i]
-        atr_val = atr_4h_raw[i]
+        atr_val = atr_6h_raw[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price breaks below Donchian low (opposite break)
-            if price < donchian_low[i]:
+            # Exit if price breaks below Camarilla S4 (strong reversal)
+            if price < camarilla_s4[i]:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR below entry
             elif price < entry_price - 2.0 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price breaks above Donchian high (opposite break)
-            if price > donchian_high[i]:
+            # Exit if price breaks above Camarilla R4 (strong reversal)
+            if price > camarilla_r4[i]:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR above entry
             elif price > entry_price + 2.0 * atr_val:
@@ -93,14 +106,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Donchian high AND volume spike
-            if price > donchian_high[i] and vol_spike:
+            # LONG: Price breaks above Camarilla R1 AND volume spike
+            if price > camarilla_r1[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: Price breaks below Donchian low AND volume spike
-            elif price < donchian_low[i] and vol_spike:
+            # SHORT: Price breaks below Camarilla S1 AND volume spike
+            elif price < camarilla_s1[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -110,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dVolumeSpike_V1"
-timeframe = "4h"
+name = "6h_Camarilla_R1S1_1dVolumeSpike_V1"
+timeframe = "6h"
 leverage = 1.0
