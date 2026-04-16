@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,19 +13,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Weekly data for trend filter ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_1w_12h = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
     # === Daily data for pivot points ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot points: P, R1, S1, R2, S2
+    # Calculate standard pivot points: P, R1, S1, R2, S2
     pivot = (high_1d + low_1d + close_1d) / 3
     range_hl = high_1d - low_1d
     r1 = pivot + range_hl
@@ -33,12 +27,12 @@ def generate_signals(prices):
     r2 = pivot + 2 * range_hl
     s2 = pivot - 2 * range_hl
     
-    # Align daily pivot levels to 12h timeframe
-    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
-    r2_12h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_12h = align_htf_to_ltf(prices, df_1d, s2)
+    # Align daily pivot levels to 4h timeframe
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
     
     # Volume spike detection (20-period volume MA)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -50,34 +44,40 @@ def generate_signals(prices):
                                   np.abs(low_1d - np.roll(close_1d, 1))))
     tr_1d[0] = high_1d[0] - low_1d[0]  # First value
     atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    atr_1d_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_1d_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # 12h EMA34 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_12h_4h = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators have valid data
-    warmup = 100
+    warmup = 50
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or
-            np.isnan(r2_12h[i]) or np.isnan(s2_12h[i]) or np.isnan(volume_spike[i]) or
-            np.isnan(atr_1d_12h[i]) or np.isnan(ema_1w_12h[i])):
+        if (np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
+            np.isnan(r2_4h[i]) or np.isnan(s2_4h[i]) or np.isnan(volume_spike[i]) or
+            np.isnan(atr_1d_4h[i]) or np.isnan(ema_12h_4h[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        pivot_level = pivot_12h[i]
-        r1_level = r1_12h[i]
-        s1_level = s1_12h[i]
-        r2_level = r2_12h[i]
-        s2_level = s2_12h[i]
+        pivot_level = pivot_4h[i]
+        r1_level = r1_4h[i]
+        s1_level = s1_4h[i]
+        r2_level = r2_4h[i]
+        s2_level = s2_4h[i]
         vol_spike = volume_spike[i]
-        atr = atr_1d_12h[i]
-        ema_trend = ema_1w_12h[i]
+        atr = atr_1d_4h[i]
+        ema_trend = ema_12h_4h[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
@@ -118,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_R1_S1_Breakout_Volume_WTrend"
-timeframe = "12h"
+name = "4h_Pivot_R1_S1_Breakout_Volume_EMA34Trend"
+timeframe = "4h"
 leverage = 1.0
