@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d volume confirmation and ADX regime filter.
-# Long when price breaks above Donchian(20) high AND 1d volume > 1.8x 20-period average AND ADX(14) > 25.
-# Short when price breaks below Donchian(20) low AND 1d volume > 1.8x 20-period average AND ADX(14) > 25.
-# Exit on ATR-based stoploss (2.5*ATR from entry) or opposite Donchian break.
-# Uses discrete position size 0.28. Designed to capture strong breakouts with volume confirmation in trending regimes.
-# Works in both bull and bear markets by requiring volume confirmation and ADX filter to avoid whipsaws.
-# Target: 80-180 total trades over 4 years (20-45/year) to balance edge and fee drag.
+# Hypothesis: 1d Williams Alligator with 1w trend filter and volume confirmation.
+# Long when price > Alligator Jaw (13-period SMMA) AND 1w close > 1w open (bullish weekly candle) AND volume > 1.5x 20-day average.
+# Short when price < Alligator Jaw AND 1w close < 1w open (bearish weekly candle) AND volume > 1.5x 20-day average.
+# Exit on ATR-based stoploss (2*ATR from entry) or opposite Alligator Jaw crossover.
+# Uses discrete position size 0.25. Designed to capture trending moves with volume confirmation in both bull and bear markets.
+# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,84 +20,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Indicators: Donchian Channel (20) ===
-    # Donchian high: highest high over last 20 periods
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    # Donchian low: lowest low over last 20 periods
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === 1d Indicators: Williams Alligator (Smoothed Moving Averages) ===
+    # Jaw: 13-period SMMA of median price, smoothed 8 periods
+    median_price = (high + low) / 2.0
+    smma_jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean()
+    smma_jaw = smma_jaw.ewm(alpha=1/8, adjust=False, min_periods=8).mean().values
     
-    # === 1d Indicators: Volume Spike (volume > 1.8x 20-period average) ===
-    df_1d = get_htf_data(prices, '1d')
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    volume_spike = volume > (1.8 * vol_ma_1d_aligned)
+    # === 1w Indicators: Weekly trend and volume confirmation ===
+    df_1w = get_htf_data(prices, '1w')
+    weekly_close = df_1w['close'].values
+    weekly_open = df_1w['open'].values
+    weekly_bullish = weekly_close > weekly_open  # Bullish weekly candle
+    weekly_bearish = weekly_close < weekly_open  # Bearish weekly candle
     
-    # === 4h Indicators: ADX(14) for regime filter ===
-    # True Range
+    # Volume confirmation: 1d volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma_20)
+    
+    # === 1d ATR for stoploss ===
     tr1 = pd.Series(high).diff()
     tr2 = pd.Series(low).diff().abs()
     tr3 = pd.Series(close).shift(1).diff().abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    # Directional Movement
-    dm_plus = pd.Series(high).diff()
-    dm_minus = -pd.Series(low).diff()
-    dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0.0)
-    dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0.0)
-    # Smoothed values
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / atr
-    di_minus = 100 * dm_minus_smooth / atr
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # === 4h ATR for stoploss ===
-    atr_raw = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
+    
+    # Align HTF indicators to LTF
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
+    smma_jaw_aligned = align_htf_to_ltf(prices, df_1w, smma_jaw)  # Align Jaw to 1d
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed)
-    warmup = 50
+    # Warmup: ensure all indicators are valid
+    warmup = 100
     
     # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     for i in range(warmup, n):
-        # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(volume_spike[i]) or
-            np.isnan(adx[i]) or np.isnan(atr_raw[i])):
+        # Skip if any required data is NaN or outside session
+        if (np.isnan(smma_jaw_aligned[i]) or np.isnan(weekly_bullish_aligned[i]) or
+            np.isnan(weekly_bearish_aligned[i]) or np.isnan(volume_spike[i]) or
+            np.isnan(atr[i]) or not session_filter[i]):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values
         price = close[i]
+        jaw = smma_jaw_aligned[i]
         vol_spike = volume_spike[i]
-        adx_val = adx[i]
-        atr_val = atr_raw[i]
+        atr_val = atr[i]
+        wk_bullish = weekly_bullish_aligned[i] > 0.5
+        wk_bearish = weekly_bearish_aligned[i] > 0.5
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price breaks below Donchian low (trend reversal)
-            if price < lowest_low[i]:
+            # Exit if price crosses below Alligator Jaw
+            if price < jaw:
                 exit_signal = True
-            # ATR-based stoploss: 2.5*ATR below entry
-            elif price < entry_price - 2.5 * atr_val:
+            # ATR-based stoploss: 2*ATR below entry
+            elif price < entry_price - 2.0 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price breaks above Donchian high (trend reversal)
-            if price > highest_high[i]:
+            # Exit if price crosses above Alligator Jaw
+            if price > jaw:
                 exit_signal = True
-            # ATR-based stoploss: 2.5*ATR above entry
-            elif price > entry_price + 2.5 * atr_val:
+            # ATR-based stoploss: 2*ATR above entry
+            elif price > entry_price + 2.0 * atr_val:
                 exit_signal = True
         
         if exit_signal:
@@ -109,23 +106,23 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Donchian high AND volume spike AND ADX > 25
-            if price > highest_high[i] and vol_spike and adx_val > 25:
-                signals[i] = 0.28
+            # LONG: Price > Jaw AND weekly bullish AND volume spike
+            if price > jaw and wk_bullish and vol_spike:
+                signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: Price breaks below Donchian low AND volume spike AND ADX > 25
-            elif price < lowest_low[i] and vol_spike and adx_val > 25:
-                signals[i] = -0.28
+            # SHORT: Price < Jaw AND weekly bearish AND volume spike
+            elif price < jaw and wk_bearish and vol_spike:
+                signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         else:
-            signals[i] = position * 0.28
+            signals[i] = position * 0.25
     
     return signals
 
-name = "4h_Donchian20_1dVolumeSpike_ADXFilter_V1"
-timeframe = "4h"
+name = "1d_WilliamsAlligator_1wTrend_VolumeSpike_V1"
+timeframe = "1d"
 leverage = 1.0
