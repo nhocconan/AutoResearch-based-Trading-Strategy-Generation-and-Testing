@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Camarilla R3/S3 levels with 12h volume spike and 4h choppiness filter.
-# Long when price breaks above daily Camarilla R3 with 12h volume > 2.0x 24-period average and CHOP > 61.8 (range).
-# Short when price breaks below daily Camarilla S3 with same filters.
-# Exit when price returns to daily Camarilla midpoint or touches opposite S3/R3 level.
-# Uses discrete position size 0.25. CHOP filter ensures mean-reversion logic in ranging markets.
-# Target: 75-200 total trades over 4 years (19-50/year) to balance edge and fee drag.
+# Hypothesis: 1d strategy using weekly Donchian channel (20) breakout with 1w ADX filter and volume confirmation.
+# Long when price breaks above weekly Donchian upper with 1w ADX > 25 and volume > 2.0x 20-period average.
+# Short when price breaks below weekly Donchian lower with 1w ADX > 25 and volume > 2.0x 20-period average.
+# Exit when price returns to weekly Donchian midpoint or opposite band.
+# Uses discrete position size 0.25. Weekly structure provides edge in both bull and bear markets.
+# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag and maximize edge.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,62 +20,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once before loop for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    # Get weekly data once before loop for Donchian and ADX
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # === Daily Indicators: Camarilla Pivot Levels (R3, S3, Midpoint) based on prior day ===
-    # Calculate using prior day's high, low, close (shift by 1 to use completed day only)
-    phigh = np.roll(high_1d, 1)
-    plow = np.roll(low_1d, 1)
-    pclose = np.roll(close_1d, 1)
-    phigh[0] = np.nan
-    plow[0] = np.nan
-    pclose[0] = np.nan
+    # === Weekly Indicators: Donchian Channel (20) ===
+    # Donchian upper: highest high over past 20 completed weekly bars
+    # Donchian lower: lowest low over past 20 completed weekly bars
+    # Use shift(1) to ensure we only use completed weekly bars (no look-ahead)
+    donchian_upper = pd.Series(high_1w).rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_lower = pd.Series(low_1w).rolling(window=20, min_periods=20).min().shift(1).values
+    donchian_mid = (donchian_upper + donchian_lower) / 2.0
     
-    # Camarilla levels (based on prior day)
-    pivot = (phigh + plow + pclose) / 3.0
-    camarilla_r3 = pivot + (1.1/4) * (phigh - plow)  # R3 = pivot + 1.1/4*(H-L)
-    camarilla_s3 = pivot - (1.1/4) * (phigh - plow)  # S3 = pivot - 1.1/4*(H-L)
-    camarilla_mid = pivot
-    
-    # Align daily Camarilla levels to 4h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_mid_aligned = align_htf_to_ltf(prices, df_1d, camarilla_mid)
-    
-    # Get 12h data once before loop for volume confirmation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
-    
-    volume_12h = df_12h['volume'].values
-    
-    # === 12h Indicators: Volume Spike (24-period average) ===
-    vol_ma_24_12h = pd.Series(volume_12h).rolling(window=24, min_periods=24).mean().values
-    vol_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_12h)
-    vol_ma_24_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_24_12h)
-    
-    # Get 4h data for choppiness filter
+    # === Weekly Indicators: ADX (14) for trend strength filter ===
     # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr1[0] = 0
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Choppiness Index (CHOP) = 100 * log10(sum(TR over n) / (n * max(high-low over n))) / log10(n)
-    n_chop = 14
-    sum_tr = pd.Series(tr).rolling(window=n_chop, min_periods=n_chop).sum().values
-    max_hl = pd.Series(high - low).rolling(window=n_chop, min_periods=n_chop).max().values
-    chop = 100 * np.log10(sum_tr / (n_chop * max_hl)) / np.log10(n_chop)
+    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
+    up_move = high_1w - np.roll(high_1w, 1)
+    down_move = np.roll(low_1w, 1) - low_1w
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed TR, +DM, -DM (using Wilder's smoothing)
+    tr_smooth = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Plus Directional Indicator (+DI) and Minus Directional Indicator (-DI)
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
+    
+    # Directional Index (DX) and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Align weekly indicators to 1d timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1w, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Volume moving average (20-period) on 1d
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
@@ -88,35 +88,34 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(camarilla_mid_aligned[i]) or np.isnan(vol_12h_aligned[i]) or 
-            np.isnan(vol_ma_24_12h_aligned[i]) or np.isnan(chop[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             position = 0
             entry_price = 0.0
             continue
         
         # Current values
-        cr3 = camarilla_r3_aligned[i]
-        cs3 = camarilla_s3_aligned[i]
-        cm = camarilla_mid_aligned[i]
-        vol_12h_val = vol_12h_aligned[i]
-        vol_ma_24_12h_val = vol_ma_24_12h_aligned[i]
-        chop_val = chop[i]
+        du = donchian_upper_aligned[i]
+        dl = donchian_lower_aligned[i]
+        dm = donchian_mid_aligned[i]
+        adx_val = adx_aligned[i]
         price = close[i]
         vol = volume[i]
+        vol_ma = vol_ma_20[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price returns to daily Camarilla midpoint or drops to Camarilla S3
-            if price <= cm or price <= cs3:
+            # Exit if price returns to weekly Donchian midpoint or drops to Donchian lower
+            if price <= dm or price <= dl:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price returns to daily Camarilla midpoint or rises to Camarilla R3
-            if price >= cm or price >= cr3:
+            # Exit if price returns to weekly Donchian midpoint or rises to Donchian upper
+            if price >= dm or price >= du:
                 exit_signal = True
         
         if exit_signal:
@@ -127,20 +126,20 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Volume filter: 12h volume > 2.0x 24-period average
-            vol_filter = vol_12h_val > 2.0 * vol_ma_24_12h_val
+            # Trend filter: only trade when ADX > 25 (strong trend)
+            trend_filter = adx_val > 25
             
-            # Choppiness filter: CHOP > 61.8 indicates ranging market (mean reversion regime)
-            chop_filter = chop_val > 61.8
+            # Volume filter: volume > 2.0x 20-period average
+            vol_filter = vol > 2.0 * vol_ma
             
-            # LONG: Price breaks above daily Camarilla R3 with volume and chop confirmation
-            if (price > cr3) and vol_filter and chop_filter:
+            # LONG: Price breaks above weekly Donchian upper with trend and volume confirmation
+            if (price > du) and trend_filter and vol_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: Price breaks below daily Camarilla S3 with volume and chop confirmation
-            elif (price < cs3) and vol_filter and chop_filter:
+            # SHORT: Price breaks below weekly Donchian lower with trend and volume confirmation
+            elif (price < dl) and trend_filter and vol_filter:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -150,6 +149,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dCamarillaR3S3_12hVolSpike_4hChopFilter_V1"
-timeframe = "4h"
+name = "1d_1wDonchian20_1wADX_VolumeConfirmation_V1"
+timeframe = "1d"
 leverage = 1.0
