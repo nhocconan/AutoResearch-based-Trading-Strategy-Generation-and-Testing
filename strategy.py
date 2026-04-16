@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Bollinger Bands squeeze breakout with weekly trend filter and volume confirmation
-# Bollinger Band width < 20th percentile indicates low volatility (squeeze).
-# Breakout occurs when price closes outside bands with volume > 1.5x average.
-# Weekly EMA50 trend filter: only take long breaks in weekly uptrend (price > EMA50),
-# short breaks in weekly downtrend (price < EMA50).
-# Works in ranging markets (squeeze breakouts) and trending markets (continuation).
-# Target: 50-150 total trades over 4 years (12-37/year) with disciplined entries.
+# Hypothesis: 1d Donchian breakout (20) with 1w Trend Filter (ADX) and Volume Confirmation
+# Buy when price breaks above Donchian upper band in strong uptrend (ADX > 25) with volume surge
+# Sell when price breaks below Donchian lower band in strong downtrend (ADX > 25) with volume surge
+# Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
+# Target: 30-100 total trades over 4 years (7-25/year) with disciplined entries
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,32 +19,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h Bollinger Bands (20, 2) ===
-    bb_period = 20
-    bb_std = 2
-    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_band = sma + (bb_std * std_dev)
-    lower_band = sma - (bb_std * std_dev)
-    bb_width = ((upper_band - lower_band) / sma) * 100  # percentage
+    # === 1d data (primary timeframe) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # === 12h Bollinger Band width percentile (200 lookback) ===
-    bb_width_percentile = pd.Series(bb_width).rolling(window=200, min_periods=20).rank(pct=True).values * 100
+    # === 1d Donchian Channel (20) ===
+    highest_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # === 12h volume ratio for confirmation ===
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma_20
-    
-    # === Weekly trend filter (EMA50) ===
+    # === 1w ADX(14) for trend filter ===
     df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate True Range
+    tr1 = pd.Series(high_1w).diff()
+    tr2 = abs(pd.Series(high_1w).diff())
+    tr3 = abs(pd.Series(low_1w).diff())
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1w = tr.rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate Directional Movement
+    up_move = pd.Series(high_1w).diff()
+    down_move = -pd.Series(low_1w).diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smooth DM and TR
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_1w
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_1w
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # === 1d volume ratio for confirmation ===
+    vol_ma_10_1d = pd.Series(volume_1d).rolling(window=10, min_periods=10).mean().values
+    vol_ratio_1d = volume_1d / vol_ma_10_1d
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 200
+    warmup = 50
     
     # Track position and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
@@ -54,29 +71,40 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(bb_width_percentile[i]) or np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(vol_ratio[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i])):
+        if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ratio_1d[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        bb_width_pct = bb_width_percentile[i]
-        weekly_ema = ema_50_1w_aligned[i]
-        vol = vol_ratio[i]
-        upper = upper_band[i]
-        lower = lower_band[i]
+        upper_band = highest_high_20[i]
+        lower_band = lowest_low_20[i]
+        adx_val = adx_aligned[i]
+        vol_ratio = vol_ratio_1d[i]
         
-        # === STOPLOSS LOGIC (close-based) ===
+        # === STOPLOSS LOGIC ===
         if position == 1:  # Long position
-            if price < entry_price - 2.0 * (upper - lower):  # 2x BB width as SL
+            # Calculate ATR for stop loss
+            tr_1d = np.maximum(high_1d - low_1d, 
+                              np.absolute(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]])),
+                              np.absolute(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]])))
+            atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+            atr_val = atr_1d[i]
+            if price < entry_price - 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            if price > entry_price + 2.0 * (upper - lower):  # 2x BB width as SL
+            # Calculate ATR for stop loss
+            tr_1d = np.maximum(high_1d - low_1d, 
+                              np.absolute(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]])),
+                              np.absolute(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]])))
+            atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+            atr_val = atr_1d[i]
+            if price > entry_price + 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -84,16 +112,16 @@ def generate_signals(prices):
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price touches opposite band or squeeze ends
-            if price >= lower or bb_width_pct > 50:  # touch lower band or volatility expansion
+            # Exit when price breaks below Donchian lower band or trend weakens
+            if price < lower_band or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price touches opposite band or squeeze ends
-            if price <= upper or bb_width_pct > 50:  # touch upper band or volatility expansion
+            # Exit when price breaks above Donchian upper band or trend weakens
+            if price > upper_band or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -101,26 +129,20 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Squeeze condition: BB width in lowest 20%
-            is_squeeze = bb_width_pct < 20
-            # Volume confirmation
-            vol_confirm = vol > 1.5
-            # Weekly trend alignment
-            weekly_uptrend = price > weekly_ema
-            weekly_downtrend = price < weekly_ema
-            
-            # Long: squeeze breakout up in weekly uptrend
-            if is_squeeze and vol_confirm and weekly_uptrend and price > upper:
-                signals[i] = 0.25
-                position = 1
-                entry_price = price
-                continue
-            # Short: squeeze breakout down in weekly downtrend
-            elif is_squeeze and vol_confirm and weekly_downtrend and price < lower:
-                signals[i] = -0.25
-                position = -1
-                entry_price = price
-                continue
+            # Require trending market (ADX > 25) and volume confirmation
+            if adx_val > 25 and vol_ratio > 1.5:
+                # Buy when price breaks above Donchian upper band
+                if price > upper_band:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = price
+                    continue
+                # Sell when price breaks below Donchian lower band
+                elif price < lower_band:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = price
+                    continue
         
         # Hold current position
         if position == 1:
@@ -132,6 +154,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_BollingerSqueeze_WeeklyTrend_VolumeBreakout_v1"
-timeframe = "12h"
+name = "1d_Donchian_20_1wADX_VolumeFilter_v1"
+timeframe = "1d"
 leverage = 1.0
