@@ -3,48 +3,60 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Bollinger Band mean reversion with 4h trend filter and session filter.
-# Long when price touches lower BB(20,2) AND 4h EMA50 uptrend (price > EMA50) AND UTC 08-20 session.
-# Short when price touches upper BB(20,2) AND 4h EMA50 downtrend (price < EMA50) AND UTC 08-20 session.
-# Uses discrete position size 0.20. Bollinger Bands identify overextended moves, 4h EMA50 ensures alignment with higher timeframe trend.
-# Session filter reduces noise trades outside active hours. Designed to work in both bull (buy dips) and bear (sell rallies) markets.
-# Target: 80-150 trades over 4 years (20-37/year) to balance opportunity and fee drag.
+# Hypothesis: 6h Camarilla pivot breakout with 1d volume confirmation and ATR filter.
+# Long when price breaks above R4 with volume > 1.5x 20-period average AND ATR(14) > ATR(50) (expanding volatility).
+# Short when price breaks below S4 with volume > 1.5x 20-period average AND ATR(14) > ATR(50).
+# Uses discrete position size 0.25. Camarilla R4/S4 are strong breakout levels, volume confirms participation,
+# ATR expansion filters for genuine breakouts vs false signals. Designed to capture strong momentum moves
+# in both bull and bear markets. Target: 80-160 trades over 4 years (20-40/year).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === 1h Indicators: Bollinger Bands (20,2) ===
-    close_s = pd.Series(close)
-    bb_ma = close_s.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_s.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_ma + 2 * bb_std
-    bb_lower = bb_ma - 2 * bb_std
+    # === 6h Indicators: ATR for volatility filter ===
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    atr_expanding = atr_14 > atr_50  # volatility expanding
     
-    # Get 4h data once before loop for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:  # Need enough for EMA50 calculation
+    # === 6h Indicators: Volume Spike ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
+    
+    # Get 1d data once before loop for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === 4h Indicators: EMA50 for trend filter ===
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # === 1d Indicators: Camarilla pivot levels (R4, S4) ===
+    # Camarilla: R4 = close + 1.5*(high-low), S4 = close - 1.5*(high-low)
+    camarilla_r4 = close_1d + 1.5 * (high_1d - low_1d)
+    camarilla_s4 = close_1d - 1.5 * (high_1d - low_1d)
     
-    # Align 4h EMA50 to 1h timeframe
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Session filter: UTC 08-20 (active trading hours)
-    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
+    # Align 1d Camarilla levels to 6h timeframe
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed for EMA, 20 for BB)
+    # Warmup: ensure all indicators are valid (max 50 periods needed for ATR)
     warmup = 60
     
     # Track position state
@@ -52,30 +64,38 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
-            np.isnan(ema_50_4h_aligned[i])):
+        if (np.isnan(atr_14[i]) or np.isnan(atr_50[i]) or np.isnan(vol_ma[i]) or
+            np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values
         price = close[i]
-        bb_up = bb_upper[i]
-        bb_low = bb_lower[i]
-        ema_4h = ema_50_4h_aligned[i]
-        in_session = (8 <= hours[i] <= 20)
+        r4 = camarilla_r4_aligned[i]
+        s4 = camarilla_s4_aligned[i]
+        vol_spike = volume_spike[i]
+        atr_exp = atr_expanding[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price returns to middle band or session ends
-            if price >= bb_ma[i] or not in_session:
+            # Exit if price falls below R3 (take profit) or volatility contracts
+            # R3 = close + 1.1*(high-low)
+            camarilla_r3_1d = close_1d + 1.1 * (high_1d - low_1d)
+            camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
+            r3 = camarilla_r3_aligned[i]
+            if price < r3 or not atr_exp:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price returns to middle band or session ends
-            if price <= bb_ma[i] or not in_session:
+            # Exit if price rises above S3 (take profit) or volatility contracts
+            # S3 = close - 1.1*(high-low)
+            camarilla_s3_1d = close_1d - 1.1 * (high_1d - low_1d)
+            camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
+            s3 = camarilla_s3_aligned[i]
+            if price > s3 or not atr_exp:
                 exit_signal = True
         
         if exit_signal:
@@ -84,22 +104,22 @@ def generate_signals(prices):
             continue
         
         # === ENTRY LOGIC (only when flat) ===
-        if position == 0 and in_session:
-            # LONG: price touches lower BB AND 4h EMA50 uptrend (price > EMA50)
-            if price <= bb_low and price > ema_4h:
-                signals[i] = 0.20
+        if position == 0:
+            # LONG: Price breaks above R4 with volume spike and expanding volatility
+            if price > r4 and vol_spike and atr_exp:
+                signals[i] = 0.25
                 position = 1
             
-            # SHORT: price touches upper BB AND 4h EMA50 downtrend (price < EMA50)
-            elif price >= bb_up and price < ema_4h:
-                signals[i] = -0.20
+            # SHORT: Price breaks below S4 with volume spike and expanding volatility
+            elif price < s4 and vol_spike and atr_exp:
+                signals[i] = -0.25
                 position = -1
         
         else:
-            signals[i] = position * 0.20
+            signals[i] = position * 0.25
     
     return signals
 
-name = "1h_BB_MeanReversion_4hEMA50_SessionFilter_V1"
-timeframe = "1h"
+name = "6h_CamarillaR4S4_Breakout_1dVolume_ATRFilter_V1"
+timeframe = "6h"
 leverage = 1.0
