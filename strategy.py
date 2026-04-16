@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + volume spike + ADX filter.
-# In bull markets: buy when price breaks above 20-period high with volume > 1.5x average and ADX > 25.
-# In bear markets: sell when price breaks below 20-period low with volume > 1.5x average and ADX > 25.
-# Uses 1d ADX for trend filter. Position size 0.25 for risk control.
-# Designed to capture trends in both directions with controlled trade frequency.
+# Hypothesis: 12h Donchian(20) breakout with 1d ADX trend filter and volume confirmation.
+# Buy when price breaks above 20-period high with ADX > 25 (uptrend) and volume > 1.5x average.
+# Sell when price breaks below 20-period low with ADX > 25 (downtrend) and volume > 1.5x average.
+# Exit when price crosses 10-period EMA in opposite direction or ADX < 20 (trend weakening).
+# Position size 0.25 for risk control. Designed for fewer trades (<50/year) to avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,12 +19,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h data (primary timeframe) ===
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    # === 12h data (primary timeframe) ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
     # === 1d data (higher timeframe for ADX trend filter) ===
     df_1d = get_htf_data(prices, '1d')
@@ -32,9 +32,9 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === 4h Donchian channels (20) ===
-    highest_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # === 12h Donchian channels (20) ===
+    highest_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
     # === 1d ADX (14) for trend filter ===
     # Calculate True Range
@@ -57,9 +57,13 @@ def generate_signals(prices):
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # === 4h volume ratio for confirmation ===
-    vol_ma_10_4h = pd.Series(volume_4h).rolling(window=10, min_periods=10).mean().values
-    vol_ratio_4h = volume_4h / vol_ma_10_4h
+    # === 12h volume ratio for confirmation ===
+    vol_ma_10_12h = pd.Series(volume_12h).rolling(window=10, min_periods=10).mean().values
+    vol_ratio_12h = volume_12h / vol_ma_10_12h
+    
+    # === 12h EMA(10) for exit signal ===
+    ema_10 = pd.Series(close_12h).ewm(span=10, adjust=False, min_periods=10).mean().values
+    ema_aligned = align_htf_to_ltf(prices, df_12h, ema_10)
     
     signals = np.zeros(n)
     
@@ -73,22 +77,24 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # Skip if any data is NaN
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ratio_4h[i])):
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ratio_12h[i]) or
+            np.isnan(ema_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        hh = highest_high[i]
-        ll = lowest_low[i]
+        upper_channel = highest_high[i]
+        lower_channel = lowest_low[i]
         adx_val = adx_aligned[i]
-        vol_ratio = vol_ratio_4h[i]
+        vol_ratio = vol_ratio_12h[i]
+        ema_val = ema_aligned[i]
         
         # === STOPLOSS LOGIC ===
         if position == 1:  # Long position
-            atr_4h = np.abs(high_4h - low_4h)
-            atr_ma = pd.Series(atr_4h).rolling(window=14, min_periods=14).mean().values
-            atr_aligned = align_htf_to_ltf(prices, df_4h, atr_ma)
+            atr_12h = np.abs(high_12h - low_12h)
+            atr_ma = pd.Series(atr_12h).rolling(window=14, min_periods=14).mean().values
+            atr_aligned = align_htf_to_ltf(prices, df_12h, atr_ma)
             atr_val = atr_aligned[i]
             if price < entry_price - 2.5 * atr_val:
                 signals[i] = 0.0
@@ -97,9 +103,9 @@ def generate_signals(prices):
                 continue
         
         elif position == -1:  # Short position
-            atr_4h = np.abs(high_4h - low_4h)
-            atr_ma = pd.Series(atr_4h).rolling(window=14, min_periods=14).mean().values
-            atr_aligned = align_htf_to_ltf(prices, df_4h, atr_ma)
+            atr_12h = np.abs(high_12h - low_12h)
+            atr_ma = pd.Series(atr_12h).rolling(window=14, min_periods=14).mean().values
+            atr_aligned = align_htf_to_ltf(prices, df_12h, atr_ma)
             atr_val = atr_aligned[i]
             if price > entry_price + 2.5 * atr_val:
                 signals[i] = 0.0
@@ -109,16 +115,16 @@ def generate_signals(prices):
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price breaks below Donchian low or trend weakens
-            if price < ll or adx_val < 20:
+            # Exit when price crosses below EMA(10) or trend weakens
+            if price < ema_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price breaks above Donchian high or trend weakens
-            if price > hh or adx_val < 20:
+            # Exit when price crosses above EMA(10) or trend weakens
+            if price > ema_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -128,14 +134,14 @@ def generate_signals(prices):
         if position == 0:
             # Require trending market (ADX > 25)
             if adx_val > 25:
-                # Buy when price breaks above Donchian high with volume
-                if price > hh and vol_ratio > 1.5:
+                # Buy when price breaks above upper Donchian channel with volume
+                if close[i-1] <= upper_channel and price > upper_channel and vol_ratio > 1.5:
                     signals[i] = 0.25
                     position = 1
                     entry_price = price
                     continue
-                # Sell when price breaks below Donchian low with volume
-                elif price < ll and vol_ratio > 1.5:
+                # Sell when price breaks below lower Donchian channel with volume
+                elif close[i-1] >= lower_channel and price < lower_channel and vol_ratio > 1.5:
                     signals[i] = -0.25
                     position = -1
                     entry_price = price
@@ -151,6 +157,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Volume_ADXFilter_v1"
-timeframe = "4h"
+name = "12h_Donchian20_ADX_VolumeFilter_V1"
+timeframe = "12h"
 leverage = 1.0
