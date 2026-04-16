@@ -19,27 +19,24 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot points: P, R1, S1, R2, S2
+    # Calculate daily pivot points: P, R1, S1
     pivot_1d = (high_1d + low_1d + close_1d) / 3
     range_1d = high_1d - low_1d
     r1_1d = pivot_1d + range_1d
     s1_1d = pivot_1d - range_1d
-    r2_1d = pivot_1d + 2 * range_1d
-    s2_1d = pivot_1d - 2 * range_1d
     
-    # Align 1d data to 6h timeframe
+    # Align 1d data to 4h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
     
-    # === 1w data for weekly trend direction ===
+    # === 1w data for trend filter ===
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
-    # Weekly EMA34 for trend
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # 1w EMA(34) for trend direction
+    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Volume spike detection (20-period volume MA)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,8 +53,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # Skip if any required data is NaN
         if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(r2_1d_aligned[i]) or 
-            np.isnan(s2_1d_aligned[i]) or np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or np.isnan(ema_1w_aligned[i]) or 
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
             position = 0
@@ -67,9 +63,7 @@ def generate_signals(prices):
         pivot_level = pivot_1d_aligned[i]
         r1_level = r1_1d_aligned[i]
         s1_level = s1_1d_aligned[i]
-        r2_level = r2_1d_aligned[i]
-        s2_level = s2_1d_aligned[i]
-        weekly_ema = ema_34_1w_aligned[i]
+        ema_trend = ema_1w_aligned[i]
         vol_spike = volume_spike[i]
         
         # === EXIT LOGIC ===
@@ -89,14 +83,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above R1 with volume spike and weekly uptrend
-            if price > r1_level and vol_spike and price > weekly_ema:
+            # LONG: Price breaks above R1 with volume spike and uptrend filter
+            if price > r1_level and vol_spike and price > ema_trend:
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Price breaks below S1 with volume spike and weekly downtrend
-            elif price < s1_level and vol_spike and price < weekly_ema:
+            # SHORT: Price breaks below S1 with volume spike and downtrend filter
+            elif price < s1_level and vol_spike and price < ema_trend:
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -111,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Pivot_R1_S1_Breakout_Volume_WeeklyTrend"
-timeframe = "6h"
+name = "4h_Pivot_R1_S1_Breakout_Volume_WeeklyTrendFilter"
+timeframe = "4h"
 leverage = 1.0
