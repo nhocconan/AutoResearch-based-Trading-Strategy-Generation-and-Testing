@@ -19,11 +19,11 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Pivot and R1/S1 levels
+    # Calculate Pivot and R2/S2 levels (using close for pivot)
     pivot = (high_1d + low_1d + close_1d) / 3
     range_hl = high_1d - low_1d
-    r1 = pivot + range_hl * 0.382
-    s1 = pivot - range_hl * 0.382
+    r2 = pivot + range_hl * 0.618
+    s2 = pivot - range_hl * 0.618
     
     # === True Range and ATR (14-period) ===
     tr1 = high_1d[1:] - low_1d[1:]
@@ -33,28 +33,21 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], tr])
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align HTF data to 4h timeframe
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    atr_14_4h = align_htf_to_ltf(prices, df_1d, atr_14)
+    # === 1h EMA for trend filter (30-period) ===
+    ema_1h = pd.Series(close).ewm(span=30, min_periods=30, adjust=False).mean().values
     
-    # === Volume spike detection (20-period volume MA) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Align HTF data to 1h timeframe
+    r2_1h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_1h = align_htf_to_ltf(prices, df_1d, s2)
+    atr_14_1h = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # === ADX for trend strength (14-period) ===
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    tr_for_adx = tr.copy()
-    tr_for_adx[0] = 0  # First TR is zero for ADX calculation
+    # === Volume spike detection (15-period volume MA) ===
+    vol_ma = pd.Series(volume).rolling(window=15, min_periods=15).mean().values
+    volume_spike = volume > (1.8 * vol_ma)
     
-    atr_14_adx = pd.Series(tr_for_adx).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_14_adx
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_14_adx
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # === Session filter: 08-20 UTC ===
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     
@@ -65,60 +58,60 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
-        # Skip if any required data is NaN
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
-            np.isnan(atr_14_4h[i]) or np.isnan(adx[i]) or
-            np.isnan(volume_spike[i])):
+        # Skip if any required data is NaN or outside session
+        if (np.isnan(r2_1h[i]) or np.isnan(s2_1h[i]) or
+            np.isnan(atr_14_1h[i]) or np.isnan(ema_1h[i]) or
+            np.isnan(volume_spike[i]) or not in_session[i]):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        r1_level = r1_4h[i]
-        s1_level = s1_4h[i]
-        atr_val = atr_14_4h[i]
-        adx_val = adx[i]
+        r2_level = r2_1h[i]
+        s2_level = s2_1h[i]
+        atr_val = atr_14_1h[i]
+        ema_val = ema_1h[i]
         vol_spike = volume_spike[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price drops below S1 or trend weakens
-            if price < s1_level or adx_val < 20:
+            # Exit when price drops below S2 or volatility drops significantly
+            if price < s2_level or (i > 0 and atr_val < atr_14_1h[i-1] * 0.7):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price rises above R1 or trend weakens
-            if price > r1_level or adx_val < 20:
+            # Exit when price rises above R2 or volatility drops significantly
+            if price > r2_level or (i > 0 and atr_val < atr_14_1h[i-1] * 0.7):
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above R1 with volume spike and strong trend (ADX > 25)
-            if price > r1_level and vol_spike and adx_val > 25:
-                signals[i] = 0.25
+            # LONG: Price breaks above R2 with volume spike, above EMA30
+            if price > r2_level and vol_spike and price > ema_val:
+                signals[i] = 0.20
                 position = 1
                 continue
             
-            # SHORT: Price breaks below S1 with volume spike and strong trend (ADX > 25)
-            elif price < s1_level and vol_spike and adx_val > 25:
-                signals[i] = -0.25
+            # SHORT: Price breaks below S2 with volume spike, below EMA30
+            elif price < s2_level and vol_spike and price < ema_val:
+                signals[i] = -0.20
                 position = -1
                 continue
         
         # Hold current position
         if position == 1:
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif position == -1:
-            signals[i] = -0.25
+            signals[i] = -0.20
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Pivot_R1_S1_Breakout_Volume_ADXFilter"
-timeframe = "4h"
+name = "1h_Pivot_R2_S2_Breakout_Volume_EMA30Filter_Session"
+timeframe = "1h"
 leverage = 1.0
