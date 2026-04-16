@@ -3,13 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d EMA(34) trend + 4h Donchian(20) breakout with volume confirmation and chop regime filter.
-# Long when price > 1d EMA(34) AND breaks above 4h Donchian upper(20) with volume spike (>1.5x median) AND chop < 61.8 (trending).
-# Short when price < 1d EMA(34) AND breaks below 4h Donchian lower(20) with volume spike AND chop < 61.8.
-# Exit via ATR(10) trailing stop: long exits when price < highest high since entry - 2.0*ATR,
-# short exits when price > lowest low since entry + 2.0*ATR.
-# Uses discrete position size 0.25. Tight volume and chop filters reduce overtrading.
-# Combines HTF trend (1d EMA) with LTF structure (Donchian) for robustness in bull/bear markets.
+# Hypothesis: 4h strategy using 1d Supertrend(ATR=10, mult=3) for trend + 4h Donchian(20) breakout with volume confirmation (>1.5x median) and chop regime filter (chop < 61.8).
+# Long when price > 1d Supertrend AND breaks above 4h Donchian upper(20) with volume spike AND chop < 61.8.
+# Short when price < 1d Supertrend AND breaks below 4h Donchian lower(20) with volume spike AND chop < 61.8.
+# Exit via ATR(10) trailing stop: long exits when price < highest high since entry - 2.0*ATR, short exits when price > lowest low since entry + 2.0*ATR.
+# Uses discrete position size 0.25. Supertrend adapts to volatility, making it robust in both bull and bear markets.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,15 +18,64 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 1d data once before loop for EMA(34) trend
+    # Get 1d data once before loop for Supertrend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === 1d Indicators: EMA(34) for trend ===
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # === 1d Indicators: Supertrend(10, 3) ===
+    atr_period = 10
+    multiplier = 3
+    
+    # True Range
+    tr1 = pd.Series(high_1d - low_1d)
+    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
+    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
+    tr2.iloc[0] = tr1.iloc[0]
+    tr3.iloc[0] = tr1.iloc[0]
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = pd.Series(tr_1d).rolling(window=atr_period, min_periods=atr_period).mean().values
+    
+    # Basic Upper and Lower Bands
+    hl2 = (high_1d + low_1d) / 2
+    basic_ub = hl2 + (multiplier * atr_1d)
+    basic_lb = hl2 - (multiplier * atr_1d)
+    
+    # Final Upper and Lower Bands
+    final_ub = np.zeros(len(close_1d))
+    final_lb = np.zeros(len(close_1d))
+    final_ub[0] = basic_ub[0]
+    final_lb[0] = basic_lb[0]
+    
+    for i in range(1, len(close_1d)):
+        if basic_ub[i] < final_ub[i-1] or close_1d[i-1] > final_ub[i-1]:
+            final_ub[i] = basic_ub[i]
+        else:
+            final_ub[i] = final_ub[i-1]
+            
+        if basic_lb[i] > final_lb[i-1] or close_1d[i-1] < final_lb[i-1]:
+            final_lb[i] = basic_lb[i]
+        else:
+            final_lb[i] = final_lb[i-1]
+    
+    # Supertrend
+    supertrend = np.zeros(len(close_1d))
+    supertrend[0] = final_ub[0]
+    for i in range(1, len(close_1d)):
+        if supertrend[i-1] == final_ub[i-1]:
+            if close_1d[i] <= final_ub[i]:
+                supertrend[i] = final_ub[i]
+            else:
+                supertrend[i] = final_lb[i]
+        else:
+            if close_1d[i] >= final_lb[i]:
+                supertrend[i] = final_lb[i]
+            else:
+                supertrend[i] = final_ub[i]
     
     # Get 4h data for Donchian, volume, ATR, and chop filter
     df_4h = get_htf_data(prices, '4h')
@@ -68,7 +115,7 @@ def generate_signals(prices):
     chop = np.where((range_14 == 0) | np.isnan(chop), 50.0, chop)
     
     # Align all indicators to primary timeframe (4h)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
     donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper_20)
     donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower_20)
     vol_median_aligned = align_htf_to_ltf(prices, df_4h, vol_median_20)
@@ -78,7 +125,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(34, 20, 14, 10)  # EMA(34), Donchian(20), Chop(14), ATR(10)
+    warmup = max(30, 20, 14, 10)  # Supertrend(30), Donchian(20), Chop(14), ATR(10)
     
     # Track position state for trailing stops
     position = 0  # 0: flat, 1: long, -1: short
@@ -87,7 +134,7 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(donchian_upper_aligned[i]) or 
+        if (np.isnan(supertrend_aligned[i]) or np.isnan(donchian_upper_aligned[i]) or 
             np.isnan(donchian_lower_aligned[i]) or np.isnan(vol_median_aligned[i]) or 
             np.isnan(atr_aligned[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0
@@ -97,7 +144,7 @@ def generate_signals(prices):
             continue
         
         # Current values (aligned)
-        ema_trend = ema_34_aligned[i]
+        supertrend_val = supertrend_aligned[i]
         upper = donchian_upper_aligned[i]
         lower = donchian_lower_aligned[i]
         vol_median = vol_median_aligned[i]
@@ -146,15 +193,15 @@ def generate_signals(prices):
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
             # LONG CONDITIONS
-            # Price above 1d EMA(34) (uptrend), breakout above Donchian upper, volume spike, trending market
-            if price > ema_trend and breakout_long and volume_spike and trending:
+            # Price above 1d Supertrend (uptrend), breakout above Donchian upper, volume spike, trending market
+            if price > supertrend_val and breakout_long and volume_spike and trending:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = price  # initialize trailing stop
             
             # SHORT CONDITIONS
-            # Price below 1d EMA(34) (downtrend), breakout below Donchian lower, volume spike, trending market
-            elif price < ema_trend and breakout_short and volume_spike and trending:
+            # Price below 1d Supertrend (downtrend), breakout below Donchian lower, volume spike, trending market
+            elif price < supertrend_val and breakout_short and volume_spike and trending:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = price  # initialize trailing stop
@@ -164,6 +211,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dEMA34_4hDonchian20_Breakout_VolumeSpike1.5x_Chop61.8_ATRTrail2.0_v1"
+name = "4h_1dSupertrend10_3_4hDonchian20_Breakout_VolumeSpike1.5x_Chop61.8_ATRTrail2.0_v1"
 timeframe = "4h"
 leverage = 1.0
