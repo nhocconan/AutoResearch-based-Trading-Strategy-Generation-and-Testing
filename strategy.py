@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R1/S1 breakout + 1d EMA34 trend filter + volume confirmation + ATR trailing stop
-# Entry on breakout above Camarilla R1 (long) or below S1 (short) on 12h timeframe.
+# Hypothesis: 4h Camarilla R1/S1 breakout + 1d EMA34 trend filter + volume confirmation + ATR trailing stop
+# Entry on breakout above Camarilla R1 (long) or below S1 (short) on 4h timeframe.
 # 1d EMA34 acts as trend filter: only long when price > EMA34, short when price < EMA34.
-# Volume confirmation: current 12h volume > 1.8x 20-period average of 12h volume.
+# Volume confirmation: current 4h volume > 1.5x 20-period average of 4h volume.
 # ATR-based trailing stop (2.0x ATR) to manage risk and reduce whipsaws.
-# Designed for low trade frequency (target: 50-150 total trades over 4 years) to minimize fee drag.
-# Works in both bull and bear markets via trend filter and volatility-based stops.
+# Designed for low trade frequency (target: 75-200 total trades over 4 years) to minimize fee drag.
+# Uses proven Camarilla pivot structure from top performers, with EMA trend filter for bull/bear adaptation.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,45 +21,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h data for Camarilla, volume, ATR ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    # === 4h data for Camarilla, volume, ATR ===
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
     
-    # === Camarilla Pivot Levels (based on previous 12h bar) ===
-    # Calculated from previous completed 12h bar's OHLC
-    prev_close = np.roll(close_12h, 1)
-    prev_high = np.roll(high_12h, 1)
-    prev_low = np.roll(low_12h, 1)
-    # First bar needs special handling
-    prev_close[0] = close_12h[0]
-    prev_high[0] = high_12h[0]
-    prev_low[0] = low_12h[0]
+    # === Camarilla Pivot Levels (R1, S1) from previous day ===
+    # Typical price = (H + L + C) / 3
+    typical_price = (high_4h + low_4h + close_4h) / 3.0
+    # Range = H - L
+    rng = high_4h - low_4h
+    # R1 = C + (H-L) * 1.1/12
+    # S1 = C - (H-L) * 1.1/12
+    r1 = close_4h + rng * 1.1 / 12.0
+    s1 = close_4h - rng * 1.1 / 12.0
+    r1_aligned = align_htf_to_ltf(prices, df_4h, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_4h, s1)
     
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_ = prev_high - prev_low
-    r1 = pivot + (range_ * 1.1 / 12)  # Camarilla R1
-    s1 = pivot - (range_ * 1.1 / 12)  # Camarilla S1
+    # === 4h Volume Confirmation (20-period average) ===
+    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20)
     
-    # Align Camarilla levels to LTF (15m)
-    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
-    
-    # === 12h Volume Confirmation (20-period average) ===
-    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
-    
-    # === 12h ATR for trailing stop (14-period) ===
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    # === 4h ATR for trailing stop (14-period) ===
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
+    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
     
     # === 1d EMA34 (trend filter) ===
     df_1d = get_htf_data(prices, '1d')
@@ -93,7 +86,7 @@ def generate_signals(prices):
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
         ema34_val = ema34_aligned[i]
-        vol_confirm = volume[i] > vol_ma_aligned[i] * 1.8  # 1.8x average volume
+        vol_confirm = volume[i] > vol_ma_aligned[i] * 1.5  # 1.5x average volume
         atr_val = atr_aligned[i]
         
         # === TRAILING STOP LOGIC ===
@@ -163,6 +156,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_1dEMA34_VolumeConfirm_ATRTrail"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_1dEMA34_VolumeConfirm_ATRTrail"
+timeframe = "4h"
 leverage = 1.0
