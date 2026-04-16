@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,99 +19,97 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === 4d data (HTF for trend filter) ===
-    df_4d = get_htf_data(prices, '4d')
-    close_4d = df_4d['close'].values
-    
-    # === Calculate 1d price channels (previous day's high/low) ===
-    # Using previous day's OHLC for support/resistance
+    # === Calculate 1d Camarilla pivot levels ===
+    # Using previous day's OHLC
+    prev_close_1d = np.roll(close_1d, 1)
     prev_high_1d = np.roll(high_1d, 1)
     prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d[0] = close_1d[0]  # First value
     prev_high_1d[0] = high_1d[0]
     prev_low_1d[0] = low_1d[0]
     
-    # Support and Resistance levels (previous day's high/low)
-    resistance = prev_high_1d
-    support = prev_low_1d
+    # Camarilla formula
+    camarilla_base = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
+    camarilla_range = prev_high_1d - prev_low_1d
     
-    # Align to 1h timeframe
-    resistance_aligned = align_htf_to_ltf(prices, df_1d, resistance)
-    support_aligned = align_htf_to_ltf(prices, df_1d, support)
+    # Resistance and Support levels
+    r3 = camarilla_base + camarilla_range * 1.1 / 4
+    s3 = camarilla_base - camarilla_range * 1.1 / 4
     
-    # === 4d EMA50 for trend filter ===
-    ema_50_4d = pd.Series(close_4d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_4d_aligned = align_htf_to_ltf(prices, df_4d, ema_50_4d)
+    # Align to 12h timeframe
+    camarilla_base_aligned = align_htf_to_ltf(prices, df_1d, camarilla_base)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # === Volume confirmation (1h) ===
-    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
-    vol_ratio = volume / vol_ma_10
+    # === 1d EMA34 for trend filter ===
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === Session filter (08-20 UTC) ===
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_mask = (hours >= 8) & (hours <= 20)
+    # === Volume confirmation (12h) ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma_20
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 50
+    warmup = 100
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
-        # Skip if any data is NaN or outside session
-        if (np.isnan(resistance_aligned[i]) or np.isnan(support_aligned[i]) or 
-            np.isnan(ema_50_4d_aligned[i]) or np.isnan(vol_ratio[i]) or
-            not session_mask[i]):
+        # Skip if any data is NaN
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        resistance_val = resistance_aligned[i]
-        support_val = support_aligned[i]
-        ema_50_4d_val = ema_50_4d_aligned[i]
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
+        ema_34_1d_val = ema_34_1d_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price closes below support (stop) or hits resistance*1.02 (take profit)
-            if price < support_val or price > resistance_val * 1.02:
+            # Exit when price closes below S3 (stop) or hits R3*1.5 (take profit)
+            if price < s3_val or price > r3_val * 1.5:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price closes above resistance (stop) or hits support*0.98 (take profit)
-            if price > resistance_val or price < support_val * 0.98:
+            # Exit when price closes above R3 (stop) or hits S3*0.5 (take profit)
+            if price > r3_val or price < s3_val * 0.5:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above resistance with volume AND above 4d EMA50 (uptrend)
-            if (price > resistance_val) and (price > ema_50_4d_val) and (vol_ratio_val > 1.5):
-                signals[i] = 0.20
+            # LONG: Price breaks above R3 with volume AND above 1d EMA34 (uptrend)
+            if (price > r3_val) and (price > ema_34_1d_val) and (vol_ratio_val > 2.0):
+                signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Price breaks below support with volume AND below 4d EMA50 (downtrend)
-            elif (price < support_val) and (price < ema_50_4d_val) and (vol_ratio_val > 1.5):
-                signals[i] = -0.20
+            # SHORT: Price breaks below S3 with volume AND below 1d EMA34 (downtrend)
+            elif (price < s3_val) and (price < ema_34_1d_val) and (vol_ratio_val > 2.0):
+                signals[i] = -0.25
                 position = -1
                 continue
         
         # Hold current position
         if position == 1:
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif position == -1:
-            signals[i] = -0.20
+            signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1h_Resistance_Support_Breakout_Volume_EMA50_4d_Session"
-timeframe = "1h"
+name = "12h_Camarilla_R3_S3_Breakout_Volume_EMA34"
+timeframe = "12h"
 leverage = 1.0
