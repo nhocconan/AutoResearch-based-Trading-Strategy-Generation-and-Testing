@@ -3,11 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud breakout with 1d volume confirmation and ADX regime filter
-# Long when price breaks above 6h Ichimoku cloud AND 1d volume > 1.5x 20-period SMA AND 1d ADX > 25
-# Short when price breaks below 6h Ichimoku cloud AND 1d volume > 1.5x 20-period SMA AND 1d ADX > 25
-# Ichimoku provides dynamic support/resistance via cloud, volume confirms breakout conviction,
-# ADX ensures sufficient trend strength to avoid whipsaws in ranging markets
+# Hypothesis: 6h Elder Ray (Bull Power/Bear Power) with 1d ADX regime filter and volume confirmation
+# Long when Bull Power > 0 (close > EMA13) AND Bear Power < 0 AND 1d ADX > 20 AND volume > 1.2x 20-period SMA
+# Short when Bear Power < 0 (close < EMA13) AND Bull Power < 0 AND 1d ADX > 20 AND volume > 1.2x 20-period SMA
+# Elder Ray measures bull/bear strength relative to EMA13, ADX ensures trending market, volume confirms conviction
 # Discrete position sizing (0.25) to control drawdown. Target: 50-150 total trades over 4 years
 
 def generate_signals(prices):
@@ -24,9 +23,9 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 6h data once before loop for Ichimoku calculation
+    # Get 6h data once before loop for Elder Ray calculation
     df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 60:
+    if len(df_6h) < 30:
         return np.zeros(n)
     
     # Get 1d data once before loop for volume and ADX filters
@@ -34,30 +33,20 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 6h Indicator: Ichimoku Cloud ===
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
+    # === 6h Indicator: Elder Ray (Bull Power/Bear Power) ===
+    # EMA13 as the reference
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
+    # Bull Power = High - EMA13 (buying strength)
+    bull_power = high - ema13
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
+    # Bear Power = Low - EMA13 (selling strength)
+    bear_power = low - ema13
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = ((period52_high + period52_low) / 2)
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_6h, tenkan_sen)
-    kijun_aligned = align_htf_to_ltf(prices, df_6h, kijun_sen)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_6h, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_6h, senkou_span_b)
+    # Align Elder Ray components to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_6h, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_6h, bear_power)
+    ema13_aligned = align_htf_to_ltf(prices, df_6h, ema13)
     
     # === 1d Indicator: Volume SMA (20-period) for confirmation ===
     volume_1d = df_1d['volume'].values
@@ -103,8 +92,8 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (need 52 periods for Ichimoku + 26 for Senkou Span)
-    warmup = 100
+    # Warmup: ensure all indicators are valid (need 13 periods for EMA13 + 14 for ADX)
+    warmup = 50
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -113,32 +102,32 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or
-            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
-            np.isnan(vol_sma_20_1d_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
+            np.isnan(ema13_aligned[i]) or np.isnan(vol_sma_20_1d_aligned[i]) or 
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current 1d volume > 1.5x 20-period 1d volume SMA
+        # Volume filter: current 1d volume > 1.2x 20-period 1d volume SMA
         vol_1d_series = df_1d['volume'].values
         vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d_series)
         vol_confirm = False
         if not np.isnan(vol_1d_aligned[i]):
-            vol_threshold = vol_sma_20_1d_aligned[i] * 1.5
+            vol_threshold = vol_sma_20_1d_aligned[i] * 1.2
             vol_confirm = vol_1d_aligned[i] > vol_threshold
         
-        # Determine cloud boundaries (top and bottom of cloud)
-        cloud_top = max(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        cloud_bottom = min(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        
         # === LONG CONDITIONS ===
-        # Price breaks above cloud AND volume confirmation AND ADX > 25 (strong trend)
-        if (close[i] > cloud_top) and vol_confirm and (adx_aligned[i] > 25):
+        # Bull Power > 0 (buying pressure) AND Bear Power < 0 (no selling pressure) 
+        # AND ADX > 20 (trending market) AND volume confirmation
+        if (bull_power_aligned[i] > 0) and (bear_power_aligned[i] < 0) and \
+           (adx_aligned[i] > 20) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # Price breaks below cloud AND volume confirmation AND ADX > 25 (strong trend)
-        elif (close[i] < cloud_bottom) and vol_confirm and (adx_aligned[i] > 25):
+        # Bear Power < 0 (selling pressure) AND Bull Power < 0 (no buying pressure)
+        # AND ADX > 20 (trending market) AND volume confirmation
+        elif (bear_power_aligned[i] < 0) and (bull_power_aligned[i] < 0) and \
+             (adx_aligned[i] > 20) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -146,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_IchimokuCloud_Breakout_1dVolume_ADX_v1"
+name = "6h_ElderRay_1dADX_Volume_Filter_v3"
 timeframe = "6h"
 leverage = 1.0
