@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA trend + 1w RSI mean reversion + volume spike filter.
-# Long when 1d KAMA slope > 0 (uptrend) AND 1w RSI < 30 (oversold) AND volume > 1.5x 20-period 1w average.
-# Short when 1d KAMA slope < 0 (downtrend) AND 1w RSI > 70 (overbought) AND volume > 1.5x 20-period 1w average.
-# Exit when 1d KAMA slope reverses or price crosses 1d KAMA.
-# Uses discrete position size 0.25. Designed to catch trend continuations after HTF pullbacks in strong trends.
-# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag while maintaining edge.
-# Works in both bull and bear markets by using KAMA for adaptive trend and RSI for mean reversion entries.
+# Hypothesis: 6h Williams %R (14) with 1d EMA(34) trend filter and volume confirmation.
+# Long when Williams %R crosses above -80 (oversold bounce) AND price > 1d EMA(34) AND volume > 1.5x 20-period average.
+# Short when Williams %R crosses below -20 (overbought rejection) AND price < 1d EMA(34) AND volume > 1.5x 20-period average.
+# Exit when Williams %R crosses -50 (mean reversion) or ATR-based stoploss (2*ATR from entry).
+# Uses discrete position size 0.25. Designed to capture mean reversion in trending markets.
+# Target: 50-150 total trades over 4 years (12-37/year) to balance edge and fee drag.
+# Works in both bull and bear markets by requiring trend alignment via 1d EMA(34).
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,38 +21,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Indicators: KAMA (adaptive trend) ===
-    close_1d = pd.Series(close)
-    # Efficiency Ratio
-    change = abs(close_1d.diff(10))
-    volatility = close_1d.diff().abs().rolling(10).sum()
-    er = change / volatility
-    er = er.fillna(0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = [close[0]]
-    for i in range(1, len(close)):
-        kama.append(kama[-1] + sc.iloc[i] * (close[i] - kama[-1]))
-    kama = np.array(kama)
-    kama_slope = np.diff(kama, prepend=kama[0])  # slope = current - previous
+    # === 6h Indicators: Williams %R (14-period) ===
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
-    # === 1w Indicators: RSI (mean reversion) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    delta = pd.Series(close_1w).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_aligned = align_htf_to_ltf(prices, df_1w, rsi)
+    # === 1d Indicators: EMA(34) for trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === 1w Indicators: Volume Spike (volume > 1.5x 20-period average) ===
-    vol_1w = df_1w['volume'].values
-    vol_ma_1w = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
-    volume_spike = volume > (1.5 * vol_ma_1w_aligned)
+    # === Volume Confirmation: volume > 1.5x 20-period average ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma)
+    
+    # === 6h ATR for stoploss ===
+    tr1 = pd.Series(high).diff()
+    tr2 = pd.Series(low).diff().abs()
+    tr3 = pd.Series(close).shift(1).diff().abs()
+    tr_6h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_6h = pd.Series(tr_6h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -60,8 +48,8 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed)
-    warmup = 100
+    # Warmup: ensure all indicators are valid (max 34 periods needed for EMA)
+    warmup = 50
     
     # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
@@ -69,30 +57,42 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(kama_slope[i]) or np.isnan(rsi_aligned[i]) or np.isnan(volume_spike[i]) or
-            not session_filter[i]):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_confirm[i]) or
+            np.isnan(atr_6h[i]) or not session_filter[i]):
             signals[i] = 0.0
             position = 0
             continue
         
         # Current values
         price = close[i]
-        kama_val = kama[i]
-        kama_slope_val = kama_slope[i]
-        rsi_val = rsi_aligned[i]
-        vol_spike = volume_spike[i]
+        wr = williams_r[i]
+        vol_conf = volume_confirm[i]
+        atr_val = atr_6h[i]
+        price_vs_ema = price > ema_34_1d_aligned[i]
+        
+        # Williams %R crossover signals
+        wr_cross_above_80 = wr > -80 and williams_r[i-1] <= -80
+        wr_cross_below_20 = wr < -20 and williams_r[i-1] >= -20
+        wr_cross_above_50 = wr > -50 and williams_r[i-1] <= -50
+        wr_cross_below_50 = wr < -50 and williams_r[i-1] >= -50
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if KAMA slope turns negative or price crosses below KAMA
-            if kama_slope_val <= 0 or price < kama_val:
+            # Exit if Williams %R crosses above -50 (overbought)
+            if wr_cross_above_50:
+                exit_signal = True
+            # ATR-based stoploss: 2*ATR below entry
+            elif price < entry_price - 2.0 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if KAMA slope turns positive or price crosses above KAMA
-            if kama_slope_val >= 0 or price > kama_val:
+            # Exit if Williams %R crosses below -50 (oversold)
+            if wr_cross_below_50:
+                exit_signal = True
+            # ATR-based stoploss: 2*ATR above entry
+            elif price > entry_price + 2.0 * atr_val:
                 exit_signal = True
         
         if exit_signal:
@@ -103,14 +103,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: KAMA uptrend AND 1w RSI oversold AND volume spike
-            if kama_slope_val > 0 and rsi_val < 30 and vol_spike:
+            # LONG: Williams %R crosses above -80 (oversold bounce) AND price > 1d EMA(34) AND volume confirmation
+            if wr_cross_above_80 and price_vs_ema and vol_conf:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: KAMA downtrend AND 1w RSI overbought AND volume spike
-            elif kama_slope_val < 0 and rsi_val > 70 and vol_spike:
+            # SHORT: Williams %R crosses below -20 (overbought rejection) AND price < 1d EMA(34) AND volume confirmation
+            elif wr_cross_below_20 and not price_vs_ema and vol_conf:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -120,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_1wRSI_VolumeSpike_V1"
-timeframe = "1d"
+name = "6h_WilliamsR14_1dEMA34_VolumeConfirm_V1"
+timeframe = "6h"
 leverage = 1.0
