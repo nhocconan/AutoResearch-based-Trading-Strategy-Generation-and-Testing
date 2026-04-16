@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h EMA(21) pullback strategy with 4h Donchian(20) trend filter and 1d volume confirmation.
-# Long when: 1h price > EMA21 AND 1h close > 1h open (bullish candle) AND price > 4h Donchian upper(20) AND 1d volume > 1.3x 20-period average
-# Short when: 1h price < EMA21 AND 1h close < 1h open (bearish candle) AND price < 4h Donchian lower(20) AND 1d volume > 1.3x 20-period average
-# Exit when price crosses EMA21 in opposite direction.
-# Uses 4h/1d for signal direction and regime, 1h for precise entry timing.
-# Session filter: 08-20 UTC to avoid low-volume Asian session.
-# Position size: 0.20 discrete levels to minimize fee churn.
-# Target: 80-160 total trades over 4 years (20-40/year) to balance opportunity and fee drag.
+# Hypothesis: 6h Elder Ray Index (Bull/Bear Power) with EMA50 trend filter and volume confirmation.
+# Bull Power = High - EMA(close,50), Bear Power = Low - EMA(close,50).
+# Long when Bull Power > 0 AND Bear Power < previous Bear Power (bullish momentum building) AND 6h volume > 1.5x 20-period average AND EMA50 rising.
+# Short when Bear Power < 0 AND Bull Power < previous Bull Power (bearish momentum building) AND 6h volume > 1.5x 20-period average AND EMA50 falling.
+# Exit when Elder Ray power crosses zero (Bull Power <= 0 for longs, Bear Power >= 0 for shorts).
+# Uses discrete position size 0.25. Elder Ray measures price relative to trend, volume confirms participation, EMA50 slope ensures trend alignment.
+# Target: 60-120 total trades over 4 years (15-30/year) to balance opportunity and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,42 +20,22 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
     
-    # Pre-compute session hours for 08-20 UTC filter
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h data once before loop for Donchian calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    
-    # === 4h Indicators: Donchian channels (20-period) ===
-    upper_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to 1h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_4h, upper_20)
-    lower_aligned = align_htf_to_ltf(prices, df_4h, lower_20)
-    
-    # Get 1d data once before loop for volume filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    volume_1d = df_1d['volume'].values
-    
-    # === 1d Indicators: Volume MA(20) for confirmation ===
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
-    
-    # === 1h Indicators: EMA(21) for dynamic support/resistance ===
+    # === 6h Indicators: EMA50 and Elder Ray ===
+    # EMA50
     close_s = pd.Series(close)
-    ema_21 = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Elder Ray: Bull Power = High - EMA50, Bear Power = Low - EMA50
+    bull_power = high - ema50
+    bear_power = low - ema50
+    
+    # EMA50 slope (rising/falling)
+    ema50_slope = ema50 - np.roll(ema50, 1)
+    ema50_slope[0] = 0
+    
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
@@ -68,45 +47,41 @@ def generate_signals(prices):
     entry_price = 0.0
     
     for i in range(warmup, n):
-        # Skip if not in trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            position = 0
-            entry_price = 0.0
-            continue
-        
         # Skip if any required data is NaN
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(ema_21[i]) or np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(ema50[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema50_slope[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             position = 0
             entry_price = 0.0
             continue
         
         # Current values
-        upper_val = upper_aligned[i]
-        lower_val = lower_aligned[i]
-        ema_val = ema_21[i]
-        vol_ma_val = vol_ma_aligned[i]
+        ema50_val = ema50[i]
+        bull_val = bull_power[i]
+        bear_val = bear_power[i]
+        ema50_slope_val = ema50_slope[i]
+        vol_ma_val = vol_ma_20[i]
         price = close[i]
         vol = volume[i]
-        is_bullish_candle = close[i] > open_price[i]
-        is_bearish_candle = close[i] < open_price[i]
         
-        # Volume filter: volume > 1.3x 20-period average (using 1d volume MA)
-        vol_filter = vol > 1.3 * vol_ma_val if vol_ma_val > 0 else False
+        # Volume filter
+        vol_filter = vol > 1.5 * vol_ma_val if vol_ma_val > 0 else False
+        
+        # EMA50 trend filter
+        ema_rising = ema50_slope_val > 0
+        ema_falling = ema50_slope_val < 0
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price crosses below EMA21
-            if price < ema_val:
+            # Exit if Bull Power crosses zero (loses bullish momentum)
+            if bull_val <= 0:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price crosses above EMA21
-            if price > ema_val:
+            # Exit if Bear Power crosses zero (loses bearish momentum)
+            if bear_val >= 0:
                 exit_signal = True
         
         if exit_signal:
@@ -117,23 +92,23 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: price above EMA21, bullish candle, above 4h Donchian upper, with volume confirmation
-            if price > ema_val and is_bullish_candle and price > upper_val and vol_filter:
-                signals[i] = 0.20
+            # LONG: Bull Power > 0 (above EMA50) AND Bear Power decreasing (bullish building) AND volume filter AND EMA50 rising
+            if bull_val > 0 and i > warmup and bear_val < bear_power[i-1] and vol_filter and ema_rising:
+                signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: price below EMA21, bearish candle, below 4h Donchian lower, with volume confirmation
-            elif price < ema_val and is_bearish_candle and price < lower_val and vol_filter:
-                signals[i] = -0.20
+            # SHORT: Bear Power < 0 (below EMA50) AND Bull Power decreasing (bearish building) AND volume filter AND EMA50 falling
+            elif bear_val < 0 and i > warmup and bull_val < bull_power[i-1] and vol_filter and ema_falling:
+                signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         else:
-            signals[i] = position * 0.20
+            signals[i] = position * 0.25
     
     return signals
 
-name = "1h_EMA21_Pullback_4hDonchian20_1dVolumeFilter_V1"
-timeframe = "1h"
+name = "6h_ElderRay_EMA50_VolumeFilter_V1"
+timeframe = "6h"
 leverage = 1.0
