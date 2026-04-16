@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout + 1w ADX trend filter + volume confirmation
-# In trending markets (ADX > 25), buy when price breaks above upper Donchian channel,
-# sell when price breaks below lower Donchian channel. Works in bull markets (buy breakouts)
-# and bear markets (sell breakdowns). Weekly ADX ensures we only trade in strong trends.
-# Target: 50-100 total trades over 4 years (12-25/year) with disciplined entries.
+# Hypothesis: 6h Donchian(20) breakout + 12h pivot direction + volume confirmation
+# Donchian breakouts capture momentum in trending markets. 
+# Pivot direction from 12h acts as trend filter: only take long breaks above 12h pivot point in uptrend,
+# short breaks below pivot in downtrend. Volume confirms breakout strength.
+# Works in bull markets (breakouts with volume) and bear markets (breakdowns with volume).
+# Target: 50-150 total trades over 4 years (12-37/year) with disciplined entries.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,52 +20,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data (primary timeframe) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # === 6h data (primary timeframe) ===
+    df_6h = get_htf_data(prices, '6h')
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    volume_6h = df_6h['volume'].values
     
-    # === 1w data (higher timeframe for ADX trend filter) ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === 12h data (higher timeframe for pivot direction) ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # === 1d Donchian Channel (20) ===
-    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # === 6h Donchian(20) channels ===
+    donch_high = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
     
-    # === 1w ADX(14) for trend filter ===
-    # Calculate True Range
-    tr1 = pd.Series(high_1w).diff()
-    tr2 = abs(pd.Series(high_1w).diff())
-    tr3 = abs(pd.Series(low_1w).diff())
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1w = tr.rolling(window=14, min_periods=14).mean().values
+    # === 12h Pivot Point (classic: (H+L+C)/3) ===
+    pp_12h = (high_12h + low_12h + close_12h) / 3.0
     
-    # Calculate Directional Movement
-    up_move = pd.Series(high_1w).diff()
-    down_move = -pd.Series(low_1w).diff()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # === 6h volume ratio for confirmation ===
+    vol_ma_20_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_6h = volume_6h / vol_ma_20_6h
     
-    # Smooth DM and TR
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_1w
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_1w
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # === 1d volume ratio for confirmation ===
-    vol_ma_10_1d = pd.Series(volume_1d).rolling(window=10, min_periods=10).mean().values
-    vol_ratio_1d = volume_1d / vol_ma_10_1d
+    # Align 12h pivot to 6s timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_12h, pp_12h)
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 100
+    warmup = 50
     
     # Track position and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
@@ -72,23 +58,21 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ratio_1d[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(pp_aligned[i]) or np.isnan(vol_ratio_6h[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        upper = high_20[i]
-        lower = low_20[i]
-        adx_val = adx_aligned[i]
-        vol_ratio = vol_ratio_1d[i]
+        pp_val = pp_aligned[i]
+        vol_ratio = vol_ratio_6h[i]
         
         # === STOPLOSS LOGIC ===
         if position == 1:  # Long position
-            atr_1d = np.abs(high_1d - low_1d)
-            atr_ma = pd.Series(atr_1d).rolling(window=14, min_periods=14).mean().values
-            atr_aligned = align_htf_to_ltf(prices, df_1d, atr_ma)
+            atr_6h = np.abs(high_6h - low_6h)
+            atr_ma = pd.Series(atr_6h).rolling(window=14, min_periods=14).mean().values
+            atr_aligned = align_htf_to_ltf(prices, df_6h, atr_ma)
             atr_val = atr_aligned[i]
             if price < entry_price - 2.5 * atr_val:
                 signals[i] = 0.0
@@ -97,9 +81,9 @@ def generate_signals(prices):
                 continue
         
         elif position == -1:  # Short position
-            atr_1d = np.abs(high_1d - low_1d)
-            atr_ma = pd.Series(atr_1d).rolling(window=14, min_periods=14).mean().values
-            atr_aligned = align_htf_to_ltf(prices, df_1d, atr_ma)
+            atr_6h = np.abs(high_6h - low_6h)
+            atr_ma = pd.Series(atr_6h).rolling(window=14, min_periods=14).mean().values
+            atr_aligned = align_htf_to_ltf(prices, df_6h, atr_ma)
             atr_val = atr_aligned[i]
             if price > entry_price + 2.5 * atr_val:
                 signals[i] = 0.0
@@ -109,16 +93,16 @@ def generate_signals(prices):
         
         # === EXIT LOGIC ===
         if position == 1:  # Long position
-            # Exit when price breaks below lower Donchian or trend weakens
-            if price < lower or adx_val < 20:
+            # Exit when price breaks below Donchian low or pivot flips bearish
+            if price < donch_low[i] or close_6h[i] < pp_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price breaks above upper Donchian or trend weakens
-            if price > upper or adx_val < 20:
+            # Exit when price breaks above Donchian high or pivot flips bullish
+            if price > donch_high[i] or close_6h[i] > pp_val:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -126,16 +110,16 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Require trending market (ADX > 25) and volume confirmation
-            if adx_val > 25 and vol_ratio > 1.3:
-                # Buy when price breaks above upper Donchian
-                if price > upper:
+            # Require volume confirmation
+            if vol_ratio > 1.5:
+                # Buy when price breaks above Donchian high AND above 12h pivot (bullish alignment)
+                if price > donch_high[i] and close_6h[i] > pp_val:
                     signals[i] = 0.25
                     position = 1
                     entry_price = price
                     continue
-                # Sell when price breaks below lower Donchian
-                elif price < lower:
+                # Sell when price breaks below Donchian low AND below 12h pivot (bearish alignment)
+                elif price < donch_low[i] and close_6h[i] < pp_val:
                     signals[i] = -0.25
                     position = -1
                     entry_price = price
@@ -151,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wADX_VolumeTrendFilter_v1"
-timeframe = "1d"
+name = "6h_Donchian20_Pivot12h_VolumeBreakout_v1"
+timeframe = "6h"
 leverage = 1.0
