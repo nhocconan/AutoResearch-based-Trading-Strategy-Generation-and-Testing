@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w volume spike and 1w ADX trend filter.
-# Long when price breaks above 20-period 1d high AND volume > 1.5x 20-period 1w average AND 1w ADX > 25 (strong trending market).
-# Short when price breaks below 20-period 1d low AND volume > 1.5x 20-period 1w average AND 1w ADX > 25.
-# Exit when price crosses the 1d midpoint (upper+lower)/2 or ATR-based stoploss (2*ATR from entry).
-# Uses discrete position size 0.25. Designed to capture major breakouts in strong trending markets.
-# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag while maintaining edge.
+# Hypothesis: 6h Elder Ray (Bull Power/Bear Power) with 1d EMA34 trend filter and 1d volume spike confirmation.
+# Long when Bull Power > 0 (price > EMA13) AND Bear Power < 0 (price < EMA13) AND price > EMA34 (1d uptrend) AND volume > 1.5x 20-period 1d average.
+# Short when Bull Power < 0 AND Bear Power > 0 AND price < EMA34 (1d downtrend) AND volume > 1.5x 20-period 1d average.
+# Uses discrete position size 0.25. Designed to capture momentum shifts with trend and volume confirmation.
+# Target: 50-150 total trades over 4 years (12-37/year) to balance edge and fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,59 +19,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Indicators: Donchian Channel (20-period) ===
+    # === 1d Indicators: EMA34 for trend filter ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Donchian upper and lower bands (20-period)
-    dc_upper_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    dc_lower_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    dc_mid_1d = (dc_upper_1d + dc_lower_1d) / 2
+    # === 1d Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    volume_spike = volume > (1.5 * vol_ma_1d_aligned)
     
-    # Align to 1d timeframe (already aligned as primary timeframe)
-    dc_upper_1d_aligned = dc_upper_1d
-    dc_lower_1d_aligned = dc_lower_1d
-    dc_mid_1d_aligned = dc_mid_1d
-    
-    # === 1w Indicators: Volume Spike (volume > 1.5x 20-period average) ===
-    df_1w = get_htf_data(prices, '1w')
-    vol_1w = df_1w['volume'].values
-    vol_ma_1w = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
-    volume_spike = volume > (1.5 * vol_ma_1w_aligned)
-    
-    # === 1w Indicators: ADX > 25 (strong trending market filter) ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # True Range
-    tr1 = pd.Series(high_1w).diff()
-    tr2 = pd.Series(low_1w).diff().abs()
-    tr3 = pd.Series(close_1w).shift(1).diff().abs()
-    tr_1w = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1w = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Movement
-    dm_plus = pd.Series(high_1w).diff()
-    dm_minus = pd.Series(low_1w).diff().abs()
-    dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
-    dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
-    
-    # Smoothed DM and TR
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_smooth = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * (dm_plus_smooth / atr_smooth)
-    di_minus = 100 * (dm_minus_smooth / atr_smooth)
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    strong_trend = adx_aligned > 25
+    # === 6h Indicators: Elder Ray (Bull Power/Bear Power) ===
+    # EMA13 for 6h
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Bull Power = High - EMA13
+    bull_power = high - ema13
+    # Bear Power = Low - EMA13
+    bear_power = low - ema13
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -80,25 +45,25 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed for ADX/ATR)
-    warmup = 100
+    # Warmup: ensure all indicators are valid (max 34 periods needed for EMA34)
+    warmup = 50
     
     # Track position state and entry price for stoploss
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Calculate 1d ATR for stoploss
-    tr1_1d = pd.Series(high_1d).diff()
-    tr2_1d = pd.Series(low_1d).diff().abs()
-    tr3_1d = pd.Series(close_1d).shift(1).diff().abs()
-    tr_1d = pd.concat([tr1_1d, tr2_1d, tr3_1d], axis=1).max(axis=1)
-    atr_1d_raw = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_1d_aligned = atr_1d_raw  # Already aligned as primary timeframe
+    # Calculate 6h ATR for stoploss
+    tr1 = pd.Series(high).diff()
+    tr2 = pd.Series(low).diff().abs()
+    tr3 = pd.Series(close).shift(1).diff().abs()
+    tr_6h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_6h_raw = pd.Series(tr_6h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_6h_aligned = atr_6h_raw  # Already aligned as primary timeframe
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(dc_upper_1d_aligned[i]) or np.isnan(dc_lower_1d_aligned[i]) or np.isnan(dc_mid_1d_aligned[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(strong_trend[i]) or np.isnan(atr_1d_aligned[i]) or
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_spike[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(atr_6h_aligned[i]) or
             not session_filter[i]):
             signals[i] = 0.0
             position = 0
@@ -107,23 +72,25 @@ def generate_signals(prices):
         # Current values
         price = close[i]
         vol_spike = volume_spike[i]
-        is_strong_trend = strong_trend[i]
-        atr_val = atr_1d_aligned[i]
+        ema34_val = ema34_1d_aligned[i]
+        bull = bull_power[i]
+        bear = bear_power[i]
+        atr_val = atr_6h_aligned[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price crosses below midpoint
-            if price < dc_mid_1d_aligned[i]:
+            # Exit if Elder Ray turns bearish (Bull Power <= 0 AND Bear Power >= 0)
+            if bull <= 0 and bear >= 0:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR below entry
             elif price < entry_price - 2.0 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price crosses above midpoint
-            if price > dc_mid_1d_aligned[i]:
+            # Exit if Elder Ray turns bullish (Bull Power >= 0 AND Bear Power <= 0)
+            if bull >= 0 and bear <= 0:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR above entry
             elif price > entry_price + 2.0 * atr_val:
@@ -137,14 +104,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Donchian upper AND volume spike AND strong trending market
-            if price > dc_upper_1d_aligned[i] and vol_spike and is_strong_trend:
+            # LONG: Bull Power > 0 AND Bear Power < 0 AND price > EMA34 (1d uptrend) AND volume spike
+            if bull > 0 and bear < 0 and price > ema34_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: Price breaks below Donchian lower AND volume spike AND strong trending market
-            elif price < dc_lower_1d_aligned[i] and vol_spike and is_strong_trend:
+            # SHORT: Bull Power < 0 AND Bear Power > 0 AND price < EMA34 (1d downtrend) AND volume spike
+            elif bull < 0 and bear > 0 and price < ema34_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -154,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wVolumeSpike_1wADX_V1"
-timeframe = "1d"
+name = "6h_ElderRay_1dEMA34_VolumeSpike_V1"
+timeframe = "6h"
 leverage = 1.0
