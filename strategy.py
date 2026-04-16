@@ -3,12 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 1w EMA50 trend filter
-# Long when price closes above Donchian upper band AND volume > 2x 1d average volume AND price > 1w EMA50
-# Short when price closes below Donchian lower band AND volume > 2x 1d average volume AND price < 1w EMA50
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA200 trend filter and volume confirmation
+# Long when price closes above Donchian upper(20) AND price > 1w EMA200 AND volume > 1.5x 30-day average volume
+# Short when price closes below Donchian lower(20) AND price < 1w EMA200 AND volume > 1.5x 30-day average volume
 # ATR trailing stop (2.5x ATR) to manage risk
-# Donchian provides clear breakout levels, volume confirms conviction, EMA50 filters trend
-# Target: 75-200 total trades over 4 years (19-50/year)
+# Donchian breakouts capture momentum with clear levels
+# Weekly EMA200 ensures alignment with long-term trend
+# Volume confirmation filters weak breakouts
+# Target: 40-80 total trades over 4 years (10-20/year) to minimize fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,32 +22,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1w EMA50 trend filter ===
+    # === 1w EMA200 trend filter ===
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
-    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    ema_200 = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200)
     
-    # === 1d Volume Confirmation ===
-    vol_ma_1d = pd.Series(volume).rolling(window=4, min_periods=4).mean().values  # 4 periods of 6h = 1d
+    # === 1d Donchian channels (20-period) ===
+    # Calculate highest high and lowest low over past 20 days
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Donchian(20) ===
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === 30-day average volume for confirmation ===
+    vol_ma_30d = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
-    # === 4h ATR for trailing stop (10-period) ===
+    # === 1d ATR for trailing stop (14-period) ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 60
+    warmup = 50
     
     # Track position and entry price for trailing stop
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,20 +58,20 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_50_aligned[i]) or 
-            np.isnan(high_20[i]) or
-            np.isnan(low_20[i]) or
-            np.isnan(vol_ma_1d[i]) or
+        if (np.isnan(ema_200_aligned[i]) or 
+            np.isnan(highest_20[i]) or
+            np.isnan(lowest_20[i]) or
+            np.isnan(vol_ma_30d[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        ema_val = ema_50_aligned[i]
-        upper_band = high_20[i]
-        lower_band = low_20[i]
-        vol_confirm = volume[i] > vol_ma_1d[i] * 2.0  # 2x average volume for confirmation
+        ema_val = ema_200_aligned[i]
+        upper_donchian = highest_20[i]
+        lower_donchian = lowest_20[i]
+        vol_confirm = volume[i] > vol_ma_30d[i] * 1.5  # 1.5x 30-day average volume
         atr_val = atr[i]
         
         # === TRAILING STOP LOGIC ===
@@ -96,15 +99,15 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Long when: price closes above Donchian upper band AND price > EMA50 AND volume confirmation
-            if price > upper_band and price > ema_val and vol_confirm:
+            # Long when: price closes above Donchian upper AND price > EMA200 AND volume confirmation
+            if price > upper_donchian and price > ema_val and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 highest_since_entry = price
                 continue
-            # Short when: price closes below Donchian lower band AND price < EMA50 AND volume confirmation
-            elif price < lower_band and price < ema_val and vol_confirm:
+            # Short when: price closes below Donchian lower AND price < EMA200 AND volume confirmation
+            elif price < lower_donchian and price < ema_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -121,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1wEMA50_Volume2x_ATRTrail_2.5x"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA200_Volume1.5x_ATRTrail_2.5x"
+timeframe = "1d"
 leverage = 1.0
