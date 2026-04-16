@@ -13,7 +13,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Daily ATR for volatility filter ===
+    # === Weekly Close for Trend Filter ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    # Weekly EMA(21) for trend direction
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    
+    # === Daily ATR for Volatility Filter ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -29,30 +36,25 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # === 4h EMA Trend Filter (21-period) ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
-    
-    # === Price Momentum (ROC 5-period) ===
+    # === Daily Close for Momentum and Volume ===
+    # ROC 5-period for momentum
     roc_5 = ((pd.Series(close).pct_change(5) * 100)).values
     
-    # === Volume Spike Detection (15-period volume MA) ===
-    vol_ma = pd.Series(volume).rolling(window=15, min_periods=15).mean().values
-    volume_spike = volume > (1.8 * vol_ma)  # Strong volume spike
+    # Volume spike detection (20-period volume MA)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)  # Strong volume spike
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators have valid data
-    warmup = 100  # Need ROC(5), EMA21, ATR14
+    warmup = 100  # Need ROC(5), EMA21 weekly, ATR14
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(roc_5[i]) or np.isnan(ema_21_4h_aligned[i]) or
+        if (np.isnan(roc_5[i]) or np.isnan(ema_21_1w_aligned[i]) or
             np.isnan(atr_1d_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             position = 0
@@ -60,7 +62,7 @@ def generate_signals(prices):
         
         price = close[i]
         roc = roc_5[i]
-        ema21 = ema_21_4h_aligned[i]
+        ema21w = ema_21_1w_aligned[i]
         atr = atr_1d_aligned[i]
         vol_spike = volume_spike[i]
         
@@ -81,14 +83,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Strong positive momentum + price above EMA21 + volume spike
-            if roc > 1.0 and price > ema21 and vol_spike:
+            # LONG: Strong positive momentum + price above weekly EMA21 + volume spike
+            if roc > 1.5 and price > ema21w and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # SHORT: Strong negative momentum + price below EMA21 + volume spike
-            elif roc < -1.0 and price < ema21 and vol_spike:
+            # SHORT: Strong negative momentum + price below weekly EMA21 + volume spike
+            elif roc < -1.5 and price < ema21w and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -103,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA21_ROC5_VolumeSpike_ATRFilter"
-timeframe = "4h"
+name = "1d_EMA21W_ROC5_VolumeSpike_ATRFilter"
+timeframe = "1d"
 leverage = 1.0
