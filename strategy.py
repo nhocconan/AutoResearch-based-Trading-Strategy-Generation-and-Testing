@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R reversal with 1d volume spike and 1w ADX trend filter.
-# Long when Williams %R crosses above -80 (oversold bounce) AND 1d volume > 1.8x 20-period average AND 1w ADX > 20 (trending market).
-# Short when Williams %R crosses below -20 (overbought rejection) AND 1d volume > 1.8x 20-period average AND 1w ADX > 20.
-# Exit when Williams %R crosses below -50 (for longs) or above -50 (for shorts).
-# Uses discrete position size 0.25. Designed to capture mean reversions in ranging markets and pullbacks in trends.
-# Target: 100-180 total trades over 4 years (25-45/year) to balance edge and fee drag.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+# Long when price breaks above Donchian upper band AND volume > 1.5x 20-period 1d average AND 1w EMA50 > EMA50 previous week (uptrend).
+# Short when price breaks below Donchian lower band AND volume > 1.5x 20-period 1d average AND 1w EMA50 < EMA50 previous week (downtrend).
+# Exit when price crosses the Donchian midpoint (upper+lower)/2.
+# Uses discrete position size 0.25. Designed to capture breakouts in trending markets (both bull and bear).
+# Target: 50-100 total trades over 4 years (12-25/year) to minimize fee drag while maintaining edge.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,51 +20,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Indicators: Williams %R (14-period) ===
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Avoid division by zero
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # === 1d Indicators: Donchian(20) channels (from previous bar) ===
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
     
-    # === 1d Indicators: Volume Spike (volume > 1.8x 20-period average) ===
-    df_1d = get_htf_data(prices, '1d')
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    volume_spike = volume > (1.8 * vol_ma_1d_aligned)
+    # Donchian upper/lower band (20-period lookback)
+    lookback = 20
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
     
-    # === 1w Indicators: ADX > 20 (trending market filter) ===
+    for i in range(lookback, n):
+        upper[i] = np.max(prev_high[i-lookback:i])
+        lower[i] = np.min(prev_low[i-lookback:i])
+    
+    midpoint = (upper + lower) / 2  # Exit level
+    
+    # === 1d Indicators: Volume Spike (volume > 1.5x 20-period average) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
+    
+    # === 1w Indicators: EMA50 trend filter (rising/falling) ===
     df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # True Range
-    tr1 = pd.Series(high_1w).diff()
-    tr2 = pd.Series(low_1w).diff().abs()
-    tr3 = pd.Series(close_1w).shift(1).diff().abs()
-    tr_1w = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1w = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # EMA50 calculation
+    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_prev = np.roll(ema_50, 1)
+    ema_50_prev[0] = np.nan
     
-    # Directional Movement
-    dm_plus = pd.Series(high_1w).diff()
-    dm_minus = pd.Series(low_1w).diff().abs()
-    dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
-    dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
-    
-    # Smoothed DM and TR
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_smooth = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * (dm_plus_smooth / atr_smooth)
-    di_minus = 100 * (dm_minus_smooth / atr_smooth)
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    trending = adx_aligned > 20
+    # EMA50 trend: rising if current > previous, falling if current < previous
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    ema_50_prev_aligned = align_htf_to_ltf(prices, df_1w, ema_50_prev)
+    ema_rising = ema_50_aligned > ema_50_prev_aligned
+    ema_falling = ema_50_aligned < ema_50_prev_aligned
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -72,7 +62,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: ensure all indicators are valid (max 50 periods needed for Williams %R and ADX)
+    # Warmup: ensure all indicators are valid (max 50 periods needed for EMA50)
     warmup = 100
     
     # Track position state
@@ -80,7 +70,8 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(williams_r[i]) or np.isnan(volume_spike[i]) or np.isnan(trending[i]) or
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(midpoint[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(ema_rising[i]) or np.isnan(ema_falling[i]) or
             not session_filter[i]):
             signals[i] = 0.0
             position = 0
@@ -89,19 +80,20 @@ def generate_signals(prices):
         # Current values
         price = close[i]
         vol_spike = volume_spike[i]
-        is_trending = trending[i]
+        is_ema_rising = ema_rising[i]
+        is_ema_falling = ema_falling[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if Williams %R crosses below -50
-            if williams_r[i] < -50 and williams_r[i-1] >= -50:
+            # Exit if price crosses below midpoint
+            if price < midpoint[i]:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if Williams %R crosses above -50
-            if williams_r[i] > -50 and williams_r[i-1] <= -50:
+            # Exit if price crosses above midpoint
+            if price > midpoint[i]:
                 exit_signal = True
         
         if exit_signal:
@@ -111,13 +103,13 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Williams %R crosses above -80 (oversold bounce) AND volume spike AND trending market
-            if williams_r[i] > -80 and williams_r[i-1] <= -80 and vol_spike and is_trending:
+            # LONG: Price breaks above upper band AND volume spike AND EMA50 rising
+            if price > upper[i] and vol_spike and is_ema_rising:
                 signals[i] = 0.25
                 position = 1
             
-            # SHORT: Williams %R crosses below -20 (overbought rejection) AND volume spike AND trending market
-            elif williams_r[i] < -20 and williams_r[i-1] >= -20 and vol_spike and is_trending:
+            # SHORT: Price breaks below lower band AND volume spike AND EMA50 falling
+            elif price < lower[i] and vol_spike and is_ema_falling:
                 signals[i] = -0.25
                 position = -1
         
@@ -126,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_1dVolumeSpike_1wADX_V1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_VolumeSpike_V1"
+timeframe = "1d"
 leverage = 1.0
