@@ -3,156 +3,163 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h EMA21 pullback strategy with 4h EMA50 trend filter and 1d ADX regime filter.
-# Long when: price > 1h EMA21 AND 4h EMA50 > 1d EMA50 (uptrend) AND 1d ADX > 25 (strong trend)
-# Short when: price < 1h EMA21 AND 4h EMA50 < 1d EMA50 (downtrend) AND 1d ADX > 25 (strong trend)
-# Exit when price crosses 1h EMA21 in opposite direction.
-# Uses discrete position size 0.20 to limit drawdown in bear markets.
-# Target: 80-120 total trades over 4 years (20-30/year) to balance opportunity and fee drag.
-# Works in bull (trend following) and bear (strong trend filters avoid whipsaws).
+# Hypothesis: 6h Ichimoku Cloud with TK Cross + Weekly Trend Filter
+# Long when price > Ichimoku Cloud AND Tenkan > Kijun (bullish TK cross) AND weekly close > weekly Kumo top
+# Short when price < Ichimoku Cloud AND Tenkan < Kijun (bearish TK cross) AND weekly close < weekly Kumo bottom
+# Uses Ichimoku components calculated on 6h timeframe with weekly trend alignment
+# Target: 50-150 total trades over 4 years (12-37/year) with discrete position size 0.25
+# Ichimoku provides dynamic support/resistance and trend identification, weekly filter ensures higher timeframe alignment
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     
-    # Get 4h data once before loop for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data once before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 52:  # Need at least 52 weeks for proper calculation
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    # === Weekly Indicators: Kumo (Cloud) for trend filter ===
+    # Calculate Ichimoku components on weekly data
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 4h EMA50
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Weekly Tenkan-sen (Conversion Line): (9-period high + low)/2
+    period_tenkan = 9
+    max_high_1w_tenkan = pd.Series(high_1w).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+    min_low_1w_tenkan = pd.Series(low_1w).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+    tenkan_1w = (max_high_1w_tenkan + min_low_1w_tenkan) / 2
     
-    # Get 1d data once before loop for EMA50 and ADX regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Weekly Kijun-sen (Base Line): (26-period high + low)/2
+    period_kijun = 26
+    max_high_1w_kijun = pd.Series(high_1w).rolling(window=period_kijun, min_periods=period_kijun).max().values
+    min_low_1w_kijun = pd.Series(low_1w).rolling(window=period_kijun, min_periods=period_kijun).min().values
+    kijun_1w = (max_high_1w_kijun + min_low_1w_kijun) / 2
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Weekly Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_span_a_1w = ((tenkan_1w + kijun_1w) / 2)
     
-    # Calculate 1d EMA50
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Weekly Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
+    period_senkou_b = 52
+    max_high_1w_senkou_b = pd.Series(high_1w).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+    min_low_1w_senkou_b = pd.Series(low_1w).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+    senkou_span_b_1w = ((max_high_1w_senkou_b + min_low_1w_senkou_b) / 2)
     
-    # Calculate 1d ADX(14) for trend strength filter
-    if len(df_1d) < 14:
-        return np.zeros(n)
+    # Align weekly Kumo components to 6h timeframe
+    tenkan_1w_aligned = align_htf_to_ltf(prices, df_1w, tenkan_1w)
+    kijun_1w_aligned = align_htf_to_ltf(prices, df_1w, kijun_1w)
+    senkou_span_a_1w_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_a_1w)
+    senkou_span_b_1w_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_b_1w)
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # === 6h Indicators: Ichimoku Components for entry signals ===
+    # 6h Tenkan-sen (Conversion Line): (9-period high + low)/2
+    max_high_6h_tenkan = pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+    min_low_6h_tenkan = pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+    tenkan_6h = (max_high_6h_tenkan + min_low_6h_tenkan) / 2
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # 6h Kijun-sen (Base Line): (26-period high + low)/2
+    max_high_6h_kijun = pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values
+    min_low_6h_kijun = pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values
+    kijun_6h = (max_high_6h_kijun + min_low_6h_kijun) / 2
     
-    # Smoothed values
-    tr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # 6h Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_span_a_6h = ((tenkan_6h + kijun_6h) / 2)
     
-    # Directional Indicators
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
+    # 6h Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
+    max_high_6h_senkou_b = pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+    min_low_6h_senkou_b = pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+    senkou_span_b_6h = ((max_high_6h_senkou_b + min_low_6h_senkou_b) / 2)
     
-    # ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    dx = np.where(np.isnan(dx), 0, dx)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate 1h EMA21 for entry/exit
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Current Kumo (Cloud) boundaries: Senkou Span A and B
+    # Note: In Ichimoku, the cloud is plotted 26 periods ahead, so we use current values
+    # For simplicity in live trading, we use the current Senkou Spans as cloud boundaries
+    kumo_top_6h = np.maximum(senkou_span_a_6h, senkou_span_b_6h)
+    kumo_bottom_6h = np.minimum(senkou_span_a_6h, senkou_span_b_6h)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 100
+    warmup = max(period_senkou_b, 52) + 26  # Enough for all calculations
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(ema_21[i])):
+        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or np.isnan(kumo_top_6h[i]) or 
+            np.isnan(kumo_bottom_6h[i]) or np.isnan(tenkan_1w_aligned[i]) or 
+            np.isnan(kijun_1w_aligned[i]) or np.isnan(senkou_span_a_1w_aligned[i]) or 
+            np.isnan(senkou_span_b_1w_aligned[i])):
             signals[i] = 0.0
             position = 0
-            entry_price = 0.0
             continue
         
         # Current values
-        ema_50_4h_val = ema_50_4h_aligned[i]
-        ema_50_1d_val = ema_50_1d_aligned[i]
-        adx_val = adx_aligned[i]
-        ema_21_val = ema_21[i]
         price = close[i]
+        tenkan_6h_val = tenkan_6h[i]
+        kijun_6h_val = kijun_6h[i]
+        kumo_top_6h_val = kumo_top_6h[i]
+        kumo_bottom_6h_val = kumo_bottom_6h[i]
+        tenkan_1w_val = tenkan_1w_aligned[i]
+        kijun_1w_val = kijun_1w_aligned[i]
+        senkou_span_a_1w_val = senkou_span_a_1w_aligned[i]
+        senkou_span_b_1w_val = senkou_span_b_1w_aligned[i]
         
-        # Trend alignment: 4h EMA50 vs 1d EMA50
-        uptrend = ema_50_4h_val > ema_50_1d_val
-        downtrend = ema_50_4h_val < ema_50_1d_val
-        
-        # Strong trend filter: ADX > 25
-        strong_trend = adx_val > 25
+        # Weekly Kumo boundaries for trend filter
+        weekly_kumo_top = max(senkou_span_a_1w_val, senkou_span_b_1w_val)
+        weekly_kumo_bottom = min(senkou_span_a_1w_val, senkou_span_b_1w_val)
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price crosses below 1h EMA21
-            if price < ema_21_val:
+            # Exit if price falls below Kumo bottom OR Tenkan crosses below Kijun
+            if price < kumo_bottom_6h_val or tenkan_6h_val < kijun_6h_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price crosses above 1h EMA21
-            if price > ema_21_val:
+            # Exit if price rises above Kumo top OR Tenkan crosses above Kijun
+            if price > kumo_top_6h_val or tenkan_6h_val > kijun_6h_val:
                 exit_signal = True
         
         if exit_signal:
             signals[i] = 0.0
             position = 0
-            entry_price = 0.0
             continue
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: price > 1h EMA21 AND 4h EMA50 > 1d EMA50 (uptrend) AND strong trend
-            if price > ema_21_val and uptrend and strong_trend:
-                signals[i] = 0.20
-                position = 1
-                entry_price = price
+            # Bullish conditions: price above cloud, bullish TK cross, weekly trend up
+            price_above_cloud = price > kumo_top_6h_val
+            bullish_tk = tenkan_6h_val > kijun_6h_val
+            weekly_bullish = close_1w[-1] > weekly_kumo_top if len(close_1w) > 0 else False  # Simplified: use last known weekly close
             
-            # SHORT: price < 1h EMA21 AND 4h EMA50 < 1d EMA50 (downtrend) AND strong trend
-            elif price < ema_21_val and downtrend and strong_trend:
-                signals[i] = -0.20
+            # Bearish conditions: price below cloud, bearish TK cross, weekly trend down
+            price_below_cloud = price < kumo_bottom_6h_val
+            bearish_tk = tenkan_6h_val < kijun_6h_val
+            weekly_bearish = close_1w[-1] < weekly_kumo_bottom if len(close_1w) > 0 else False  # Simplified: use last known weekly close
+            
+            # LONG: price > cloud AND bullish TK cross AND weekly bullish
+            if price_above_cloud and bullish_tk and weekly_bullish:
+                signals[i] = 0.25
+                position = 1
+            
+            # SHORT: price < cloud AND bearish TK cross AND weekly bearish
+            elif price_below_cloud and bearish_tk and weekly_bearish:
+                signals[i] = -0.25
                 position = -1
-                entry_price = price
         
         else:
-            signals[i] = position * 0.20
+            signals[i] = position * 0.25
     
     return signals
 
-name = "1h_EMA21_Pullback_4hEMA50_Trend_1dADX25_V1"
-timeframe = "1h"
+name = "6h_IchimokuTKCross_WeeklyKumoFilter_V1"
+timeframe = "6h"
 leverage = 1.0
