@@ -3,15 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 4h Supertrend(ATR=10,mult=3) for trend direction,
-# 4h RSI(14) for mean-reversion entries within the trend, and 1d volume spike filter.
-# Long when Supertrend is bullish, RSI < 30 (oversold), and 1d volume > 2.0x 20-period median volume.
-# Short when Supertrend is bearish, RSI > 70 (overbought), and same volume condition.
-# Exit via ATR(10) trailing stop: long exits when price < highest high since entry - 3.0*ATR,
-# short exits when price > lowest low since entry + 3.0*ATR.
-# Uses discrete position size 0.25. Target: 50-150 total trades over 4 years (12-37/year).
-# Supertrend captures the trend, RSI provides mean-reversion entries in the trend direction,
-# volume spike confirms institutional interest, wider ATR stop reduces whipsaws.
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
+# Long when price breaks above Donchian upper channel (20-period high) AND 12h EMA50 is rising AND current volume > 1.5x 20-period median volume.
+# Short when price breaks below Donchian lower channel (20-period low) AND 12h EMA50 is falling AND same volume condition.
+# Exit via ATR(10) trailing stop: long exits when price < highest high since entry - 2.5*ATR, short exits when price > lowest low since entry + 2.5*ATR.
+# Uses discrete position size 0.25. Target: 75-200 total trades over 4 years (19-50/year).
+# Donchian captures structure, EMA50 filters trend direction, volume confirms conviction, ATR stop manages risk.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,13 +18,19 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 4h data once before loop for Supertrend, RSI, and ATR
+    # Get 4h data once before loop for Donchian channels and ATR
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 50:
         return np.zeros(n)
     
-    # === 4h Indicators: Supertrend, RSI(14), ATR(10) ===
+    # Get 12h data once before loop for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    # === 4h Indicators: Donchian(20), ATR(10) ===
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
@@ -41,74 +44,31 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr_10 = tr.rolling(window=10, min_periods=10).mean().values
     
-    # Supertrend(ATR=10, mult=3)
-    hl2 = (high_4h + low_4h) / 2
-    upper_band = hl2 + (3.0 * atr_10)
-    lower_band = hl2 - (3.0 * atr_10)
+    # Donchian(20)
+    donchian_upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    upper_band = pd.Series(upper_band)
-    lower_band = pd.Series(lower_band)
+    # === 12h Indicators: EMA50 trend filter ===
+    close_12h = df_12h['close'].values
+    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # EMA slope: rising if current > previous, falling if current < previous
+    ema_slope = np.diff(ema_50, prepend=ema_50[0])
     
-    for i in range(1, len(upper_band)):
-        if close_4h[i-1] <= upper_band[i-1]:
-            upper_band[i] = min(upper_band[i], upper_band[i-1])
-        else:
-            upper_band[i] = upper_band[i]
-        
-        if close_4h[i-1] >= lower_band[i-1]:
-            lower_band[i] = max(lower_band[i], lower_band[i-1])
-        else:
-            lower_band[i] = lower_band[i]
-    
-    upper_band = upper_band.values
-    lower_band = lower_band.values
-    
-    supertrend = np.zeros_like(close_4h)
-    supertrend[:] = np.nan
-    dir_ = np.ones_like(close_4h)  # 1 for uptrend, -1 for downtrend
-    
-    for i in range(10, len(supertrend)):
-        if close_4h[i] > upper_band[i-1]:
-            dir_[i] = 1
-        elif close_4h[i] < lower_band[i-1]:
-            dir_[i] = -1
-        else:
-            dir_[i] = dir_[i-1]
-        
-        if dir_[i] == 1:
-            supertrend[i] = lower_band[i]
-        else:
-            supertrend[i] = upper_band[i]
-    
-    # RSI(14)
-    delta = pd.Series(close_4h).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_14 = 100 - (100 / (1 + rs))
-    rsi_14 = rsi_14.values
-    
-    # Get 1d data for volume median
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    volume_1d = df_1d['volume'].values
-    vol_median_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).median().values
+    # Get volume median for spike filter
+    vol_median_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
     
     # Align all indicators to primary timeframe (4h)
-    supertrend_aligned = align_htf_to_ltf(prices, df_4h, supertrend)
-    dir_aligned = align_htf_to_ltf(prices, df_4h, dir_)
-    rsi_aligned = align_htf_to_ltf(prices, df_4h, rsi_14)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
     atr_aligned = align_htf_to_ltf(prices, df_4h, atr_10)
-    vol_median_aligned = align_htf_to_ltf(prices, df_1d, vol_median_20)
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
+    ema_slope_aligned = align_htf_to_ltf(prices, df_12h, ema_slope)
+    vol_median_aligned = align_htf_to_ltf(prices, prices, vol_median_20)  # align to self
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(14, 10, 14, 10, 20)  # RSI(14), Supertrend, ATR(10), volume median(20)
+    warmup = max(20, 10, 50, 20)  # Donchian(20), ATR(10), EMA(50), volume median(20)
     
     # Track position state for trailing stops
     position = 0  # 0: flat, 1: long, -1: short
@@ -117,8 +77,9 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(supertrend_aligned[i]) or np.isnan(dir_aligned[i]) or 
-            np.isnan(rsi_aligned[i]) or np.isnan(atr_aligned[i]) or np.isnan(vol_median_aligned[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(atr_aligned[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(ema_slope_aligned[i]) or 
+            np.isnan(vol_median_aligned[i])):
             signals[i] = 0.0
             position = 0
             highest_since_entry = 0.0
@@ -126,25 +87,25 @@ def generate_signals(prices):
             continue
         
         # Current values (aligned)
-        st = supertrend_aligned[i]
-        direction = dir_aligned[i]
-        rsi = rsi_aligned[i]
+        dc_upper = donchian_upper_aligned[i]
+        dc_lower = donchian_lower_aligned[i]
         atr = atr_aligned[i]
+        ema50 = ema_50_aligned[i]
+        emaslope = ema_slope_aligned[i]
         vol_median = vol_median_aligned[i]
         price = close[i]
+        vol = volume[i]
         
-        # Get current 1d volume for volume spike filter
-        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-        current_vol_1d = vol_1d_aligned[i]
+        # Volume spike filter: current volume > 1.5x median volume
+        volume_spike = vol > (vol_median * 1.5)
         
-        # Volume spike filter: current 1d volume > 2.0x median volume
-        volume_spike = current_vol_1d > (vol_median * 2.0)
+        # Breakout conditions
+        breakout_up = price > dc_upper
+        breakout_down = price < dc_lower
         
-        # Trend and mean-reversion filters
-        uptrend = direction == 1
-        downtrend = direction == -1
-        oversold = rsi < 30
-        overbought = rsi > 70
+        # EMA trend filter: rising for long, falling for short
+        ema_rising = emaslope > 0
+        ema_falling = emaslope < 0
         
         # === EXIT LOGIC (trailing stop) ===
         exit_signal = False
@@ -152,15 +113,15 @@ def generate_signals(prices):
             # Update highest high since entry
             if price > highest_since_entry:
                 highest_since_entry = price
-            # Exit when price drops below highest high - 3.0*ATR
-            if price < highest_since_entry - 3.0 * atr:
+            # Exit when price drops below highest high - 2.5*ATR
+            if price < highest_since_entry - 2.5 * atr:
                 exit_signal = True
         elif position == -1:  # short position
             # Update lowest low since entry
             if price < lowest_since_entry:
                 lowest_since_entry = price
-            # Exit when price rises above lowest low + 3.0*ATR
-            if price > lowest_since_entry + 3.0 * atr:
+            # Exit when price rises above lowest low + 2.5*ATR
+            if price > lowest_since_entry + 2.5 * atr:
                 exit_signal = True
         
         if exit_signal:
@@ -173,15 +134,15 @@ def generate_signals(prices):
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
             # LONG CONDITIONS
-            # Uptrend, RSI oversold, and volume spike
-            if uptrend and oversold and volume_spike:
+            # Breakout above upper channel, EMA rising, volume spike
+            if breakout_up and ema_rising and volume_spike:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = price  # initialize trailing stop
             
             # SHORT CONDITIONS
-            # Downtrend, RSI overbought, and volume spike
-            elif downtrend and overbought and volume_spike:
+            # Breakout below lower channel, EMA falling, volume spike
+            elif breakout_down and ema_falling and volume_spike:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = price  # initialize trailing stop
@@ -191,6 +152,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Supertrend10_3_RSI14_OBOS_VolumeSpike2.0x_ATRTrail3.0_v1"
+name = "4h_Donchian20_EMA50_VolumeSpike1.5x_ATRTrail2.5_v1"
 timeframe = "4h"
 leverage = 1.0
