@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Bollinger Bands mean reversion with volume spike confirmation.
+# Hypothesis: 4h strategy using 1d Bollinger Bands mean reversion with volume spike confirmation.
 # Long when price touches lower Bollinger Band (20,2) + volume > 2.0x 20-period median volume.
 # Short when price touches upper Bollinger Band (20,2) + volume > 2.0x 20-period median volume.
 # Exit when price returns to Bollinger middle (20-period SMA) or when volume drops below median.
 # Uses discrete position size 0.25. Bollinger Bands capture volatility and mean reversion in ranging markets.
-# Volume spike ensures institutional participation at extremes. 12h timeframe targets 15-35 trades/year to minimize fee drag.
+# Volume spike ensures institutional participation at extremes. 4h timeframe targets 30-60 trades/year to minimize fee drag.
 # Works in both bull and bear markets by fading extremes with volume confirmation.
 
 def generate_signals(prices):
@@ -41,7 +41,7 @@ def generate_signals(prices):
     # === 1d Indicators: Volume Median (20-period) ===
     vol_median_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).median().values
     
-    # Align all indicators to primary timeframe (12h)
+    # Align all indicators to primary timeframe (4h)
     bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
     bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
     bb_middle_aligned = align_htf_to_ltf(prices, df_1d, bb_middle)
@@ -112,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dBollingerBands20_2_VolumeSpike2.0x_MeanReversion_V1"
-timeframe = "12h"
+name = "4h_1dBollingerBands20_2_VolumeSpike2.0x_MeanReversion_V1"
+timeframe = "4h"
 leverage = 1.0
