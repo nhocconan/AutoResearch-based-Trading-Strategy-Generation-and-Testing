@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout (20-period) with 1d volume confirmation and 1d ADX trend filter
-# Long when price breaks above Donchian upper band AND volume > 1.3x 1d average volume AND 1d ADX > 20
-# Short when price breaks below Donchian lower band AND volume > 1.3x 1d average volume AND 1d ADX > 20
-# ATR trailing stop (2.0x ATR) to manage risk
-# Donchian provides clear price channels, volume confirms breakout strength, ADX filters for trending markets
-# Target: 100-200 total trades over 4 years (25-50/year) to balance opportunity and fee drag
+# Hypothesis: 1d weekly pivot points (R2/S2) with volume confirmation and weekly ADX trend filter
+# Long when price crosses above R2 AND volume > 1.3x weekly average volume AND weekly ADX > 20
+# Short when price crosses below S2 AND volume > 1.3x weekly average volume AND weekly ADX > 20
+# ATR trailing stop (2.5x ATR) to manage risk
+# Weekly pivots provide strong weekly support/resistance, volume confirms conviction, ADX filters for trending markets
+# Target: 50-100 total trades over 4 years (12-25/year) to balance opportunity and fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,42 +20,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h Donchian channel (20-period) ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # === 1d Weekly Pivot Points (R2, S2) ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Donchian bands
-    donchian_upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Calculate pivot point
+    pivot = (high_1w + low_1w + close_1w) / 3
+    # Calculate Weekly pivot levels (R2, S2)
+    weekly_r2 = pivot + (high_1w - low_1w)
+    weekly_s2 = pivot - (high_1w - low_1w)
     
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
+    weekly_r2_aligned = align_htf_to_ltf(prices, df_1w, weekly_r2)
+    weekly_s2_aligned = align_htf_to_ltf(prices, df_1w, weekly_s2)
     
-    # === 1d Volume Confirmation (average volume) ===
-    df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values  # 20 periods average
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # === 1d Weekly Volume Confirmation (average volume) ===
+    volume_1w = df_1w['volume'].values
+    vol_ma_1w = pd.Series(volume_1w).rolling(window=10, min_periods=10).mean().values  # 10 weeks average
+    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
     
-    # === 1d ADX trend filter (14-period) ===
-    high_1d_arr = df_1d['high'].values
-    low_1d_arr = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
+    # === 1d Weekly ADX trend filter (14-period) ===
+    high_1w_arr = df_1w['high'].values
+    low_1w_arr = df_1w['low'].values
+    close_1w_arr = df_1w['close'].values
     
     # True Range
-    tr1 = high_1d_arr - low_1d_arr
-    tr2 = np.abs(high_1d_arr - np.roll(close_1d_arr, 1))
-    tr3 = np.abs(low_1d_arr - np.roll(close_1d_arr, 1))
+    tr1 = high_1w_arr - low_1w_arr
+    tr2 = np.abs(high_1w_arr - np.roll(close_1w_arr, 1))
+    tr3 = np.abs(low_1w_arr - np.roll(close_1w_arr, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
     # Directional Movement
-    dm_plus = np.where((high_1d_arr - np.roll(high_1d_arr, 1)) > (np.roll(low_1d_arr, 1) - low_1d_arr), 
-                       np.maximum(high_1d_arr - np.roll(high_1d_arr, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d_arr, 1) - low_1d_arr) > (high_1d_arr - np.roll(high_1d_arr, 1)), 
-                        np.maximum(np.roll(low_1d_arr, 1) - low_1d_arr, 0), 0)
+    dm_plus = np.where((high_1w_arr - np.roll(high_1w_arr, 1)) > (np.roll(low_1w_arr, 1) - low_1w_arr), 
+                       np.maximum(high_1w_arr - np.roll(high_1w_arr, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1w_arr, 1) - low_1w_arr) > (high_1w_arr - np.roll(high_1w_arr, 1)), 
+                        np.maximum(np.roll(low_1w_arr, 1) - low_1w_arr, 0), 0)
     dm_plus[0] = 0
     dm_minus[0] = 0
     
@@ -72,21 +74,21 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     dx[np.isnan(dx)] = 0
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
-    # === 12h ATR for trailing stop (14-period) ===
-    high_12h_arr = df_12h['high'].values
-    low_12h_arr = df_12h['low'].values
-    close_12h_arr = df_12h['close'].values
+    # === 1d Weekly ATR for trailing stop (14-period) ===
+    high_1w_arr = df_1w['high'].values
+    low_1w_arr = df_1w['low'].values
+    close_1w_arr = df_1w['close'].values
     
-    tr1_12h = high_12h_arr - low_12h_arr
-    tr2_12h = np.abs(high_12h_arr - np.roll(close_12h_arr, 1))
-    tr3_12h = np.abs(low_12h_arr - np.roll(close_12h_arr, 1))
-    tr2_12h[0] = tr1_12h[0]
-    tr3_12h[0] = tr1_12h[0]
-    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
-    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
+    tr1_1w = high_1w_arr - low_1w_arr
+    tr2_1w = np.abs(high_1w_arr - np.roll(close_1w_arr, 1))
+    tr3_1w = np.abs(low_1w_arr - np.roll(close_1w_arr, 1))
+    tr2_1w[0] = tr1_1w[0]
+    tr3_1w[0] = tr1_1w[0]
+    tr_1w = np.maximum(tr1_1w, np.maximum(tr2_1w, tr3_1w))
+    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
     
     signals = np.zeros(n)
     
@@ -101,23 +103,23 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(donchian_upper_aligned[i]) or 
-            np.isnan(donchian_lower_aligned[i]) or
-            np.isnan(vol_ma_1d_aligned[i]) or
+        if (np.isnan(weekly_r2_aligned[i]) or 
+            np.isnan(weekly_s2_aligned[i]) or
+            np.isnan(vol_ma_1w_aligned[i]) or
             np.isnan(adx_aligned[i]) or
-            np.isnan(atr_12h_aligned[i])):
+            np.isnan(atr_1w_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         price = close[i]
-        upper = donchian_upper_aligned[i]
-        lower = donchian_lower_aligned[i]
-        vol_ma_val = vol_ma_1d_aligned[i]
+        r2_val = weekly_r2_aligned[i]
+        s2_val = weekly_s2_aligned[i]
+        vol_ma_val = vol_ma_1w_aligned[i]
         adx_val = adx_aligned[i]
-        atr_val = atr_12h_aligned[i]
+        atr_val = atr_1w_aligned[i]
         
-        # Volume confirmation: current volume > 1.3x 1d average volume
+        # Volume confirmation: current volume > 1.3x weekly average volume
         vol_confirm = volume[i] > vol_ma_val * 1.3
         
         # ADX filter: trending market (ADX > 20)
@@ -128,8 +130,8 @@ def generate_signals(prices):
             # Update highest price since entry
             if price > highest_since_entry:
                 highest_since_entry = price
-            # Trail stop: exit if price drops 2.0*ATR from highest
-            if atr_val > 0 and price < highest_since_entry - 2.0 * atr_val:
+            # Trail stop: exit if price drops 2.5*ATR from highest
+            if atr_val > 0 and price < highest_since_entry - 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 highest_since_entry = 0.0
@@ -139,8 +141,8 @@ def generate_signals(prices):
             # Update lowest price since entry
             if price < lowest_since_entry or lowest_since_entry == 0:
                 lowest_since_entry = price
-            # Trail stop: exit if price rises 2.0*ATR from lowest
-            if atr_val > 0 and price > lowest_since_entry + 2.0 * atr_val:
+            # Trail stop: exit if price rises 2.5*ATR from lowest
+            if atr_val > 0 and price > lowest_since_entry + 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
                 lowest_since_entry = 0.0
@@ -148,15 +150,15 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # Long when: price breaks above upper band AND volume confirmation AND trend filter
-            if price > upper and vol_confirm and trend_filter:
+            # Long when: price crosses above R2 AND volume confirmation AND trend filter
+            if price > r2_val and vol_confirm and trend_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 highest_since_entry = price
                 continue
-            # Short when: price breaks below lower band AND volume confirmation AND trend filter
-            elif price < lower and vol_confirm and trend_filter:
+            # Short when: price crosses below S2 AND volume confirmation AND trend filter
+            elif price < s2_val and vol_confirm and trend_filter:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -173,6 +175,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dVolume1.3x_1dADX20_12hATRTrail_2.0x"
-timeframe = "12h"
+name = "1d_WeeklyPivot_R2_S2_1wVolume1.3x_1wADX20_ATRTrail_2.5x"
+timeframe = "1d"
 leverage = 1.0
