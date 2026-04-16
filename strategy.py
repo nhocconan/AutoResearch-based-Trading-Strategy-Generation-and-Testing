@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -33,7 +33,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators have valid data
-    warmup = 60  # Need EMA50 and data alignment
+    warmup = 100  # Need EMA50 and data alignment
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
@@ -91,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_12h_Volume_EMA50Filter"
-timeframe = "6h"
+name = "12h_Donchian20_12h_Volume_EMA50Filter"
+timeframe = "12h"
 leverage = 1.0
