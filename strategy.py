@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike and 1w ADX trend filter.
-# Long when price breaks above Camarilla R3 (1d) AND volume > 2.0x 20-period 1d average AND 1w ADX > 25.
-# Short when price breaks below Camarilla S3 (1d) AND volume > 2.0x 20-period 1d average AND 1w ADX > 25.
-# Exit when price crosses the 1d midpoint (close) or ATR-based stoploss (2*ATR from entry).
-# Uses discrete position size 0.25. Designed to capture major breakouts in strong trending markets across regimes.
-# Target: 80-180 total trades over 4 years (20-45/year) to balance edge and fee drag.
+# Hypothesis: 1d Bollinger Band breakout with 1w volume confirmation and 1w ADX trend filter.
+# Long when price breaks above upper Bollinger Band (20,2) AND volume > 1.3x 20-period 1w average AND 1w ADX > 20 (trending market).
+# Short when price breaks below lower Bollinger Band (20,2) AND volume > 1.3x 20-period 1w average AND 1w ADX > 20.
+# Exit when price crosses the 1d 20-period SMA or ATR-based stoploss (2*ATR from entry).
+# Uses discrete position size 0.25. Designed to capture volatility expansion breakouts in trending markets.
+# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag while maintaining edge.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,30 +20,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Indicators: Camarilla Pivot Levels (R3, S3, midpoint) ===
+    # === 1d Indicators: Bollinger Bands (20,2) ===
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Camarilla levels: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
-    camarilla_r3_1d = close_1d + 1.1 * (high_1d - low_1d) / 2
-    camarilla_s3_1d = close_1d - 1.1 * (high_1d - low_1d) / 2
-    camarilla_mid_1d = close_1d  # Midpoint is close for Camarilla
+    # Bollinger Bands
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    bb_upper = sma_20 + 2.0 * std_20
+    bb_lower = sma_20 - 2.0 * std_20
+    bb_middle = sma_20  # 20-period SMA for exit
     
-    # Align to 4h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
-    camarilla_mid_aligned = align_htf_to_ltf(prices, df_1d, camarilla_mid_1d)
+    # Aligned as primary timeframe
+    bb_upper_aligned = bb_upper
+    bb_lower_aligned = bb_lower
+    bb_middle_aligned = bb_middle
     
-    # === 1d Indicators: Volume Spike (volume > 2.0x 20-period average) ===
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    volume_spike = volume > (2.0 * vol_ma_1d_aligned)
-    
-    # === 1w Indicators: ADX > 25 (strong trending market filter) ===
+    # === 1w Indicators: Volume Spike (volume > 1.3x 20-period average) ===
     df_1w = get_htf_data(prices, '1w')
+    vol_1w = df_1w['volume'].values
+    vol_ma_1w = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
+    volume_spike = volume > (1.3 * vol_ma_1w_aligned)
+    
+    # === 1w Indicators: ADX > 20 (trending market filter) ===
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
@@ -72,7 +74,7 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    strong_trend = adx_aligned > 25
+    strong_trend = adx_aligned > 20
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -87,18 +89,18 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Calculate 4h ATR for stoploss
-    tr1 = pd.Series(high).diff()
-    tr2 = pd.Series(low).diff().abs()
-    tr3 = pd.Series(close).shift(1).diff().abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_raw = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_aligned = atr_raw  # Already aligned as primary timeframe
+    # Calculate 1d ATR for stoploss
+    tr1_1d = pd.Series(high_1d).diff()
+    tr2_1d = pd.Series(low_1d).diff().abs()
+    tr3_1d = pd.Series(close_1d).shift(1).diff().abs()
+    tr_1d = pd.concat([tr1_1d, tr2_1d, tr3_1d], axis=1).max(axis=1)
+    atr_1d_raw = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_1d_aligned = atr_1d_raw  # Already aligned as primary timeframe
     
     for i in range(warmup, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_mid_aligned[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(strong_trend[i]) or np.isnan(atr_aligned[i]) or
+        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or np.isnan(bb_middle_aligned[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(strong_trend[i]) or np.isnan(atr_1d_aligned[i]) or
             not session_filter[i]):
             signals[i] = 0.0
             position = 0
@@ -108,22 +110,22 @@ def generate_signals(prices):
         price = close[i]
         vol_spike = volume_spike[i]
         is_strong_trend = strong_trend[i]
-        atr_val = atr_aligned[i]
+        atr_val = atr_1d_aligned[i]
         
         # === EXIT LOGIC ===
         exit_signal = False
         
         if position == 1:  # Long position
-            # Exit if price crosses below midpoint
-            if price < camarilla_mid_aligned[i]:
+            # Exit if price crosses below middle Bollinger Band (20-period SMA)
+            if price < bb_middle_aligned[i]:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR below entry
             elif price < entry_price - 2.0 * atr_val:
                 exit_signal = True
         
         elif position == -1:  # Short position
-            # Exit if price crosses above midpoint
-            if price > camarilla_mid_aligned[i]:
+            # Exit if price crosses above middle Bollinger Band (20-period SMA)
+            if price > bb_middle_aligned[i]:
                 exit_signal = True
             # ATR-based stoploss: 2*ATR above entry
             elif price > entry_price + 2.0 * atr_val:
@@ -137,14 +139,14 @@ def generate_signals(prices):
         
         # === ENTRY LOGIC (only when flat) ===
         if position == 0:
-            # LONG: Price breaks above Camarilla R3 AND volume spike AND strong trending market
-            if price > camarilla_r3_aligned[i] and vol_spike and is_strong_trend:
+            # LONG: Price breaks above upper Bollinger Band AND volume spike AND trending market
+            if price > bb_upper_aligned[i] and vol_spike and is_strong_trend:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
             
-            # SHORT: Price breaks below Camarilla S3 AND volume spike AND strong trending market
-            elif price < camarilla_s3_aligned[i] and vol_spike and is_strong_trend:
+            # SHORT: Price breaks below lower Bollinger Band AND volume spike AND trending market
+            elif price < bb_lower_aligned[i] and vol_spike and is_strong_trend:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -154,6 +156,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_1dVolumeSpike_1wADX_V1"
-timeframe = "4h"
+name = "1d_BB20_1wVolumeSpike_1wADX_V1"
+timeframe = "1d"
 leverage = 1.0
