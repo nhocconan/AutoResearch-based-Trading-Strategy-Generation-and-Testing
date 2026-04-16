@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian breakout with 1w trend filter and volume confirmation
-# Long when price closes above Donchian(20) upper band AND price > 1w EMA50 AND volume > 1.5x 30d average volume
-# Short when price closes below Donchian(20) lower band AND price < 1w EMA50 AND volume > 1.5x 30d average volume
-# ATR trailing stop (2.5x ATR) to manage risk
-# Donchian breakout provides clear breakout signals with defined risk
-# 1w EMA50 ensures alignment with long-term trend
-# Volume confirmation adds conviction to breakouts
-# Target: 30-100 total trades over 4 years (7-25/year)
+# Hypothesis: 6h Ehlers Fisher Transform with 1d trend filter and volume confirmation
+# Long when Fisher crosses above -1.5 AND price > 1d EMA50 AND volume > 1.3x 6h average volume
+# Short when Fisher crosses below +1.5 AND price < 1d EMA50 AND volume > 1.3x 6h average volume
+# Fisher Transform identifies turning points in cyclical price action
+# EMA50 filter ensures alignment with intermediate trend to avoid counter-trend trades
+# Volume confirmation adds conviction to reversals
+# Target: 80-160 total trades over 4 years (20-40/year) with controlled risk
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,84 +21,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1w EMA50 trend filter ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    # === 1d EMA50 trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # === 1d Donchian channels (20-period) ===
-    # Calculate highest high and lowest low of past 20 days
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === Ehlers Fisher Transform (9-period) ===
+    # Normalize price to 0-1 range over lookback period
+    hlc = (high + low + close) / 3.0
+    max_h = pd.Series(hlc).rolling(window=9, min_periods=9).max().values
+    min_l = pd.Series(hlc).rolling(window=9, min_periods=9).min().values
+    range_hlc = max_h - min_l
+    # Avoid division by zero
+    range_hlc = np.where(range_hlc == 0, 1e-10, range_hlc)
+    value1 = 0.33 * 2 * ((hlc - min_l) / range_hlc - 0.5) + 0.67 * np.roll(0.33 * 2 * ((hlc - min_l) / range_hlc - 0.5) + 0.67 * np.zeros_like(hlc), 1)
+    value1[0] = 0
+    # Apply smoothing
+    value2 = pd.Series(value1).ewm(alpha=0.5, adjust=False).mean().values
+    # Fisher Transform
+    value2 = np.clip(value2, -0.999, 0.999)
+    fisher = 0.5 * np.log((1 + value2) / (1 - value2))
+    # Signal line
+    fisher_signal = pd.Series(fisher).ewm(span=3, adjust=False).mean().values
     
-    # === 30d Volume average for confirmation ===
-    vol_avg_30d = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    
-    # === 1d ATR for trailing stop (15-period) ===
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=15, min_periods=15).mean().values
+    # === Volume Confirmation (6h average) ===
+    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values  # 6 periods of 6h = 36h
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 50
+    warmup = 30
     
-    # Track position and exit levels
+    # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any data is NaN
         if (np.isnan(ema_50_aligned[i]) or 
-            np.isnan(highest_20[i]) or
-            np.isnan(lowest_20[i]) or
-            np.isnan(vol_avg_30d[i]) or
-            np.isnan(atr[i])):
+            np.isnan(fisher[i]) or
+            np.isnan(fisher_signal[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
+            position = 0
             continue
         
         price = close[i]
         ema_val = ema_50_aligned[i]
-        upper_band = highest_20[i]
-        lower_band = lowest_20[i]
-        vol_confirm = volume[i] > vol_avg_30d[i] * 1.5  # 1.5x average volume for confirmation
-        atr_val = atr[i]
+        fish = fisher[i]
+        fish_sig = fisher_signal[i]
+        vol_confirm = volume[i] > vol_ma[i] * 1.3  # 1.3x average volume
         
-        # === EXIT LOGIC ===
-        if position == 1:  # Long position
-            # Exit if price breaks below lower Donchian band
-            if price < lower_band:
-                signals[i] = 0.0
-                position = 0
-                continue
+        # Fisher crossover signals
+        fish_cross_up = fish > fish_sig and np.roll(fish, 1)[i] <= np.roll(fisher_signal, 1)[i]
+        fish_cross_down = fish < fish_sig and np.roll(fish, 1)[i] >= np.roll(fisher_signal, 1)[i]
         
-        elif position == -1:  # Short position
-            # Exit if price breaks above upper Donchian band
-            if price > upper_band:
-                signals[i] = 0.0
-                position = 0
-                continue
+        # Handle roll boundary
+        if i == 0:
+            fish_cross_up = False
+            fish_cross_down = False
+        else:
+            fish_cross_up = fish > fish_sig and fisher[i-1] <= fisher_signal[i-1]
+            fish_cross_down = fish < fish_sig and fisher[i-1] >= fisher_signal[i-1]
         
-        # === ENTRY LOGIC (only when flat) ===
+        # === ENTRY LOGIC ===
         if position == 0:
-            # Long when: price closes above Donchian upper band AND price > EMA50 AND volume confirmation
-            if price > upper_band and price > ema_val and vol_confirm:
+            # Long when: Fisher crosses above signal AND price > EMA50 AND volume confirmation
+            if fish_cross_up and price > ema_val and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short when: price closes below Donchian lower band AND price < EMA50 AND volume confirmation
-            elif price < lower_band and price < ema_val and vol_confirm:
+            # Short when: Fisher crosses below signal AND price < EMA50 AND volume confirmation
+            elif fish_cross_down and price < ema_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 continue
         
+        # === EXIT LOGIC: Reverse on opposite signal ===
+        elif position == 1 and fish_cross_down:
+            signals[i] = -0.25
+            position = -1
+        elif position == -1 and fish_cross_up:
+            signals[i] = 0.25
+            position = 1
+        
         # Hold current position
-        if position == 1:
+        elif position == 1:
             signals[i] = 0.25
         elif position == -1:
             signals[i] = -0.25
@@ -108,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wEMA50_Volume1.5x"
-timeframe = "1d"
+name = "6h_FisherTransform_1dEMA50_Volume1.3x"
+timeframe = "6h"
 leverage = 1.0
