@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ATR-based volatility regime filter
+# Hypothesis: 4h Bollinger Band breakout with 1d ATR volatility regime filter
 # Uses 4h primary timeframe with 1d HTF for volatility regime confirmation.
-# Donchian breakouts capture momentum in both bull and bear markets.
+# Bollinger Band breakouts capture volatility expansion in both bull and bear markets.
 # ATR regime filter ensures we only trade when volatility is elevated (avoiding chop).
 # ATR trailing stop (2.5x) protects gains and limits drawdown.
 # Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
@@ -33,11 +33,13 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # === 4h Donchian Channel (20-period) ===
-    donch_upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donch_lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donch_upper_aligned = align_htf_to_ltf(prices, df_4h, donch_upper)
-    donch_lower_aligned = align_htf_to_ltf(prices, df_4h, donch_lower)
+    # === 4h Bollinger Bands (20, 2.0) ===
+    bb_middle = pd.Series(close_4h).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close_4h).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2.0 * bb_std
+    bb_lower = bb_middle - 2.0 * bb_std
+    bb_upper_aligned = align_htf_to_ltf(prices, df_4h, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_4h, bb_lower)
     
     # === 1d ATR Regime Filter (High Volatility) ===
     # ATR(15) on 1d, then compare to its 50-period EMA
@@ -60,8 +62,8 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(donch_upper_aligned[i]) or 
-            np.isnan(donch_lower_aligned[i]) or
+        if (np.isnan(bb_upper_aligned[i]) or 
+            np.isnan(bb_lower_aligned[i]) or
             np.isnan(vol_regime_aligned[i])):
             signals[i] = 0.0
             position = 0
@@ -101,10 +103,10 @@ def generate_signals(prices):
                 lowest_since_entry = 0.0
                 continue
         
-        # === EXIT LOGIC (Donchian breakout in opposite direction) ===
+        # === EXIT LOGIC (Bollinger Band breakout in opposite direction) ===
         if position == 1:  # Long position
-            # Exit when price breaks below Donchian lower
-            if price < donch_lower_aligned[i]:
+            # Exit when price breaks below Bollinger lower
+            if price < bb_lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -112,8 +114,8 @@ def generate_signals(prices):
                 continue
         
         elif position == -1:  # Short position
-            # Exit when price breaks above Donchian upper
-            if price > donch_upper_aligned[i]:
+            # Exit when price breaks above Bollinger upper
+            if price > bb_upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -124,15 +126,15 @@ def generate_signals(prices):
         if position == 0:
             # Require high volatility regime for conviction
             if vol_regime_val:
-                # Long on break above Donchian upper with high volatility
-                if price > donch_upper_aligned[i]:
+                # Long on break above Bollinger upper with high volatility
+                if price > bb_upper_aligned[i]:
                     signals[i] = 0.25
                     position = 1
                     entry_price = price
                     highest_since_entry = price
                     continue
-                # Short on break below Donchian lower with high volatility
-                elif price < donch_lower_aligned[i]:
+                # Short on break below Bollinger lower with high volatility
+                elif price < bb_lower_aligned[i]:
                     signals[i] = -0.25
                     position = -1
                     entry_price = price
@@ -149,6 +151,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dATRRegime_ATRTrail"
+name = "4h_BB20_2.0_1dATRRegime_ATRTrail"
 timeframe = "4h"
 leverage = 1.0
