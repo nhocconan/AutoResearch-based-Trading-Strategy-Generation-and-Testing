@@ -13,9 +13,6 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1h data for session filter
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    
     # Get daily data for weekly pivot calculation (using 5 daily bars)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
@@ -33,15 +30,15 @@ def generate_signals(prices):
     weekly_r1 = 2 * weekly_pivot - low_5d
     weekly_s1 = 2 * weekly_pivot - high_5d
     
-    # Align weekly pivot levels to 1h timeframe
-    weekly_pivot_1h = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-    weekly_r1_1h = align_htf_to_ltf(prices, df_1d, weekly_r1)
-    weekly_s1_1h = align_htf_to_ltf(prices, df_1d, weekly_s1)
+    # Align weekly pivot levels to 6h timeframe
+    weekly_pivot_6h = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    weekly_r1_6h = align_htf_to_ltf(prices, df_1d, weekly_r1)
+    weekly_s1_6h = align_htf_to_ltf(prices, df_1d, weekly_s1)
     
     # Get daily data for trend filter (EMA34)
     close_1d_series = pd.Series(close_1d)
     ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema34_6h = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume filter: current volume > 1.5 * 30-period average
     volume_ma30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
@@ -52,16 +49,11 @@ def generate_signals(prices):
     start_idx = 50  # Need weekly pivot, EMA34, volume MA
     
     for i in range(start_idx, n):
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
         # Skip if any required data is not available
-        if (not in_session or 
-            np.isnan(weekly_pivot_1h[i]) or 
-            np.isnan(weekly_r1_1h[i]) or 
-            np.isnan(weekly_s1_1h[i]) or 
-            np.isnan(ema34_1h[i]) or 
+        if (np.isnan(weekly_pivot_6h[i]) or 
+            np.isnan(weekly_r1_6h[i]) or 
+            np.isnan(weekly_s1_6h[i]) or 
+            np.isnan(ema34_6h[i]) or 
             np.isnan(volume_ma30[i])):
             signals[i] = 0.0
             continue
@@ -70,41 +62,41 @@ def generate_signals(prices):
         volume_filter = volume[i] > (1.5 * volume_ma30[i])
         
         # Trend filter: price above/below daily EMA34
-        price_above_ema = close[i] > ema34_1h[i]
-        price_below_ema = close[i] < ema34_1h[i]
+        price_above_ema = close[i] > ema34_6h[i]
+        price_below_ema = close[i] < ema34_6h[i]
         
         # Price relative to weekly pivot levels
-        price_above_r1 = close[i] > weekly_r1_1h[i]
-        price_below_s1 = close[i] < weekly_s1_1h[i]
+        price_above_r1 = close[i] > weekly_r1_6h[i]
+        price_below_s1 = close[i] < weekly_s1_6h[i]
         
         if position == 0:
             # Long: Price breaks above weekly R1 with volume and above daily EMA34
             if (price_above_r1 and price_above_ema and volume_filter):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             # Short: Price breaks below weekly S1 with volume and below daily EMA34
             elif (price_below_s1 and price_below_ema and volume_filter):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit long: Price crosses below weekly pivot OR below daily EMA34
-            if (close[i] < weekly_pivot_1h[i]) or (close[i] < ema34_1h[i]):
+            if (close[i] < weekly_pivot_6h[i]) or (close[i] < ema34_6h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
             # Exit short: Price crosses above weekly pivot OR above daily EMA34
-            if (close[i] > weekly_pivot_1h[i]) or (close[i] > ema34_1h[i]):
+            if (close[i] > weekly_pivot_6h[i]) or (close[i] > ema34_6h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_WeeklyPivot_Breakout_EMA34_Volume_Session"
-timeframe = "1h"
+name = "6h_WeeklyPivot_Breakout_EMA34_Volume"
+timeframe = "6h"
 leverage = 1.0
