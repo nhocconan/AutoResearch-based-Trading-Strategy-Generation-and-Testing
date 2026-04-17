@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_Volume_Regime_v1
-Breakout at Camarilla R1 (long) or S1 (short) from daily pivot with volume confirmation and Choppiness regime filter.
-Exit when price returns to central pivot (PP).
-Designed to work in both bull and bear markets via regime filter that avoids trend-following in chop.
+4h_Donchian_Breakout_VolumeTrend_v1
+Breakout above/below Donchian(20) with volume confirmation and ADX(14) trend filter.
+Exit when price returns to Donchian middle or opposite band.
+Uses 1d ADX for higher timeframe trend alignment.
+Designed to capture sustained moves with volume confirmation.
 Target: 50-150 total trades over 4 years (12-37/year).
 """
 
@@ -21,49 +22,53 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Daily Pivot Points (using prior day's OHLC) ===
-    # We'll calculate pivots from daily data and align to 12h
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # === Donchian Channel (20) ===
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Prior day's OHLC for pivot calculation
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # === Volume MA (20) for confirmation ===
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Pivot Point (PP) = (H + L + C)/3
-    pp = (prev_high + prev_low + prev_close) / 3.0
-    # R1 = 2*PP - L
-    r1 = 2 * pp - prev_low
-    # S1 = 2*PP - H
-    s1 = 2 * pp - prev_high
-    
-    # Align daily pivot levels to 12h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # === Volume Confirmation: 20-period volume average ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # === Choppiness Index (14) for regime filter ===
-    # CHOP = 100 * log10(sum(TR over n) / (n * (HHV - LLV))) / log10(n)
+    # === ADX(14) for trend strength ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    hhll_diff = highest_high - lowest_low
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
     
-    # Avoid division by zero
-    chop = 100 * np.log10(atr_sum / (14 * hhll_diff + 1e-10)) / np.log10(14)
-    # Replace invalid values (where hhll_diff == 0) with 50 (neutral)
-    chop = np.where((hhll_diff == 0) | np.isnan(chop), 50.0, chop)
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr + 1e-10)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # === 1d ADX for higher timeframe trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    tr1d = df_1d['high'] - df_1d['low']
+    tr2d = np.abs(df_1d['high'] - np.roll(df_1d['close'], 1))
+    tr3d = np.abs(df_1d['low'] - np.roll(df_1d['close'], 1))
+    tr_d = np.maximum(tr1d, np.maximum(tr2d, tr3d))
+    tr_d[0] = tr1d[0]
+    
+    plus_dm_d = np.where((df_1d['high'].values[1:] - df_1d['high'].values[:-1]) > (df_1d['low'].values[:-1] - df_1d['low'].values[1:]), 
+                         np.maximum(df_1d['high'].values[1:] - df_1d['high'].values[:-1], 0), 0)
+    minus_dm_d = np.where((df_1d['low'].values[:-1] - df_1d['low'].values[1:]) > (df_1d['high'].values[1:] - df_1d['high'].values[:-1]), 
+                          np.maximum(df_1d['low'].values[:-1] - df_1d['low'].values[1:], 0), 0)
+    plus_dm_d = np.concatenate([[0], plus_dm_d])
+    minus_dm_d = np.concatenate([[0], minus_dm_d])
+    
+    atr_d = pd.Series(tr_d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_di_d = 100 * pd.Series(plus_dm_d).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr_d + 1e-10)
+    minus_di_d = 100 * pd.Series(minus_dm_d).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr_d + 1e-10)
+    dx_d = 100 * np.abs(plus_di_d - minus_di_d) / (plus_di_d + minus_di_d + 1e-10)
+    adx_1d = pd.Series(dx_d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     
@@ -75,45 +80,38 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(pp_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(vol_ma[i]) or 
-            np.isnan(chop[i])):
+        if (np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or 
+            np.isnan(volume_ma[i]) or 
+            np.isnan(adx[i]) or 
+            np.isnan(adx_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Regime filter: only trade when Choppiness < 61.8 (trending market)
-        # Avoid chop where Choppiness > 61.8
-        if chop[i] > 61.8:
-            # In chop, stay flat
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price breaks above R1 with volume confirmation
-            if (close[i] > r1_aligned[i] and 
-                volume[i] > vol_ma[i]):
+            # Long: price breaks above upper band, volume > MA, ADX > 20, 1d ADX > 20
+            if (close[i] > donchian_high[i] and 
+                volume[i] > volume_ma[i] and 
+                adx[i] > 20 and 
+                adx_1d_aligned[i] > 20):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price breaks below S1 with volume confirmation
-            elif (close[i] < s1_aligned[i] and 
-                  volume[i] > vol_ma[i]):
+            # Short: price breaks below lower band, volume > MA, ADX > 20, 1d ADX > 20
+            elif (close[i] < donchian_low[i] and 
+                  volume[i] > volume_ma[i] and 
+                  adx[i] > 20 and 
+                  adx_1d_aligned[i] > 20):
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic: return to central pivot (PP)
+        # Exit logic: return to middle line or opposite band
         elif position == 1:
-            # Exit long: price crosses below PP
-            if close[i] < pp_aligned[i]:
+            # Exit long: price crosses below middle or above upper (failed breakout)
+            if close[i] < donchian_mid[i] or close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -121,8 +119,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above PP
-            if close[i] > pp_aligned[i]:
+            # Exit short: price crosses above middle or below lower (failed breakdown)
+            if close[i] > donchian_mid[i] or close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -131,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_Volume_Regime_v1"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_VolumeTrend_v1"
+timeframe = "4h"
 leverage = 1.0
