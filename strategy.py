@@ -1,13 +1,12 @@
-#1
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA20 trend filter and volume confirmation.
-# Uses price channels (Donchian) for breakouts, daily EMA for trend filter, volume spike for confirmation.
+# Hypothesis: 4h Donchian(20) breakout with 12h trend filter and volume confirmation.
+# Uses price channels (Donchian) for breakouts, 12h EMA for trend filter, volume spike for confirmation.
 # Designed to work in bull (upward breakouts with trend) and bear (downward breakouts with trend).
-# Target: 15-30 trades/year to avoid fee drag.
+# Target: 20-40 trades/year to avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,79 +18,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1d EMA20 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Align 1d EMA to 12h
-    ema20_12h = align_htf_to_ltf(prices, df_1d, ema20_1d)
-    
-    # Get 12h data for Donchian channels
+    # Get 12h data for Donchian and EMA
     df_12h = get_htf_data(prices, '12h')
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
     # Calculate 12h Donchian channels (20-period)
     high_max_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
     low_min_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Align 12h Donchian to 12h (no alignment needed since same timeframe)
-    donchian_high_12h = high_max_20
-    donchian_low_12h = low_min_20
+    # Calculate 12h EMA34 for trend filter
+    close_12h_series = pd.Series(close_12h)
+    ema34_12h = close_12h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume filter: current volume > 2.5 * 20-period average (reduces trades)
+    # Align 12h Donchian and EMA to 4h
+    donchian_high_4h = align_htf_to_ltf(prices, df_12h, high_max_20)
+    donchian_low_4h = align_htf_to_ltf(prices, df_12h, low_min_20)
+    ema34_4h = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    
+    # Volume filter: current volume > 2.0 * 20-period average (reduces trades)
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 40  # Need 20-period Donchian (12h) + EMA20 (1d) + volume MA20
+    start_idx = 54  # Need 20-period Donchian (12h) + EMA34 (12h) + volume MA20
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_high_12h[i]) or 
-            np.isnan(donchian_low_12h[i]) or 
-            np.isnan(ema20_12h[i]) or 
+        if (np.isnan(donchian_high_4h[i]) or 
+            np.isnan(donchian_low_4h[i]) or 
+            np.isnan(ema34_4h[i]) or 
             np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: spike > 2.5x average (strict to reduce trades)
-        volume_filter = volume[i] > (2.5 * volume_ma20[i])
+        # Volume filter: spike > 2x average (strict to reduce trades)
+        volume_filter = volume[i] > (2.0 * volume_ma20[i])
         
-        # Trend filter: price above/below 1d EMA20
-        price_above_ema = close[i] > ema20_12h[i]
-        price_below_ema = close[i] < ema20_12h[i]
+        # Trend filter: price above/below 12h EMA34
+        price_above_ema = close[i] > ema34_4h[i]
+        price_below_ema = close[i] < ema34_4h[i]
         
         # Price relative to 12h Donchian channels
-        price_above_high = close[i] > donchian_high_12h[i]
-        price_below_low = close[i] < donchian_low_12h[i]
+        price_above_high = close[i] > donchian_high_4h[i]
+        price_below_low = close[i] < donchian_low_4h[i]
         
         if position == 0:
-            # Long: Price breaks above 12h Donchian high with volume and above 1d EMA20
+            # Long: Price breaks above 12h Donchian high with volume and above 12h EMA34
             if (price_above_high and price_above_ema and volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below 12h Donchian low with volume and below 1d EMA20
+            # Short: Price breaks below 12h Donchian low with volume and below 12h EMA34
             elif (price_below_low and price_below_ema and volume_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price crosses below 12h Donchian low OR below 1d EMA20
-            if (close[i] < donchian_low_12h[i]) or (close[i] < ema20_12h[i]):
+            # Exit long: Price crosses below 12h Donchian low OR below 12h EMA34
+            if (close[i] < donchian_low_4h[i]) or (close[i] < ema34_4h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price crosses above 12h Donchian high OR above 1d EMA20
-            if (close[i] > donchian_high_12h[i]) or (close[i] > ema20_12h[i]):
+            # Exit short: Price crosses above 12h Donchian high OR above 12h EMA34
+            if (close[i] > donchian_high_4h[i]) or (close[i] > ema34_4h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dEMA20_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
