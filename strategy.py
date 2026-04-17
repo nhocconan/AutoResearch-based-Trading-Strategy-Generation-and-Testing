@@ -1,11 +1,4 @@
-# 2025-07-06: 4h Williams Alligator + Volume + ADX (4h ADX)
-# Williams Alligator: Jaw(13,8), Teeth(8,5), Lips(5,3) SMAs of median price
-# Long when Lips > Teeth > Jaw and price above Lips, with volume > 1.5x 20-bar volume MA and ADX > 20
-# Short when Lips < Teeth < Jaw and price below Lips, with volume > 1.5x 20-bar volume MA and ADX > 20
-# Exit when Alligator reverses (Lips crosses Teeth) or ADX drops below 15
-# Fixed position size 0.25 to manage drawdown
-# Designed for 4h timeframe with strict entry conditions to limit trades to 50-150 total over 4 years
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -20,84 +13,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Williams Alligator components (all on 4h data)
-    median_price = (high + low) / 2
+    # Daily data for monthly pivot points
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Jaw: 13-period SMMA, smoothed 8 periods ahead
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean()
-    jaw = jaw.rolling(window=8, min_periods=8).mean().shift(8)
+    # Monthly pivot points (based on previous month)
+    # Using previous month's high, low, close
+    prev_month_high = np.roll(high_1d, 1)
+    prev_month_low = np.roll(low_1d, 1)
+    prev_month_close = np.roll(close_1d, 1)
+    prev_month_high[0] = high_1d[0]
+    prev_month_low[0] = low_1d[0]
+    prev_month_close[0] = close_1d[0]
     
-    # Teeth: 8-period SMMA, smoothed 5 periods ahead
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean()
-    teeth = teeth.rolling(window=5, min_periods=5).mean().shift(5)
+    pivot = (prev_month_high + prev_month_low + prev_month_close) / 3
+    r1 = 2 * pivot - prev_month_low
+    s1 = 2 * pivot - prev_month_high
+    r2 = pivot + (prev_month_high - prev_month_low)
+    s2 = pivot - (prev_month_high - prev_month_low)
+    r3 = prev_month_high + 2 * (pivot - prev_month_low)
+    s3 = prev_month_low - 2 * (prev_month_high - pivot)
     
-    # Lips: 5-period SMMA, smoothed 3 periods ahead
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean()
-    lips = lips.rolling(window=3, min_periods=3).mean().shift(3)
+    # Align to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
+    r2_6h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_6h = align_htf_to_ltf(prices, df_1d, s2)
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
     
-    jaw = jaw.values
-    teeth = teeth.values
-    lips = lips.values
+    # 6h RSI for momentum confirmation
+    delta = np.diff(close)
+    delta = np.insert(delta, 0, 0)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # ADX (14-period) on 4h data
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean()
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
     
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr[0] = tr1[0]  # first TR is just high-low
-    
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean()
-    plus_di = 100 * (pd.Series(plus_dm).rolling(window=14, min_periods=14).mean() / atr)
-    minus_di = 100 * (pd.Series(minus_dm).rolling(window=14, min_periods=14).mean() / atr)
-    dx = (np.abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean()
-    adx = adx.values
-    
-    # Volume confirmation: 20-period volume MA
-    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    # Volume filter
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 30  # warmup for all indicators
+    start_idx = 30  # warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or
-            np.isnan(adx[i]) or np.isnan(volume_ma_20.iloc[i])):
+        if (np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or
+            np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or np.isnan(r3_6h[i]) or
+            np.isnan(s3_6h[i]) or np.isnan(rsi[i]) or np.isnan(volume_ma.iloc[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = volume_ma_20.iloc[i]
+        vol_ma = volume_ma.iloc[i]
         
         if position == 0:
-            # Look for Alligator alignment with volume and ADX filter
-            # Long: Lips > Teeth > Jaw (bullish alignment) and price above Lips
-            if lips[i] > teeth[i] and teeth[i] > jaw[i] and price > lips[i] and vol > 1.5 * vol_ma and adx[i] > 20:
+            # Long: price above R1 with RSI > 50 and volume confirmation
+            if price > r1_6h[i] and rsi[i] > 50 and vol > 1.5 * vol_ma:
                 signals[i] = 0.25
                 position = 1
-            # Short: Lips < Teeth < Jaw (bearish alignment) and price below Lips
-            elif lips[i] < teeth[i] and teeth[i] < jaw[i] and price < lips[i] and vol > 1.5 * vol_ma and adx[i] > 20:
+            # Short: price below S1 with RSI < 50 and volume confirmation
+            elif price < s1_6h[i] and rsi[i] < 50 and vol > 1.5 * vol_ma:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when Alligator turns bearish (Lips crosses below Teeth) or ADX weak
-            if lips[i] < teeth[i] or adx[i] < 15:
+            # Exit when price drops below pivot or RSI < 40
+            if price < pivot_6h[i] or rsi[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when Alligator turns bullish (Lips crosses above Teeth) or ADX weak
-            if lips[i] > teeth[i] or adx[i] < 15:
+            # Exit when price rises above pivot or RSI > 60
+            if price > pivot_6h[i] or rsi[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsAlligator_Volume_ADX"
-timeframe = "4h"
+name = "6h_MonthlyPivot_R1S1_RSI_Volume"
+timeframe = "6h"
 leverage = 1.0
