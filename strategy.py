@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h timeframe with 1d ATR-based volatility expansion filter to avoid whipsaws.
-Long when price breaks above 1d Donchian(20) high with volume > 1.5x 20-period average and ATR(14) > 1.3x ATR(50).
-Short when price breaks below 1d Donchian(20) low with same filters.
-Uses 1d structure for institutional reference points, volatility expansion to confirm genuine breakouts
-(not low-volatility squeezes), and volume for participation. Designed to capture strong trending moves
-while avoiding false breakouts in ranging markets. Works in bull (breakouts in uptrend) and bear (breakdowns in downtrend)
-by requiring volatility expansion as a regime filter.
+Hypothesis: 6h timeframe with 12h Ichimoku Cloud as trend filter and 1d Camarilla pivot R2/S2 for breakout entries.
+Long when price breaks above 1d Camarilla R2 with volume confirmation and price > 12h Ichimoku Cloud (bullish regime).
+Short when price breaks below 1d Camarilla S2 with volume confirmation and price < 12h Ichimoku Cloud (bearish regime).
+Ichimoku Cloud from 12h provides multi-timeframe trend alignment, reducing false breakouts in ranging markets.
+Camarilla R2/S2 levels offer stronger support/resistance than R1/S1, increasing breakout validity.
+Designed to capture momentum shifts in both bull and bear markets by requiring alignment with higher timeframe trend.
 """
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,79 +22,106 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels and ATR
+    # Get 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Donchian(20) channels
-    high_ma_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_ma_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d Camarilla pivot levels (R2, S2)
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # R2 = C + Range * 1.1 / 6
+    # S2 = C - Range * 1.1 / 6
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r2_1d = close_1d + range_1d * 1.1 / 6.0
+    s2_1d = close_1d - range_1d * 1.1 / 6.0
     
-    # Calculate 1d ATR(14) and ATR(50) for volatility expansion filter
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr1 = np.maximum(tr1, np.abs(low_1d[1:] - close_1d[:-1]))
-    tr1 = np.concatenate([[np.nan], tr1])  # first TR is NaN
+    # Get 12h data for Ichimoku Cloud
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    atr14 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
-    atr50 = pd.Series(tr1).rolling(window=50, min_periods=50).mean().values
+    # Calculate Ichimoku Cloud components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    high_9 = pd.Series(high_12h).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(low_12h).rolling(window=9, min_periods=9).min().values
+    tenkan = (high_9 + low_9) / 2.0
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    high_26 = pd.Series(high_12h).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(low_12h).rolling(window=26, min_periods=26).min().values
+    kijun = (high_26 + low_26) / 2.0
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2.0
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    high_52 = pd.Series(high_12h).rolling(window=52, min_periods=52).max().values
+    low_52 = pd.Series(low_12h).rolling(window=52, min_periods=52).min().values
+    senkou_b = (high_52 + low_52) / 2.0
+    
+    # The Cloud: between Senkou Span A and B
+    # For trend filter: price above cloud = bullish, price below cloud = bearish
+    # We'll use the cloud's leading edge (shifted 26 periods ahead) for actual cloud position
+    # But for simplicity in HTF alignment, we use current cloud and align it
+    ichimoku_top = np.maximum(senkou_a, senkou_b)
+    ichimoku_bottom = np.minimum(senkou_a, senkou_b)
     
     # Calculate 6h volume 20-period average for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align 1d indicators to 6h timeframe
-    high_donchian_aligned = align_htf_to_ltf(prices, df_1d, high_ma_20)
-    low_donchian_aligned = align_htf_to_ltf(prices, df_1d, low_ma_20)
-    atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
-    atr50_aligned = align_htf_to_ltf(prices, df_1d, atr50)
+    # Align HTF indicators to 6h timeframe
+    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    ichimoku_top_aligned = align_htf_to_ltf(prices, df_12h, ichimoku_top)
+    ichimoku_bottom_aligned = align_htf_to_ltf(prices, df_12h, ichimoku_bottom)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # need enough for ATR50 and volume MA
+    start_idx = 100  # need enough for Ichimoku calculations (52+26)
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(high_donchian_aligned[i]) or 
-            np.isnan(low_donchian_aligned[i]) or 
-            np.isnan(atr14_aligned[i]) or 
-            np.isnan(atr50_aligned[i]) or 
+        if (np.isnan(r2_1d_aligned[i]) or 
+            np.isnan(s2_1d_aligned[i]) or 
+            np.isnan(ichimoku_top_aligned[i]) or 
+            np.isnan(ichimoku_bottom_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
-        
-        # Volatility expansion: ATR(14) > 1.3x ATR(50) indicates expanding volatility
-        vol_expansion = atr14_aligned[i] > 1.3 * atr50_aligned[i]
         
         # Volume confirmation: current 6h volume > 1.5x 20-period average
         volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Long: price breaks above 1d Donchian high with vol expansion and volume
-            if (close[i] > high_donchian_aligned[i] and 
-                vol_expansion and 
-                volume_confirmed):
+            # Long: price breaks above 1d Camarilla R2 with volume and bullish cloud (price > ichimoku top)
+            if (close[i] > r2_1d_aligned[i] and 
+                volume_confirmed and 
+                close[i] > ichimoku_top_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 1d Donchian low with vol expansion and volume
-            elif (close[i] < low_donchian_aligned[i] and 
-                  vol_expansion and 
-                  volume_confirmed):
+            # Short: price breaks below 1d Camarilla S2 with volume and bearish cloud (price < ichimoku bottom)
+            elif (close[i] < s2_1d_aligned[i] and 
+                  volume_confirmed and 
+                  close[i] < ichimoku_bottom_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below 1d Donchian low (opposite side)
-            if close[i] < low_donchian_aligned[i]:
+            # Exit long: price falls back below 1d Camarilla S2 (opposite side)
+            if close[i] < s2_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above 1d Donchian high (opposite side)
-            if close[i] > high_donchian_aligned[i]:
+            # Exit short: price rises back above 1d Camarilla R2 (opposite side)
+            if close[i] > r2_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -103,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1dDonchian20_VolExpansion_Volume_Confirm"
+name = "6h_12hIchimoku_CloudFilter_1dCamarilla_R2S2_Breakout_Volume"
 timeframe = "6h"
 leverage = 1.0
