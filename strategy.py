@@ -13,53 +13,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d ATR for volatility regime ===
+    # === 1w High/Low for range identification (weekly range) ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly range position: where current price sits in weekly range
+    weekly_range = high_1w - low_1w
+    # Avoid division by zero
+    weekly_range_safe = np.where(weekly_range == 0, 1, weekly_range)
+    weekly_position = (close_1w - low_1w) / weekly_range_safe  # 0 at low, 1 at high
+    
+    # === 1d Close for daily trend and momentum ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate 20-period EMA for daily trend
+    ema_20 = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 20:
+        ema_20[19] = np.mean(close_1d[:20])
+        alpha = 2 / (20 + 1)
+        for i in range(20, len(close_1d)):
+            ema_20[i] = alpha * close_1d[i] + (1 - alpha) * ema_20[i-1]
+    else:
+        for i in range(len(close_1d)):
+            ema_20[i] = np.mean(close_1d[:i+1]) if i >= 0 else close_1d[0]
     
-    # ATR(14)
-    atr_1d = np.full_like(close_1d, np.nan)
-    if len(tr) >= 14:
-        atr_1d[13] = np.nanmean(tr[1:15])  # skip first NaN
-        for i in range(14, len(tr)):
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
-    
-    # === 1d EMA(50) for trend filter ===
-    ema_50 = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 50:
-        ema_50[49] = np.mean(close_1d[:50])
-        alpha = 2 / (50 + 1)
-        for i in range(50, len(close_1d)):
-            ema_50[i] = alpha * close_1d[i] + (1 - alpha) * ema_50[i-1]
-    
-    # === Align indicators to 4h timeframe ===
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
-    
-    # === 4h Donchian channel (20-period) ===
-    # Highest high over last 20 periods
-    highest_high = np.full_like(close, np.nan)
-    lowest_low = np.full_like(close, np.nan)
-    for i in range(len(close)):
-        if i >= 19:
-            highest_high[i] = np.max(close[i-19:i+1])
-            lowest_low[i] = np.min(close[i-19:i+1])
-        elif i > 0:
-            highest_high[i] = np.max(close[0:i+1])
-            lowest_low[i] = np.min(close[0:i+1])
+    # Calculate daily price change momentum (1-day return)
+    daily_return = np.full_like(close_1d, np.nan)
+    for i in range(1, len(close_1d)):
+        if close_1d[i-1] != 0:
+            daily_return[i] = (close_1d[i] - close_1d[i-1]) / close_1d[i-1]
         else:
-            highest_high[i] = close[0]
-            lowest_low[i] = close[0]
+            daily_return[i] = 0
     
-    # === Volume confirmation (20-period average) ===
+    # === Align indicators to daily timeframe ===
+    weekly_position_aligned = align_htf_to_ltf(prices, df_1w, weekly_position)
+    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
+    daily_return_aligned = align_htf_to_ltf(prices, df_1d, daily_return)
+    
+    # === Daily Volume confirmation ===
     vol_ma_20 = np.full_like(volume, np.nan)
     for i in range(len(volume)):
         if i >= 19:
@@ -71,6 +65,12 @@ def generate_signals(prices):
     
     vol_confirm = volume > vol_ma_20 * 1.5
     
+    # === Signal parameters ===
+    # Weekly range boundaries for mean reversion
+    WEAK_LONG_THRESHOLD = 0.2   # Near weekly low (oversold)
+    WEAK_SHORT_THRESHOLD = 0.8  # Near weekly high (overbought)
+    MOMENTUM_THRESHOLD = 0.02   # 2% daily momentum
+    
     signals = np.zeros(n)
     
     # Warmup period
@@ -81,10 +81,9 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or 
-            np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or 
+        if (np.isnan(weekly_position_aligned[i]) or 
+            np.isnan(ema_20_aligned[i]) or 
+            np.isnan(daily_return_aligned[i]) or 
             np.isnan(vol_confirm[i])):
             signals[i] = 0.0
             position = 0
@@ -92,18 +91,18 @@ def generate_signals(prices):
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: breakout above Donchian high + ATR filter + above EMA50
-            if (close[i] > highest_high[i] and 
-                atr_1d_aligned[i] > 0 and  # volatility present
-                close[i] > ema_50_aligned[i] and
+            # Long: Near weekly low AND positive daily momentum AND above daily EMA20
+            if (weekly_position_aligned[i] < WEAK_LONG_THRESHOLD and
+                daily_return_aligned[i] > MOMENTUM_THRESHOLD and
+                close[i] > ema_20_aligned[i] and
                 vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: breakdown below Donchian low + ATR filter + below EMA50
-            elif (close[i] < lowest_low[i] and 
-                  atr_1d_aligned[i] > 0 and  # volatility present
-                  close[i] < ema_50_aligned[i] and
+            # Short: Near weekly high AND negative daily momentum AND below daily EMA20
+            elif (weekly_position_aligned[i] > WEAK_SHORT_THRESHOLD and
+                  daily_return_aligned[i] < -MOMENTUM_THRESHOLD and
+                  close[i] < ema_20_aligned[i] and
                   vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
@@ -111,8 +110,10 @@ def generate_signals(prices):
         
         # Exit logic
         elif position == 1:
-            # Exit long: breakdown below Donchian low OR below EMA50
-            if close[i] < lowest_low[i] or close[i] < ema_50_aligned[i]:
+            # Exit long: Weekly position > 0.5 (middle) OR momentum turns negative OR below EMA20
+            if (weekly_position_aligned[i] > 0.5 or
+                daily_return_aligned[i] < -MOMENTUM_THRESHOLD/2 or
+                close[i] < ema_20_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -120,8 +121,10 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: breakout above Donchian high OR above EMA50
-            if close[i] > highest_high[i] or close[i] > ema_50_aligned[i]:
+            # Exit short: Weekly position < 0.5 (middle) OR momentum turns positive OR above EMA20
+            if (weekly_position_aligned[i] < 0.5 or
+                daily_return_aligned[i] > MOMENTUM_THRESHOLD/2 or
+                close[i] > ema_20_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -130,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_ATR_VolumeFilter_EMA50"
-timeframe = "4h"
+name = "1d_WeeklyRange_Momentum_EMA20_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
