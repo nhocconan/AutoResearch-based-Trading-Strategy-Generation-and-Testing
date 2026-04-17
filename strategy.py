@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Trend_RSI_Volume_Spike_v1
-KAMA (ER=10) direction + RSI(14) > 50 for long / < 50 for short + volume spike confirmation.
-Trades only in direction of higher timeframe (1d) trend.
-Target: 20-50 total trades over 4 years (5-12/year).
+4h_TRIX_VolumeSpike_Regime_v1
+TRIX(12) > 0 + Volume Spike + Chop Regime Filter (CHOP > 61.8 = range)
+Long when TRIX crosses above zero in ranging market with volume confirmation.
+Short when TRIX crosses below zero in ranging market with volume confirmation.
+Exit when TRIX crosses back to zero or chop regime ends.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -20,90 +22,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === KAMA(ER=10) ===
-    change = np.abs(close - np.roll(close, 10))
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # placeholder, will compute properly below
-    # Recompute volatility properly
-    volatility = np.zeros_like(close)
-    for i in range(10, len(close)):
-        volatility[i] = np.sum(np.abs(np.diff(close[i-10:i+1])))
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # seed
-    for i in range(10, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # === TRIX(12) ===
+    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    trix = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
+    trix[0] = 0  # first value
     
-    # === RSI(14) ===
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # === Volume Spike (2x 20-period average) ===
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (2.0 * vol_ma20)
     
-    # === Volume Spike (20-period average) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # === Chopiness Index (14) ===
+    atr1 = np.abs(high - low)
+    atr2 = np.abs(high - np.roll(close, 1))
+    atr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(atr1, np.maximum(atr2, atr3))
+    tr[0] = atr1[0]
     
-    # === 1d KAMA trend filter ===
-    df_1d = get_htf_data(prices, '1d')
-    # Compute KAMA on 1d close
-    change_1d = np.abs(df_1d['close'] - np.roll(df_1d['close'], 10))
-    volatility_1d = np.zeros_like(df_1d['close'])
-    for i in range(10, len(df_1d)):
-        volatility_1d[i] = np.sum(np.abs(np.diff(df_1d['close'].values[i-10:i+1])))
-    er_1d = np.where(volatility_1d != 0, change_1d / volatility_1d, 0)
-    sc_1d = (er_1d * (0.6645 - 0.0645) + 0.0645) ** 2
-    kama_1d = np.full_like(df_1d['close'], np.nan)
-    kama_1d[9] = df_1d['close'].values[9]
-    for i in range(10, len(df_1d)):
-        kama_1d[i] = kama_1d[i-1] + sc_1d[i] * (df_1d['close'].values[i] - kama_1d[i-1])
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
+    chop = np.where((highest_high - lowest_low) == 0, 50, chop)  # avoid div0
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 50
+    warmrow = 30
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(warmup, n):
+    for i in range(warmrow, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(kama_1d_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(trix[i]) or 
+            np.isnan(chop[i]) or 
+            np.isnan(vol_ma20[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: KAMA rising, RSI > 50, volume spike, price above 1d KAMA
-            if (kama[i] > kama[i-1] and 
-                rsi[i] > 50 and 
-                volume_spike[i] and 
-                close[i] > kama_1d_aligned[i]):
+            # Long: TRIX crosses above zero, chop > 61.8 (range), volume spike
+            if (trix[i] > 0 and trix[i-1] <= 0 and 
+                chop[i] > 61.8 and 
+                vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: KAMA falling, RSI < 50, volume spike, price below 1d KAMA
-            elif (kama[i] < kama[i-1] and 
-                  rsi[i] < 50 and 
-                  volume_spike[i] and 
-                  close[i] < kama_1d_aligned[i]):
+            # Short: TRIX crosses below zero, chop > 61.8 (range), volume spike
+            elif (trix[i] < 0 and trix[i-1] >= 0 and 
+                  chop[i] > 61.8 and 
+                  vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: KAMA falling OR RSI < 50
-            if (kama[i] < kama[i-1] or 
-                rsi[i] < 50):
+            # Exit long: TRIX crosses below zero OR chop < 38.2 (trending)
+            if (trix[i] < 0 and trix[i-1] >= 0) or chop[i] < 38.2:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -111,9 +91,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: KAMA rising OR RSI > 50
-            if (kama[i] > kama[i-1] or 
-                rsi[i] > 50):
+            # Exit short: TRIX crosses above zero OR chop < 38.2 (trending)
+            if (trix[i] > 0 and trix[i-1] <= 0) or chop[i] < 38.2:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -122,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_Trend_RSI_Volume_Spike_v1"
+name = "4h_TRIX_VolumeSpike_Regime_v1"
 timeframe = "4h"
 leverage = 1.0
