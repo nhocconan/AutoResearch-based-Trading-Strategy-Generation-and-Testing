@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,84 +13,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d ATR for volatility-based stoploss ===
+    # === 1d Data ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
+    # === 12h Data for Trend ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    atr_1d = np.full_like(close_1d, np.nan)
-    for i in range(len(close_1d)):
-        if i >= 14:
-            atr_1d[i] = np.mean(tr[i-14:i+1])
+    # === 1d Pivot and Support/Resistance ===
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r1 = close_1d + (range_1d * 1.1 / 12)
+    s1 = close_1d - (range_1d * 1.1 / 12)
+    
+    # === 12h EMA34 for Trend Filter ===
+    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    
+    # === Align 1d Levels to 4h ===
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # === Volume Confirmation ===
+    vol_ma_20 = np.full_like(volume, np.nan)
+    for i in range(len(volume)):
+        if i >= 19:
+            vol_ma_20[i] = np.mean(volume[i-19:i+1])
         elif i > 0:
-            atr_1d[i] = np.mean(tr[1:i+1])
+            vol_ma_20[i] = np.mean(volume[max(0, i-9):i+1])
         else:
-            atr_1d[i] = np.nan
-    
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # === 1d EMA50 for trend filter ===
-    ema50_1d = np.full_like(close_1d, np.nan)
-    for i in range(len(close_1d)):
-        if i < 50:
-            ema50_1d[i] = np.nan
-        else:
-            if i == 50:
-                ema50_1d[i] = np.mean(close_1d[:51])
-            else:
-                ema50_1d[i] = (close_1d[i] * 2 / 51) + ema50_1d[i-1] * (49 / 51)
-    
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # === 12h Donchian(20) channels ===
-    donchian_high = np.full_like(close, np.nan)
-    donchian_low = np.full_like(close, np.nan)
-    for i in range(len(close)):
-        if i < 20:
-            donchian_high[i] = np.nan
-            donchian_low[i] = np.nan
-        else:
-            donchian_high[i] = np.max(high[i-20:i+1])
-            donchian_low[i] = np.min(low[i-20:i+1])
+            vol_ma_20[i] = volume[0]
+    vol_confirm = volume > vol_ma_20 * 1.5
     
     signals = np.zeros(n)
+    warmup = 100
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):
+    for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(ema34_12h_aligned[i]) or 
+            np.isnan(vol_confirm[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price breaks above Donchian high in uptrend (price > EMA50)
-            if close[i] > donchian_high[i] and close[i] > ema50_1d_aligned[i]:
+            # Long: price above pivot AND above 12h EMA34 (uptrend) with volume
+            if (close[i] > pivot_aligned[i] and close[i] > ema34_12h_aligned[i] and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price breaks below Donchian low in downtrend (price < EMA50)
-            elif close[i] < donchian_low[i] and close[i] < ema50_1d_aligned[i]:
+            # Short: price below pivot AND below 12h EMA34 (downtrend) with volume
+            elif (close[i] < pivot_aligned[i] and close[i] < ema34_12h_aligned[i] and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price falls below Donchian low OR stoploss hit
-            if close[i] < donchian_low[i] or close[i] < (ema50_1d_aligned[i] - 2.0 * atr_1d_aligned[i]):
+            # Exit long: price crosses below pivot OR trend reversal
+            if close[i] < pivot_aligned[i] or close[i] < ema34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -98,8 +86,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises above Donchian high OR stoploss hit
-            if close[i] > donchian_high[i] or close[i] > (ema50_1d_aligned[i] + 2.0 * atr_1d_aligned[i]):
+            # Exit short: price crosses above pivot OR trend reversal
+            if close[i] > pivot_aligned[i] or close[i] > ema34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -108,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_EMA50_VolumeFilter"
-timeframe = "12h"
+name = "4h_Pivot_EMA34_Trend_Filter_Volume"
+timeframe = "4h"
 leverage = 1.0
