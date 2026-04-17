@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Williams Alligator + Volume Spike + ATR Trail
-- Williams Alligator: Jaw(13,8), Teeth(8,5), Lips(5,3) SMAs on median price
-- Trend when Lips > Teeth > Jaw (bull) or Lips < Teeth < Jaw (bear)
-- Volume Spike: Current volume > 2.0x 20-period average for confirmation
-- ATR Trail: Exit when price moves 2.5* ATR against position from extreme
-- Uses 1d HTF for regime classification to avoid whipsaws
-- Target: 20-50 trades/year per symbol (~80-200 total over 4 years)
-- Position sizing: 0.30 (discrete levels to minimize fee churn)
+Hypothesis: 4h Williams %R + ADX Trend Filter with Volume Spike Confirmation
+- Williams %R(14): Measures overbought/oversold levels (-80 to -20 = range, < -80 = oversold, > -20 = overbought)
+- ADX > 25: Strong trend - trade in direction of %R extreme (buy oversold in uptrend, sell overbought in downtrend)
+- ADX < 20: Weak trend/range - fade extremes (sell overbought, buy oversold)
+- Volume Spike: Current volume > 1.8x 20-period average for confirmation
+- Uses 1d HTF for trend context (EMA50) to avoid counter-trend trades
+- Target: 20-35 trades/year per symbol (~80-140 total over 4 years)
+- Position sizing: 0.25 (discrete levels to minimize fee churn)
 """
 
 import numpy as np
@@ -31,39 +31,65 @@ def generate_signals(prices):
     close_4h = df_4h['close'].values
     volume_4h = df_4h['volume'].values
     
-    # Get 1d data for regime filter (HTF)
+    # Get 1d data for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     
-    # Calculate Williams Alligator on 4h
-    median_price_4h = (high_4h + low_4h) / 2
+    # Calculate Williams %R on 4h
+    def calculate_williams_r(high_arr, low_arr, close_arr, window=14):
+        """Williams %R indicator"""
+        highest_high = pd.Series(high_arr).rolling(window=window, min_periods=window).max().values
+        lowest_low = pd.Series(low_arr).rolling(window=window, min_periods=window).min().values
+        wr = -100 * (highest_high - close_arr) / (highest_high - lowest_low)
+        # Handle division by zero (when high == low)
+        wr[highest_high == lowest_low] = -50
+        return wr
     
-    # Jaw: 13-period SMA, shifted 8 bars
-    jaw_4h = pd.Series(median_price_4h).rolling(window=13, min_periods=13).mean().values
-    jaw_4h = np.roll(jaw_4h, 8)
-    jaw_4h[:8] = np.nan
+    wr_4h = calculate_williams_r(high_4h, low_4h, close_4h, 14)
     
-    # Teeth: 8-period SMA, shifted 5 bars
-    teeth_4h = pd.Series(median_price_4h).rolling(window=8, min_periods=8).mean().values
-    teeth_4h = np.roll(teeth_4h, 5)
-    teeth_4h[:5] = np.nan
+    # Calculate ADX on 4h for trend strength
+    def calculate_adx(high_arr, low_arr, close_arr, window=14):
+        """Average Directional Index"""
+        # True Range
+        tr1 = high_arr - low_arr
+        tr2 = np.abs(high_arr - np.roll(close_arr, 1))
+        tr3 = np.abs(low_arr - np.roll(close_arr, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]
+        
+        # Directional Movement
+        dm_plus = np.where((high_arr - np.roll(high_arr, 1)) > (np.roll(low_arr, 1) - low_arr),
+                           np.maximum(high_arr - np.roll(high_arr, 1), 0), 0)
+        dm_minus = np.where((np.roll(low_arr, 1) - low_arr) > (high_arr - np.roll(high_arr, 1)),
+                            np.maximum(np.roll(low_arr, 1) - low_arr, 0), 0)
+        dm_plus[0] = 0
+        dm_minus[0] = 0
+        
+        # Smoothed values
+        tr_smoothed = pd.Series(tr).ewm(span=window, adjust=False, min_periods=window).mean().values
+        dm_plus_smoothed = pd.Series(dm_plus).ewm(span=window, adjust=False, min_periods=window).mean().values
+        dm_minus_smoothed = pd.Series(dm_minus).ewm(span=window, adjust=False, min_periods=window).mean().values
+        
+        # Directional Indicators
+        di_plus = 100 * dm_plus_smoothed / tr_smoothed
+        di_minus = 100 * dm_minus_smoothed / tr_smoothed
+        
+        # DX and ADX
+        dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+        dx[np.isnan(dx)] = 0
+        adx = pd.Series(dx).ewm(span=window, adjust=False, min_periods=window).mean().values
+        return adx
     
-    # Lips: 5-period SMA, shifted 3 bars
-    lips_4h = pd.Series(median_price_4h).rolling(window=5, min_periods=5).mean().values
-    lips_4h = np.roll(lips_4h, 3)
-    lips_4h[:3] = np.nan
+    adx_4h = calculate_adx(high_4h, low_4h, close_4h, 14)
     
-    # Determine trend direction
-    bullish_alligator = (lips_4h > teeth_4h) & (teeth_4h > jaw_4h)
-    bearish_alligator = (lips_4h < teeth_4h) & (teeth_4h < jaw_4h)
+    # Calculate EMA50 on 1d for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Volume average (20-period) on 4h
     volume_4h_series = pd.Series(volume_4h)
     volume_ma_4h = volume_4h_series.rolling(window=20, min_periods=20).mean().values
     
-    # ATR (14-period) for trailing stop on 4h
+    # ATR (14-period) for stoploss on 4h
     def calculate_atr(high_arr, low_arr, close_arr, window):
         """Average True Range"""
         tr1 = high_arr - low_arr
@@ -77,91 +103,97 @@ def generate_signals(prices):
     atr_4h = calculate_atr(high_4h, low_4h, close_4h, 14)
     
     # Align all indicators to 4h timeframe
-    bullish_alligator_aligned = align_htf_to_ltf(prices, df_4h, bullish_alligator)
-    bearish_alligator_aligned = align_htf_to_ltf(prices, df_4h, bearish_alligator)
+    wr_aligned = align_htf_to_ltf(prices, df_4h, wr_4h)
+    adx_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     volume_ma_aligned = align_htf_to_ltf(prices, df_4h, volume_ma_4h)
     atr_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     entry_price = 0.0
-    extreme_price = 0.0  # Track extreme price for trailing stop
     
     start_idx = 100  # warmup for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(bullish_alligator_aligned[i]) or np.isnan(bearish_alligator_aligned[i]) or 
-            np.isnan(volume_ma_aligned[i]) or np.isnan(atr_aligned[i])):
+        if (np.isnan(wr_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(ema50_aligned[i]) or np.isnan(volume_ma_aligned[i]) or np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             continue
         
-        is_bullish = bullish_alligator_aligned[i]
-        is_bearish = bearish_alligator_aligned[i]
+        wr = wr_aligned[i]
+        adx = adx_aligned[i]
+        ema50 = ema50_aligned[i]
         vol_ma = volume_ma_aligned[i]
         atr_val = atr_aligned[i]
         vol = volume[i]
         price = close[i]
         
         if position == 0:
-            # Entry logic: Alligator alignment + volume spike
-            if is_bullish and vol > 2.0 * vol_ma:
-                signals[i] = 0.30
-                position = 1
-                entry_price = price
-                extreme_price = price
-            elif is_bearish and vol > 2.0 * vol_ma:
-                signals[i] = -0.30
-                position = -1
-                entry_price = price
-                extreme_price = price
+            # Entry logic based on trend regime
+            if adx > 25:  # Strong trend
+                # Determine trend direction from 1d EMA50
+                uptrend = price > ema50
+                # Long: Oversold in uptrend + volume spike
+                if wr < -80 and uptrend and vol > 1.8 * vol_ma:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = price
+                # Short: Overbought in downtrend + volume spike
+                elif wr > -20 and not uptrend and vol > 1.8 * vol_ma:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = price
+            else:  # Weak trend/range (ADX < 25)
+                # Fade extremes: sell overbought, buy oversold
+                if wr > -20 and vol > 1.8 * vol_ma:  # Overbought
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = price
+                elif wr < -80 and vol > 1.8 * vol_ma:  # Oversold
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = price
         
         elif position == 1:
-            # Update extreme price for trailing stop
-            if price > extreme_price:
-                extreme_price = price
-            
             # Exit conditions for long
             exit_signal = False
             
-            # Exit 1: Alligator trend reversal
-            if not is_bullish:
+            # Exit 1: Williams %R returns to neutral territory
+            if wr > -50:  # Returned from oversold
                 exit_signal = True
             
-            # Exit 2: ATR-based trailing stop (2.5 * ATR below extreme)
-            elif price < extreme_price - 2.5 * atr_val:
+            # Exit 2: ATR-based stoploss (2.0 * ATR below entry)
+            elif price < entry_price - 2.0 * atr_val:
                 exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
-            # Update extreme price for trailing stop (track lowest price for shorts)
-            if price < extreme_price:
-                extreme_price = price
-            
             # Exit conditions for short
             exit_signal = False
             
-            # Exit 1: Alligator trend reversal
-            if not is_bearish:
+            # Exit 1: Williams %R returns to neutral territory
+            if wr < -50:  # Returned from overbought
                 exit_signal = True
             
-            # Exit 2: ATR-based trailing stop (2.5 * ATR above extreme)
-            elif price > extreme_price + 2.5 * atr_val:
+            # Exit 2: ATR-based stoploss (2.0 * ATR above entry)
+            elif price > entry_price + 2.0 * atr_val:
                 exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_WilliamsAlligator_VolumeSpike_ATRTrail"
+name = "4h_WilliamsR_ADXTrend_VolumeSpike_ATRStop"
 timeframe = "4h"
 leverage = 1.0
