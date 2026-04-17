@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Camarilla pivot (R1/S1) breakout with 1-day volume confirmation and ADX trend filter
-# Camarilla pivots provide precise support/resistance levels; volume confirms conviction; ADX>25 filters chop.
+# Hypothesis: 12-hour Donchian(20) breakout with 1-day volume confirmation and ADX trend filter
+# Donchian breakouts capture momentum; volume confirms conviction; ADX>25 filters chop.
 # Designed for 12h timeframe to achieve 12-37 trades/year with low fee decay.
 # Works in both bull and bear markets by capturing breakouts in trending regimes.
 
@@ -18,29 +18,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h OHLC for Camarilla calculation ===
+    # === 12h OHLC for Donchian calculation ===
     df_12h = get_htf_data(prices, '12h')
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     
-    # === 1-day Camarilla Pivot Levels (R1, S1) ===
-    # Based on previous day's OHLC
-    high_prev = np.concatenate([[high_12h[0]], high_12h[:-1]])  # Previous 12h high
-    low_prev = np.concatenate([[low_12h[0]], low_12h[:-1]])    # Previous 12h low
-    close_prev = np.concatenate([[close_12h[0]], close_12h[:-1]])  # Previous 12h close
-    
-    # Pivot point
-    pivot = (high_prev + low_prev + close_prev) / 3
-    range_prev = high_prev - low_prev
-    
-    # Camarilla levels
-    r1 = close_prev + (range_prev * 1.1 / 12)
-    s1 = close_prev - (range_prev * 1.1 / 12)
+    # === 12h Donchian Channels (20-period) ===
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
     # Align to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
     
     # === 1-day Volume Spike (vs 20-period average) ===
     df_1d = get_htf_data(prices, '1d')
@@ -89,7 +79,7 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
             np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             position = 0
@@ -106,9 +96,9 @@ def generate_signals(prices):
         # Trend filter: ADX > 25
         trend_filter = adx_aligned[i] > 25
         
-        # Camarilla breakout signals
-        breakout_up = close_12h_aligned[i] > r1_aligned[i]
-        breakout_down = close_12h_aligned[i] < s1_aligned[i]
+        # Donchian breakout signals
+        breakout_up = close_12h_aligned[i] > donchian_high_aligned[i]
+        breakout_down = close_12h_aligned[i] < donchian_low_aligned[i]
         
         # Entry logic: only enter when flat
         if position == 0:
@@ -122,10 +112,10 @@ def generate_signals(prices):
                     position = -1
                     continue
         
-        # Exit logic: exit when price returns to pivot or conditions fail
+        # Exit logic: exit when price returns to opposite Donchian band or conditions fail
         elif position == 1:
-            # Exit long if price returns to pivot or conditions fail
-            if close_12h_aligned[i] < pivot[i] or not vol_spike or not trend_filter:
+            # Exit long if price returns to lower band or conditions fail
+            if close_12h_aligned[i] < donchian_low_aligned[i] or not vol_spike or not trend_filter:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -133,8 +123,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short if price returns to pivot or conditions fail
-            if close_12h_aligned[i] > pivot[i] or not vol_spike or not trend_filter:
+            # Exit short if price returns to upper band or conditions fail
+            if close_12h_aligned[i] > donchian_high_aligned[i] or not vol_spike or not trend_filter:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -143,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_1dVolume_ADXFilter"
+name = "12h_Donchian20_1dVolume1.5x_ADX25"
 timeframe = "12h"
 leverage = 1.0
