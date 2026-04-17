@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-1h_Aroon_Slope_Trend_v1
-Aroon(25) for trend strength: Aroon-Up > 60 for long, Aroon-Down > 60 for short.
-1d EMA50 filter: price above/below 1d EMA50 for trend alignment.
-Session filter: 08-20 UTC to avoid low-volume periods.
-Target: 60-150 total trades over 4 years (15-37/year).
+12h_Donchian20_VolumeSpike_TrendFilter_v1
+Long: Price breaks above Donchian(20) high + volume spike + trend filter (price > 1d EMA50)
+Short: Price breaks below Donchian(20) low + volume spike + trend filter (price < 1d EMA50)
+Exit: Price crosses back below Donchian(20) mid (for long) or above mid (for short)
+Position size: 0.25
+Designed to capture breakouts with volume confirmation in trending markets.
+Target: 20-50 total trades over 4 years (5-12/year) to avoid fee drag.
+Works in both bull (breakouts continue) and bear (failed reversals) regimes.
 """
 
 import numpy as np
@@ -13,101 +16,85 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # === Aroon(25) ===
-    # Aroon-Up: ((25 - periods since 25-period high) / 25) * 100
-    # Aroon-Down: ((25 - periods since 25-period low) / 25) * 100
-    period = 25
-    aroon_up = np.full(n, np.nan)
-    aroon_down = np.full(n, np.nan)
+    # === Donchian Channel (20) ===
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2.0
     
-    for i in range(period - 1, n):
-        # Find highest high in last 'period' bars
-        highest_high_idx = i - np.argmax(high[i - period + 1:i + 1][::-1])  # most recent
-        # Find lowest low in last 'period' bars
-        lowest_low_idx = i - np.argmin(low[i - period + 1:i + 1][::-1])    # most recent
-        
-        aroon_up[i] = ((period - (i - highest_high_idx)) / period) * 100
-        aroon_down[i] = ((period - (i - lowest_low_idx)) / period) * 100
+    # === Volume Spike (2x 20-period average) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (2.0 * vol_ma)
     
     # === 1d EMA50 for trend filter ===
     df_1d = get_htf_data(prices, '1d')
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Pre-compute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 60
+    warmup = 50
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(aroon_up[i]) or 
-            np.isnan(aroon_down[i]) or 
+        if (np.isnan(donch_high[i]) or 
+            np.isnan(donch_low[i]) or 
+            np.isnan(donch_mid[i]) or 
+            np.isnan(vol_spike[i]) or 
             np.isnan(ema_50_1d_aligned[i])):
-            signals[i] = 0.0
-            position = 0
-            continue
-        
-        # Session filter: only trade during 08-20 UTC
-        if not in_session[i]:
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: Aroon-Up > 60, Aroon-Down < 40 (strong uptrend), price above 1d EMA50
-            if (aroon_up[i] > 60 and 
-                aroon_down[i] < 40 and 
+            # Long: breakout above Donchian high + volume spike + above 1d EMA50
+            if (close[i] > donch_high[i] and 
+                vol_spike[i] and 
                 close[i] > ema_50_1d_aligned[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
                 continue
-            # Short: Aroon-Down > 60, Aroon-Up < 40 (strong downtrend), price below 1d EMA50
-            elif (aroon_down[i] > 60 and 
-                  aroon_up[i] < 40 and 
+            # Short: breakout below Donchian low + volume spike + below 1d EMA50
+            elif (close[i] < donch_low[i] and 
+                  vol_spike[i] and 
                   close[i] < ema_50_1d_aligned[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: Aroon-Down > 60 (downtrend emerging) OR Aroon-Up < 40 (weakening uptrend)
-            if (aroon_down[i] > 60 or 
-                aroon_up[i] < 40):
+            # Exit long: price crosses back below Donchian mid
+            if close[i] < donch_mid[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Aroon-Up > 60 (uptrend emerging) OR Aroon-Down < 40 (weakening downtrend)
-            if (aroon_up[i] > 60 or 
-                aroon_down[i] < 40):
+            # Exit short: price crosses back above Donchian mid
+            if close[i] > donch_mid[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Aroon_Slope_Trend_v1"
-timeframe = "1h"
+name = "12h_Donchian20_VolumeSpike_TrendFilter_v1"
+timeframe = "12h"
 leverage = 1.0
