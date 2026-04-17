@@ -1,12 +1,13 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-1h_4hTrend_1dVolume_Confirmation
-Trend-following strategy using 4h EMA34 for direction, 1h EMA8/21 crossover for entry timing, and 1d volume surge confirmation.
-Long when: 4h EMA34 uptrend + 1h EMA8 crosses above EMA21 + 1d volume > 1.5x 20-day average.
-Short when: 4h EMA34 downtrend + 1h EMA8 crosses below EMA21 + 1d volume > 1.5x 20-day average.
-Exit when 1h EMA8 crosses back in opposite direction.
+1h_Structure_Trend_Filter
+Long when: 4h price above SMA200 + 1h price above EMA50 + volume > 1.5x 20-period average.
+Short when: 4h price below SMA200 + 1h price below EMA50 + volume > 1.5x 20-period average.
+Exit when price crosses back EMA50.
 Position size: 0.20. Target: 15-37 trades/year.
-Uses 4h for trend direction, 1h for entry timing, 1d for volume confirmation. Works in bull/bear: trend filter avoids counter-trend trades, volume confirmation ensures momentum behind breakouts.
+Uses 4h for long-term trend (SMA200), 1h for entry/exit (EMA50), volume for momentum.
+Avoids overtrading by requiring multi-factor confluence.
 """
 
 import numpy as np
@@ -15,31 +16,23 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA34 trend
+    # 4h SMA200 for trend
     df_4h = get_htf_data(prices, '4h')
     close_4h = df_4h['close'].values
+    sma200_4h = pd.Series(close_4h).rolling(window=200, min_periods=200).mean().values
+    sma200_4h_aligned = align_htf_to_ltf(prices, df_4h, sma200_4h)
     
-    # Calculate EMA34 on 4h
-    ema34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
+    # 1h EMA50 for entry/exit
+    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Get 1d data for volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    volume_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma20_1d)
-    
-    # Calculate EMA8 and EMA21 on 1h
-    ema8 = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # 1h volume filter
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -47,51 +40,46 @@ def generate_signals(prices):
     # Precompute session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    for i in range(34, n):  # warmup for EMA34
+    for i in range(50, n):  # warmup for EMA50
         # Session filter: 08-20 UTC
         if not (8 <= hours[i] <= 20):
             signals[i] = 0.0
             continue
         
         # Skip if any required data is not available
-        if (np.isnan(ema34_4h_aligned[i]) or np.isnan(volume_ma20_1d_aligned[i])):
+        if (np.isnan(sma200_4h_aligned[i]) or np.isnan(ema50[i]) or np.isnan(vol_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Current 1d volume aligned to 1h
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
+        # Current price vs 4h SMA200 (trend)
+        # Since we don't have 4h close at 1h bar, we use price vs aligned SMA200 as proxy
+        price_above_4h_sma200 = close[i] > sma200_4h_aligned[i]
+        price_below_4h_sma200 = close[i] < sma200_4h_aligned[i]
         
-        volume_filter = vol_1d_current > (1.5 * volume_ma20_1d_aligned[i])
-        
-        # EMA crossover signals
-        ema8_cross_above = ema8[i] > ema21[i] and ema8[i-1] <= ema21[i-1]
-        ema8_cross_below = ema8[i] < ema21[i] and ema8[i-1] >= ema21[i-1]
+        # Volume filter
+        volume_filter = volume[i] > (1.5 * vol_ma20[i])
         
         if position == 0:
-            # Long: 4h uptrend + EMA8 crosses above EMA21 + volume surge
-            if ema34_4h_aligned[i] > close_4h[len(df_4h)-1] if len(df_4h) > 0 else False:  # Simplified trend check
-                # Actually, we need to check if current 4h close is above its EMA34
-                # Since we don't have current 4h close in 1h loop, we'll use the aligned EMA34 vs price approximation
-                # Better approach: check if 1h price is above the 4h EMA34 trend (simplified)
-                if ema8_cross_above and volume_filter:
-                    signals[i] = 0.20
-                    position = 1
-            # Short: 4h downtrend + EMA8 crosses below EMA21 + volume surge
-            elif ema8_cross_below and volume_filter:
+            # Long: uptrend + price above EMA50 + volume
+            if price_above_4h_sma200 and close[i] > ema50[i] and volume_filter:
+                signals[i] = 0.20
+                position = 1
+            # Short: downtrend + price below EMA50 + volume
+            elif price_below_4h_sma200 and close[i] < ema50[i] and volume_filter:
                 signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: EMA8 crosses below EMA21
-            if ema8_cross_below:
+            # Exit long: price crosses below EMA50
+            if close[i] < ema50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: EMA8 crosses above EMA21
-            if ema8_cross_above:
+            # Exit short: price crosses above EMA50
+            if close[i] > ema50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4hTrend_1dVolume_Confirmation"
+name = "1h_Structure_Trend_Filter"
 timeframe = "1h"
 leverage = 1.0
