@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with volume confirmation and 1w ADX filter.
-In trending markets (ADX>25), buy breakouts above upper band, sell breakdowns below lower band.
-In ranging markets (ADX<20), fade extremes with mean reversion to the middle.
-Position sizing: 0.30 for entries, 0 for exits.
-Target: 30-100 total trades over 4 years (7-25/year).
+Hypothesis: 12h timeframe with 1d RSI mean reversion and volume confirmation.
+Buy when RSI < 30 and volume > 1.5x 20-period average, sell when RSI > 70 and volume > 1.5x 20-period average.
+Use 1w ADX > 25 to filter for trending markets (avoid ranging whipsaws).
+In uptrends: buy RSI < 30 pullbacks; in downtrends: sell RSI > 70 rallies.
+Position sizing: 0.25 for entries, 0 for exits.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -13,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,17 +22,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels
+    # Get 1d data for RSI
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate Donchian channels (20-period high/low)
-    upper_dc = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_dc = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    middle_dc = (upper_dc + lower_dc) / 2
+    # Calculate RSI (14)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     # Get 1w data for ADX filter
     df_1w = get_htf_data(prices, '1w')
@@ -61,90 +64,63 @@ def generate_signals(prices):
     # Volume filter: 1.5x 20-period average
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all to 1d
-    upper_dc_aligned = align_htf_to_ltf(prices, df_1d, upper_dc)
-    lower_dc_aligned = align_htf_to_ltf(prices, df_1d, lower_dc)
-    middle_dc_aligned = align_htf_to_ltf(prices, df_1d, middle_dc)
+    # Align all to 12h
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    plus_di_aligned = align_htf_to_ltf(prices, df_1w, plus_di)
+    minus_di_aligned = align_htf_to_ltf(prices, df_1w, minus_di)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 60
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_dc_aligned[i]) or np.isnan(lower_dc_aligned[i]) or 
-            np.isnan(middle_dc_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ma_20_aligned[i])):
+        if (np.isnan(rsi_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(vol_ma_20_aligned[i]) or np.isnan(plus_di_aligned[i]) or 
+            np.isnan(minus_di_aligned[i])):
             signals[i] = 0.0
             continue
-            
-        # Determine market regime
-        trending = adx_aligned[i] > 25
-        ranging = adx_aligned[i] < 20
+        
+        # Determine trend direction from ADX components
+        uptrend = plus_di_aligned[i] > minus_di_aligned[i]
+        downtrend = plus_di_aligned[i] < minus_di_aligned[i]
+        strong_trend = adx_aligned[i] > 25
         
         if position == 0:
-            # Trending market: breakout strategy
-            if trending:
-                # Long: break above upper Donchian with volume
-                if (close[i] > upper_dc_aligned[i] and 
-                    volume[i] > vol_ma_20_aligned[i] * 1.5):
-                    signals[i] = 0.30
-                    position = 1
-                # Short: break below lower Donchian with volume
-                elif (close[i] < lower_dc_aligned[i] and 
-                      volume[i] > vol_ma_20_aligned[i] * 1.5):
-                    signals[i] = -0.30
-                    position = -1
-            # Ranging market: mean reversion to middle
-            elif ranging:
-                # Long: price near lower band, revert to middle
-                if close[i] <= lower_dc_aligned[i] * 1.005:  # within 0.5% of lower band
-                    signals[i] = 0.30
-                    position = 1
-                # Short: price near upper band, revert to middle
-                elif close[i] >= upper_dc_aligned[i] * 0.995:  # within 0.5% of upper band
-                    signals[i] = -0.30
-                    position = -1
+            # Long: RSI < 30, volume spike, strong uptrend
+            if (rsi_aligned[i] < 30 and 
+                volume[i] > vol_ma_20_aligned[i] * 1.5 and 
+                strong_trend and uptrend):
+                signals[i] = 0.25
+                position = 1
+            # Short: RSI > 70, volume spike, strong downtrend
+            elif (rsi_aligned[i] > 70 and 
+                  volume[i] > vol_ma_20_aligned[i] * 1.5 and 
+                  strong_trend and downtrend):
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit long: price reaches middle or opposite band
-            if trending:
-                # In trending market, hold until opposite band or momentum fails
-                if close[i] >= upper_dc_aligned[i] * 1.02 or close[i] <= middle_dc_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.30
+            # Exit long: RSI > 50 (mean reversion) or trend weakness
+            if rsi_aligned[i] > 50 or not strong_trend:
+                signals[i] = 0.0
+                position = 0
             else:
-                # In ranging market, exit at middle
-                if close[i] >= middle_dc_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price reaches middle or opposite band
-            if trending:
-                # In trending market, hold until opposite band or momentum fails
-                if close[i] <= lower_dc_aligned[i] * 0.98 or close[i] >= middle_dc_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.30
+            # Exit short: RSI < 50 (mean reversion) or trend weakness
+            if rsi_aligned[i] < 50 or not strong_trend:
+                signals[i] = 0.0
+                position = 0
             else:
-                # In ranging market, exit at middle
-                if close[i] <= middle_dc_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "1d_Donchian20_ADX_Volume_Regime"
-timeframe = "1d"
+name = "12h_RSI14_Volume_TrendFilter"
+timeframe = "12h"
 leverage = 1.0
