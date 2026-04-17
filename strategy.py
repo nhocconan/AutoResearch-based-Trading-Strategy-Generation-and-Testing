@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_WilliamsVixFix_VolumeSpike_v1
-Williams Vix Fix (WVF) > 0.8 + Volume spike > 1.5x avg volume + RSI(14) > 50 for long, < 50 for short.
-Uses 1d ADX > 25 for trend filter (avoid chop). Exit when WVF < 0.3 or ADX < 20.
-Designed to capture volatility expansion moves in both bull and bear markets.
+6h_ElderRay_BullBearPower_Trend_v1
+Elder Ray Index: Bull Power = High - EMA13, Bear Power = EMA13 - Low.
+Long when Bull Power > 0 and rising, Bear Power < 0 and falling.
+Short when Bear Power < 0 and falling, Bull Power > 0 and rising.
+Uses 1d trend filter: price above/below 1d EMA50.
+Exit when power crosses zero or trend fails.
+Designed to capture institutional buying/selling pressure with trend alignment.
 Target: 50-150 total trades over 4 years (12-37/year).
 """
 
@@ -13,103 +16,67 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # === Williams Vix Fix (WVF) ===
-    # WVF = ((Highest Close in n-period - Low) / Highest Close in n-period) * 100
-    # We use 22-period as per Larry Williams
-    highest_close = pd.Series(close).rolling(window=22, min_periods=22).max()
-    wvf = ((highest_close - low) / highest_close) * 100
-    wvf = wvf.values  # already 0-100 scale
+    # === EMA13 for Elder Ray ===
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # === RSI(14) ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # === Elder Ray Components ===
+    bull_power = high - ema13
+    bear_power = ema13 - low
     
-    # === Volume spike (1.5x 20-period average) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume / (vol_ma + 1e-10)  # ratio
-    
-    # === 1d ADX(14) for trend filter ===
+    # === 1d EMA50 for trend filter ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # ADX calculation
-    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / (atr_1d * 14)
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / (atr_1d * 14)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx_1d = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 50
+    warmup = 20
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(wvf[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(vol_spike[i]) or 
-            np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: WVF > 0.8 (high fear), volume spike, RSI > 50, ADX > 25
-            if (wvf[i] > 80 and 
-                vol_spike[i] > 1.5 and 
-                rsi[i] > 50 and 
-                adx_1d_aligned[i] > 25):
+            # Long: Bull Power > 0 and rising, Bear Power < 0, price above 1d EMA50
+            if (bull_power[i] > 0 and 
+                bull_power[i] > bull_power[i-1] and 
+                bear_power[i] < 0 and 
+                close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: WVF > 0.8 (high fear), volume spike, RSI < 50, ADX > 25
-            elif (wvf[i] > 80 and 
-                  vol_spike[i] > 1.5 and 
-                  rsi[i] < 50 and 
-                  adx_1d_aligned[i] > 25):
+            # Short: Bear Power < 0 and falling, Bull Power > 0, price below 1d EMA50
+            elif (bear_power[i] < 0 and 
+                  bear_power[i] < bear_power[i-1] and 
+                  bull_power[i] > 0 and 
+                  close[i] < ema_50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: WVF < 0.3 (low fear) OR ADX < 20
-            if (wvf[i] < 30 or 
-                adx_1d_aligned[i] < 20):
+            # Exit long: Bull Power <= 0 OR Bear Power >= 0 OR price below 1d EMA50
+            if (bull_power[i] <= 0 or 
+                bear_power[i] >= 0 or 
+                close[i] < ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -117,9 +84,10 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: WVF < 0.3 (low fear) OR ADX < 20
-            if (wvf[i] < 30 or 
-                adx_1d_aligned[i] < 20):
+            # Exit short: Bear Power >= 0 OR Bull Power <= 0 OR price above 1d EMA50
+            if (bear_power[i] >= 0 or 
+                bull_power[i] <= 0 or 
+                close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -128,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsVixFix_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_ElderRay_BullBearPower_Trend_v1"
+timeframe = "6h"
 leverage = 1.0
