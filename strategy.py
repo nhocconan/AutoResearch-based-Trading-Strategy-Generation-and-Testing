@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h timeframe with 1d Williams %R extreme reversal + volume confirmation + ATR volatility filter.
-Long when 1d Williams %R < -80 (oversold) with volume > 1.5x 20-period average and current ATR < 1.2x 20-period ATR average.
-Short when 1d Williams %R > -20 (overbought) with volume > 1.5x 20-period average and current ATR < 1.2x 20-period ATR average.
-Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts).
-Uses discrete position sizing 0.25 to limit fee drag. Target: 75-200 total trades over 4 years.
-Williams %R captures extreme sentiment reversals; volume confirmation ensures participation; volatility filter avoids false signals in high volatility.
-Works in bull markets (buying panic dips) and bear markets (selling into overbought bounces).
+Hypothesis: 6h timeframe with 1d EMA50 trend filter + 6h RSI(14) mean reversion + volume spike confirmation.
+Long when price > 1d EMA50 (uptrend) AND 6h RSI < 30 (oversold) AND 6h volume > 1.5x 20-period average.
+Short when price < 1d EMA50 (downtrend) AND 6h RSI > 70 (overbought) AND 6h volume > 1.5x 20-period average.
+Exit when RSI returns to neutral zone (40-60) or opposite extreme is hit.
+Uses discrete position sizing 0.25 to limit fee drag. Target: 50-150 total trades over 4 years.
+Combines trend following with mean reversion entries to work in both bull and bear markets.
+Volume spike confirms institutional interest, reducing false signals.
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,83 +23,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Williams %R, volume, and ATR
+    # Get daily data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate daily Williams %R (14-period)
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low + 1e-10)
+    # Calculate daily EMA50
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate daily ATR (14-period) for volatility filter
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align length
+    # Calculate 6h RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_ma_20 = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
-    
-    # Get 1d volume 20-period average
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all to 4h
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
-    atr_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20)
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+    # Calculate 6h volume 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # need enough for ATR and Williams %R
+    start_idx = 50  # need enough for EMA50 and RSI
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(atr_aligned[i]) or 
-            np.isnan(atr_ma_20_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or 
-            np.isnan(volume_1d_aligned[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(rsi_values[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x 20-period average
-        volume_confirmed = volume_1d_aligned[i] > 1.5 * vol_ma_20_1d_aligned[i]
-        
-        # Volatility filter: current ATR < 1.2x 20-period ATR average (breakout from low volatility)
-        vol_filter = atr_aligned[i] < 1.2 * atr_ma_20_1d_aligned[i]
+        # Volume confirmation: current 6h volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) with volume and low volatility
-            if (williams_r_aligned[i] < -80 and 
-                volume_confirmed and 
-                vol_filter):
+            # Long: uptrend + oversold + volume spike
+            if (close[i] > ema50_1d_aligned[i] and 
+                rsi_values[i] < 30 and 
+                volume_confirmed):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (> -20) with volume and low volatility
-            elif (williams_r_aligned[i] > -20 and 
-                  volume_confirmed and 
-                  vol_filter):
+            # Short: downtrend + overbought + volume spike
+            elif (close[i] < ema50_1d_aligned[i] and 
+                  rsi_values[i] > 70 and 
+                  volume_confirmed):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Williams %R crosses above -50 (exiting oversold territory)
-            if williams_r_aligned[i] > -50:
+            # Exit long: RSI returns to neutral (40-60) or becomes overbought
+            if rsi_values[i] >= 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Williams %R crosses below -50 (exiting overbought territory)
-            if williams_r_aligned[i] < -50:
+            # Exit short: RSI returns to neutral (40-60) or becomes oversold
+            if rsi_values[i] <= 60:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dWilliamsR_Volume_VolatilityFilter"
-timeframe = "4h"
+name = "6h_1dEMA50_RSI14_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
