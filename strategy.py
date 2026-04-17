@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_RSI_ChopFilter_v1
-Daily strategy combining Kaufman Adaptive Moving Average trend with RSI momentum and Choppiness Index regime filter.
-Designed to work in both bull and bear markets by adapting to trending and ranging conditions.
-Target: 30-100 total trades over 4 years (7-25/year).
+6h_Pivots_R1_S1_Breakout_Volume_Regime_v1
+6-hour strategy using daily Camarilla pivot levels (R1/S1) with volume confirmation and regime filter.
+Enters long on break above R1 with volume, short on break below S1 with volume.
+Exits when price returns to pivot point (PP).
+Uses 12h ADX to filter ranging markets (ADX < 25).
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -20,56 +22,58 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Daily KAMA (10-period ER) ===
-    close_s = pd.Series(close)
-    change = abs(close_s.diff(1))
-    volatility = change.rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if not np.isnan(sc.iloc[i]):
-            kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # === Daily Camarilla Pivot Levels ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === Daily RSI (14-period) ===
-    delta = close_s.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    # Calculate pivot point and levels
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r1 = pp + (range_1d * 1.0 / 8.0)
+    s1 = pp - (range_1d * 1.0 / 8.0)
+    r4 = pp + (range_1d * 1.5 / 8.0)  # Not used but calculated for reference
+    s4 = pp - (range_1d * 1.5 / 8.0)
     
-    # === Weekly Choppiness Index (14-period) ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Align to 6h timeframe (wait for daily close)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    atr_1w = np.zeros(len(high_1w))
-    tr_1w = np.maximum(
-        high_1w[1:] - low_1w[1:],
-        np.maximum(
-            abs(high_1w[1:] - close_1w[:-1]),
-            abs(low_1w[1:] - close_1w[:-1])
-        )
-    )
-    atr_1w[1:] = tr_1w
-    atr_1w[0] = high_1w[0] - low_1w[0]
+    # === Daily Volume Confirmation (20-period average) ===
+    volume_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    sum_atr_1w = pd.Series(atr_1w).rolling(window=14, min_periods=14).sum()
-    highest_high_1w = pd.Series(high_1w).rolling(window=14, min_periods=14).max()
-    lowest_low_1w = pd.Series(low_1w).rolling(window=14, min_periods=14).min()
+    # === 12h ADX for Regime Filter (trending only) ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    chop = 100 * np.log10(sum_atr_1w / (highest_high_1w - lowest_low_1w)) / np.log10(14)
-    chop = chop.fillna(50).values
+    # Calculate ADX components
+    plus_dm = np.zeros_like(high_12h)
+    minus_dm = np.zeros_like(low_12h)
+    plus_dm[1:] = np.maximum(high_12h[1:] - high_12h[:-1], 0)
+    minus_dm[1:] = np.maximum(low_12h[:-1] - low_12h[1:], 0)
+    plus_dm = np.where(plus_dm > minus_dm, plus_dm, 0)
+    minus_dm = np.where(minus_dm > plus_dm, minus_dm, 0)
     
-    # Align weekly chop to daily timeframe (wait for weekly close)
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr[0] = high_12h[0] - low_12h[0]  # First TR
+    
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / (atr * 14)
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / (atr * 14)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
     signals = np.zeros(n)
     
@@ -81,34 +85,39 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(pp_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(vol_ma_1d_aligned[i]) or 
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
+        # Get current day's volume for confirmation
+        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
+        vol_confirmed = vol_1d_current > 1.5 * vol_ma_1d_aligned[i]
+        
+        # Regime filter: only trade in trending markets (ADX > 25)
+        trending = adx_aligned[i] > 25
+        
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price above KAMA, RSI > 50, and chop < 61.8 (trending)
-            if (close[i] > kama[i] and 
-                rsi[i] > 50 and 
-                chop_aligned[i] < 61.8):
+            # Long: price breaks above R1 with volume confirmation and trending
+            if (close[i] > r1_aligned[i] and vol_confirmed and trending):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price below KAMA, RSI < 50, and chop < 61.8 (trending)
-            elif (close[i] < kama[i] and 
-                  rsi[i] < 50 and 
-                  chop_aligned[i] < 61.8):
+            # Short: price breaks below S1 with volume confirmation and trending
+            elif (close[i] < s1_aligned[i] and vol_confirmed and trending):
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic: reverse signal or chop > 61.8 (ranging)
+        # Exit logic: price returns to pivot point
         elif position == 1:
-            # Exit long: price below KAMA or chop > 61.8
-            if (close[i] < kama[i] or chop_aligned[i] > 61.8):
+            # Exit long: price crosses below pivot point
+            if close[i] < pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -116,8 +125,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price above KAMA or chop > 61.8
-            if (close[i] > kama[i] or chop_aligned[i] > 61.8):
+            # Exit short: price crosses above pivot point
+            if close[i] > pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -126,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_RSI_ChopFilter_v1"
-timeframe = "1d"
+name = "6h_Pivots_R1_S1_Breakout_Volume_Regime_v1"
+timeframe = "6h"
 leverage = 1.0
