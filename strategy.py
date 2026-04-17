@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-1h 4h/1d Trend + Volume Breakout with Session Filter
-Long: Price breaks above 4h high + volume > 2x 4h volume SMA(20) + price > 1d EMA(50) + session (08-20 UTC)
-Short: Price breaks below 4h low + volume > 2x 4h volume SMA(20) + price < 1d EMA(50) + session (08-20 UTC)
-Exit: Reverse signal or session exit
-Uses 4h for breakout levels, 1d for trend filter, 1h for entry timing
-Target: 15-35 trades/year per symbol (60-140 total over 4 years)
+6h Elder Ray Power + 1d EMA Trend + Volume Spike
+Long: Bull Power > 0, price > 1d EMA50, volume > 2x 6m volume SMA(20)
+Short: Bear Power < 0, price < 1d EMA50, volume > 2x 6m volume SMA(20)
+Exit: Opposite signal or price crosses 1d EMA50
+Uses Elder Ray (Bull/Bear Power) to measure trend strength behind price moves.
+Designed to work in both bull and bear markets by filtering with 1d trend.
+Target: 50-150 total trades over 4 years (12-37/year)
 """
 
 import numpy as np
@@ -22,37 +23,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for breakout levels
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    
-    # Get 1d data for trend filter
+    # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    
-    # Calculate 4h high/low for breakout levels (previous 4h bar)
-    high_4h_prev = np.roll(high_4h, 1)
-    low_4h_prev = np.roll(low_4h, 1)
-    high_4h_prev[0] = np.nan
-    low_4h_prev[0] = np.nan
-    
-    # Align 4h levels to 1h
-    high_4h_aligned = align_htf_to_ltf(prices, df_4h, high_4h_prev)
-    low_4h_aligned = align_htf_to_ltf(prices, df_4h, low_4h_prev)
     
     # Calculate 1d EMA(50) for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 4h volume SMA(20) for volume filter (use 4h volume from 4h data)
-    vol_4h = df_4h['volume'].values
-    vol_sma_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
-    vol_sma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_sma_4h)
+    # Calculate 6m volume SMA(20) for volume filter
+    vol_sma_6m = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Precompute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Calculate 13-period EMA for Elder Ray (standard setting)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray components
+    bull_power = high - ema_13  # Bull Power = High - EMA13
+    bear_power = low - ema_13   # Bear Power = Low - EMA13
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
@@ -60,52 +47,46 @@ def generate_signals(prices):
     start_idx = max(30, 50)  # need EMA50 and volume SMA
     
     for i in range(start_idx, n):
-        if (np.isnan(high_4h_aligned[i]) or np.isnan(low_4h_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_sma_4h_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_sma_6m[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
             signals[i] = 0.0
-            continue
-        
-        if not in_session[i]:
-            signals[i] = 0.0
-            if position != 0:
-                position = 0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_sma_val = vol_sma_4h_aligned[i]
+        vol_sma_val = vol_sma_6m[i]
         ema_50_val = ema_50_1d_aligned[i]
-        high_4h_val = high_4h_aligned[i]
-        low_4h_val = low_4h_aligned[i]
+        bull = bull_power[i]
+        bear = bear_power[i]
         
         if position == 0:
-            # Long: Price breaks above 4h high + volume > 2x SMA + price > 1d EMA50 + session
-            if price > high_4h_val and close[i-1] <= high_4h_val and vol > 2.0 * vol_sma_val and price > ema_50_val:
-                signals[i] = 0.20
+            # Long: Bull Power > 0 (strong buying pressure) + price > 1d EMA50 + volume spike
+            if bull > 0 and price > ema_50_val and vol > 2.0 * vol_sma_val:
+                signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below 4h low + volume > 2x SMA + price < 1d EMA50 + session
-            elif price < low_4h_val and close[i-1] >= low_4h_val and vol > 2.0 * vol_sma_val and price < ema_50_val:
-                signals[i] = -0.20
+            # Short: Bear Power < 0 (strong selling pressure) + price < 1d EMA50 + volume spike
+            elif bear < 0 and price < ema_50_val and vol > 2.0 * vol_sma_val:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Reverse signal or session exit
-            if price < low_4h_val or not in_session[i]:
+            # Long exit: Bear Power > 0 (selling pressure appears) or price < 1d EMA50
+            if bear > 0 or price < ema_50_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Reverse signal or session exit
-            if price > high_4h_val or not in_session[i]:
+            # Short exit: Bull Power < 0 (buying pressure appears) or price > 1d EMA50
+            if bull < 0 or price > ema_50_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_4h1d_TrendVolumeBreakout_Session"
-timeframe = "1h"
+name = "6h_ElderRay_Power_1dEMA50_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
