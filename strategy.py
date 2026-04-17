@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h timeframe with 1d Williams %R extreme + volume spike + ATR filter.
-Williams %R > -20 (overbought) or < -80 (oversold) on daily timeframe signals potential reversal.
-Entry confirmed with volume > 1.5x 20-period average and ATR < 1.3x 20-period ATR average (low volatility).
-Exit on Williams %R crossing back through -50 midpoint.
-Discrete position sizing 0.25 to limit fee drag. Target: 75-200 total trades over 4 years.
-Works in bull markets (fade overextended rallies) and bear markets (fade panic selling).
+Hypothesis: 4h timeframe with 1d Williams %R extreme + volume confirmation + ATR volatility filter.
+Long when 1d Williams %R < -80 (oversold) with volume > 1.2x 20-period average and ATR < 1.3x 20-period ATR average.
+Short when 1d Williams %R > -20 (overbought) with volume > 1.2x 20-period average and ATR < 1.3x 20-period ATR average.
+Exit when Williams %R crosses back above -50 (for long) or below -50 (for short).
+Uses discrete position sizing 0.25 to limit fee drag. Target: 75-200 total trades over 4 years.
+Williams %R identifies exhaustion points; volume confirms participation; volatility filter ensures low-volatility environment for mean reversion to work.
+Works in bull markets (buy the dip) and bear markets (sell the rally).
 """
 
 import numpy as np
@@ -30,10 +31,11 @@ def generate_signals(prices):
     volume_1d = df_1d['volume'].values
     
     # Calculate daily Williams %R (14-period)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
     highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
     lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
+    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
+    # Handle division by zero (when highest_high == lowest_low)
     williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # Calculate daily ATR (14-period) for volatility filter
@@ -60,7 +62,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # need enough for Williams %R and ATR
+    start_idx = 50  # need enough for ATR and Williams %R
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
@@ -70,28 +72,28 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x 20-period average
-        volume_confirmed = volume_1d_aligned[i] > 1.5 * vol_ma_20_1d_aligned[i]
+        # Volume confirmation: current 1d volume > 1.2x 20-period average
+        volume_confirmed = volume_1d_aligned[i] > 1.2 * vol_ma_20_1d_aligned[i]
         
-        # Volatility filter: current ATR < 1.3x 20-period ATR average (low volatility)
+        # Volatility filter: current ATR < 1.3x 20-period ATR average (breakout from low volatility)
         vol_filter = atr_aligned[i] < 1.3 * atr_ma_20_1d_aligned[i]
         
         if position == 0:
-            # Short: Williams %R > -20 (overbought) with volume and low volatility
-            if (williams_r_aligned[i] > -20 and 
+            # Long: Williams %R oversold (< -80) with volume and low volatility
+            if (williams_r_aligned[i] < -80 and 
                 volume_confirmed and 
                 vol_filter):
-                signals[i] = -0.25
-                position = -1
-            # Long: Williams %R < -80 (oversold) with volume and low volatility
-            elif (williams_r_aligned[i] < -80 and 
-                  volume_confirmed and 
-                  vol_filter):
                 signals[i] = 0.25
                 position = 1
+            # Short: Williams %R overbought (> -20) with volume and low volatility
+            elif (williams_r_aligned[i] > -20 and 
+                  volume_confirmed and 
+                  vol_filter):
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit long: Williams %R crosses above -50 (moving out of oversold)
+            # Exit long: Williams %R crosses back above -50
             if williams_r_aligned[i] > -50:
                 signals[i] = 0.0
                 position = 0
@@ -99,7 +101,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Williams %R crosses below -50 (moving out of overbought)
+            # Exit short: Williams %R crosses back below -50
             if williams_r_aligned[i] < -50:
                 signals[i] = 0.0
                 position = 0
