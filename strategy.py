@@ -32,15 +32,22 @@ def generate_signals(prices):
     r2 = pivot + (high_5d - low_5d)
     s2 = pivot - (high_5d - low_5d)
     
-    # Align weekly pivots to 6h timeframe
-    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
-    r2_6h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_6h = align_htf_to_ltf(prices, df_1d, s2)
+    # Align weekly pivots to 12h timeframe
+    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    r2_12h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_12h = align_htf_to_ltf(prices, df_1d, s2)
     
-    # Volume confirmation (20-period MA on 6h)
+    # Volume confirmation (20-period MA on 12h)
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Choppiness regime filter (1d)
+    high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    atr_14 = pd.Series(high_1d - low_1d).rolling(window=14, min_periods=14).mean().values
+    chop = 100 * np.log10(atr_14.sum() / (high_14 - low_14)) / np.log10(14)
+    chop_12h = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -50,38 +57,42 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(volume_ma20[i]) or 
-            np.isnan(pivot_6h[i]) or 
-            np.isnan(r1_6h[i]) or 
-            np.isnan(s1_6h[i]) or 
-            np.isnan(r2_6h[i]) or 
-            np.isnan(s2_6h[i])):
+            np.isnan(pivot_12h[i]) or 
+            np.isnan(r1_12h[i]) or 
+            np.isnan(s1_12h[i]) or 
+            np.isnan(r2_12h[i]) or 
+            np.isnan(s2_12h[i]) or
+            np.isnan(chop_12h[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter: current volume > 1.3x 20-period average
         volume_filter = volume[i] > (1.3 * volume_ma20[i])
         
+        # Chop filter: chop < 61.8 (trending market)
+        chop_filter = chop_12h[i] < 61.8
+        
         if position == 0:
-            # Long: break above R2 with volume
-            if close[i] > r2_6h[i] and volume_filter:
+            # Long: break above R2 with volume and trending market
+            if close[i] > r2_12h[i] and volume_filter and chop_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S2 with volume
-            elif close[i] < s2_6h[i] and volume_filter:
+            # Short: break below S2 with volume and trending market
+            elif close[i] < s2_12h[i] and volume_filter and chop_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below R1 or volume dries up
-            if close[i] < r1_6h[i] or volume[i] < volume_ma20[i]:
+            # Exit long: price crosses below R1 or chop becomes too high (range) or volume dries up
+            if close[i] < r1_12h[i] or chop_12h[i] > 61.8 or volume[i] < volume_ma20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above S1 or volume dries up
-            if close[i] > s1_6h[i] or volume[i] < volume_ma20[i]:
+            # Exit short: price crosses above S1 or chop becomes too high (range) or volume dries up
+            if close[i] > s1_12h[i] or chop_12h[i] > 61.8 or volume[i] < volume_ma20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R2_S2_Breakout_Volume"
-timeframe = "6h"
+name = "12h_WeeklyPivot_R2_S2_Breakout_Volume_Chop"
+timeframe = "12h"
 leverage = 1.0
