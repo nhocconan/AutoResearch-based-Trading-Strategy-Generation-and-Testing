@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_WeeklyPivot_R1_S1_Breakout_Volume_Filter_v2
-Strategy: 4h Weekly Pivot R1/S1 breakout with volume confirmation and 12h trend filter.
-Long: Price breaks above R1 + volume > 1.5x 12-period avg + 12h close > 12h open
-Short: Price breaks below S1 + volume > 1.5x 12-period avg + 12h close < 12h open
-Exit: Opposite pivot level touch or trend reversal
+4h_WaveTrend_Trend_Scalp
+Strategy: 4h WaveTrend oscillator with 12h trend filter and volume confirmation.
+Long: WT crosses above -60 + 12h uptrend + volume > 1.5x 12-period average
+Short: WT crosses below 60 + 12h downtrend + volume > 1.5x 12-period average
+Exit: WT crosses back through 0 or trend reversal
 Position size: 0.25
-Designed to capture breakouts in trending markets while avoiding false signals in ranging conditions.
+Designed to catch momentum swings in trending markets while filtering chop.
 Timeframe: 4h
 """
 
@@ -24,57 +24,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Weekly Pivot levels for current week using previous week's OHLC
-    def calculate_weekly_pivot(high, low, close):
-        # Pivot point
-        pp = (high + low + close) / 3
-        # Range
-        range_ = high - low
-        # Weekly Pivot levels (R1, S1)
-        r1 = pp + range_ * 1.1 / 12
-        s1 = pp - range_ * 1.1 / 12
-        return r1, s1
+    # Calculate WaveTrend (WT) oscillator
+    # WT1 = EMA(EMA((hlc3 - ema) / (0.015 * mad)), n1)
+    # WT2 = SMA(WT1, n2)
+    # Where hlc3 = (high + low + close) / 3
+    # ema = EMA(hlc3, n1)
+    # mad = mean absolute deviation
     
-    # Need previous week's data to calculate this week's levels
-    # We'll calculate for each bar using previous week's OHLC
-    r1 = np.full(n, np.nan)
-    s1 = np.full(n, np.nan)
+    n1 = 10
+    n2 = 21
     
-    # Convert to pandas for easier date handling
-    df = prices.copy()
-    df['date'] = pd.to_datetime(df['open_time']).dt.date
-    df['week'] = pd.to_datetime(df['open_time']).dt.isocalendar().week
-    df['year'] = pd.to_datetime(df['open_time']).dt.isocalendar().year
+    hlc3 = (high + low + close) / 3.0
     
-    # Group by year-week to get weekly OHLC
-    weekly = df.groupby(['year', 'week']).agg({
-        'high': 'max',
-        'low': 'min',
-        'close': 'last',
-        'open': 'first'
-    }).reset_index()
+    # First EMA of hlc3
+    ema1 = pd.Series(hlc3).ewm(span=n1, adjust=False).mean().values
     
-    if len(weekly) < 2:
-        return np.zeros(n)
+    # Deviation
+    dev = hlc3 - ema1
     
-    # Calculate Weekly Pivot levels for each week (using previous week's data)
-    weekly['r1'] = np.nan
-    weekly['s1'] = np.nan
+    # Mean absolute deviation
+    mad = pd.Series(np.abs(dev)).ewm(span=n1, adjust=False).mean().values
     
-    for i in range(1, len(weekly)):
-        prev_high = weekly.iloc[i-1]['high']
-        prev_low = weekly.iloc[i-1]['low']
-        prev_close = weekly.iloc[i-1]['close']
-        r1_val, s1_val = calculate_weekly_pivot(prev_high, prev_low, prev_close)
-        weekly.iloc[i, weekly.columns.get_loc('r1')] = r1_val
-        weekly.iloc[i, weekly.columns.get_loc('s1')] = s1_val
+    # WT1
+    wi = np.where(mad != 0, dev / (0.015 * mad), 0)
+    wt1 = pd.Series(wi).ewm(span=n1, adjust=False).mean().values
+    wt1 = pd.Series(wt1).ewm(span=n1, adjust=False).mean().values  # Double smoothed
     
-    # Map weekly levels back to 4h bars
-    week_map = dict(zip(zip(weekly['year'], weekly['week']), zip(weekly['r1'], weekly['s1'])))
-    for i in range(n):
-        year_week = (df.iloc[i]['year'], df.iloc[i]['week'])
-        if year_week in week_map:
-            r1[i], s1[i] = week_map[year_week]
+    # WT2 = SMA of WT1
+    wt2 = pd.Series(wt1).rolling(window=n2, min_periods=n2).mean().values
     
     # Calculate 12h trend (close > open = uptrend, close < open = downtrend)
     df_12h = get_htf_data(prices, '12h')
@@ -96,14 +73,14 @@ def generate_signals(prices):
     # Precompute session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    for i in range(50, n):  # warmup for indicators
+    for i in range(max(n1*2, n2*2, 12), n):  # warmup for indicators
         # Session filter: 08-20 UTC
         if not (8 <= hours[i] <= 20):
             signals[i] = 0.0
             continue
         
         # Skip if any required data is not available
-        if (np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(trend_12h_aligned[i]) or 
+        if (np.isnan(wt1[i]) or np.isnan(wt2[i]) or np.isnan(trend_12h_aligned[i]) or 
             np.isnan(volume_ma12_4h_aligned[i])):
             signals[i] = 0.0
             continue
@@ -116,32 +93,34 @@ def generate_signals(prices):
         trend_up = trend_12h_aligned[i] > 0.5  # 12h close > open
         trend_down = trend_12h_aligned[i] < 0.5  # 12h close < open
         
-        # Breakout conditions
-        breakout_up = close[i] > r1[i]
-        breakout_down = close[i] < s1[i]
+        # WaveTrend signals
+        wt1_cross_up = wt1[i-1] < wt2[i-1] and wt1[i] > wt2[i]  # WT1 crosses above WT2
+        wt1_cross_down = wt1[i-1] > wt2[i-1] and wt1[i] < wt2[i]  # WT1 crosses below WT2
+        wt_cross_zero_up = wt1[i-1] < 0 and wt1[i] >= 0  # WT1 crosses above zero
+        wt_cross_zero_down = wt1[i-1] > 0 and wt1[i] <= 0  # WT1 crosses below zero
         
         # Entry signals
         if position == 0:
-            # Long: breakout above R1 + volume filter + 12h uptrend
-            if breakout_up and volume_filter and trend_up:
+            # Long: WT1 crosses above WT2 + volume filter + 12h uptrend
+            if wt1_cross_up and volume_filter and trend_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below S1 + volume filter + 12h downtrend
-            elif breakout_down and volume_filter and trend_down:
+            # Short: WT1 crosses below WT2 + volume filter + 12h downtrend
+            elif wt1_cross_down and volume_filter and trend_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price touches S1 or 12h trend turns down
-            if close[i] <= s1[i] or not trend_up:
+            # Exit long: WT1 crosses below zero or 12h trend turns down
+            if wt_cross_zero_down or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price touches R1 or 12h trend turns up
-            if close[i] >= r1[i] or not trend_down:
+            # Exit short: WT1 crosses above zero or 12h trend turns up
+            if wt_cross_zero_up or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -149,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WeeklyPivot_R1_S1_Breakout_Volume_Filter"
+name = "4h_WaveTrend_Trend_Scalp"
 timeframe = "4h"
 leverage = 1.0
