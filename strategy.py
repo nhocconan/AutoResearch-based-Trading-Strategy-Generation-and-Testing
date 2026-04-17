@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: Daily pivot points act as key support/resistance levels in crypto markets, with price often bouncing or breaking through them. 
-This strategy uses the daily pivot point with volume confirmation and a 12h EMA filter to reduce false signals, targeting 20-30 trades per year.
-Long entries occur when price closes above the daily pivot with volume > 1.5x average and price above the 12h EMA34.
-Short entries occur when price closes below the daily pivot with volume > 1.5x average and price below the 12h EMA34.
-Exits are triggered when price returns to the pivot level, avoiding whipsaw in ranging markets.
-Designed for 4h timeframe to capture both breakout and mean-reversion moves in bull and bear markets.
+Hypothesis: On the daily timeframe, price tends to respect the 20-day exponential moving average (EMA20) as dynamic support/resistance. 
+In trending markets, price pulls back to EMA20 before continuing the trend. In ranging markets, price oscillates around EMA20. 
+We combine EMA20 with a volatility filter (ATR-based) and volume confirmation to enter trades with the trend on pullbacks. 
+The weekly trend (EMA50) acts as a regime filter to avoid counter-trend trades. Designed for 1d timeframe to capture multi-day swings 
+with low frequency (~10-20 trades per year) to minimize fee drag in both bull and bear markets.
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,62 +21,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculation
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate daily EMA20 for dynamic support/resistance
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate daily pivot point (standard formula)
-    phigh = df_1d['high'].values
-    plow = df_1d['low'].values
-    pclose = df_1d['close'].values
+    # Calculate ATR(14) for volatility filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first bar
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    pivot = (phigh + plow + pclose) / 3
+    # Volume confirmation: 20-day volume average
+    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 12h EMA34 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    ema_34_12h = pd.Series(df_12h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align daily pivot and 12h EMA34 to 4h timeframe
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
-    ema_34_12h_4h = align_htf_to_ltf(prices, df_12h, ema_34_12h)
-    
-    # Volume confirmation: 20-period volume MA on 4h
-    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    # Get weekly data for trend filter (EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    weekly_close = df_1w['close'].values
+    weekly_ema_50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    weekly_ema_50_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema_50)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 40  # warmup for all indicators
+    start_idx = 60  # warmup for all indicators
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_4h[i]) or np.isnan(ema_34_12h_4h[i]) or np.isnan(volume_ma_20.iloc[i]):
+        if (np.isnan(ema_20[i]) or np.isnan(atr[i]) or np.isnan(volume_ma_20[i]) or 
+            np.isnan(weekly_ema_50_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = volume_ma_20.iloc[i]
+        vol_ma = volume_ma_20[i]
+        
+        # Determine trend based on weekly EMA50
+        is_uptrend = price > weekly_ema_50_aligned[i]
+        is_downtrend = price < weekly_ema_50_aligned[i]
         
         if position == 0:
-            # Long: price closes above pivot with volume spike and above 12h EMA34
-            if price > pivot_4h[i] and vol > 1.5 * vol_ma and price > ema_34_12h_4h[i]:
+            # Long: pullback to EMA20 in uptrend with volume confirmation
+            if is_uptrend and price <= ema_20[i] + 0.5 * atr[i] and price >= ema_20[i] - 0.5 * atr[i] and vol > 1.5 * vol_ma:
                 signals[i] = 0.25
                 position = 1
-            # Short: price closes below pivot with volume spike and below 12h EMA34
-            elif price < pivot_4h[i] and vol > 1.5 * vol_ma and price < ema_34_12h_4h[i]:
+            # Short: pullback to EMA20 in downtrend with volume confirmation
+            elif is_downtrend and price >= ema_20[i] - 0.5 * atr[i] and price <= ema_20[i] + 0.5 * atr[i] and vol > 1.5 * vol_ma:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to or below pivot
-            if price <= pivot_4h[i]:
+            # Long exit: price moves significantly above EMA20 or trend changes
+            if price > ema_20[i] + atr[i] or not is_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to or above pivot
-            if price >= pivot_4h[i]:
+            # Short exit: price moves significantly below EMA20 or trend changes
+            if price < ema_20[i] - atr[i] or not is_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -85,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Pivot_Volume_EMA12h34"
-timeframe = "4h"
+name = "1d_EMA20_Pullback_TrendFilter_Volume"
+timeframe = "1d"
 leverage = 1.0
