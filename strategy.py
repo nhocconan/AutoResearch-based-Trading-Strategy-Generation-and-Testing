@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1h_Pullback_EMA_Trend
-Hypothesis: In 1h timeframe, price pulls back to EMA20 during strong trends (4h/1d aligned). 
-Go long when price touches EMA20 from below in uptrend (4h close > EMA50, 1d close > EMA50) with volume confirmation.
-Go short when price touches EMA20 from above in downtrend (4h close < EMA50, 1d close < EMA50) with volume confirmation.
-Exit on opposite touch. Position size: ±0.20. Uses EMA20 for dynamic support/resistance.
-Designed to work in bull (buy pullbacks) and bear (sell rallies) by aligning with higher timeframe trend.
+4h_KAMA_Trend_With_12h_Trend_Filter
+Hypothesis: KAMA adapts to market efficiency, reducing whipsaw in chop and catching trends.
+Long when KAMA slope turns up + price > KAMA + volume > 1.5x average + 12h close > 12h EMA34.
+Short when KAMA slope turns down + price < KAMA + volume > 1.5x average + 12h close < 12h EMA34.
+Exit on opposite signal. Position size: ±0.25. Uses 4h primary with 12h trend filter.
+Designed to work in both bull (trend capture) and bear (avoids false signals via 12h filter).
 """
 
 import numpy as np
@@ -22,88 +22,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate EMA20 for dynamic support/resistance
-    close_series = pd.Series(close)
-    ema20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate KAMA (Kaufman Adaptive Moving Average)
+    def kama(close, er_length=10, fast=2, slow=30):
+        change = np.abs(np.diff(close, prepend=close[0]))
+        volatility = np.abs(np.diff(close))
+        er = np.zeros_like(close)
+        for i in range(1, len(close)):
+            if volatility[i-er_length+1:i+1].sum() > 0:
+                er[i] = change[i-er_length+1:i+1].sum() / volatility[i-er_length+1:i+1].sum()
+            else:
+                er[i] = 0
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        kama = np.zeros_like(close)
+        kama[0] = close[0]
+        for i in range(1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    kama_vals = kama(close, 10, 2, 30)
     
-    # Calculate 4h EMA50 for trend filter
-    close_series_4h = pd.Series(close_4h)
-    ema50_4h = close_series_4h.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate KAMA slope (1-period change)
+    kama_slope = np.diff(kama_vals, prepend=0)
     
-    # Align 4h EMA50 to 1h timeframe
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Volume confirmation (10-period MA on 4h)
+    volume_ma10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d EMA50 for trend filter
-    close_series_1d = pd.Series(close_1d)
-    ema50_1d = close_series_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 12h EMA34 for trend filter
+    close_series_12h = pd.Series(close_12h)
+    ema34_12h = close_series_12h.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA50 to 1h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Volume confirmation (20-period MA)
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align 12h EMA to 4h timeframe
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = max(20, 50, 50, 20)  # EMA20, EMA50_4h, EMA50_1d, volume MA20
+    start_idx = max(10, 10, 34)  # KAMA, volume MA10, EMA34
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema20[i]) or 
-            np.isnan(ema50_4h_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(volume_ma20[i])):
+        if (np.isnan(kama_vals[i]) or 
+            np.isnan(kama_slope[i]) or 
+            np.isnan(volume_ma10[i]) or 
+            np.isnan(ema34_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.3x 20-period average
-        volume_filter = volume[i] > (1.3 * volume_ma20[i])
+        # Volume filter: current volume > 1.5x 10-period average
+        volume_filter = volume[i] > (1.5 * volume_ma10[i])
         
-        # Determine trend alignment: both 4h and 1d must agree
-        uptrend = (close_4h[i // 16] > ema50_4h[i // 16]) and (close_1d[i // 384] > ema50_1d[i // 384])
-        downtrend = (close_4h[i // 16] < ema50_4h[i // 16]) and (close_1d[i // 384] < ema50_1d[i // 384])
-        
-        # Price touching EMA20 conditions
-        touch_from_below = low[i] <= ema20[i] and close[i] > ema20[i]
-        touch_from_above = high[i] >= ema20[i] and close[i] < ema20[i]
+        # KAMA-based signals
+        kama_bullish = kama_slope[i] > 0 and close[i] > kama_vals[i]
+        kama_bearish = kama_slope[i] < 0 and close[i] < kama_vals[i]
         
         if position == 0:
-            # Long: touch EMA20 from below + volume filter + uptrend on both 4h and 1d
-            if touch_from_below and volume_filter and uptrend:
-                signals[i] = 0.20
+            # Long: KAMA bullish + volume filter + 12h uptrend
+            if kama_bullish and volume_filter and close[i] > ema34_12h_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: touch EMA20 from above + volume filter + downtrend on both 4h and 1d
-            elif touch_from_above and volume_filter and downtrend:
-                signals[i] = -0.20
+            # Short: KAMA bearish + volume filter + 12h downtrend
+            elif kama_bearish and volume_filter and close[i] < ema34_12h_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: touch EMA20 from above
-            if touch_from_above:
+            # Exit long: KAMA turns bearish
+            if kama_bearish:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: touch EMA20 from below
-            if touch_from_below:
+            # Exit short: KAMA turns bullish
+            if kama_bullish:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Pullback_EMA_Trend"
-timeframe = "1h"
+name = "4h_KAMA_Trend_With_12h_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
