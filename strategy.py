@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,80 +23,70 @@ def generate_signals(prices):
     pivot_1d = (high_1d + low_1d + close_1d) / 3.0
     r1_1d = 2 * pivot_1d - low_1d
     s1_1d = 2 * pivot_1d - high_1d
-    r2_1d = pivot_1d + (high_1d - low_1d)
-    s2_1d = pivot_1d - (high_1d - low_1d)
-    r3_1d = high_1d + 2 * (pivot_1d - low_1d)
-    s3_1d = low_1d - 2 * (high_1d - pivot_1d)
-    r4_1d = pivot_1d + 3 * (high_1d - low_1d)
-    s4_1d = pivot_1d - 3 * (high_1d - low_1d)
     
-    # Align pivot levels to 6h timeframe
+    # Align pivot levels to 4h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
     # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # Calculate weekly EMA50 for trend
+    # Calculate weekly EMA21 for trend (faster than 50 for more signals)
     close_1w_series = pd.Series(close_1w)
-    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    ema21_1w = close_1w_series.ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
     
-    # Calculate 6h ATR for volatility filter
+    # Calculate 4h ATR for volatility filter
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
+    # Volume spike filter: current volume > 1.5x average of last 20 periods
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma * 1.5)
+    
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
-            np.isnan(r2_1d_aligned[i]) or np.isnan(s2_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or
-            np.isnan(s3_1d_aligned[i]) or np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(atr[i])):
+            np.isnan(ema21_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above weekly EMA50 for long, below for short
-        long_trend = close[i] > ema50_1w_aligned[i]
-        short_trend = close[i] < ema50_1w_aligned[i]
+        # Trend filter: price above weekly EMA21 for long, below for short
+        long_trend = close[i] > ema21_1w_aligned[i]
+        short_trend = close[i] < ema21_1w_aligned[i]
         
         # Volatility filter: avoid extremely low volatility periods
-        vol_filter = atr[i] > np.nanpercentile(atr[max(0, i-100):i+1], 20) if i >= 100 else True
+        vol_filter = atr[i] > np.nanpercentile(atr[max(0, i-50):i+1], 30) if i >= 50 else True
         
         if position == 0:
-            # Long: price breaks above S3 with trend alignment
-            if long_trend and vol_filter and close[i] > s3_1d_aligned[i]:
+            # Long: price breaks above R1 with trend alignment and volume spike
+            if long_trend and vol_filter and vol_spike[i] and close[i] > r1_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below R3 with trend alignment
-            elif short_trend and vol_filter and close[i] < r3_1d_aligned[i]:
+            # Short: price breaks below S1 with trend alignment and volume spike
+            elif short_trend and vol_filter and vol_spike[i] and close[i] < s1_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below S2 or reverses at R4
-            if close[i] < s2_1d_aligned[i] or close[i] > r4_1d_aligned[i]:
+            # Exit long: price breaks below pivot or ATR-based trailing stop
+            if close[i] < pivot_1d_aligned[i] or close[i] < (high[i] - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above R2 or reverses at S4
-            if close[i] > r2_1d_aligned[i] or close[i] < s4_1d_aligned[i]:
+            # Exit short: price breaks above pivot or ATR-based trailing stop
+            if close[i] > pivot_1d_aligned[i] or close[i] > (low[i] + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Pivot_S3R3_Breakout_WeeklyTrend"
-timeframe = "6h"
+name = "4h_Pivot_R1S1_Breakout_WeeklyTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
