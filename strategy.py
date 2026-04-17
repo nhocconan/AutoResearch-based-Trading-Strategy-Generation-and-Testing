@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: On the 4-hour timeframe, we combine the 12-hour Supertrend trend filter with
-1-day volume-weighted average price (VWAP) as dynamic support/resistance, entering on
-pullbacks to VWAP in the direction of the 12h Supertrend. Exits occur on opposite
-Supertrend flip or when price extends 2 ATR away from VWAP (profit target). This
-captures trend continuation moves while avoiding counter-trend noise, designed to
-work in both bull (strong trends) and bear (sharp declines) markets with controlled
-trade frequency (~20-40 trades/year).
+Hypothesis: On the daily timeframe, price respects the 1-week high/low as key support/resistance levels.
+We combine this with a 1-week EMA34 trend filter and volume confirmation to capture breakouts.
+Long when price breaks above prior 1-week high with volume > 2x average and price above 1-week EMA34.
+Short when price breaks below prior 1-week low with volume > 2x average and price below 1-week EMA34.
+Exit when price returns to the prior 1-week midpoint (mean reversion) or on opposite breakout.
+Designed for 1d to work in trending (breakouts) and ranging (mean reversion to mid-point) markets with ~10-30 trades per year.
 """
 
 import numpy as np
@@ -15,120 +14,73 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 12h Supertrend (ATR=10, mult=3.0) for trend filter ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Get 1w data for prior period's high/low and EMA34
+    df_1w = get_htf_data(prices, '1w')
     
-    # True Range and ATR(10)
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align length
-    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # Prior 1w high and low (use shift(1) to avoid look-ahead: use completed period's levels)
+    phigh = df_1w['high'].shift(1).values
+    plow = df_1w['low'].shift(1).values
+    pclose = df_1w['close'].values
     
-    # Basic Upper/Lower Bands
-    hl2 = (high_12h + low_12h) / 2
-    upper_band = hl2 + 3.0 * atr_10
-    lower_band = hl2 - 3.0 * atr_10
+    # Prior 1w midpoint for mean reversion exit
+    pmid = (phigh + plow) / 2
     
-    # Supertrend logic
-    supertrend = np.full_like(close_12h, np.nan, dtype=float)
-    dir_ = np.full_like(close_12h, 1, dtype=int)  # 1=up, -1=down
+    # Calculate 1w EMA34 for trend filter (use prior period's close to avoid look-ahead)
+    ema_34 = pd.Series(pclose).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    for i in range(1, len(close_12h)):
-        if np.isnan(atr_10[i-1]) or np.isnan(upper_band[i-1]) or np.isnan(lower_band[i-1]):
-            continue
-        if close_12h[i] > upper_band[i-1]:
-            dir_[i] = 1
-        elif close_12h[i] < lower_band[i-1]:
-            dir_[i] = -1
-        else:
-            dir_[i] = dir_[i-1]
-            if dir_[i] == 1 and lower_band[i] < lower_band[i-1]:
-                lower_band[i] = lower_band[i-1]
-            if dir_[i] == -1 and upper_band[i] > upper_band[i-1]:
-                upper_band[i] = upper_band[i-1]
-        supertrend[i] = lower_band[i] if dir_[i] == 1 else upper_band[i]
+    # Align all 1w levels to daily timeframe (waits for 1w bar to close)
+    phigh_1d = align_htf_to_ltf(prices, df_1w, phigh)
+    plow_1d = align_htf_to_ltf(prices, df_1w, plow)
+    pmid_1d = align_htf_to_ltf(prices, df_1w, pmid)
+    ema_34_1d = align_htf_to_ltf(prices, df_1w, ema_34)
     
-    # Align Supertrend direction to 4h (wait for 12h bar close)
-    supertrend_dir_aligned = align_htf_to_ltf(prices, df_12h, dir_.astype(float))
-    
-    # === 1d VWAP as dynamic support/resistance ===
-    df_1d = get_htf_data(prices, '1d')
-    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    vwap_1d = (typical_price_1d * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
-    vwap_1d = vwap_1d.values
-    
-    # Align VWAP to 4h
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
-    
-    # === 4h ATR(14) for profit target/exit ===
-    tr_4h1 = high[1:] - low[1:]
-    tr_4h2 = np.abs(high[1:] - close[:-1])
-    tr_4h3 = np.abs(low[1:] - close[:-1])
-    tr_4h = np.maximum(tr_4h1, np.maximum(tr_4h2, tr_4h3))
-    tr_4h = np.concatenate([[np.nan], tr_4h])
-    atr_14 = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
-    
-    # === Volume confirmation: 20-period volume MA ===
+    # Volume confirmation: 20-period volume MA on 1d
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    entry_price = 0.0
     
-    start_idx = max(100, 20)  # warmup for Supertrend, VWAP, ATR, volume MA
+    start_idx = 50  # warmup for EMA34 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(supertrend_dir_aligned[i]) or np.isnan(vwap_aligned[i]) or
-            np.isnan(atr_14[i]) or np.isnan(volume_ma_20.iloc[i])):
+        if (np.isnan(phigh_1d[i]) or np.isnan(plow_1d[i]) or np.isnan(pmid_1d[i]) or
+            np.isnan(ema_34_1d[i]) or np.isnan(volume_ma_20.iloc[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vwap = vwap_aligned[i]
-        atr = atr_14[i]
         vol = volume[i]
         vol_ma = volume_ma_20.iloc[i]
-        trend = supertrend_dir_aligned[i]  # 1=up, -1=down
         
         if position == 0:
-            # Look for pullback to VWAP in direction of 12h trend
-            if trend == 1:  # uptrend
-                # Long: price pulls back to near VWAP (within 0.5*ATR) with volume confirmation
-                if abs(price - vwap) <= 0.5 * atr and vol > 1.5 * vol_ma:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = price
-            else:  # downtrend
-                # Short: price pulls back to near VWAP (within 0.5*ATR) with volume confirmation
-                if abs(price - vwap) <= 0.5 * atr and vol > 1.5 * vol_ma:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = price
+            # Long: price breaks above prior 1w high with volume spike and above 1w EMA34
+            if price > phigh_1d[i] and vol > 2.0 * vol_ma and price > ema_34_1d[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short: price breaks below prior 1w low with volume spike and below 1w EMA34
+            elif price < plow_1d[i] and vol > 2.0 * vol_ma and price < ema_34_1d[i]:
+                signals[i] = -0.25
+                position = -1
         
-        elif position == 1:  # long
-            # Exit: opposite trend flip OR price extends 2*ATR above VWAP (profit target)
-            if trend == -1 or price >= vwap + 2.0 * atr:
+        elif position == 1:
+            # Long exit: price returns to prior 1w midpoint (mean reversion) OR breaks below prior 1w low (invalidates breakout)
+            if price < pmid_1d[i] or price < plow_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
-        elif position == -1:  # short
-            # Exit: opposite trend flip OR price extends 2*ATR below VWAP (profit target)
-            if trend == 1 or price <= vwap - 2.0 * atr:
+        elif position == -1:
+            # Short exit: price returns to prior 1w midpoint (mean reversion) OR breaks above prior 1w high (invalidates breakout)
+            if price > pmid_1d[i] or price > phigh_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -136,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Supertrend12h_VWAP_Pullback"
-timeframe = "4h"
+name = "1d_Prior1W_HL_Breakout_MeanRev"
+timeframe = "1d"
 leverage = 1.0
