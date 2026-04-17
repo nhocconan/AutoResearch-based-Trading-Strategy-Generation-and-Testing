@@ -24,10 +24,10 @@ def generate_signals(prices):
     r1_1d = 2 * pivot_1d - low_1d
     s1_1d = 2 * pivot_1d - high_1d
     
-    # Align daily pivot levels to 4h timeframe (use previous day's levels)
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align daily pivot levels to 1h timeframe (use previous day's levels)
+    pivot_1h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1h = align_htf_to_ltf(prices, df_1d, s1_1d)
     
     # Volume filter: current volume > 2.0 * 30-period average
     volume_ma30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
@@ -51,7 +51,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
+        if (np.isnan(pivot_1h[i]) or np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or
             np.isnan(volume_ma30[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
@@ -64,32 +64,32 @@ def generate_signals(prices):
         
         if position == 0:
             # Long breakout: price breaks above R1 with volume and trend filter
-            if close[i] > r1_4h[i] and volume_filter and trend_filter:
-                signals[i] = 0.25
+            if close[i] > r1_1h[i] and volume_filter and trend_filter:
+                signals[i] = 0.20
                 position = 1
             # Short breakdown: price breaks below S1 with volume and trend filter
-            elif close[i] < s1_4h[i] and volume_filter and trend_filter:
-                signals[i] = -0.25
+            elif close[i] < s1_1h[i] and volume_filter and trend_filter:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
             # Exit long: price falls below S1
-            if close[i] < s1_4h[i]:
+            if close[i] < s1_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
             # Exit short: price rises above R1
-            if close[i] > r1_4h[i]:
+            if close[i] > r1_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_DailyPivot_Breakout_Volume_TrendFilter_Strict"
-timeframe = "4h"
+name = "1h_DailyPivot_Breakout_Volume_TrendFilter_Strict"
+timeframe = "1h"
 leverage = 1.0
