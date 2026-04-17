@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: On 12h timeframe, weekly pivot levels act as strong support/resistance zones. 
-Price often reverses or accelerates when touching weekly R1/S1 levels with volume confirmation. 
-The strategy enters long when price crosses above weekly R1 with volume > 2.0x average and 
-price above weekly EMA50 trend filter, and short when price crosses below weekly S1 with 
-volume > 2.0x average and price below weekly EMA50. Exits occur at the weekly pivot level. 
-Designed for 12h timeframe to capture multi-day moves in both bull (breakouts) and bear 
-(reversals at resistance) regimes with ~15-25 trades per year.
+Hypothesis: Daily pivot points act as strong support/resistance levels on lower timeframes.
+When price approaches the daily pivot with increased volume and shows rejection (long lower shadow for longs,
+long upper shadow for shorts), it often reverses. This strategy captures these reversals by entering 
+long when price bounces off the pivot from below with bullish rejection and volume confirmation,
+and short when price is rejected from the pivot from above with bearish rejection and volume confirmation.
+Exits occur when price moves to the opposite pivot level (S1 for longs, R1 for shorts) or when
+the rejection signal fails. Designed for 4h timeframe to work in both trending and ranging markets.
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,67 +23,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for pivot calculation
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot and support/resistance levels
-    whigh = df_1w['high'].values
-    wlow = df_1w['low'].values
-    wclose = df_1w['close'].values
+    # Calculate daily pivot and support/resistance levels
+    phigh = df_1d['high'].values
+    plow = df_1d['low'].values
+    pclose = df_1d['close'].values
     
-    pivot = (whigh + wlow + wclose) / 3
-    range_ = whigh - wlow
-    r1 = 2 * pivot - wlow
-    s1 = 2 * pivot - whigh
+    pivot = (phigh + plow + pclose) / 3
+    range_ = phigh - plow
     
-    # Calculate weekly EMA50 for trend filter
-    ema_50 = pd.Series(wclose).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate support and resistance levels
+    s1 = 2 * pivot - phigh
+    r1 = 2 * pivot - plow
     
-    # Align all weekly levels to 12h timeframe (waits for weekly bar to close)
-    pivot_12h = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_12h = align_htf_to_ltf(prices, df_1w, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1w, s1)
-    ema_50_12h = align_htf_to_ltf(prices, df_1w, ema_50)
+    # Calculate 1d EMA50 for trend filter
+    ema_50 = pd.Series(pclose).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume confirmation: 30-period volume MA on 12h
-    volume_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean()
+    # Align all daily levels to 4h timeframe (waits for daily bar to close)
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50)
+    
+    # Volume confirmation: 20-period volume MA on 4h
+    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 60  # warmup for all indicators
+    start_idx = 50  # warmup for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or
-            np.isnan(ema_50_12h[i]) or np.isnan(volume_ma_30.iloc[i])):
+        if (np.isnan(pivot_4h[i]) or np.isnan(s1_4h[i]) or np.isnan(r1_4h[i]) or
+            np.isnan(ema_50_4h[i]) or np.isnan(volume_ma_20.iloc[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        high_price = high[i]
+        low_price = low[i]
         vol = volume[i]
-        vol_ma = volume_ma_30.iloc[i]
+        vol_ma = volume_ma_20.iloc[i]
+        
+        # Calculate candle body and shadows
+        body = abs(price - close[i-1]) if i > 0 else 0
+        lower_shadow = min(close[i-1], price) - low_price if i > 0 else 0
+        upper_shadow = high_price - max(close[i-1], price) if i > 0 else 0
         
         if position == 0:
-            # Long: price crosses above R1 with volume spike and above weekly EMA50
-            if price > r1_12h[i] and vol > 2.0 * vol_ma and price > ema_50_12h[i]:
+            # Long: price near S1 with bullish rejection (long lower shadow) and volume spike
+            if (price <= s1_4h[i] * 1.005 and  # near S1 (within 0.5%)
+                lower_shadow > body * 1.5 and   # long lower shadow
+                vol > 1.5 * vol_ma):            # volume spike
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below S1 with volume spike and below weekly EMA50
-            elif price < s1_12h[i] and vol > 2.0 * vol_ma and price < ema_50_12h[i]:
+            # Short: price near R1 with bearish rejection (long upper shadow) and volume spike
+            elif (price >= r1_4h[i] * 0.995 and  # near R1 (within 0.5%)
+                  upper_shadow > body * 1.5 and   # long upper shadow
+                  vol > 1.5 * vol_ma):            # volume spike
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to weekly pivot level
-            if price < pivot_12h[i]:
+            # Long exit: price reaches pivot or shows bearish rejection at resistance
+            if (price >= pivot_4h[i] or  # reached pivot
+                (price >= r1_4h[i] * 0.995 and upper_shadow > body * 1.5)):  # rejected at R1
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to weekly pivot level
-            if price > pivot_12h[i]:
+            # Short exit: price reaches pivot or shows bullish rejection at support
+            if (price <= pivot_4h[i] or  # reached pivot
+                (price <= s1_4h[i] * 1.005 and lower_shadow > body * 1.5)):  # rejected at S1
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WeeklyPivot_R1S1_Volume_EMA50"
-timeframe = "12h"
+name = "4h_Pivot_Rejection_Volume"
+timeframe = "4h"
 leverage = 1.0
