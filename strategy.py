@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -62,31 +62,31 @@ def generate_signals(prices):
         for i in range(14, len(tr)):
             atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
     
-    # Align all indicators to 4h timeframe
+    # Align all indicators to daily timeframe
     rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # === 4h Volume confirmation ===
-    df_4h = get_htf_data(prices, '4h')
-    volume_4h = df_4h['volume'].values
+    # === Weekly Trend Filter (1w) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 20-period average volume on 4h timeframe
-    vol_ma_20 = np.full_like(volume_4h, np.nan)
-    for i in range(len(volume_4h)):
+    # Calculate 20-period SMA on weekly timeframe
+    sma_20_1w = np.full_like(close_1w, np.nan)
+    for i in range(len(close_1w)):
         if i >= 19:
-            vol_ma_20[i] = np.mean(volume_4h[i-19:i+1])
+            sma_20_1w[i] = np.mean(close_1w[i-19:i+1])
         elif i > 0:
-            vol_ma_20[i] = np.mean(volume_4h[max(0, i-9):i+1])
+            sma_20_1w[i] = np.mean(close_1w[max(0, i-9):i+1])
         else:
-            vol_ma_20[i] = volume_4h[0]
+            sma_20_1w[i] = close_1w[0]
     
-    # Volume confirmation: current 4h volume > 1.5x 20-period average
-    vol_confirm = volume_4h > vol_ma_20 * 1.5
+    # Align weekly SMA to daily timeframe
+    sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_20_1w)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 100
+    warmup = 50
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
@@ -94,32 +94,32 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # Skip if any required data is NaN
         if (np.isnan(rsi_1d_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
-            np.isnan(vol_confirm[i])):
+            np.isnan(sma_20_1w_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Entry logic: only enter when flat AND volume confirmation
+        # Entry logic: only enter when flat AND volatility filter
         if position == 0:
-            # Long: RSI < 40 (oversold) + volatility filter + volume confirmation
-            if (rsi_1d_aligned[i] < 40 and 
-                atr_14_aligned[i] > 0.005 * close[i] and  # volatility filter
-                vol_confirm[i]):
+            # Long: RSI < 30 (oversold) + price above weekly SMA + volatility filter
+            if (rsi_1d_aligned[i] < 30 and 
+                close[i] > sma_20_1w_aligned[i] and 
+                atr_14_aligned[i] > 0.005 * close[i]):  # volatility filter
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: RSI > 60 (overbought) + volatility filter + volume confirmation
-            elif (rsi_1d_aligned[i] > 60 and 
-                  atr_14_aligned[i] > 0.005 * close[i] and  # volatility filter
-                  vol_confirm[i]):
+            # Short: RSI > 70 (overbought) + price below weekly SMA + volatility filter
+            elif (rsi_1d_aligned[i] > 70 and 
+                  close[i] < sma_20_1w_aligned[i] and 
+                  atr_14_aligned[i] > 0.005 * close[i]):  # volatility filter
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: RSI crosses above 60 (overbought)
-            if rsi_1d_aligned[i] > 60:
+            # Exit long: RSI crosses above 50 (neutral)
+            if rsi_1d_aligned[i] > 50:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -127,8 +127,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI crosses below 40 (oversold)
-            if rsi_1d_aligned[i] < 40:
+            # Exit short: RSI crosses below 50 (neutral)
+            if rsi_1d_aligned[i] < 50:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -137,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI14_Volume_Confirm_VolatilityFilter_v1"
-timeframe = "4h"
+name = "1d_RSI14_WeeklyTrend_VolatilityFilter_v1"
+timeframe = "1d"
 leverage = 1.0
