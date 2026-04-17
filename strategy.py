@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -37,11 +37,11 @@ def generate_signals(prices):
     rs = avg_gain / (avg_loss + 1e-10)
     rsi_14 = 100 - (100 / (1 + rs))
     
-    # Align daily ATR and RSI to 12h
+    # Align daily ATR and RSI to 4h
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
     
-    # 12h Donchian channel (20-period)
+    # 4h Donchian channel (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -97,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_DailyATR_RSI_DonchianBreakout_Volume"
-timeframe = "12h"
+name = "4h_DailyATR_RSI_DonchianBreakout_Volume"
+timeframe = "4h"
 leverage = 1.0
