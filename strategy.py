@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_1w_PriceChannel_Breakout_Volume_Confirm_V1
-Hypothesis: On daily timeframe, buy when price breaks above weekly Donchian high (20-period) with volume confirmation (>1.5x average volume), sell when breaks below weekly Donchian low. Use weekly ADX > 25 as trend filter to avoid false breakouts in ranging markets. Exit when ADX < 20 (trend weakening) or opposite breakout occurs. Designed for low frequency (target 10-25 trades/year) to minimize fee drag and work in both bull and bear markets by capturing strong trends.
+1d_1w_RSI_Divergence_Momentum_V1
+Hypothesis: On daily timeframe, buy when RSI(14) shows bullish divergence with price (higher low in RSI while price makes lower low) and weekly close > weekly open, sell when RSI shows bearish divergence (lower high in RSI while price makes higher high) and weekly close < weekly open. Uses volume confirmation (>1.3x average volume) to filter weak signals. Designed for low frequency (target 15-25 trades/year) to work in both bull and bear markets by capturing momentum reversals at extremes.
 """
 
 import numpy as np
@@ -10,88 +10,53 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Weekly Data (HTF for trend and channels) ===
+    # === Weekly Data (HTF for trend and divergence) ===
     df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    open_1w = df_1w['open'].values
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
     volume_1w = df_1w['volume'].values
     
-    # Calculate weekly ADX (14-period)
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high[1:] - low[1:]
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])
+    # Weekly RSI (14-period)
+    def calculate_rsi(prices, period=14):
+        delta = np.diff(prices)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
         
-        # Directional Movement
-        up_move = high[1:] - high[:-1]
-        down_move = low[:-1] - low[1:]
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        plus_dm = np.concatenate([[np.nan], plus_dm])
-        minus_dm = np.concatenate([[np.nan], minus_dm])
+        avg_gain = np.full_like(prices, np.nan)
+        avg_loss = np.full_like(prices, np.nan)
         
-        # Wilder smoothing
-        def smooth_wilder(arr, period):
-            result = np.full_like(arr, np.nan)
-            if len(arr) < period:
-                return result
-            result[period-1] = np.nansum(arr[1:period])
-            for i in range(period, len(arr)):
-                if not np.isnan(arr[i]) and not np.isnan(result[i-1]):
-                    result[i] = (result[i-1] * (period-1) + arr[i]) / period
-            return result
+        if len(prices) <= period:
+            return avg_gain, avg_loss
+            
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
         
-        atr = smooth_wilder(tr, period)
-        plus_di = 100 * smooth_wilder(plus_dm, period) / atr
-        minus_di = 100 * smooth_wilder(minus_dm, period) / atr
-        dx = np.where((plus_di + minus_di) > 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-        adx = smooth_wilder(dx, period)
-        return adx
+        for i in range(period + 1, len(prices)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    rsi_1w = calculate_rsi(close_1w, 14)
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
-    # Weekly Donchian channels (20-period)
-    def rolling_max(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i < window - 1:
-                continue
-            window_slice = arr[max(0, i-window+1):i+1]
-            if np.all(np.isnan(window_slice)):
-                result[i] = np.nan
-            else:
-                result[i] = np.nanmax(window_slice)
-        return result
-    
-    def rolling_min(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i < window - 1:
-                continue
-            window_slice = arr[max(0, i-window+1):i+1]
-            if np.all(np.isnan(window_slice)):
-                result[i] = np.nan
-            else:
-                result[i] = np.nanmin(window_slice)
-        return result
-    
-    high_20_1w = rolling_max(high_1w, 20)
-    low_20_1w = rolling_min(low_1w, 20)
-    high_20_1w_aligned = align_htf_to_ltf(prices, df_1w, high_20_1w)
-    low_20_1w_aligned = align_htf_to_ltf(prices, df_1w, low_20_1w)
+    # Weekly close > open (bullish candle) and close < open (bearish candle)
+    bullish_weekly = close_1w > open_1w
+    bearish_weekly = close_1w < open_1w
+    bullish_weekly_aligned = align_htf_to_ltf(prices, df_1w, bullish_weekly.astype(float))
+    bearish_weekly_aligned = align_htf_to_ltf(prices, df_1w, bearish_weekly.astype(float))
     
     # Volume confirmation on weekly
     vol_ma_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
@@ -100,16 +65,16 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 60
+    warmup = 40
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx_1w_aligned[i]) or 
-            np.isnan(high_20_1w_aligned[i]) or
-            np.isnan(low_20_1w_aligned[i]) or
+        if (np.isnan(rsi_1w_aligned[i]) or 
+            np.isnan(bullish_weekly_aligned[i]) or
+            np.isnan(bearish_weekly_aligned[i]) or
             np.isnan(vol_ma_1w_aligned[i])):
             signals[i] = 0.0
             position = 0
@@ -117,48 +82,35 @@ def generate_signals(prices):
         
         # Get current weekly bar's volume for confirmation
         vol_1w_current = align_htf_to_ltf(prices, df_1w, volume_1w)[i]
-        vol_confirmed = vol_1w_current > 1.5 * vol_ma_1w_aligned[i]
+        vol_confirmed = vol_1w_current > 1.3 * vol_ma_1w_aligned[i]
         
-        # Trend filter: only trade when ADX > 25 (strong trend)
-        strong_trend = adx_1w_aligned[i] > 25
-        
-        # Exit when trend weakens (ADX < 20)
-        weak_trend = adx_1w_aligned[i] < 20
-        
-        # Entry logic: only enter when flat
+        # Only look for divergence signals when flat
         if position == 0:
-            # Long: price breaks above 20-period weekly high with volume confirmation and strong trend
-            if close[i] > high_20_1w_aligned[i] and vol_confirmed and strong_trend:
-                signals[i] = 0.25
-                position = 1
-                continue
-            # Short: price breaks below 20-period weekly low with volume confirmation and strong trend
-            elif close[i] < low_20_1w_aligned[i] and vol_confirmed and strong_trend:
-                signals[i] = -0.25
-                position = -1
-                continue
+            # Need at least 3 periods to check for divergence
+            if i >= 3:
+                # Bullish divergence: price makes lower low, RSI makes higher low
+                if (low[i] < low[i-1] and low[i-1] < low[i-2] and 
+                    rsi_1w_aligned[i] > rsi_1w_aligned[i-1] and rsi_1w_aligned[i-1] > rsi_1w_aligned[i-2] and
+                    bullish_weekly_aligned[i] and vol_confirmed):
+                    signals[i] = 0.25
+                    position = 1
+                    continue
+                # Bearish divergence: price makes higher high, RSI makes lower high
+                elif (high[i] > high[i-1] and high[i-1] > high[i-2] and 
+                      rsi_1w_aligned[i] < rsi_1w_aligned[i-1] and rsi_1w_aligned[i-1] < rsi_1w_aligned[i-2] and
+                      bearish_weekly_aligned[i] and vol_confirmed):
+                    signals[i] = -0.25
+                    position = -1
+                    continue
         
-        # Exit logic
+        # Hold position if already in trade
         elif position == 1:
-            # Exit conditions: trend weakening OR opposite breakout
-            if weak_trend or close[i] < low_20_1w_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-                continue
-            else:
-                signals[i] = 0.25
-        
+            signals[i] = 0.25
         elif position == -1:
-            # Exit conditions: trend weakening OR opposite breakout
-            if weak_trend or close[i] > high_20_1w_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-                continue
-            else:
-                signals[i] = -0.25
+            signals[i] = -0.25
     
     return signals
 
-name = "1d_1w_PriceChannel_Breakout_Volume_Confirm_V1"
+name = "1d_1w_RSI_Divergence_Momentum_V1"
 timeframe = "1d"
 leverage = 1.0
