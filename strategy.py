@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray + 1d Regime Filter.
-Long when Bull Power > 0 and Bear Power < 0 with 1d ADX < 20 (range regime) or ADX > 25 with price > EMA20 (trend regime).
-Short when Bear Power > 0 and Bull Power < 0 with same regime filters.
-Exit when power signals reverse or regime changes.
-Uses 1d for ADX/EMA regime, 6h for Elder Ray (EMA13-based Bull/Bear power).
+Hypothesis: 6h Bollinger Band Squeeze Breakout with 1d Volume Confirmation.
+Long when price breaks above upper BB(20,2) during low volatility (BBW < 0.05) and 1d volume > 1.5x 20-period average.
+Short when price breaks below lower BB(20,2) during low volatility and 1d volume > 1.5x 20-period average.
+Exit when price returns to middle BB or volatility expands (BBW > 0.1).
+Uses 1d for volume filter, 6h for Bollinger Bands and breakout detection.
 Target: 50-150 total trades over 4 years (12-37/year).
 """
 
@@ -21,54 +21,23 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 1d data for regime filters (ADX, EMA)
+    # Get 1d data for volume filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d ADX (14-period)
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(high[i] - high[i-1], 0)
-            minus_dm[i] = max(low[i-1] - low[i], 0)
-            if plus_dm[i] < minus_dm[i]:
-                plus_dm[i] = 0
-            if minus_dm[i] < plus_dm[i]:
-                minus_dm[i] = 0
-            if plus_dm[i] == minus_dm[i]:
-                plus_dm[i] = 0
-                minus_dm[i] = 0
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Wilder's smoothing
-        atr = np.zeros_like(tr)
-        atr[period] = np.mean(tr[1:period+1])
-        for i in range(period+1, len(tr)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        
-        plus_di = 100 * (pd.Series(plus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr)
-        minus_di = 100 * (pd.Series(minus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr)
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = pd.Series(dx).ewm(alpha=1/period, adjust=False).mean().values
-        return adx
+    # Calculate 1d average volume (20-period)
+    avg_volume_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
     
-    # Calculate 1d EMA20
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate 6h Bollinger Bands (20,2)
+    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma20 + 2 * std20
+    lower_bb = sma20 - 2 * std20
+    middle_bb = sma20
     
-    # Align 1d indicators
-    adx_14 = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
-    
-    # Calculate 6h Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Bollinger Band Width (normalize by middle BB to avoid price level issues)
+    bb_width = (upper_bb - lower_bb) / middle_bb
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -77,47 +46,40 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(adx_14_aligned[i]) or 
-            np.isnan(ema20_1d_aligned[i])):
+        if (np.isnan(sma20[i]) or np.isnan(std20[i]) or 
+            np.isnan(avg_volume_1d_aligned[i]) or 
+            np.isnan(bb_width[i])):
             signals[i] = 0.0
             continue
         
-        # Regime determination
-        adx_val = adx_14_aligned[i]
-        ema20_val = ema20_1d_aligned[i]
-        price = close[i]
+        # Volume confirmation: 1d volume > 1.5x 20-period average
+        volume_confirmed = volume_1d[i] > 1.5 * avg_volume_1d_aligned[i]
         
-        # Range regime: ADX < 20
-        # Trend regime: ADX > 25 and price > EMA20 (for long) or price < EMA20 (for short)
-        is_range = adx_val < 20
-        is_trend_long = adx_val > 25 and price > ema20_val
-        is_trend_short = adx_val > 25 and price < ema20_val
-        
-        # Elder Ray signals
-        bull_signal = bull_power[i] > 0
-        bear_signal = bear_power[i] > 0
+        # Squeeze conditions
+        is_squeeze = bb_width[i] < 0.05  # low volatility
+        is_expansion = bb_width[i] > 0.1  # high volatility (exit condition)
         
         if position == 0:
-            # Long: Bull Power positive AND (range regime OR trend regime long)
-            if bull_signal and (is_range or is_trend_long):
+            # Long: price breaks above upper BB during squeeze with volume confirmation
+            if close[i] > upper_bb[i] and is_squeeze and volume_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power positive AND (range regime OR trend regime short)
-            elif bear_signal and (is_range or is_trend_short):
+            # Short: price breaks below lower BB during squeeze with volume confirmation
+            elif close[i] < lower_bb[i] and is_squeeze and volume_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Bull Power turns negative OR regime shifts to trend short
-            if not bull_signal or is_trend_short:
+            # Exit long: price returns to middle BB OR volatility expands
+            if close[i] < middle_bb[i] or is_expansion:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Bear Power turns negative OR regime shifts to trend long
-            if not bear_signal or is_trend_long:
+            # Exit short: price returns to middle BB OR volatility expands
+            if close[i] > middle_bb[i] or is_expansion:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -125,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_1dADXEMA_Regime"
+name = "6h_BBSqueeze_1dVolume_Breakout"
 timeframe = "6h"
 leverage = 1.0
