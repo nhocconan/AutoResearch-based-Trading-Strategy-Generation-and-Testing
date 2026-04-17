@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h timeframe with 1d Elder Ray (Bull/Bear Power) + 6h Donchian(20) breakout.
-Long when 1d Bull Power > 0 (buying pressure) and price breaks above 6h Donchian upper band.
-Short when 1d Bear Power < 0 (selling pressure) and price breaks below 6h Donchian lower band.
-Elder Ray measures daily bull/bear strength via EMA13, Donchian provides structure.
-Designed to work in both bull (buy on strength + breakout) and bear (sell on weakness + breakdown) markets.
+Hypothesis: 12h timeframe with 1w Camarilla pivot levels (R1/S1) as dynamic support/resistance.
+Long when price breaks above 1w Camarilla R1 with volume confirmation and price > 12h EMA50 (trend filter).
+Short when price breaks below 1w Camarilla S1 with volume confirmation and price < 12h EMA50.
+Uses weekly Camarilla levels for institutional reference points, EMA50 for trend alignment,
+and volume to confirm breakout strength. Designed to work in both bull (breakouts above R1 in uptrend)
+and bear (breakdowns below S1 in downtrend) markets by requiring trend alignment.
 """
 
 import numpy as np
@@ -21,74 +22,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Elder Ray calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 1w data for Camarilla pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d EMA13 for Elder Ray
-    close_1d_s = pd.Series(close_1d)
-    ema13_1d = close_1d_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate 1w Camarilla pivot levels (R1, S1)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
+    r1_1w = close_1w + range_1w * 1.1 / 12.0
+    s1_1w = close_1w - range_1w * 1.1 / 12.0
     
-    # 1d Elder Ray components
-    bull_power_1d = high_1d - ema13_1d  # >0 = buying pressure
-    bear_power_1d = low_1d - ema13_1d   # <0 = selling pressure
+    # Calculate 12h EMA50 for trend filter
+    close_s = pd.Series(close)
+    ema50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Get 6h data for Donchian(20) breakout
-    df_6h = get_htf_data(prices, '6h')
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
+    # Calculate 12h volume 20-period average for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 6h Donchian(20) bands
-    high_ma_20 = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
-    low_ma_20 = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
-    
-    # Align 1d Elder Ray to 6h timeframe
-    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    
-    # Align 6h Donchian bands to 6h timeframe (no additional delay needed)
-    upper_6h_aligned = align_htf_to_ltf(prices, df_6h, high_ma_20)
-    lower_6h_aligned = align_htf_to_ltf(prices, df_6h, low_ma_20)
+    # Align 1w Camarilla levels to 12h timeframe
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 20  # need enough for Donchian(20)
+    start_idx = 50  # need enough for EMA50 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(bull_power_1d_aligned[i]) or 
-            np.isnan(bear_power_1d_aligned[i]) or 
-            np.isnan(upper_6h_aligned[i]) or 
-            np.isnan(lower_6h_aligned[i])):
+        if (np.isnan(r1_1w_aligned[i]) or 
+            np.isnan(s1_1w_aligned[i]) or 
+            np.isnan(ema50[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation: current 12h volume > 1.3x 20-period average
+        volume_confirmed = volume[i] > 1.3 * vol_ma_20[i]
+        
         if position == 0:
-            # Long: 1d Bull Power > 0 (buying pressure) + price breaks above 6h Donchian upper
-            if (bull_power_1d_aligned[i] > 0 and 
-                close[i] > upper_6h_aligned[i]):
+            # Long: price breaks above 1w Camarilla R1 with volume and uptrend (price > EMA50)
+            if (close[i] > r1_1w_aligned[i] and 
+                volume_confirmed and 
+                close[i] > ema50[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: 1d Bear Power < 0 (selling pressure) + price breaks below 6h Donchian lower
-            elif (bear_power_1d_aligned[i] < 0 and 
-                  close[i] < lower_6h_aligned[i]):
+            # Short: price breaks below 1w Camarilla S1 with volume and downtrend (price < EMA50)
+            elif (close[i] < s1_1w_aligned[i] and 
+                  volume_confirmed and 
+                  close[i] < ema50[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below 6h Donchian lower (mean reversion)
-            if close[i] < lower_6h_aligned[i]:
+            # Exit long: price falls back below 1w Camarilla S1 (opposite side)
+            if close[i] < s1_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above 6h Donchian upper (mean reversion)
-            if close[i] > upper_6h_aligned[i]:
+            # Exit short: price rises back above 1w Camarilla R1 (opposite side)
+            if close[i] > r1_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1dElderRay_Donchian20_Breakout"
-timeframe = "6h"
+name = "12h_1wCamarilla_R1S1_Breakout_Volume_EMA50_Trend"
+timeframe = "12h"
 leverage = 1.0
