@@ -3,6 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 6h Camarilla pivot reversal with daily trend filter
+# - Fade at R3/S3 levels when price rejects extreme levels in ranging markets
+# - Continuation breakout at R4/S4 levels when price breaks with daily trend alignment
+# - Volume confirmation to avoid false breakouts
+# - Works in both bull/bear: mean reversion in ranges, trend following in breaks
+# Target: 50-150 total trades over 4 years (12-37/year)
+# Size: 0.25
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -13,62 +21,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ADX (trend strength filter)
+    # Get daily data for Camarilla pivots and trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate ADX (14-period) on daily
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla levels from previous day
+    # Formula: R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, etc.
+    # Using previous day's OHLC to avoid look-ahead
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1d[0] = tr1[0]
+    # Camarilla levels
+    R4 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    S4 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    # Directional Movement
-    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    # Daily EMA trend filter (34-period)
+    ema_34 = pd.Series(prev_close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Smooth TR, +DM, -DM with Wilder's smoothing (alpha = 1/period)
-    period = 14
-    alpha = 1.0 / period
-    
-    atr_1d = np.zeros_like(tr_1d)
-    plus_dm_smooth = np.zeros_like(plus_dm)
-    minus_dm_smooth = np.zeros_like(minus_dm)
-    
-    atr_1d[0] = tr_1d[0]
-    plus_dm_smooth[0] = plus_dm[0]
-    minus_dm_smooth[0] = minus_dm[0]
-    
-    for i in range(1, len(tr_1d)):
-        atr_1d[i] = alpha * tr_1d[i] + (1 - alpha) * atr_1d[i-1]
-        plus_dm_smooth[i] = alpha * plus_dm[i] + (1 - alpha) * plus_dm_smooth[i-1]
-        minus_dm_smooth[i] = alpha * minus_dm[i] + (1 - alpha) * minus_dm_smooth[i-1]
-    
-    # Directional Indicators
-    plus_di_1d = 100 * plus_dm_smooth / (atr_1d + 1e-10)
-    minus_di_1d = 100 * minus_dm_smooth / (atr_1d + 1e-10)
-    
-    # DX and ADX
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d + 1e-10)
-    adx_1d = np.zeros_like(dx_1d)
-    adx_1d[0] = dx_1d[0]
-    
-    for i in range(1, len(dx_1d)):
-        adx_1d[i] = alpha * dx_1d[i] + (1 - alpha) * adx_1d[i-1]
-    
-    # Align daily ADX to 4h
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Donchian channel (20-period) on 4h
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align all daily levels to 6h timeframe
+    R4_6h = align_htf_to_ltf(prices, df_1d, R4)
+    R3_6h = align_htf_to_ltf(prices, df_1d, R3)
+    S3_6h = align_htf_to_ltf(prices, df_1d, S3)
+    S4_6h = align_htf_to_ltf(prices, df_1d, S4)
+    ema_34_6h = align_htf_to_ltf(prices, df_1d, ema_34)
     
     # Volume confirmation: current volume > 1.5 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -76,44 +53,51 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 40  # Need daily ADX, Donchian, volume MA
+    start_idx = 40  # Need daily data and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or 
-            np.isnan(volume_ma20[i]) or 
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(R4_6h[i]) or np.isnan(R3_6h[i]) or 
+            np.isnan(S3_6h[i]) or np.isnan(S4_6h[i]) or 
+            np.isnan(ema_34_6h[i]) or np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # ADX filter: trend strength > 25
-        trend_filter = adx_aligned[i] > 25
-        
-        # Volume filter: current volume > 1.5x 20-period average
+        # Volume filter
         volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
         if position == 0:
-            # Long: price breaks above Donchian high with strong trend and volume
-            if (close[i] > highest_high[i] and trend_filter and volume_filter):
+            # Long conditions:
+            # 1. Mean reversion: price rejects S3 level (long when price > S3 after being <= S3)
+            # 2. OR breakout: price breaks above R4 with daily uptrend
+            mean_reversion_long = (close[i-1] <= S3_6h[i-1] and close[i] > S3_6h[i])
+            breakout_long = (close[i] > R4_6h[i] and ema_34_6h[i] > ema_34_6h[i-1])
+            
+            if (mean_reversion_long or breakout_long) and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low with strong trend and volume
-            elif (close[i] < lowest_low[i] and trend_filter and volume_filter):
+            
+            # Short conditions:
+            # 1. Mean reversion: price rejects R3 level (short when price < R3 after being >= R3)
+            # 2. OR breakout: price breaks below S4 with daily downtrend
+            mean_reversion_short = (close[i-1] >= R3_6h[i-1] and close[i] < R3_6h[i])
+            breakout_short = (close[i] < S4_6h[i] and ema_34_6h[i] < ema_34_6h[i-1])
+            
+            if (mean_reversion_short or breakout_short) and volume_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to Donchian low
-            if close[i] < lowest_low[i]:
+            # Exit long: price reaches R3 (profit target) or S4 (stop)
+            if close[i] >= R3_6h[i] or close[i] <= S4_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to Donchian high
-            if close[i] > highest_high[i]:
+            # Exit short: price reaches S3 (profit target) or R4 (stop)
+            if close[i] <= S3_6h[i] or close[i] >= R4_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -121,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_ADX_DonchianBreakout_Volume"
-timeframe = "4h"
+name = "6h_Camarilla_R3_S3_R4_S4_MeanRev_Breakout"
+timeframe = "6h"
 leverage = 1.0
