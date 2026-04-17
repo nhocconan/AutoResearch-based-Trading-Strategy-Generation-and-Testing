@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout + 1d volume spike + 1d choppiness regime filter.
-Long when price breaks above Donchian(20) high with volume spike and chop > 61.8 (range regime).
-Short when price breaks below Donchian(20) low with volume spike and chop > 61.8.
-Exit when price breaks opposite Donchian level or chop < 38.2 (trend regime).
-Uses 12h for price/Donchian, 1d for volume and chop filter.
-Target: 50-150 total trades over 4 years (12-37/year).
+Hypothesis: 4h Williams Alligator + 12h Volume Spike + Chop Regime Filter.
+Long when Jaw < Teeth < Lips (bullish alignment) AND 12h volume > 1.5x 20-period average AND Chop > 61.8 (range regime).
+Short when Jaw > Teeth > Lips (bearish alignment) AND same volume/chop conditions.
+Exit when Alligator alignment breaks or volume/chop conditions fail.
+Uses 12h for volume filter and Chop regime, 4h for Alligator (SMAs-based Jaw/Teeth/Lips).
+Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -14,129 +14,109 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for volume and chop filters
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Get 12h data for volume filter and chop regime
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate 1d ATR(14) for chop calculation
-    def calculate_atr(high, low, close, period=14):
-        tr = np.zeros_like(high)
-        for i in range(1, len(high)):
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        atr = np.zeros_like(tr)
-        atr[period] = np.mean(tr[1:period+1])
-        for i in range(period+1, len(tr)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        return atr
+    # Calculate 4h Williams Alligator (Jaw=TEETH=LIPS SMAs)
+    # Jaw: 13-period SMA, shifted 8 bars
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
+    # Teeth: 8-period SMA, shifted 5 bars
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
+    # Lips: 5-period SMA, shifted 3 bars
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Calculate 1d choppiness index
+    # Calculate 12h volume spike filter: volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume_12h > (1.5 * vol_ma_20)
+    
+    # Calculate 12h Choppiness Index (CHOP)
     def calculate_chop(high, low, close, period=14):
-        atr = calculate_atr(high, low, close, period)
-        sum_atr = np.zeros_like(close)
-        sum_atr[period] = np.sum(atr[1:period+1])
-        for i in range(period+1, len(close)):
-            sum_atr[i] = sum_atr[i-1] - atr[i-period] + atr[i]
+        atr = np.zeros_like(high)
+        for i in range(1, len(high)):
+            atr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
         
-        highest_high = np.zeros_like(high)
-        lowest_low = np.zeros_like(low)
-        highest_high[period] = np.max(high[1:period+1])
-        lowest_low[period] = np.min(low[1:period+1])
-        for i in range(period+1, len(close)):
-            highest_high[i] = max(highest_high[i-1], high[i])
-            lowest_low[i] = min(lowest_low[i-1], low[i])
+        # Wilder's smoothing for ATR
+        atr_ma = np.zeros_like(atr)
+        atr_ma[period] = np.mean(atr[1:period+1])
+        for i in range(period+1, len(atr)):
+            atr_ma[i] = (atr_ma[i-1] * (period-1) + atr[i]) / period
         
-        range_hl = highest_high - lowest_low
-        chop = np.zeros_like(close)
-        for i in range(period, len(close)):
-            if range_hl[i] > 0:
-                chop[i] = 100 * np.log10(sum_atr[i] / range_hl[i]) / np.log10(period)
-            else:
-                chop[i] = 50  # neutral when no range
+        # True range sum over period
+        tr_sum = np.zeros_like(high)
+        for i in range(period, len(high)):
+            tr_sum[i] = np.sum(atr_ma[i-period+1:i+1])
+        
+        # Max high - min low over period
+        max_high = np.zeros_like(high)
+        min_low = np.zeros_like(low)
+        for i in range(period-1, len(high)):
+            max_high[i] = np.max(high[i-period+1:i+1])
+            min_low[i] = np.min(low[i-period+1:i+1])
+        
+        # Avoid division by zero
+        range_hl = max_high - min_low
+        chop = np.where(range_hl > 0, 100 * np.log10(tr_sum / range_hl) / np.log10(period), 50)
         return chop
     
-    # Calculate 1d volume spike (volume > 2.0 * 20-period average)
-    def calculate_volume_spike(volume, period=20):
-        vol_ma = np.zeros_like(volume)
-        for i in range(period, len(volume)):
-            vol_ma[i] = np.mean(volume[i-period:i])
-        vol_spike = np.zeros_like(volume)
-        vol_spike[period:] = volume[period:] > (2.0 * vol_ma[period:])
-        return vol_spike
+    chop_12h = calculate_chop(high_12h, low_12h, close_12h, 14)
+    chop_range = chop_12h > 61.8  # range regime
     
-    # Calculate 1d indicators
-    chop_1d = calculate_chop(high_1d, low_1d, close_1d, 14)
-    vol_spike_1d = calculate_volume_spike(volume_1d, 20)
-    
-    # Align 1d indicators
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
-    
-    # Calculate 12h Donchian channels (20-period)
-    def calculate_donchian(high, low, period=20):
-        upper = np.zeros_like(high)
-        lower = np.zeros_like(low)
-        for i in range(period-1, len(high)):
-            upper[i] = np.max(high[i-period+1:i+1])
-            lower[i] = np.min(low[i-period+1:i+1])
-        return upper, lower
-    
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    # Align 12h indicators to 4h
+    volume_spike_aligned = align_htf_to_ltf(prices, df_12h, volume_spike.astype(float))
+    chop_range_aligned = align_htf_to_ltf(prices, df_12h, chop_range.astype(float))
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # warmup
+    start_idx = 100  # warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(chop_1d_aligned[i]) or 
-            np.isnan(vol_spike_1d_aligned[i]) or
-            np.isnan(donchian_upper[i]) or
-            np.isnan(donchian_lower[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(volume_spike_aligned[i]) or np.isnan(chop_range_aligned[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        vol_spike = vol_spike_1d_aligned[i]
-        chop_val = chop_1d_aligned[i]
-        upper = donchian_upper[i]
-        lower = donchian_lower[i]
+        # Alligator alignment signals
+        bullish_alignment = (jaw[i] < teeth[i]) and (teeth[i] < lips[i])
+        bearish_alignment = (jaw[i] > teeth[i]) and (teeth[i] > lips[i])
         
-        # Regime filter: only trade in range regime (chop > 61.8)
-        is_range = chop_val > 61.8
+        # Volume and regime filters
+        vol_ok = volume_spike_aligned[i] > 0.5
+        chop_ok = chop_range_aligned[i] > 0.5
         
         if position == 0:
-            # Long: price breaks above Donchian upper with volume spike in range regime
-            if price > upper and vol_spike and is_range:
+            # Long: Bullish Alligator alignment AND volume spike AND range regime
+            if bullish_alignment and vol_ok and chop_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower with volume spike in range regime
-            elif price < lower and vol_spike and is_range:
+            # Short: Bearish Alligator alignment AND volume spike AND range regime
+            elif bearish_alignment and vol_ok and chop_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below Donchian lower OR chop < 38.2 (trend regime)
-            if price < lower or chop_val < 38.2:
+            # Exit long: Alligator alignment breaks OR filters fail
+            if not bullish_alignment or not vol_ok or not chop_ok:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above Donchian upper OR chop < 38.2 (trend regime)
-            if price > upper or chop_val < 38.2:
+            # Exit short: Alligator alignment breaks OR filters fail
+            if not bearish_alignment or not vol_ok or not chop_ok:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -144,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dVolumeSpike_ChopRegime"
-timeframe = "12h"
+name = "4h_WilliamsAlligator_12hVolumeSpike_ChopRegime"
+timeframe = "4h"
 leverage = 1.0
