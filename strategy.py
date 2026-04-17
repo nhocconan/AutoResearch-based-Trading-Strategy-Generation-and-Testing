@@ -1,12 +1,7 @@
-#!/usr/bin/env python3
-"""
-6h 1D Ichimoku Cloud with 1W Trend Filter
-Long: Price above 1D Kumo + TK Cross Bullish + 1W EMA100 Up
-Short: Price below 1D Kumo + TK Cross Bearish + 1W EMA100 Down
-Exit: Price crosses opposite Kumo edge (Tenkan/Kijun average)
-Uses Ichimoku for trend/momentum and weekly EMA for long-term bias
-Target: 15-25 trades/year per symbol
-"""
+# 12h DMI Trend + Parabolic SAR + Volume Filter
+# Hypothesis: Trend-following using DMI (ADX) for trend strength and Parabolic SAR for entries, filtered by volume.
+# Works in both bull and bear by only taking strong trends (ADX > 25) and using SAR for precise entry/exit.
+# Target: 20-30 trades/year per symbol.
 
 import numpy as np
 import pandas as pd
@@ -20,85 +15,126 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1D data for Ichimoku calculation
+    # Get 1D data for DMI and SAR
     df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate DMI (ADX) on 1D
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Ichimoku parameters: Tenkan=9, Kijun=26, Senkou B=52
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    tenkan_sen = (pd.Series(high_1d).rolling(window=9, min_periods=9).max() + 
-                  pd.Series(low_1d).rolling(window=9, min_periods=9).min()) / 2
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    kijun_sen = (pd.Series(high_1d).rolling(window=26, min_periods=26).max() + 
-                 pd.Series(low_1d).rolling(window=26, min_periods=26).min()) / 2
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan_sen + kijun_sen) / 2)
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    senkou_b = ((pd.Series(high_1d).rolling(window=52, min_periods=52).max() + 
-                 pd.Series(low_1d).rolling(window=52, min_periods=52).min()) / 2)
-    # Chikou Span (Lagging Span): current close shifted 26 periods back (not used for signals)
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    # Align Ichimoku components to 6h timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen.values)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen.values)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a.values)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b.values)
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # Get 1W data for long-term trend filter
-    df_1w = get_htf_data(prices, '1w')
-    ema_100_1w = pd.Series(df_1w['close']).ewm(span=100, adjust=False, min_periods=100).mean().values
-    ema_100_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_100_1w)
+    # Smoothed values
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    plus_dm14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
+    minus_dm14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
+    
+    # DI and DX
+    plus_di14 = 100 * plus_dm14 / tr14
+    minus_di14 = 100 * minus_dm14 / tr14
+    dx = 100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Parabolic SAR
+    def calculate_psar(high, low, af_start=0.02, af_increment=0.02, af_max=0.2):
+        psar = np.zeros_like(high)
+        psar[0] = low[0]
+        trend = 1  # 1 for up, -1 for down
+        af = af_start
+        ep = high[0] if trend == 1 else low[0]
+        
+        for i in range(1, len(high)):
+            if trend == 1:
+                psar[i] = psar[i-1] + af * (ep - psar[i-1])
+                if low[i] < psar[i]:
+                    trend = -1
+                    psar[i] = ep
+                    af = af_start
+                    ep = low[i]
+                else:
+                    if high[i] > ep:
+                        ep = high[i]
+                        af = min(af + af_increment, af_max)
+            else:
+                psar[i] = psar[i-1] + af * (ep - psar[i-1])
+                if high[i] > psar[i]:
+                    trend = 1
+                    psar[i] = ep
+                    af = af_start
+                    ep = high[i]
+                else:
+                    if low[i] < ep:
+                        ep = low[i]
+                        af = min(af + af_increment, af_max)
+        return psar
+    
+    psar = calculate_psar(high_1d, low_1d)
+    
+    # Align to 12h
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    psar_aligned = align_htf_to_ltf(prices, df_1d, psar)
+    
+    # Volume filter: 12h volume > 1.5x 20-period MA
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
-    entry_price = 0.0
     
-    start_idx = 100  # warmup for Ichimoku
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or 
-            np.isnan(ema_100_1w_aligned[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(psar_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        # Kumo top and bottom (Senkou Span A and B)
-        kumo_top = max(senkou_a_aligned[i], senkou_b_aligned[i])
-        kumo_bottom = min(senkou_a_aligned[i], senkou_b_aligned[i])
-        # Kumo midpoint for exit signal
-        kumo_mid = (kumo_top + kumo_bottom) / 2
+        vol = volume[i]
+        
+        # Trend filter: ADX > 25
+        if adx_aligned[i] <= 25:
+            # No strong trend, stay flat
+            signals[i] = 0.0
+            position = 0
+            continue
         
         if position == 0:
-            # Long: Price above Kumo + TK Cross Bullish + 1W Uptrend
-            if (price > kumo_top and 
-                tenkan_aligned[i] > kijun_aligned[i] and 
-                ema_100_1w_aligned[i] > ema_100_1w_aligned[i-1]):
+            # Long: price > SAR and volume filter
+            if price > psar_aligned[i] and vol > 1.5 * vol_ma[i]:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-            # Short: Price below Kumo + TK Cross Bearish + 1W Downtrend
-            elif (price < kumo_bottom and 
-                  tenkan_aligned[i] < kijun_aligned[i] and 
-                  ema_100_1w_aligned[i] < ema_100_1w_aligned[i-1]):
+            # Short: price < SAR and volume filter
+            elif price < psar_aligned[i] and vol > 1.5 * vol_ma[i]:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
-        
+            else:
+                signals[i] = 0.0
         elif position == 1:
-            # Long exit: Price crosses below Kumo midpoint
-            if price < kumo_mid:
+            # Long: exit when price < SAR
+            if price < psar_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        
         elif position == -1:
-            # Short exit: Price crosses above Kumo midpoint
-            if price > kumo_mid:
+            # Short: exit when price > SAR
+            if price > psar_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Kumo_TK_1WTrend"
-timeframe = "6h"
+name = "12h_DMI_PSAR_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
