@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_Williams_Alligator_ElderRay_v1
-Williams Alligator (Jaw/Teeth/Lips) + Elder Ray (Bull/Bear Power) for trend confirmation.
-Long when price above Lips and Bull Power > 0; Short when price below Lips and Bear Power < 0.
-Uses 12h timeframe for regime filter: only trade when 12h ADX > 25 (trending market).
-Exit when price crosses back below/above Teeth or ADX < 20.
-Designed to capture sustained trends with reduced whipsaw.
-Target: 60-120 total trades over 4 years (15-30/year).
+1h_RegimeAdaptive_CCI_Volume_v1
+1h strategy with 4h/1d multi-timeframe filters for direction and regime.
+- Uses 4h CCI(20) for momentum direction (long when CCI>0, short when CCI<0)
+- Uses 1d ADX(14) to filter regime: ADX>25 for trending, ADX<20 for ranging
+- Uses 1h CCI(14) for entry timing with volume confirmation
+- Volume filter: current volume > 1.5x 20-period average
+- Session filter: 08-20 UTC to avoid low-liquidity hours
+- Position size: 0.20 (20% of capital)
+- Target: 15-30 trades/year (60-120 over 4 years)
 """
 
 import numpy as np
@@ -21,53 +23,66 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # === Williams Alligator (13,8,5 SMAs shifted) ===
-    # Jaw: 13-period SMMA shifted 8 bars
-    # Teeth: 8-period SMMA shifted 5 bars
-    # Lips: 5-period SMMA shifted 3 bars
-    # Using SMA as approximation for SMMA (simple moving average)
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
+    # === 1h CCI(14) for entry timing ===
+    tp = (high + low + close) / 3.0
+    sma_tp = pd.Series(tp).rolling(window=14, min_periods=14).mean().values
+    mad = pd.Series(tp).rolling(window=14, min_periods=14).apply(
+        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
+    ).values
+    cci_1h = (tp - sma_tp) / (0.015 * mad)
     
-    # === Elder Ray (13-period EMA) ===
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # === 1h volume average (20-period) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === 12h ADX(14) for trend regime filter ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # === 4h CCI(20) for trend direction ===
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    tp_4h = (high_4h + low_4h + close_4h) / 3.0
+    sma_tp_4h = pd.Series(tp_4h).rolling(window=20, min_periods=20).mean().values
+    mad_4h = pd.Series(tp_4h).rolling(window=20, min_periods=20).apply(
+        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
+    ).values
+    cci_4h = (tp_4h - sma_tp_4h) / (0.015 * mad_4h)
+    cci_4h_aligned = align_htf_to_ltf(prices, df_4h, cci_4h)
     
-    # Calculate ADX on 12h data
-    plus_dm = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
-                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
-    minus_dm = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
-                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
+    # === 1d ADX(14) for regime filter ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1d[0] = tr1[0]
     
-    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di_12h = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / (atr_12h * 14)
-    minus_di_12h = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / (atr_12h * 14)
-    dx_12h = 100 * np.abs(plus_di_12h - minus_di_12h) / (plus_di_12h + minus_di_12h + 1e-10)
-    adx_12h = pd.Series(dx_12h).rolling(window=14, min_periods=14).mean().values
+    # Directional Movement
+    plus_dm_1d = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                          np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    minus_dm_1d = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                           np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    plus_dm_1d = np.concatenate([[0], plus_dm_1d])
+    minus_dm_1d = np.concatenate([[0], minus_dm_1d])
     
-    # Align 12h ADX to 4h timeframe
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    plus_di_1d = 100 * pd.Series(plus_dm_1d).rolling(window=14, min_periods=14).sum().values / (atr_1d * 14)
+    minus_di_1d = 100 * pd.Series(minus_dm_1d).rolling(window=14, min_periods=14).sum().values / (atr_1d * 14)
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d + 1e-10)
+    adx_1d = pd.Series(dx_1d).rolling(window=14, min_periods=14).mean().values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # === Session filter: 08-20 UTC ===
+    hours = prices.index.hour  # Already datetime64[ms], .hour works
     
     signals = np.zeros(n)
     
-    # Warmup period - enough for all indicators
+    # Warmup period
     warmup = 50
     
     # Track position state
@@ -75,54 +90,76 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(lips[i]) or 
-            np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or 
-            np.isnan(adx_12h_aligned[i])):
+        if (np.isnan(cci_1h[i]) or 
+            np.isnan(cci_4h_aligned[i]) or 
+            np.isnan(adx_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             position = 0
             continue
         
+        # Session filter: only trade 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            signals[i] = 0.0
+            position = 0
+            continue
+        
+        # Volume filter: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > 1.5 * vol_ma[i]
+        
+        # Regime filter: use 1d ADX
+        adx_val = adx_1d_aligned[i]
+        is_trending = adx_val > 25
+        is_ranging = adx_val < 20
+        
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price above Lips, Bull Power > 0, 12h ADX > 25 (trending)
-            if (close[i] > lips[i] and 
-                bull_power[i] > 0 and 
-                adx_12h_aligned[i] > 25):
-                signals[i] = 0.25
+            # Determine bias from 4h CCI
+            cci_4h_val = cci_4h_aligned[i]
+            long_bias = cci_4h_val > 0
+            short_bias = cci_4h_val < 0
+            
+            # Long conditions: 4h CCI > 0 + 1h CCI > 50 + volume + (trending OR ranging)
+            if (long_bias and 
+                cci_1h[i] > 50 and 
+                volume_filter and 
+                (is_trending or is_ranging)):
+                signals[i] = 0.20
                 position = 1
                 continue
-            # Short: price below Lips, Bear Power < 0, 12h ADX > 25 (trending)
-            elif (close[i] < lips[i] and 
-                  bear_power[i] < 0 and 
-                  adx_12h_aligned[i] > 25):
-                signals[i] = -0.25
+            # Short conditions: 4h CCI < 0 + 1h CCI < -50 + volume + (trending OR ranging)
+            elif (short_bias and 
+                  cci_1h[i] < -50 and 
+                  volume_filter and 
+                  (is_trending or is_ranging)):
+                signals[i] = -0.20
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price below Teeth OR 12h ADX < 20 (losing trend)
-            if (close[i] < teeth[i] or 
-                adx_12h_aligned[i] < 20):
+            # Exit long: 1h CCI < -10 OR 4h CCI < 0 (bias change)
+            if (cci_1h[i] < -10 or 
+                cci_4h_aligned[i] < 0):
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: price above Teeth OR 12h ADX < 20 (losing trend)
-            if (close[i] > teeth[i] or 
-                adx_12h_aligned[i] < 20):
+            # Exit short: 1h CCI > 10 OR 4h CCI > 0 (bias change)
+            if (cci_1h[i] > 10 or 
+                cci_4h_aligned[i] > 0):
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Williams_Alligator_ElderRay_v1"
-timeframe = "4h"
+name = "1h_RegimeAdaptive_CCI_Volume_v1"
+timeframe = "1h"
 leverage = 1.0
