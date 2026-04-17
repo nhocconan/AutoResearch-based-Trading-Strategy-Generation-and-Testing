@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_Volume_Regime_V1
-Camarilla R1/S1 breakout from daily pivot + volume spike + chop regime filter.
-Long: price breaks above R1 with volume spike in non-choppy market.
-Short: price breaks below S1 with volume spike in non-choppy market.
-Exit when price returns to central pivot (PP).
-Designed to capture institutional breakouts with volume confirmation.
-Target: 50-150 total trades over 4 years (12-37/year).
+4h_Camarilla_R1_S1_Breakout_Volume_V1
+Long/short at Camarilla R1/S1 with volume confirmation and 12h trend filter.
+Exit at R4/S4 or opposite S1/R1.
+Designed to capture reversals at key intraday levels with institutional volume.
+Target: 80-180 total trades over 4 years (20-45/year).
 """
 
 import numpy as np
@@ -23,41 +21,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Daily Camarilla Pivot Levels ===
+    # === Camarilla levels from previous day ===
+    # Use daily high/low/close from 1d timeframe
     df_1d = get_htf_data(prices, '1d')
-    # Previous day's OHLC for Camarilla calculation
-    ph = df_1d['high'].values
-    pl = df_1d['low'].values
-    pc = df_1d['close'].values
+    # Previous day's OHLC (shifted by 1 to avoid look-ahead)
+    ph = df_1d['high'].shift(1).values
+    pl = df_1d['low'].shift(1).values
+    pc = df_1d['close'].shift(1).values
+    # Align to 4h timeframe
+    ph_aligned = align_htf_to_ltf(prices, df_1d, ph)
+    pl_aligned = align_htf_to_ltf(prices, df_1d, pl)
+    pc_aligned = align_htf_to_ltf(prices, df_1d, pc)
     
-    # Calculate Camarilla levels for previous day
-    pp = (ph + pl + pc) / 3.0
-    r1 = pc + ((ph - pl) * 1.1 / 12)
-    s1 = pc - ((ph - pl) * 1.1 / 12)
+    # Calculate Camarilla levels
+    R1 = pc_aligned + 1.1 * (ph_aligned - pl_aligned) / 12
+    S1 = pc_aligned - 1.1 * (ph_aligned - pl_aligned) / 12
+    R4 = pc_aligned + 1.1 * (ph_aligned - pl_aligned) / 2
+    S4 = pc_aligned - 1.1 * (ph_aligned - pl_aligned) / 2
     
-    # Align to 12h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # === Volume Spike Detection (20-period) ===
+    # === Volume confirmation (20-period average) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / (vol_ma + 1e-10)
     
-    # === Choppiness Index Regime Filter (14-period) ===
-    atr1 = pd.Series(np.maximum(high - low, 
-                                np.maximum(np.abs(high - np.roll(close, 1)), 
-                                         np.abs(low - np.roll(close, 1))))).rolling(
-        window=14, min_periods=14).mean().values
-    atr1[0] = high[0] - low[0]
-    
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Avoid division by zero
-    range_14 = highest_high - lowest_low
-    chop = 100 * np.log10(atr1 * 14 / (range_14 + 1e-10)) / np.log10(14)
-    chop[range_14 == 0] = 50  # neutral when no range
+    # === 12h trend filter: EMA50 ===
+    df_12h = get_htf_data(prices, '12h')
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     
@@ -69,36 +57,34 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(pp_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(vol_ratio[i]) or 
-            np.isnan(chop[i])):
+        if (np.isnan(R1[i]) or np.isnan(S1[i]) or np.isnan(R4[i]) or np.isnan(S4[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(ema_50_12h_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
+        # Volume filter: require volume > 1.5x average
+        vol_ok = volume[i] > 1.5 * vol_ma[i]
+        
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price breaks above R1, volume spike, not choppy (trending)
-            if (close[i] > r1_aligned[i] and 
-                vol_ratio[i] > 2.0 and 
-                chop[i] < 61.8):  # trending regime
+            # Long: price crosses above R1 with volume, above 12h EMA50
+            if (close[i] > R1[i] and close[i-1] <= R1[i-1] and vol_ok and
+                close[i] > ema_50_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price breaks below S1, volume spike, not choppy (trending)
-            elif (close[i] < s1_aligned[i] and 
-                  vol_ratio[i] > 2.0 and 
-                  chop[i] < 61.8):  # trending regime
+            # Short: price crosses below S1 with volume, below 12h EMA50
+            elif (close[i] < S1[i] and close[i-1] >= S1[i-1] and vol_ok and
+                  close[i] < ema_50_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic: return to pivot point
+        # Exit logic
         elif position == 1:
-            # Exit long when price returns to or below pivot
-            if close[i] <= pp_aligned[i]:
+            # Exit long: price reaches R4 or crosses below S1
+            if (close[i] >= R4[i] or close[i] < S1[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -106,8 +92,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price returns to or above pivot
-            if close[i] >= pp_aligned[i]:
+            # Exit short: price reaches S4 or crosses above R1
+            if (close[i] <= S4[i] or close[i] > R1[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -116,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_Volume_Regime_V1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_Volume_V1"
+timeframe = "4h"
 leverage = 1.0
