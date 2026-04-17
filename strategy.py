@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_AdaptiveMFE_MAE_Regime
-Hypothesis: On 6h timeframe, enter long when price is above 20-period EMA, MFE (max favorable excursion) over last 3 bars exceeds MAE (max adverse excursion) by 1.5x, and 1d ATR ratio indicates low volatility regime (ATR(7)/ATR(30) < 0.8). Enter short when price below EMA, MAE exceeds MFE by 1.5x, and same low vol regime. Uses MFE/MAE to detect momentum persistence within low volatility regimes, which often precedes explosive moves. Designed for 50-150 total trades over 4 years to minimize fee drag and work in both bull/bear markets via volatility regime filtering.
+12h_KAMA_RSI_Volume_Signal
+Hypothesis: On 12h timeframe, use Kaufman Adaptive Moving Average (KAMA) to detect trend direction, combined with RSI for momentum confirmation and volume surge for entry timing. This strategy aims to capture trend continuations with low frequency to minimize fee drag, working in both bull and bear markets by aligning with adaptive trend and volume confirmation.
 """
 
 import numpy as np
@@ -10,109 +10,100 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # === 20-period EMA on 6h ===
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # === Daily ATR for volatility regime ===
+    # === Daily data for volume confirmation and trend filter ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0  # first period has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # KAMA ( Kaufman Adaptive Moving Average ) on close prices
+    # ER = Efficiency Ratio, SC = Smoothing Constant
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close))
+    er = np.zeros_like(change)
+    for i in range(len(change)):
+        if volatility[i] != 0:
+            er[i] = change[i] / volatility[i]
+        else:
+            er[i] = 0
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    atr7 = pd.Series(tr).rolling(window=7, min_periods=7).mean().values
-    atr30 = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
-    atr_ratio = atr7 / atr30  # < 0.8 indicates low volatility regime
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # RSI(14) for momentum
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # === MFE and MAE over last 3 bars ===
-    mfe = np.zeros(n)  # max favorable excursion
-    mae = np.zeros(n)  # max adverse excursion
+    # Daily volume average for confirmation
+    vol_avg20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg20_1d)
     
-    for i in range(2, n):
-        if close[i] >= close[i-1]:  # up or equal
-            # For long bias: favorable = upward movement, adverse = downward
-            mfe[i] = max(
-                high[i] - close[i-2],  # max favorable from 2 bars ago
-                high[i-1] - close[i-2],
-                0
-            )
-            mae[i] = max(
-                close[i-2] - low[i],
-                close[i-2] - low[i-1],
-                0
-            )
-        else:  # down
-            # For short bias: favorable = downward movement, adverse = upward
-            mfe[i] = max(
-                close[i-2] - low[i],
-                close[i-2] - low[i-1],
-                0
-            )
-            mae[i] = max(
-                high[i] - close[i-2],
-                high[i-1] - close[i-2],
-                0
-            )
-    
-    # Smooth MFE/MAE to reduce noise
-    mfe_smooth = pd.Series(mfe).ewm(span=3, adjust=False, min_periods=3).mean().values
-    mae_smooth = pd.Series(mae).ewm(span=3, adjust=False, min_periods=3).mean().values
+    # Daily trend filter: price above/below 50 EMA
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     
-    # Warmup: covers EMA20, ATR, and MFE/MAE initialization
-    warmup = 30
+    # Warmup: covers KAMA, RSI, and daily indicators
+    warmup = 50
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(ema20[i]) or np.isnan(atr_ratio_aligned[i]) or 
-            np.isnan(mfe_smooth[i]) or np.isnan(mae_smooth[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
+            np.isnan(vol_avg20_1d_aligned[i]) or np.isnan(ema50_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Low volatility regime filter
-        low_vol_regime = atr_ratio_aligned[i] < 0.8
+        # Get current daily volume
+        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
         
-        # MFE/MAE ratio
-        mfe_mae_ratio = mfe_smooth[i] / (mae_smooth[i] + 1e-10)  # avoid division by zero
-        mae_mfe_ratio = mae_smooth[i] / (mfe_smooth[i] + 1e-10)
+        # Volume filter: current volume > 1.8x 20-day average (tighter to reduce trades)
+        vol_filter = vol_1d_current > 1.8 * vol_avg20_1d_aligned[i]
+        
+        # Trend filter: price vs KAMA
+        above_kama = close[i] > kama[i]
+        below_kama = close[i] < kama[i]
+        
+        # RSI conditions: not overbought/oversold
+        rsi_not_overbought = rsi[i] < 70
+        rsi_not_oversold = rsi[i] > 30
         
         # Entry conditions
-        if position == 0 and low_vol_regime:
-            # Long: price above EMA20, MFE > 1.5 * MAE
-            if close[i] > ema20[i] and mfe_mae_ratio > 1.5:
+        if position == 0:
+            # Long: price > KAMA + volume surge + RSI not overbought + above daily EMA
+            if (above_kama and vol_filter and rsi_not_overbought and 
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price below EMA20, MAE > 1.5 * MFE
-            elif close[i] < ema20[i] and mae_mfe_ratio > 1.5:
+            # Short: price < KAMA + volume surge + RSI not oversold + below daily EMA
+            elif (below_kama and vol_filter and rsi_not_oversold and 
+                  close[i] < ema50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit conditions: reverse when price crosses EMA20
+        # Exit conditions: reverse signal when price crosses KAMA
         elif position == 1:
-            if close[i] < ema20[i]:  # price crosses below EMA20
+            if close[i] < kama[i]:  # price crosses below KAMA = exit long
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -120,7 +111,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            if close[i] > ema20[i]:  # price crosses above EMA20
+            if close[i] > kama[i]:  # price crosses above KAMA = exit short
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -129,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_AdaptiveMFE_MAE_Regime"
-timeframe = "6h"
+name = "12h_KAMA_RSI_Volume_Signal"
+timeframe = "12h"
 leverage = 1.0
