@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h Elder Ray Power + 1d EMA Trend + Volume Spike
-Long: Bull Power > 0, price > 1d EMA50, volume > 2x 6m volume SMA(20)
-Short: Bear Power < 0, price < 1d EMA50, volume > 2x 6m volume SMA(20)
-Exit: Opposite signal or price crosses 1d EMA50
-Uses Elder Ray (Bull/Bear Power) to measure trend strength behind price moves.
-Designed to work in both bull and bear markets by filtering with 1d trend.
+6h ADX + Volume-Weighted RSI with 12h Trend Filter
+Long: ADX > 25, VW-RSI < 30, price > 12h EMA50
+Short: ADX > 25, VW-RSI > 70, price < 12h EMA50
+Exit: ADX < 20 or price crosses 12h EMA50
+Combines trend strength (ADX) with mean reversion (VW-RSI) and higher timeframe trend filter.
+Designed to work in both trending and ranging markets by requiring ADX for trend and VW-RSI for entry timing.
 Target: 50-150 total trades over 4 years (12-37/year)
 """
 
@@ -23,63 +23,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 12h EMA(50) for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate 6m volume SMA(20) for volume filter
-    vol_sma_6m = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate ADX (14)
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    tr = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - close[:-1]), np.absolute(low[1:] - close[:-1]))
+    atr = np.zeros_like(close)
+    atr[0] = tr[0] if len(tr) > 0 else 0
+    for i in range(1, len(tr)):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    plus_di = 100 * (np.convolve(plus_dm, np.ones(14)/14, mode='full')[:len(close)] / np.where(atr == 0, 1, atr))
+    minus_di = 100 * (np.convolve(minus_dm, np.ones(14)/14, mode='full')[:len(close)] / np.where(atr == 0, 1, atr))
+    dx = 100 * np.absolute(plus_di - minus_di) / np.where((plus_di + minus_di) == 0, 1, (plus_di + minus_di))
+    adx = np.convolve(dx, np.ones(14)/14, mode='full')[:len(close)]
     
-    # Calculate 13-period EMA for Elder Ray (standard setting)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray components
-    bull_power = high - ema_13  # Bull Power = High - EMA13
-    bear_power = low - ema_13   # Bear Power = Low - EMA13
+    # Volume-Weighted RSI (14)
+    price_change = np.diff(close, prepend=close[0])
+    up = np.where(price_change > 0, price_change, 0)
+    down = np.where(price_change < 0, -price_change, 0)
+    vw_up = up * volume
+    vw_down = down * volume
+    vw_rs = np.convolve(vw_up, np.ones(14)/14, mode='full')[:len(close)] / np.where(np.convolve(vw_down, np.ones(14)/14, mode='full')[:len(close)] == 0, 1, np.convolve(vw_down, np.ones(14)/14, mode='full')[:len(close)])
+    vw_rsi = 100 - (100 / (1 + vw_rs))
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = max(30, 50)  # need EMA50 and volume SMA
+    start_idx = max(50, 30)  # need EMA50 and ADX/VW-RSI
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_sma_6m[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(adx[i]) or np.isnan(vw_rsi[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol = volume[i]
-        vol_sma_val = vol_sma_6m[i]
-        ema_50_val = ema_50_1d_aligned[i]
-        bull = bull_power[i]
-        bear = bear_power[i]
+        ema_50_val = ema_50_12h_aligned[i]
+        adx_val = adx[i]
+        vw_rsi_val = vw_rsi[i]
         
         if position == 0:
-            # Long: Bull Power > 0 (strong buying pressure) + price > 1d EMA50 + volume spike
-            if bull > 0 and price > ema_50_val and vol > 2.0 * vol_sma_val:
+            # Long: Strong trend + oversold + above 12h EMA50
+            if adx_val > 25 and vw_rsi_val < 30 and price > ema_50_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 (strong selling pressure) + price < 1d EMA50 + volume spike
-            elif bear < 0 and price < ema_50_val and vol > 2.0 * vol_sma_val:
+            # Short: Strong trend + overbought + below 12h EMA50
+            elif adx_val > 25 and vw_rsi_val > 70 and price < ema_50_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Bear Power > 0 (selling pressure appears) or price < 1d EMA50
-            if bear > 0 or price < ema_50_val:
+            # Long exit: Weak trend or price below 12h EMA50
+            if adx_val < 20 or price < ema_50_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Bull Power < 0 (buying pressure appears) or price > 1d EMA50
-            if bull < 0 or price > ema_50_val:
+            # Short exit: Weak trend or price above 12h EMA50
+            if adx_val < 20 or price > ema_50_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_Power_1dEMA50_VolumeSpike"
+name = "6h_ADX_VWRSI_12hEMA50"
 timeframe = "6h"
 leverage = 1.0
