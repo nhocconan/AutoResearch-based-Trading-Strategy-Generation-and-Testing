@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-12h Bollinger Band Squeeze Breakout with Volume and Trend Filter
-Long: Price breaks above upper BB(20,2) + volume > 1.5x 12h volume MA + price > 1D EMA50
-Short: Price breaks below lower BB(20,2) + volume > 1.5x 12h volume MA + price < 1D EMA50
-Exit: Opposite touch of middle BB or volatility expansion (BB width > 1.5x 20-period avg width)
-Targets 20-30 trades/year per symbol by requiring BB squeeze precondition.
+4h Camarilla Pivot Breakout with Volume Spike and Choppiness Regime Filter
+Long: Price breaks above Camarilla H3 level + volume > 2.0x 4h volume MA(20) + CHOP(14) > 61.8 (range)
+Short: Price breaks below Camarilla L3 level + volume > 2.0x 4h volume MA(20) + CHOP(14) > 61.8 (range)
+Exit: Price re-enters between H3 and L3 levels
+Uses 1d Camarilla levels for structure and 4h volume/chop for confirmation and regime
+Target: 25-35 trades/year per symbol
 """
 
 import numpy as np
@@ -13,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,91 +22,107 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1D data for trend filter and BB calculation
+    # Get 1d data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate Camarilla levels from previous day's OHLC
+    # H4 = C + (H-L) * 1.500, H3 = C + (H-L) * 1.250, H2 = C + (H-L) * 1.166, H1 = C + (H-L) * 1.083
+    # L1 = C - (H-L) * 1.083, L2 = C - (H-L) * 1.166, L3 = C - (H-L) * 1.250, L4 = C - (H-L) * 1.500
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # 1D Bollinger Bands (20,2)
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean()
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std()
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
-    middle_bb = sma_20
-    bb_width = upper_bb - lower_bb
+    # Shift by 1 to get previous day's levels
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
     
-    # Squeeze condition: BB width < 1.5x 20-period average width
-    bb_width_ma20 = pd.Series(bb_width).rolling(window=20, min_periods=20).mean()
-    squeeze_condition = bb_width < 1.5 * bb_width_ma20
+    # Calculate Camarilla levels
+    H3 = prev_close + (prev_high - prev_low) * 1.250
+    L3 = prev_close - (prev_high - prev_low) * 1.250
     
-    # 1D EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean()
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     
-    # Align 1D indicators to 12h
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb.values)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb.values)
-    middle_bb_aligned = align_htf_to_ltf(prices, df_1d, middle_bb.values)
-    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze_condition.values)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d.values)
+    # 4h volume moving average (20-period for confirmation)
+    df_4h = get_htf_data(prices, '4h')
+    volume_ma_20 = pd.Series(df_4h['volume']).rolling(window=20, min_periods=20).mean()
+    volume_ma_20_4h = align_htf_to_ltf(prices, df_4h, volume_ma_20.values)
     
-    # 12h volume moving average (24-period for confirmation)
-    df_12h = get_htf_data(prices, '12h')
-    volume_ma_24 = pd.Series(df_12h['volume']).rolling(window=24, min_periods=24).mean()
-    volume_ma_24_12h = align_htf_to_ltf(prices, df_12h, volume_ma_24.values)
+    # Choppiness Index on 4h (14-period)
+    # CHOP = 100 * log10(sum(ATR over n) / (n * (max(high) - min(low)))) / log10(n)
+    atr_list = []
+    for i in range(len(df_4h)):
+        if i < 1:
+            atr_list.append(np.nan)
+        else:
+            tr = max(
+                df_4h['high'].iloc[i] - df_4h['low'].iloc[i],
+                abs(df_4h['high'].iloc[i] - df_4h['close'].iloc[i-1]),
+                abs(df_4h['low'].iloc[i] - df_4h['close'].iloc[i-1])
+            )
+            atr_list.append(tr)
+    
+    atr_series = pd.Series(atr_list)
+    atr_sum = atr_series.rolling(window=14, min_periods=14).sum()
+    max_high = df_4h['high'].rolling(window=14, min_periods=14).max()
+    min_low = df_4h['low'].rolling(window=14, min_periods=14).min()
+    chop = 100 * np.log10(atr_sum / (14 * (max_high - min_low))) / np.log10(14)
+    chop_4h = align_htf_to_ltf(prices, df_4h, chop.values)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 60  # warmup for BB calculations
+    start_idx = 100  # warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
-            np.isnan(middle_bb_aligned[i]) or np.isnan(squeeze_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ma_24_12h[i])):
+        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or 
+            np.isnan(volume_ma_20_4h[i]) or np.isnan(chop_4h[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = volume_ma_24_12h[i]
+        vol_ma = volume_ma_20_4h[i]
+        chop_val = chop_4h[i]
         
-        if position == 0:
-            # Long: BB squeeze breakout above upper BB + volume + trend
-            if (price > upper_bb_aligned[i] and squeeze_aligned[i] and 
-                vol > 1.5 * vol_ma and price > ema_50_1d_aligned[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short: BB squeeze breakout below lower BB + volume + trend
-            elif (price < lower_bb_aligned[i] and squeeze_aligned[i] and 
-                  vol > 1.5 * vol_ma and price < ema_50_1d_aligned[i]):
-                signals[i] = -0.25
-                position = -1
-        
-        elif position == 1:
-            # Long exit: price touches middle BB OR volatility expansion (BB width > 1.5x avg)
-            bb_width_current = upper_bb_aligned[i] - lower_bb_aligned[i]
-            bb_width_ma20_current = bb_width_ma20.iloc[i] if hasattr(bb_width_ma20, 'iloc') else bb_width_ma20[i]
-            if (price <= middle_bb_aligned[i] or 
-                bb_width_current > 1.5 * bb_width_ma20_current):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        
-        elif position == -1:
-            # Short exit: price touches middle BB OR volatility expansion
-            bb_width_current = upper_bb_aligned[i] - lower_bb_aligned[i]
-            bb_width_ma20_current = bb_width_ma20.iloc[i] if hasattr(bb_width_ma20, 'iloc') else bb_width_ma20[i]
-            if (price >= middle_bb_aligned[i] or 
-                bb_width_current > 1.5 * bb_width_ma20_current):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+        # Only trade in ranging markets (CHOP > 61.8)
+        if chop_val > 61.8:
+            if position == 0:
+                # Long: break above H3 with volume spike
+                if price > H3_aligned[i] and vol > 2.0 * vol_ma:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: break below L3 with volume spike
+                elif price < L3_aligned[i] and vol > 2.0 * vol_ma:
+                    signals[i] = -0.25
+                    position = -1
+            
+            elif position == 1:
+                # Long exit: price re-enters below H3
+                if price < H3_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            
+            elif position == -1:
+                # Short exit: price re-enters above L3
+                if price > L3_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+        else:
+            # In trending markets, stay flat
+            signals[i] = 0.0
+            position = 0
     
     return signals
 
-name = "12h_BB_Squeeze_Breakout_Volume_Trend"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_Volume_Chop"
+timeframe = "4h"
 leverage = 1.0
