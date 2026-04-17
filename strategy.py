@@ -1,3 +1,12 @@
+# Hypothesis: 4h timeframe strategy using daily Fibonacci retracement levels from the previous week's high-low range, combined with EMA trend filter and volume confirmation. 
+# In both bull and bear markets, price tends to retrace to key Fibonacci levels (0.382, 0.618) before continuing the trend. 
+# Weekly high-low provides relevant range for the current market regime. 
+# Entry: Long when price crosses above 0.618 Fibonacci level with above-average volume and price > daily EMA50. 
+# Short when price crosses below 0.382 Fibonacci level with above-average volume and price < daily EMA50. 
+# Exit: Price crosses back below/above the 0.5 Fibonacci level or crosses below/above daily EMA50.
+# Using weekly lookback ensures the Fibonacci levels are based on completed weekly ranges, avoiding look-ahead.
+# Position size: 0.25 to limit drawdown and reduce trade frequency.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 80:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,87 +22,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data (1D)
+    # Get daily data for weekly calculations
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Get weekly data (1W) for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Calculate weekly high and low (5 trading days)
+    high_5d = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
+    low_5d = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
     
-    # Daily 20-period EMA for trend filter
+    # Calculate Fibonacci levels from weekly range
+    weekly_range = high_5d - low_5d
+    fib_0_382 = low_5d + 0.382 * weekly_range
+    fib_0_5 = low_5d + 0.5 * weekly_range
+    fib_0_618 = low_5d + 0.618 * weekly_range
+    
+    # Align Fibonacci levels to 4h timeframe
+    fib_0_382_4h = align_htf_to_ltf(prices, df_1d, fib_0_382)
+    fib_0_5_4h = align_htf_to_ltf(prices, df_1d, fib_0_5)
+    fib_0_618_4h = align_htf_to_ltf(prices, df_1d, fib_0_618)
+    
+    # Daily EMA50 for trend filter
     close_1d_series = pd.Series(close_1d)
-    ema20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Weekly 50-period EMA for trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Daily Donchian channels (20-period)
-    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Align daily indicators to 1D timeframe (same as prices for 1d timeframe)
-    ema20_aligned = ema20_1d  # Same timeframe
-    ema50_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    upper_donchian = align_htf_to_ltf(prices, df_1d, high_20)
-    lower_donchian = align_htf_to_ltf(prices, df_1d, low_20)
-    
-    # Volume filter: current volume > 1.5 * 20-period average
+    # Volume filter: current volume > 1.3 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # Need Donchian, EMAs, volume MA
+    start_idx = 80  # Need weekly high/low, EMA50, volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema20_aligned[i]) or 
-            np.isnan(ema50_aligned[i]) or 
-            np.isnan(upper_donchian[i]) or 
-            np.isnan(lower_donchian[i]) or 
+        if (np.isnan(fib_0_382_4h[i]) or 
+            np.isnan(fib_0_5_4h[i]) or 
+            np.isnan(fib_0_618_4h[i]) or 
+            np.isnan(ema50_4h[i]) or 
             np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        volume_filter = volume[i] > (1.3 * volume_ma20[i])
         
-        # Trend filter: daily price above/below daily EMA20 AND weekly EMA50
-        price_above_ema20 = close[i] > ema20_aligned[i]
-        price_below_ema20 = close[i] < ema20_aligned[i]
-        price_above_weekly_ema = close[i] > ema50_aligned[i]
-        price_below_weekly_ema = close[i] < ema50_aligned[i]
+        # Price relative to Fibonacci levels
+        price_above_618 = close[i] > fib_0_618_4h[i]
+        price_below_382 = close[i] < fib_0_382_4h[i]
+        price_below_5 = close[i] < fib_0_5_4h[i]
+        price_above_5 = close[i] > fib_0_5_4h[i]
         
-        # Price relative to daily Donchian channels
-        price_above_upper = close[i] > upper_donchian[i]
-        price_below_lower = close[i] < lower_donchian[i]
+        # Trend filter: price relative to daily EMA50
+        price_above_ema = close[i] > ema50_4h[i]
+        price_below_ema = close[i] < ema50_4h[i]
         
         if position == 0:
-            # Long: Price breaks above upper Donchian with volume and above both EMAs
-            if (price_above_upper and price_above_ema20 and price_above_weekly_ema and volume_filter):
+            # Long: Price breaks above 0.618 Fibonacci with volume and above EMA50
+            if (price_above_618 and price_above_ema and volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower Donchian with volume and below both EMAs
-            elif (price_below_lower and price_below_ema20 and price_below_weekly_ema and volume_filter):
+            # Short: Price breaks below 0.382 Fibonacci with volume and below EMA50
+            elif (price_below_382 and price_below_ema and volume_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price crosses below lower Donchian OR below daily EMA20
-            if (close[i] < lower_donchian[i]) or (close[i] < ema20_aligned[i]):
+            # Exit long: Price crosses below 0.5 Fibonacci OR below EMA50
+            if (price_below_5) or (price_below_ema):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price crosses above upper Donchian OR above daily EMA20
-            if (close[i] > upper_donchian[i]) or (close[i] > ema20_aligned[i]):
+            # Exit short: Price crosses above 0.5 Fibonacci OR above EMA50
+            if (price_above_5) or (price_above_ema):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_EMA20_EMA50_Volume"
-timeframe = "1d"
+name = "4h_Fibonacci_Retracement_EMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
