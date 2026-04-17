@@ -13,32 +13,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Donchian Channel (20-period) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === 4h Williams %R (14-period) ===
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate Donchian upper and lower bands
-    upper_don = np.full_like(high_1d, np.nan)
-    lower_don = np.full_like(low_1d, np.nan)
-    for i in range(len(high_1d)):
-        if i >= 19:
-            upper_don[i] = np.max(high_1d[i-19:i+1])
-            lower_don[i] = np.min(low_1d[i-19:i+1])
+    # Calculate Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = np.full_like(high_4h, np.nan)
+    lowest_low = np.full_like(low_4h, np.nan)
+    period = 14
+    for i in range(len(high_4h)):
+        if i >= period - 1:
+            highest_high[i] = np.max(high_4h[i-period+1:i+1])
+            lowest_low[i] = np.min(low_4h[i-period+1:i+1])
         elif i > 0:
-            upper_don[i] = np.max(high_1d[max(0, i-9):i+1])
-            lower_don[i] = np.min(low_1d[max(0, i-9):i+1])
+            highest_high[i] = np.max(high_4h[0:i+1])
+            lowest_low[i] = np.min(low_4h[0:i+1])
         else:
-            upper_don[i] = high_1d[0]
-            lower_don[i] = low_1d[0]
+            highest_high[i] = high_4h[0]
+            lowest_low[i] = low_4h[0]
+    
+    williams_r = np.where((highest_high - lowest_low) != 0, 
+                          (highest_high - close_4h) / (highest_high - lowest_low) * -100, 
+                          -50)
     
     # === 1d RSI (14-period) ===
+    df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
+    
+    # Calculate RSI using Wilder's smoothing
     delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
-    # Wilder's smoothing
+    # Wilder's smoothing with proper seeding
     avg_gain = np.full_like(gain, np.nan)
     avg_loss = np.full_like(loss, np.nan)
     period = 14
@@ -59,51 +68,21 @@ def generate_signals(prices):
     rsi_1d[avg_loss == 0] = 100
     
     # === Align indicators to 4h timeframe ===
-    upper_don_4h = align_htf_to_ltf(prices, df_1d, upper_don)
-    lower_don_4h = align_htf_to_ltf(prices, df_1d, lower_don)
-    rsi_1d_4h = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    williams_r_aligned = align_htf_to_ltf(prices, df_4h, williams_r)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     # === 4h Volume confirmation ===
-    df_4h = get_htf_data(prices, '4h')
     volume_4h = df_4h['volume'].values
-    
-    # Calculate 20-period average volume on 4h timeframe
-    vol_ma_20 = np.full_like(volume_4h, np.nan)
+    vol_ma_10 = np.full_like(volume_4h, np.nan)
     for i in range(len(volume_4h)):
-        if i >= 19:
-            vol_ma_20[i] = np.mean(volume_4h[i-19:i+1])
+        if i >= 9:
+            vol_ma_10[i] = np.mean(volume_4h[i-9:i+1])
         elif i > 0:
-            vol_ma_20[i] = np.mean(volume_4h[max(0, i-9):i+1])
+            vol_ma_10[i] = np.mean(volume_4h[max(0, i-4):i+1])
         else:
-            vol_ma_20[i] = volume_4h[0]
+            vol_ma_10[i] = volume_4h[0]
     
-    # Volume confirmation: current 4h volume > 1.5x 20-period average
-    vol_confirm = volume_4h > vol_ma_20 * 1.5
-    
-    # === 4h Volatility filter (ATR-based) ===
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    atr = np.full_like(tr, np.nan)
-    atr_period = 14
-    for i in range(len(tr)):
-        if i < atr_period:
-            if i == 0:
-                atr[i] = tr[i]
-            else:
-                atr[i] = (atr[i-1] * (i-1) + tr[i]) / i
-        else:
-            atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
-    
-    # Volatility filter: ATR > 20-period ATR average (avoid low volatility)
-    atr_ma_20 = np.full_like(atr, np.nan)
-    for i in range(len(atr)):
-        if i >= 19:
-            atr_ma_20[i] = np.mean(atr[i-19:i+1])
-        elif i > 0:
-            atr_ma_20[i] = np.mean(atr[max(0, i-9):i+1])
-        else:
-            atr_ma_20[i] = atr[0]
-    vol_filter = atr > atr_ma_20
+    vol_confirm = volume_4h > vol_ma_10 * 1.5
     
     # === 4h Session filter (08-20 UTC) ===
     hours = prices.index.hour
@@ -119,33 +98,31 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_don_4h[i]) or 
-            np.isnan(lower_don_4h[i]) or 
-            np.isnan(rsi_1d_4h[i]) or 
-            np.isnan(vol_confirm[i]) or 
-            np.isnan(vol_filter[i])):
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(vol_confirm[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Skip if outside session or volatility filter
-        if not session_filter[i] or not vol_filter[i]:
+        # Skip if outside session
+        if not session_filter[i]:
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat AND volume confirmation
         if position == 0:
-            # Long: Price breaks above Donchian upper + RSI > 50 (bullish bias) + volume confirmation
-            if (close[i] > upper_don_4h[i] and 
-                rsi_1d_4h[i] > 50 and 
+            # Long: Williams %R < -80 (oversold) + RSI < 30 + volume confirmation
+            if (williams_r_aligned[i] < -80 and 
+                rsi_1d_aligned[i] < 30 and 
                 vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: Price breaks below Donchian lower + RSI < 50 (bearish bias) + volume confirmation
-            elif (close[i] < lower_don_4h[i] and 
-                  rsi_1d_4h[i] < 50 and 
+            # Short: Williams %R > -20 (overbought) + RSI > 70 + volume confirmation
+            elif (williams_r_aligned[i] > -20 and 
+                  rsi_1d_aligned[i] > 70 and 
                   vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
@@ -153,9 +130,9 @@ def generate_signals(prices):
         
         # Exit logic
         elif position == 1:
-            # Exit long: Price crosses below Donchian lower OR RSI < 40
-            if (close[i] < lower_don_4h[i] or 
-                rsi_1d_4h[i] < 40):
+            # Exit long: Williams %R crosses above -50 OR RSI crosses above 50
+            if (williams_r_aligned[i] > -50 or 
+                rsi_1d_aligned[i] > 50):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -163,9 +140,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price crosses above Donchian upper OR RSI > 60
-            if (close[i] > upper_don_4h[i] or 
-                rsi_1d_4h[i] > 60):
+            # Exit short: Williams %R crosses below -50 OR RSI crosses below 50
+            if (williams_r_aligned[i] < -50 or 
+                rsi_1d_aligned[i] < 50):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -174,6 +151,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_RSI_VolumeFilter_v1"
+name = "4h_Williams_RSI_OverboughtOversold_VolumeFilter_v1"
 timeframe = "4h"
 leverage = 1.0
