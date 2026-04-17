@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_ADX_Trend_Plus_VolumeBreakout_V1
-Hypothesis: Use ADX to detect strong trending conditions (ADX > 25) on 4h timeframe.
-Enter long when price breaks above 4h high of previous 10 bars with volume confirmation (>1.5x average volume).
-Enter short when price breaks below 4h low of previous 10 bars with volume confirmation.
-Exit when ADX falls below 20 (trend weakening) or opposite breakout occurs.
-Uses volume breakout to capture momentum bursts in trending markets, works in both bull and bear.
-Target: 20-40 trades/year per symbol.
+1d_1w_PriceChannel_Breakout_Volume_Confirm_V1
+Hypothesis: On daily timeframe, buy when price breaks above weekly Donchian high (20-period) with volume confirmation (>1.5x average volume), sell when breaks below weekly Donchian low. Use weekly ADX > 25 as trend filter to avoid false breakouts in ranging markets. Exit when ADX < 20 (trend weakening) or opposite breakout occurs. Designed for low frequency (target 10-25 trades/year) to minimize fee drag and work in both bull and bear markets by capturing strong trends.
 """
 
 import numpy as np
@@ -15,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,25 +18,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # === Weekly Data (HTF for trend and channels) ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # === 4h Data (HTF for trend confirmation) ===
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
-    
-    # Calculate ADX on 4h (14-period)
+    # Calculate weekly ADX (14-period)
     def calculate_adx(high, low, close, period=14):
         # True Range
         tr1 = high[1:] - low[1:]
         tr2 = np.abs(high[1:] - close[:-1])
         tr3 = np.abs(low[1:] - close[:-1])
         tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])  # align length
+        tr = np.concatenate([[np.nan], tr])
         
         # Directional Movement
         up_move = high[1:] - high[:-1]
@@ -51,14 +42,12 @@ def generate_signals(prices):
         plus_dm = np.concatenate([[np.nan], plus_dm])
         minus_dm = np.concatenate([[np.nan], minus_dm])
         
-        # Smoothed values
+        # Wilder smoothing
         def smooth_wilder(arr, period):
             result = np.full_like(arr, np.nan)
             if len(arr) < period:
                 return result
-            # First value is simple average
-            result[period-1] = np.nansum(arr[1:period])  # skip first nan
-            # Wilder smoothing
+            result[period-1] = np.nansum(arr[1:period])
             for i in range(period, len(arr)):
                 if not np.isnan(arr[i]) and not np.isnan(result[i-1]):
                     result[i] = (result[i-1] * (period-1) + arr[i]) / period
@@ -71,10 +60,10 @@ def generate_signals(prices):
         adx = smooth_wilder(dx, period)
         return adx
     
-    adx_4h = calculate_adx(high_4h, low_4h, close_4h, 14)
-    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
+    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
-    # Calculate 4h rolling high/low for breakout (10-period)
+    # Weekly Donchian channels (20-period)
     def rolling_max(arr, window):
         result = np.full_like(arr, np.nan)
         for i in range(len(arr)):
@@ -99,58 +88,52 @@ def generate_signals(prices):
                 result[i] = np.nanmin(window_slice)
         return result
     
-    high_10_4h = rolling_max(high_4h, 10)
-    low_10_4h = rolling_min(low_4h, 10)
-    high_10_4h_aligned = align_htf_to_ltf(prices, df_4h, high_10_4h)
-    low_10_4h_aligned = align_htf_to_ltf(prices, df_4h, low_10_4h)
+    high_20_1w = rolling_max(high_1w, 20)
+    low_20_1w = rolling_min(low_1w, 20)
+    high_20_1w_aligned = align_htf_to_ltf(prices, df_1w, high_20_1w)
+    low_20_1w_aligned = align_htf_to_ltf(prices, df_1w, low_20_1w)
     
-    # Volume confirmation on 4h
-    vol_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
+    # Volume confirmation on weekly
+    vol_ma_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 50
+    warmup = 60
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
-        # Skip if not in trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            position = 0
-            continue
-        
         # Skip if any required data is NaN
-        if (np.isnan(adx_4h_aligned[i]) or 
-            np.isnan(high_10_4h_aligned[i]) or
-            np.isnan(low_10_4h_aligned[i]) or
-            np.isnan(vol_ma_4h_aligned[i])):
+        if (np.isnan(adx_1w_aligned[i]) or 
+            np.isnan(high_20_1w_aligned[i]) or
+            np.isnan(low_20_1w_aligned[i]) or
+            np.isnan(vol_ma_1w_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Get current 4h bar's volume for confirmation
-        vol_4h_current = align_htf_to_ltf(prices, df_4h, volume_4h)[i]
-        vol_confirmed = vol_4h_current > 1.5 * vol_ma_4h_aligned[i]
+        # Get current weekly bar's volume for confirmation
+        vol_1w_current = align_htf_to_ltf(prices, df_1w, volume_1w)[i]
+        vol_confirmed = vol_1w_current > 1.5 * vol_ma_1w_aligned[i]
         
         # Trend filter: only trade when ADX > 25 (strong trend)
-        strong_trend = adx_4h_aligned[i] > 25
+        strong_trend = adx_1w_aligned[i] > 25
         
         # Exit when trend weakens (ADX < 20)
-        weak_trend = adx_4h_aligned[i] < 20
+        weak_trend = adx_1w_aligned[i] < 20
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price breaks above 10-period high with volume confirmation and strong trend
-            if close[i] > high_10_4h_aligned[i] and vol_confirmed and strong_trend:
+            # Long: price breaks above 20-period weekly high with volume confirmation and strong trend
+            if close[i] > high_20_1w_aligned[i] and vol_confirmed and strong_trend:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price breaks below 10-period low with volume confirmation and strong trend
-            elif close[i] < low_10_4h_aligned[i] and vol_confirmed and strong_trend:
+            # Short: price breaks below 20-period weekly low with volume confirmation and strong trend
+            elif close[i] < low_20_1w_aligned[i] and vol_confirmed and strong_trend:
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -158,7 +141,7 @@ def generate_signals(prices):
         # Exit logic
         elif position == 1:
             # Exit conditions: trend weakening OR opposite breakout
-            if weak_trend or close[i] < low_10_4h_aligned[i]:
+            if weak_trend or close[i] < low_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -167,7 +150,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit conditions: trend weakening OR opposite breakout
-            if weak_trend or close[i] > high_10_4h_aligned[i]:
+            if weak_trend or close[i] > high_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -176,6 +159,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_ADX_Trend_Plus_VolumeBreakout_V1"
-timeframe = "4h"
+name = "1d_1w_PriceChannel_Breakout_Volume_Confirm_V1"
+timeframe = "1d"
 leverage = 1.0
