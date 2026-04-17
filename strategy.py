@@ -27,7 +27,7 @@ def generate_signals(prices):
     r2_1d = pivot_1d + (range_1d * 2.0)
     s2_1d = pivot_1d - (range_1d * 2.0)
     
-    # Align pivot levels to 4h timeframe
+    # Align pivot levels to 12h timeframe
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
@@ -68,11 +68,11 @@ def generate_signals(prices):
         if position == 0:
             # Long: price breaks above R1 with volume and above weekly EMA20
             if close[i] > r1_1d_aligned[i] and volume_filter[i] and close[i] > ema20_1w_aligned[i]:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             # Short: price breaks below S1 with volume and below weekly EMA20
             elif close[i] < s1_1d_aligned[i] and volume_filter[i] and close[i] < ema20_1w_aligned[i]:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
@@ -81,7 +81,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
             # Exit short: price breaks above R2 OR ATR-based stop
@@ -89,10 +89,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_Pivot_R1S1_R2S2_Breakout_Volume_WeeklyTrend"
-timeframe = "4h"
+name = "12h_Pivot_R1S1_R2S2_Breakout_Volume_WeeklyTrend"
+timeframe = "12h"
 leverage = 1.0
