@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h timeframe with 1-week Ichimoku Cloud (Tenkan/Kijun/Senkou) filter.
-Long when price > Senkou Span B and Tenkan > Kijun; short when opposite.
-Uses 1-week data for trend structure to avoid whipsaws in 6h timeframe.
-Targets 15-35 trades/year (60-140 total over 4 years) to minimize fee drag.
-Works in bull/bear by following higher timeframe trend via Ichimoku cloud.
+12h-based strategy using weekly Donchian breakout + volume confirmation + 1w EMA trend filter.
+Trades breakouts of weekly high/low channels confirmed by volume and aligned with weekly trend.
+Designed for low trade frequency (12-37/year) to minimize fee drag in bear markets.
 """
 import numpy as np
 import pandas as pd
@@ -16,39 +14,31 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1w data for Ichimoku
+    # Get weekly data for Donchian channels and EMA trend
     df_1w = get_htf_data(prices, '1w')
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Ichimoku parameters (standard)
-    tenkan_period = 9
-    kijun_period = 26
-    senkou_span_b_period = 52
-    displacement = 26
+    # Weekly Donchian channels (20-period)
+    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    tenkan_sen = (pd.Series(high_1w).rolling(window=tenkan_period, min_periods=tenkan_period).max() + 
-                  pd.Series(low_1w).rolling(window=tenkan_period, min_periods=tenkan_period).min()) / 2
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    kijun_sen = (pd.Series(high_1w).rolling(window=kijun_period, min_periods=kijun_period).max() + 
-                 pd.Series(low_1w).rolling(window=kijun_period, min_periods=kijun_period).min()) / 2
-    # Senkou Span A: (Tenkan + Kijun)/2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
-    # Senkou Span B: (52-period high + 52-period low)/2
-    senkou_span_b = (pd.Series(high_1w).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).max() + 
-                     pd.Series(low_1w).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).min()) / 2
+    # Weekly EMA(34) for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Displace Senkou spans forward by 26 periods
-    senkou_span_a = senkou_span_a.shift(displacement)
-    senkou_span_b = senkou_span_b.shift(displacement)
+    # Align weekly data to 12h
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Align to 6h
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1w, tenkan_sen.values)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1w, kijun_sen.values)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_a.values)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_b.values)
+    # Volume filter: current volume > 1.8x 30-period average (stricter for lower frequency)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_filter = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -57,32 +47,32 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
-            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price above Senkou Span B and Tenkan > Kijun
-            if close[i] > senkou_span_b_aligned[i] and tenkan_sen_aligned[i] > kijun_sen_aligned[i]:
+            # Long: price breaks above weekly Donchian high with volume and above weekly EMA34
+            if close[i] > donchian_high_aligned[i] and volume_filter[i] and close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below Senkou Span B and Tenkan < Kijun
-            elif close[i] < senkou_span_b_aligned[i] and tenkan_sen_aligned[i] < kijun_sen_aligned[i]:
+            # Short: price breaks below weekly Donchian low with volume and below weekly EMA34
+            elif close[i] < donchian_low_aligned[i] and volume_filter[i] and close[i] < ema_34_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below Senkou Span B or Tenkan < Kijun
-            if close[i] < senkou_span_b_aligned[i] or tenkan_sen_aligned[i] < kijun_sen_aligned[i]:
+            # Exit long: price breaks below weekly Donchian low (reversal signal)
+            if close[i] < donchian_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above Senkou Span B or Tenkan > Kijun
-            if close[i] > senkou_span_b_aligned[i] or tenkan_sen_aligned[i] > kijun_sen_aligned[i]:
+            # Exit short: price breaks above weekly Donchian high (reversal signal)
+            if close[i] > donchian_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,6 +80,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1wIchimoku_CloudFilter"
-timeframe = "6h"
+name = "12h_1wDonchian20_Volume_EMA34"
+timeframe = "12h"
 leverage = 1.0
