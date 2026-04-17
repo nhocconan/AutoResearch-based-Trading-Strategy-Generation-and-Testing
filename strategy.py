@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Camarilla R1/S1 breakout with 1w volume confirmation and 1d EMA50 trend filter.
-Long when price breaks above R1 with volume > 1.5x 1w average volume AND 1d EMA50 rising.
-Short when price breaks below S1 with volume > 1.5x 1w average volume AND 1d EMA50 falling.
-Exit when price touches the opposite Camarilla level (S1 for long, R1 for short).
-Uses 1w for volume confirmation and 1d for EMA50 trend filter and Camarilla calculation.
-Designed to work in both bull and bear markets by following the 1d trend with volume confirmation.
-Target: 15-25 trades/year per symbol (60-100 total over 4 years).
+Hypothesis: 6h Donchian(20) breakout with 12h volume confirmation and 1d ADX trend filter.
+Long when price breaks above 20-bar high with volume > 1.3x 12h average volume AND 1d ADX > 25.
+Short when price breaks below 20-bar low with volume > 1.3x 12h average volume AND 1d ADX > 25.
+Exit when price touches the opposite Donchian level or ADX < 20 (trend weakening).
+Uses 12h for volume confirmation and 1d for ADX trend filter.
+Designed to capture strong trends in both bull and bear markets with volume confirmation.
+Target: 12-25 trades/year per symbol (50-100 total over 4 years).
 """
 
 import numpy as np
@@ -23,82 +23,115 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for volume MA
-    df_1w = get_htf_data(prices, '1w')
-    volume_1w = df_1w['volume'].values
-    vol_ma_20 = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20)
+    # Get 12h data for volume MA
+    df_12h = get_htf_data(prices, '12h')
+    volume_12h = df_12h['volume'].values
+    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
     
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for ADX
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_rising = ema_50_1d > np.roll(ema_50_1d, 1)
-    ema_50_falling = ema_50_1d < np.roll(ema_50_1d, 1)
-    ema_50_rising[0] = False
-    ema_50_falling[0] = False
-    ema_50_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_50_rising)
-    ema_50_falling_aligned = align_htf_to_ltf(prices, df_1d, ema_50_falling)
+    
+    # Calculate ADX (14-period)
+    plus_dm = np.zeros_like(high_1d)
+    minus_dm = np.zeros_like(low_1d)
+    tr = np.zeros_like(high_1d)
+    
+    for i in range(1, len(high_1d)):
+        plus_dm[i] = max(0, high_1d[i] - high_1d[i-1])
+        minus_dm[i] = max(0, low_1d[i-1] - low_1d[i])
+        tr[i] = max(high_1d[i] - low_1d[i], 
+                    abs(high_1d[i] - close_1d[i-1]), 
+                    abs(low_1d[i] - close_1d[i-1]))
+    
+    # Smooth with Wilder's smoothing (alpha = 1/period)
+    period = 14
+    alpha = 1.0 / period
+    
+    tr14 = np.zeros_like(tr)
+    plus_dm14 = np.zeros_like(plus_dm)
+    minus_dm14 = np.zeros_like(minus_dm)
+    
+    # Initial values
+    tr14[period] = np.nansum(tr[1:period+1])
+    plus_dm14[period] = np.nansum(plus_dm[1:period+1])
+    minus_dm14[period] = np.nansum(minus_dm[1:period+1])
+    
+    # Wilder smoothing
+    for i in range(period+1, len(tr)):
+        tr14[i] = tr14[i-1] - (tr14[i-1] / period) + tr[i]
+        plus_dm14[i] = plus_dm14[i-1] - (plus_dm14[i-1] / period) + plus_dm[i]
+        minus_dm14[i] = minus_dm14[i-1] - (minus_dm14[i-1] / period) + minus_dm[i]
+    
+    # Avoid division by zero
+    dx = np.zeros_like(tr14)
+    mask = tr14 != 0
+    dx[mask] = (np.abs(plus_dm14[mask] - minus_dm14[mask]) / tr14[mask]) * 100
+    
+    # ADX is smoothed DX
+    adx = np.zeros_like(dx)
+    adx[2*period] = np.nanmean(dx[period:2*period]) if np.any(~np.isnan(dx[period:2*period])) else 0
+    
+    for i in range(2*period+1, len(dx)):
+        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+    
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # warmup period
+    start_idx = max(50, 2*14+1)  # warmup period
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(vol_ma_20_aligned[i]) or 
-            np.isnan(ema_50_rising_aligned[i]) or
-            np.isnan(ema_50_falling_aligned[i])):
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 1w average volume
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20_aligned[i]
+        # Volume confirmation: current volume > 1.3x 12h average volume
+        volume_confirmed = volume[i] > 1.3 * vol_ma_20_aligned[i]
         
-        # Get the most recent completed 1d bar's OHLC for Camarilla
-        high_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['high'].values)
-        low_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['low'].values)
-        close_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['close'].values)
+        # ADX trend filter: ADX > 25 for strong trend
+        strong_trend = adx_aligned[i] > 25
+        weak_trend = adx_aligned[i] < 20  # exit condition
         
-        period_high = high_1d_aligned[i]
-        period_low = low_1d_aligned[i]
-        period_close = close_1d_aligned[i]
-        
-        range_val = period_high - period_low
-        if range_val <= 0:
-            signals[i] = 0.0
-            continue
-            
-        # Camarilla levels
-        R1 = period_close + range_val * 1.1 / 12
-        S1 = period_close - range_val * 1.1 / 12
+        # Donchian channels (20-period)
+        if i >= 20:
+            donch_high = np.max(high[i-20:i])
+            donch_low = np.min(low[i-20:i])
+        else:
+            donch_high = np.max(high[:i+1]) if i > 0 else high[i]
+            donch_low = np.min(low[:i+1]) if i > 0 else low[i]
         
         # Breakout conditions
-        breakout_R1 = close[i] > R1
-        breakout_S1 = close[i] < S1
+        breakout_high = close[i] > donch_high
+        breakout_low = close[i] < donch_low
         
         if position == 0:
-            # Long: break above R1 with volume confirmation and rising 1d EMA
-            if (breakout_R1 and volume_confirmed and ema_50_rising_aligned[i]):
+            # Long: break above Donchian high with volume confirmation and strong trend
+            if (breakout_high and volume_confirmed and strong_trend):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with volume confirmation and falling 1d EMA
-            elif (breakout_S1 and volume_confirmed and ema_50_falling_aligned[i]):
+            # Short: break below Donchian low with volume confirmation and strong trend
+            elif (breakout_low and volume_confirmed and strong_trend):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price touches S1
-            if close[i] <= S1:
+            # Exit long: price touches Donchian low OR trend weakens
+            if (close[i] <= donch_low) or weak_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price touches R1
-            if close[i] >= R1:
+            # Exit short: price touches Donchian high OR trend weakens
+            if (close[i] >= donch_high) or weak_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +139,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1S1_Volume_1w_1dEMA50_Trend"
-timeframe = "1d"
+name = "6h_Donchian20_Volume_12h_1dADX_Trend"
+timeframe = "6h"
 leverage = 1.0
