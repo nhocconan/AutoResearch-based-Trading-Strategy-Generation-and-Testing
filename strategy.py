@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-6h_Stochastic_Signal_v1
-Stochastic %K(14,3,3) > 80 for short, < 20 for long with 1d trend filter.
-Trend filter: price above/below 1d EMA50.
-Exit when Stochastic crosses back to neutral zone (40-60).
-Designed to capture mean reversion in ranging markets with trend alignment.
+4h_CCI_Overbought_Oversold_R1S1_v1
+Long: CCI(20) < -100 + price touches S1 pivot from 1d + volume spike
+Short: CCI(20) > 100 + price touches R1 pivot from 1d + volume spike
+Exit: CCI crosses back within [-50, 50] OR price reaches opposite pivot (R2/S2)
+Designed to capture mean-reversion bounces at key levels with volume confirmation.
 Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_hlf
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,54 +20,86 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # === Stochastic Oscillator (14,3,3) ===
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    k_percent = 100 * (close - lowest_low) / (highest_high - lowest_low + 1e-10)
-    # Smooth %K to get %D (3-period SMA of %K)
-    d_percent = pd.Series(k_percent).rolling(window=3, min_periods=3).mean().values
+    # === CCI(20) ===
+    typical_price = (high + low + close) / 3.0
+    sma_tp = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
+    mad = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(
+        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
+    ).values
+    cci = (typical_price - sma_tp) / (0.015 * mad)
     
-    # === 1d EMA50 for trend filter ===
+    # === 1d Pivot Points (Classic) ===
     df_1d = get_htf_data(prices, '1d')
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate pivot points from previous day's OHLC
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Pivot point and support/resistance levels
+    pp = (prev_high + prev_low + prev_close) / 3.0
+    r1 = 2 * pp - prev_low
+    s1 = 2 * pp - prev_high
+    r2 = pp + (prev_high - prev_low)
+    s2 = pp - (prev_high - prev_low)
+    
+    # Align to 4h timeframe (use previous day's levels)
+    pp_aligned = align_ltf_to_hlf(prices, df_1d, pp)
+    r1_aligned = align_ltf_to_hlf(prices, df_1d, r1)
+    s1_aligned = align_ltf_to_hlf(prices, df_1d, s1)
+    r2_aligned = align_ltf_to_hlf(prices, df_1d, r2)
+    s2_aligned = align_ltf_to_hlf(prices, df_1d, s2)
+    
+    # === Volume Spike (2x 20-period average) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2 * vol_ma)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 30
+    warmup = 50
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(d_percent[i]) or 
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(cci[i]) or 
+            np.isnan(pp_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(r2_aligned[i]) or 
+            np.isnan(s2_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: Stochastic < 20 (oversold) and price above 1d EMA50 (uptrend)
-            if (d_percent[i] < 20 and 
-                close[i] > ema_50_1d_aligned[i]):
+            # Long: CCI < -100 (oversold), price touches S1, volume spike
+            if (cci[i] < -100 and 
+                low[i] <= s1_aligned[i] * 1.001 and  # Allow small tolerance for touch
+                high[i] >= s1_aligned[i] * 0.999 and
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: Stochastic > 80 (overbought) and price below 1d EMA50 (downtrend)
-            elif (d_percent[i] > 80 and 
-                  close[i] < ema_50_1d_aligned[i]):
+            # Short: CCI > 100 (overbought), price touches R1, volume spike
+            elif (cci[i] > 100 and 
+                  high[i] >= r1_aligned[i] * 0.999 and  # Allow small tolerance for touch
+                  low[i] <= r1_aligned[i] * 1.001 and
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: Stochastic > 40 (exit oversold zone)
-            if d_percent[i] > 40:
+            # Exit long: CCI > -50 OR price reaches R2
+            if (cci[i] > -50 or 
+                high[i] >= r2_aligned[i] * 0.999):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -75,8 +107,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Stochastic < 60 (exit overbought zone)
-            if d_percent[i] < 60:
+            # Exit short: CCI < 50 OR price reaches S2
+            if (cci[i] < 50 or 
+                low[i] <= s2_aligned[i] * 1.001):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -85,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Stochastic_Signal_v1"
-timeframe = "6h"
+name = "4h_CCI_Overbought_Oversold_R1S1_v1"
+timeframe = "4h"
 leverage = 1.0
