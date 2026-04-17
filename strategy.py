@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Pivot_R1_S1_Breakout_Volume_Confirm
-Hypothesis: Use daily Camarilla pivot levels (R1/S1) with volume confirmation and 1-week trend filter.
-Enter long when price breaks above R1 with volume > 1.5x 20-day average and weekly close > weekly open.
-Enter short when price breaks below S1 with volume > 1.5x 20-day average and weekly close < weekly open.
-Designed for low trade frequency (12-37/year) to capture intraday momentum in trending markets while avoiding chop.
+1h_4h1d_Squeeze_Breakout_Volume
+Hypothesis: Bollinger Band squeeze (BB width < 20th percentile) on 1h indicates low volatility.
+Breakout from squeeze with volume > 1.5x 20-period average and aligned with 4h trend (EMA50) 
+and 1d trend (price > 200 EMA). Designed for low frequency (15-37/year) to catch explosive 
+moves after consolidation in both bull and bear markets. Uses 1h for entry timing, 4h/1d for 
+trend filter and volatility regime.
 """
 
 import numpy as np
@@ -13,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,92 +22,103 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Daily Camarilla pivot levels ===
+    # === 1h Bollinger Bands for squeeze detection ===
+    bb_length = 20
+    bb_mult = 2.0
+    basis = pd.Series(close).rolling(window=bb_length, min_periods=bb_length).mean().values
+    dev = bb_mult * pd.Series(close).rolling(window=bb_length, min_periods=bb_length).std().values
+    upper = basis + dev
+    lower = basis - dev
+    bb_width = upper - lower
+    
+    # Squeeze condition: BB width < 20th percentile of last 50 periods
+    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=10).quantile(0.20).values
+    squeeze = bb_width < bb_width_percentile
+    
+    # === 4h EMA50 for trend filter ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    
+    # === 1d EMA200 for long-term trend filter ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Calculate pivot point and ranges
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    range_hl = high_1d - low_1d
+    # === Volume confirmation: current volume > 1.5x 20-period average ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Camarilla levels: R1 = PP + (Range * 1.1/12), S1 = PP - (Range * 1.1/12)
-    r1 = pp + (range_hl * 1.1 / 12.0)
-    s1 = pp - (range_hl * 1.1 / 12.0)
-    
-    # Align to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # === Daily volume average for confirmation ===
-    volume_1d = df_1d['volume'].values
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
-    
-    # === Weekly trend filter (1-week close > open for uptrend) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    open_1w = df_1w['open'].values
-    weekly_uptrend = close_1w > open_1w  # True for uptrend week
-    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
+    # === Session filter: 08:00-20:00 UTC ===
+    hours = prices.index.hour  # pre-computed DatetimeIndex.hour
     
     signals = np.zeros(n)
-    
-    # Warmup period: enough for daily calculations
-    warmup = 30  # Covers 20-day volume average
-    
-    # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
+    # Warmup: enough for BB (20), percentile (50), 4h EMA (50), 1d EMA (200)
+    warmup = 200
+    
     for i in range(warmup, n):
-        # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(vol_avg_20_1d_aligned[i]) or np.isnan(weekly_uptrend_aligned[i])):
+        # Skip if any data is NaN
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(bb_width[i]) or np.isnan(bb_width_percentile[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Get current daily volume for confirmation
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
+        # Session filter: only trade 08:00-20:00 UTC
+        if not (8 <= hours[i] <= 20):
+            signals[i] = 0.0
+            position = 0
+            continue
         
-        # Volume filter: current volume > 1.5x daily average volume
-        vol_filter = vol_1d_current > 1.5 * vol_avg_20_1d_aligned[i]
-        
-        # Entry logic: only enter when flat
+        # Entry conditions (only when flat)
         if position == 0:
-            # Long: Price breaks above R1 + volume filter + weekly uptrend
-            if close[i] > r1_aligned[i] and vol_filter and weekly_uptrend_aligned[i] > 0.5:
-                signals[i] = 0.25
+            # Squeeze breakout conditions
+            bb_squeeze = squeeze[i]
+            vol_filter = volume[i] > 1.5 * vol_ma_20[i]
+            price_above_bb = close[i] > upper[i]
+            price_below_bb = close[i] < lower[i]
+            
+            # Trend filters: 4h EMA50 and 1d EMA200
+            uptrend_4h = close[i] > ema_50_4h_aligned[i]
+            uptrend_1d = close[i] > ema_200_1d_aligned[i]
+            downtrend_4h = close[i] < ema_50_4h_aligned[i]
+            downtrend_1d = close[i] < ema_200_1d_aligned[i]
+            
+            # Long: squeeze breakout up + volume + uptrend on both timeframes
+            if bb_squeeze and vol_filter and price_above_bb and uptrend_4h and uptrend_1d:
+                signals[i] = 0.20
                 position = 1
                 continue
-            # Short: Price breaks below S1 + volume filter + weekly downtrend
-            elif close[i] < s1_aligned[i] and vol_filter and weekly_uptrend_aligned[i] < 0.5:
-                signals[i] = -0.25
+            # Short: squeeze breakout down + volume + downtrend on both timeframes
+            elif bb_squeeze and vol_filter and price_below_bb and downtrend_4h and downtrend_1d:
+                signals[i] = -0.20
                 position = -1
                 continue
         
-        # Exit logic: reverse signal or volatility-based
+        # Exit conditions
         elif position == 1:
-            # Exit when price breaks below S1 (reversal signal)
-            if close[i] < s1_aligned[i]:
+            # Exit long: price closes below 4h EMA50 or 1d EMA200
+            if close[i] < ema_50_4h_aligned[i] or close[i] < ema_200_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit when price breaks above R1 (reversal signal)
-            if close[i] > r1_aligned[i]:
+            # Exit short: price closes above 4h EMA50 or 1d EMA200
+            if close[i] > ema_50_4h_aligned[i] or close[i] > ema_200_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "12h_Pivot_R1_S1_Breakout_Volume_Confirm"
-timeframe = "12h"
+name = "1h_4h1d_Squeeze_Breakout_Volume"
+timeframe = "1h"
 leverage = 1.0
