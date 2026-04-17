@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h timeframe with daily Donchian channel breakout + volume confirmation + ATR regime filter.
-Long when price breaks above 20-period Donchian upper band with volume > 1.3x 20-period average and ATR(14) < ATR(50) (low volatility regime).
-Short when price breaks below 20-period Donchian lower band with volume > 1.3x 20-period average and ATR(14) < ATR(50).
-Exit when price touches the opposite Donchian band or ATR(14) > ATR(50) (high volatility regime).
-Uses discrete sizing 0.25 to minimize fee churn. Designed to work in both bull and bear markets by filtering for low volatility breakouts.
+Hypothesis: 1d timeframe with weekly Donchian channel breakout + volume confirmation + ADX trend filter.
+Long when price breaks above weekly Donchian(20) high with volume > 1.5x 20-period average and weekly ADX > 25.
+Short when price breaks below weekly Donchian(20) low with volume > 1.5x 20-period average and weekly ADX > 25.
+Weekly Donchian captures major trend structure; breakouts with volume and trend filter reduce false signals.
+Target: 30-100 total trades over 4 years (7-25/year) to avoid fee drag. Uses discrete sizing 0.25.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,87 +21,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels and ATR
+    # Get weekly data for Donchian and ADX
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly Donchian(20)
+    donchian_window = 20
+    high_ma_20 = pd.Series(high_1w).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    low_ma_20 = pd.Series(low_1w).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    
+    # Calculate weekly ADX(14)
+    adx_window = 14
+    tr1 = pd.Series(high_1w - low_1w).values
+    tr2 = pd.Series(np.abs(high_1w - np.roll(close_1w, 1))).values
+    tr3 = pd.Series(np.abs(low_1w - np.roll(close_1w, 1))).values
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    
+    atr = pd.Series(tr).rolling(window=adx_window, min_periods=adx_window).mean().values
+    
+    plus_dm = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w),
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    minus_dm = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)),
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
+    
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=adx_window, min_periods=adx_window).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=adx_window, min_periods=adx_window).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=adx_window, min_periods=adx_window).mean().values
+    
+    # Get 1d data for volume
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d Donchian channels (20-period)
-    high_ma_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).mean().values
-    low_ma_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).mean().values
-    donchian_upper = high_ma_20
-    donchian_lower = low_ma_20
-    
-    # Calculate 1d ATR(14) and ATR(50) for regime filter
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr1 = np.maximum(tr1, np.abs(low_1d[1:] - close_1d[:-1]))
-    tr1 = np.concatenate([[np.nan], tr1])
-    atr14 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
-    
-    tr2 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr2 = np.maximum(tr2, np.abs(low_1d[1:] - close_1d[:-1]))
-    tr2 = np.concatenate([[np.nan], tr2])
-    atr50 = pd.Series(tr2).rolling(window=50, min_periods=50).mean().values
-    
-    # Calculate 1d volume 20-period average
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all to 12h
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
-    atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
-    atr50_aligned = align_htf_to_ltf(prices, df_1d, atr50)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Align all to 1d
+    high_ma_20_aligned = align_htf_to_ltf(prices, df_1w, high_ma_20)
+    low_ma_20_aligned = align_htf_to_ltf(prices, df_1w, low_ma_20)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # need enough for ATR50 and Donchian
+    start_idx = 200  # need enough for weekly calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(atr14_aligned[i]) or np.isnan(atr50_aligned[i]) or 
-            np.isnan(vol_ma_20_aligned[i]) or np.isnan(volume_1d_aligned[i])):
+        if (np.isnan(high_ma_20_aligned[i]) or np.isnan(low_ma_20_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(volume_1d_aligned[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.3x 20-period average
-        volume_confirmed = volume_1d_aligned[i] > 1.3 * vol_ma_20_aligned[i]
-        
-        # Regime filter: ATR(14) < ATR(50) (low volatility regime)
-        low_vol_regime = atr14_aligned[i] < atr50_aligned[i]
+        # Volume confirmation: current 1d volume > 1.5x 20-period average
+        volume_confirmed = volume_1d_aligned[i] > 1.5 * vol_ma_20_1d_aligned[i]
         
         if position == 0:
-            # Long: price breaks above Donchian upper band with volume and low vol regime
-            if (close[i] > donchian_upper_aligned[i] and 
+            # Long: price breaks above weekly Donchian high with volume and trend (ADX > 25)
+            if (close[i] > high_ma_20_aligned[i] and 
                 volume_confirmed and 
-                low_vol_regime):
+                adx_aligned[i] > 25):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower band with volume and low vol regime
-            elif (close[i] < donchian_lower_aligned[i] and 
+            # Short: price breaks below weekly Donchian low with volume and trend (ADX > 25)
+            elif (close[i] < low_ma_20_aligned[i] and 
                   volume_confirmed and 
-                  low_vol_regime):
+                  adx_aligned[i] > 25):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price touches Donchian lower band or high volatility regime
-            if (close[i] < donchian_lower_aligned[i] or 
-                not low_vol_regime):
+            # Exit long: price falls back below weekly Donchian low or trend weakens (ADX < 20)
+            if (close[i] < low_ma_20_aligned[i] or 
+                adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price touches Donchian upper band or high volatility regime
-            if (close[i] > donchian_upper_aligned[i] or 
-                not low_vol_regime):
+            # Exit short: price rises back above weekly Donchian high or trend weakens (ADX < 20)
+            if (close[i] > high_ma_20_aligned[i] or 
+                adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -109,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dDonchian20_Volume_ATRRegime"
-timeframe = "12h"
+name = "1d_1wDonchian20_Volume_ADX"
+timeframe = "1d"
 leverage = 1.0
