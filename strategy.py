@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h strategy using weekly pivot direction (R1/S1) for trend filter, 
-1d Camarilla H3/L3 breakout with volume confirmation.
-- Weekly pivot bias: long when price above weekly R1, short when below weekly S1
-- Breakout triggers when price closes beyond 1d H3 (long) or L3 (short) with volume > 1.8x 20-period 6h MA
+Hypothesis: 12h strategy using Donchian(20) breakout with volume confirmation and 1d EMA50 trend filter.
+- Long when price closes above 20-period 12h Donchian upper band + volume > 1.5x 20-period 12h volume MA + price above 1d EMA50
+- Short when price closes below 20-period 12h Donchian lower band + volume > 1.5x 20-period 12h volume MA + price below 1d EMA50
 - Fixed position size 0.25 to limit fee churn and manage drawdown
 - ATR-based trailing stop (2.0x ATR) to lock in profits
 - Designed for very low trade frequency (target: 50-150 trades over 4 years) to avoid fee drag
-- Works in bull markets (buying H3 breakouts above weekly R1) and bear markets (selling L3 breakdowns below weekly S1)
+- Works in bull markets (buying breakouts above 1d EMA50) and bear markets (selling breakdowns below 1d EMA50)
 """
 
 import numpy as np
@@ -24,67 +23,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly pivot points (based on previous week)
-    # P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_close_1w = np.roll(close_1w, 1)
-    prev_high_1w[0] = high_1w[0]
-    prev_low_1w[0] = low_1w[0]
-    prev_close_1w[0] = close_1w[0]
-    
-    weekly_p = (prev_high_1w + prev_low_1w + prev_close_1w) / 3
-    weekly_r1 = 2 * weekly_p - prev_low_1w
-    weekly_s1 = 2 * weekly_p - prev_high_1w
-    
-    # Get 1d data for Camarilla pivots (HTF)
+    # Get 1d data for EMA50 trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Camarilla levels (based on previous day's range)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d[0] = high_1d[0]
-    prev_low_1d[0] = low_1d[0]
-    prev_close_1d[0] = close_1d[0]
+    # Calculate 1d EMA50
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    camarilla_h3 = prev_close_1d + 1.1 * (prev_high_1d - prev_low_1d) / 2
-    camarilla_l3 = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d) / 2
+    # Get 12h data for Donchian bands, volume confirmation, and ATR (primary timeframe)
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Get 6h data for volume confirmation and ATR (primary timeframe)
-    df_6h = get_htf_data(prices, '6h')
-    volume_6h = df_6h['volume'].values
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
+    # Donchian(20) bands on 12h
+    upper_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Volume average (20-period) on 6h
-    volume_ma_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    # Volume average (20-period) on 12h for confirmation
+    volume_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
     
-    # ATR (10-period) on 6h for stoploss
-    tr1 = high_6h - low_6h
-    tr2 = np.abs(high_6h - np.roll(close_6h, 1))
-    tr3 = np.abs(low_6h - np.roll(close_6h, 1))
+    # ATR (10-period) on 12h for stoploss
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # first period
     atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # Align all indicators to 6h timeframe (primary)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_6h, volume_ma_20)
-    atr_aligned = align_htf_to_ltf(prices, df_6h, atr_10)
+    # Align all indicators to 12h timeframe (primary)
+    upper_aligned = align_htf_to_ltf(prices, df_12h, upper_20)
+    lower_aligned = align_htf_to_ltf(prices, df_12h, lower_20)
+    volume_ma_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_20)
+    atr_aligned = align_htf_to_ltf(prices, df_12h, atr_10)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -94,31 +67,30 @@ def generate_signals(prices):
     start_idx = 100  # warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]) or 
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(volume_ma_aligned[i]) or np.isnan(atr_aligned[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(volume_ma_aligned[i]) or np.isnan(atr_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        weekly_r1_val = weekly_r1_aligned[i]
-        weekly_s1_val = weekly_s1_aligned[i]
-        h3_val = h3_aligned[i]
-        l3_val = l3_aligned[i]
+        upper_val = upper_aligned[i]
+        lower_val = lower_aligned[i]
         vol_ma = volume_ma_aligned[i]
         atr_val = atr_aligned[i]
+        ema_50_val = ema_50_1d_aligned[i]
         vol = volume[i]
         price = close[i]
         
         if position == 0:
-            # Look for breakouts with volume confirmation and weekly pivot filter
-            # Long: price closes above H3 + volume spike + price above weekly R1
-            if price > h3_val and vol > 1.8 * vol_ma and price > weekly_r1_val:
+            # Look for breakouts with volume confirmation and 1d EMA50 trend filter
+            # Long: price closes above upper band + volume spike + price above 1d EMA50
+            if price > upper_val and vol > 1.5 * vol_ma and price > ema_50_val:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 atr_stop = entry_price - 2.0 * atr_val
-            # Short: price closes below L3 + volume spike + price below weekly S1
-            elif price < l3_val and vol > 1.8 * vol_ma and price < weekly_s1_val:
+            # Short: price closes below lower band + volume spike + price below 1d EMA50
+            elif price < lower_val and vol > 1.5 * vol_ma and price < ema_50_val:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -146,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R1S1_1d_Camarilla_H3L3_VolumeSpike_ATRTrail"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA50_VolumeSpike_ATRTrail"
+timeframe = "12h"
 leverage = 1.0
