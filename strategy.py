@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h timeframe with 1d Williams %R for mean reversion + volume confirmation + ADX regime filter.
-Long when price pulls back to oversold Williams %R (< -80) with volume > 1.5x 24-period average and ADX < 25 (range market).
-Short when price rallies to overbought Williams %R (> -20) with volume confirmation and ADX < 25.
-Uses Williams %R from 1d for institutional overbought/oversold levels, volume to confirm mean reversion pressure,
-and ADX to ensure we're in a ranging market where mean reversion works. Designed to work in both bull (buy pullbacks in uptrend within range) 
-and bear (sell rallies in downtrend within range) markets by requiring range regime (ADX < 25).
+Hypothesis: 4h timeframe with 12h Donchian channel breakout (20-period) + volume confirmation + 12h EMA34 trend filter.
+Long when price breaks above 12h Donchian upper band with volume > 1.5x 20-period average and price > 12h EMA34.
+Short when price breaks below 12h Donchian lower band with volume > 1.5x 20-period average and price < 12h EMA34.
+Exit when price returns to the opposite Donchian band or reverses against trend.
+Designed to capture strong momentum moves with institutional structure from 12h timeframe, confirmed by volume and trend alignment.
+Uses discrete position sizing (0.25) to minimize fee churn and manage drawdown.
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,102 +22,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams %R calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 12h data for Donchian channels and EMA
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate 1d Williams %R (14-period)
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14) * -100
-    # Replace division by zero with -50 (neutral)
-    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
+    # Calculate 12h Donchian channels (20-period)
+    # Upper band = max(high, lookback=20)
+    # Lower band = min(low, lookback=20)
+    high_series = pd.Series(high_12h)
+    low_series = pd.Series(low_12h)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Calculate 12h ADX (14-period) for regime filter
-    # ADX requires +DI and -DI calculation
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    # Pad first element
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
+    # Calculate 12h EMA34 for trend filter
+    close_series = pd.Series(close_12h)
+    ema34 = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[0], tr])
+    # Calculate 12h volume 20-period average for confirmation
+    vol_series = pd.Series(volume_12h)
+    vol_ma_20 = vol_series.rolling(window=20, min_periods=20).mean().values
     
-    # Smooth with Wilder's smoothing (alpha = 1/period)
-    def wilders_smooth(data, period):
-        alpha = 1.0 / period
-        result = np.zeros_like(data)
-        result[period-1] = np.mean(data[:period])  # seed with SMA
-        for i in range(period, len(data)):
-            result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-        return result
-    
-    period_adx = 14
-    atr = wilders_smooth(tr, period_adx)
-    plus_di = 100 * wilders_smooth(plus_dm, period_adx) / (atr + 1e-10)
-    minus_di = 100 * wilders_smooth(minus_dm, period_adx) / (atr + 1e-10)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = wilders_smooth(dx, period_adx)
-    
-    # Calculate 12h volume 24-period average for confirmation
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    
-    # Align 1d Williams %R and ADX to 12h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align 12h indicators to 4h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
+    ema34_aligned = align_htf_to_ltf(prices, df_12h, ema34)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = max(30, 24)  # need enough for Williams %R, ADX, and volume MA
+    start_idx = 50  # need enough for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(williams_r_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or 
+            np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(ema34_aligned[i]) or 
+            np.isnan(vol_ma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x 24-period average
-        volume_confirmed = volume[i] > 1.5 * vol_ma_24[i]
-        
-        # Range regime: ADX < 25 (not trending)
-        range_regime = adx_aligned[i] < 25
+        # Volume confirmation: current 12h volume > 1.5x 20-period average
+        volume_confirmed = volume_12h[i // 48] > 1.5 * vol_ma_20_aligned[i] if i // 48 < len(volume_12h) else False
         
         if position == 0:
-            # Long: price pulls back to oversold Williams %R (< -80) with volume and range regime
-            if (williams_r_aligned[i] < -80 and 
+            # Long: price breaks above 12h Donchian upper with volume and uptrend (price > EMA34)
+            if (close[i] > donchian_upper_aligned[i] and 
                 volume_confirmed and 
-                range_regime):
+                close[i] > ema34_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price rallies to overbought Williams %R (> -20) with volume and range regime
-            elif (williams_r_aligned[i] > -20 and 
+            # Short: price breaks below 12h Donchian lower with volume and downtrend (price < EMA34)
+            elif (close[i] < donchian_lower_aligned[i] and 
                   volume_confirmed and 
-                  range_regime):
+                  close[i] < ema34_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Williams %R returns to neutral (> -50) or stops oversold
-            if williams_r_aligned[i] > -50:
+            # Exit long: price falls back below 12h Donchian lower or trend reverses
+            if (close[i] < donchian_lower_aligned[i] or 
+                close[i] < ema34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Williams %R returns to neutral (< -50) or stops overbought
-            if williams_r_aligned[i] < -50:
+            # Exit short: price rises back above 12h Donchian upper or trend reverses
+            if (close[i] > donchian_upper_aligned[i] or 
+                close[i] > ema34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -125,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dWilliamsR_MeanReversion_Volume_ADXRange"
-timeframe = "12h"
+name = "4h_12hDonchian20_Breakout_Volume_EMA34_Trend"
+timeframe = "4h"
 leverage = 1.0
