@@ -1,13 +1,13 @@
-#!/usr/bin/env python3
+# 6h_Pivot_R3_S1_Breakout_VolumeSpike
+# Uses 1d pivot points to identify strong support/resistance levels.
+# Long when price breaks above S3 with volume confirmation, short when breaks below R3.
+# Uses volume spike (2x 20-period average) to confirm institutional participation.
+# Position size: 0.25. Target: 15-30 trades/year.
+# Works in bull/bear: pivot levels act as dynamic support/resistance in all regimes.
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 4h KAMA + 1d RSI + Volume Spike - Trend following in trending markets, mean reversion in choppy.
-# Uses Kaufman Adaptive Moving Average (KAMA) for trend direction, 1d RSI for overbought/oversold,
-# and 1d volume spike for institutional confirmation. Position size 0.25.
-# KAMA adapts to market noise - fast in trends, slow in chop.
-# Works in bull/bear: adapts to market conditions automatically.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,80 +19,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data for RSI and volume spike ===
+    # === 1d data for pivot points and volume ===
     df_1d = get_htf_data(prices, '1d')
     
+    # Calculate 1d pivot points (standard floor method)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    pivot_point = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot_point - low_1d
+    s1 = 2 * pivot_point - high_1d
+    r2 = pivot_point + (high_1d - low_1d)
+    s2 = pivot_point - (high_1d - low_1d)
+    r3 = high_1d + 2 * (pivot_point - low_1d)
+    s3 = low_1d - 2 * (high_1d - pivot_point)
+    
+    # Align pivot levels to 6h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pivot_point)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Volume spike filter
     volume_1d = df_1d['volume'].values
-    
-    # 1d RSI(14)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # 1d volume spike (>2x 20-day average)
     volume_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     volume_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma20_1d)
-    vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)
-    volume_spike = vol_1d_current > (2.0 * volume_ma20_1d_aligned)
-    
-    # === 4h KAMA (10, 2, 30) ===
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, k=10, prepend=close[:10]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0)
-    # Vectorized volatility calculation
-    volatility_rolling = pd.Series(np.abs(np.diff(close, prepend=close[0]))).rolling(window=10, min_periods=1).sum().values
-    er = change / (volatility_rolling + 1e-10)
-    
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if any required data is not available
-        if np.isnan(rsi_1d_aligned[i]) or np.isnan(kama[i]) or np.isnan(volume_ma20_1d_aligned[i]):
+        if np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or \
+           np.isnan(volume_ma20_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Get current values
-        rsi = rsi_1d_aligned[i]
-        vol_spike = volume_spike[i]
-        price = close[i]
-        kama_val = kama[i]
+        # Get current 1d volume (aligned to 6h)
+        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
+        volume_filter = vol_1d_current > (2.0 * volume_ma20_1d_aligned[i])
         
-        # Entry conditions
         if position == 0:
-            # Long: price > KAMA, RSI < 70 (not overbought), volume spike
-            if price > kama_val and rsi < 70 and vol_spike:
+            # Long when price breaks above S3 with volume confirmation
+            if close[i] > s3_aligned[i] and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < KAMA, RSI > 30 (not oversold), volume spike
-            elif price < kama_val and rsi > 30 and vol_spike:
+            # Short when price breaks below R3 with volume confirmation
+            elif close[i] < r3_aligned[i] and volume_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price < KAMA or RSI > 70 (overbought)
-            if price < kama_val or rsi > 70:
+            # Exit long: price crosses below pivot point
+            if close[i] < pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price > KAMA or RSI < 30 (oversold)
-            if price > kama_val or rsi < 30:
+            # Exit short: price crosses above pivot point
+            if close[i] > pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_RSI_VolumeSpike"
-timeframe = "4h"
+name = "6h_Pivot_R3_S1_Breakout_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
