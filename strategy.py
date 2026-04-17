@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,94 +13,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend direction and volatility
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Calculate 4h ATR for volatility filtering
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr_4h = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_4h = pd.Series(tr_4h).ewm(span=14, min_periods=14).mean().values
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
-    
-    # Get 1d data for trend confirmation
+    # Get daily data for pivot points
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # 1d EMA34 for trend direction
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1h RSI for entry timing
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, min_periods=14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, min_periods=14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate daily pivot points (standard formula)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = 2 * pivot_1d - low_1d
+    s1_1d = 2 * pivot_1d - high_1d
     
-    # Pre-compute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    # Align daily pivot levels to 12h timeframe (use previous day's levels)
+    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # Volume filter: current volume > 2.0 * 30-period average (30 periods = 15 days at 12h)
+    volume_ma30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    
+    # Simple moving average filter (12h timeframe)
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 34  # Need sufficient data for EMA34
+    start_idx = max(30, 20)  # Need sufficient data for volume MA and SMA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_4h_aligned[i]) or 
-            np.isnan(rsi[i])):
+        if (np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or
+            np.isnan(volume_ma30[i]) or np.isnan(sma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: 08-20 UTC only
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        if not in_session:
-            signals[i] = 0.0
-            continue
-        
-        # Trend filter: price above/below 1d EMA34
-        trend_up = close[i] > ema_34_1d_aligned[i]
-        trend_down = close[i] < ema_34_1d_aligned[i]
-        
-        # Volatility filter: ATR > 0 (always true, but ensures data validity)
-        vol_filter = atr_4h_aligned[i] > 0
+        # Volume filter - more restrictive to reduce trades
+        volume_filter = volume[i] > (2.0 * volume_ma30[i])
         
         if position == 0:
-            # Long entry: uptrend + RSI oversold bounce
-            if trend_up and rsi[i] < 35 and vol_filter:
-                signals[i] = 0.20
+            # Long breakout: price breaks above R1 with volume and above SMA
+            if (close[i] > r1_12h[i] and volume_filter and close[i] > sma_20[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + RSI overbought bounce
-            elif trend_down and rsi[i] > 65 and vol_filter:
-                signals[i] = -0.20
+            # Short breakdown: price breaks below S1 with volume and below SMA
+            elif (close[i] < s1_12h[i] and volume_filter and close[i] < sma_20[i]):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: trend reversal or RSI overbought
-            if not trend_up or rsi[i] > 70:
+            # Exit long: price falls below pivot point
+            if close[i] < pivot_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: trend reversal or RSI oversold
-            if not trend_down or rsi[i] < 30:
+            # Exit short: price rises above pivot point
+            if close[i] > pivot_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_EMA34_RSI_Session_Filter"
-timeframe = "1h"
+name = "12h_DailyPivot_Breakout_Volume_SMA"
+timeframe = "12h"
 leverage = 1.0
