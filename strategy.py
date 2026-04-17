@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Keltner_Channel_Breakout_Volume_Trend
-Hypothesis: On 4h timeframe, enter long when price breaks above Keltner upper band with 12h volume confirmation and bullish 12h trend; short when price breaks below Keltner lower band with volume and bearish 12h trend. Keltner Channels adapt to volatility better than Bollinger Bands in crypto markets, reducing whipsaws. The 12h trend filter ensures alignment with higher timeframe momentum, while volume confirmation avoids low-conviction breakouts. Designed for 15-35 trades per year to minimize fee drag and work in both bull/bear regimes via trend alignment.
+4h_RSI_MeanReversion_TrendFilter
+Hypothesis: On 4h, enter long when RSI(14) < 30 with 12h EMA(50) support and volume confirmation; short when RSI > 70 with resistance and volume. Uses mean reversion in overextended conditions filtered by higher timeframe trend to avoid counter-trend trades in strong moves. Designed for 20-40 trades/year to minimize fee drag and work in both bull/bear regimes via trend alignment.
 """
 
 import numpy as np
@@ -13,41 +13,36 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 12h data for volume and trend ===
+    # === 12h data for trend and volume ===
     df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     volume_12h = df_12h['volume'].values
     
-    # Keltner Channel (20, 2) on 4h data
-    # Middle = EMA(20), Width = ATR(20) * 2
-    ema20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
-    atr20 = pd.Series(tr).ewm(span=20, min_periods=20, adjust=False).mean().values
-    kc_upper = ema20 + 2 * atr20
-    kc_lower = ema20 - 2 * atr20
-    
-    # 12h volume average (20-period) for confirmation
-    vol_avg20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_avg20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_avg20_12h)
+    # RSI(14) on 4h
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     # 12h EMA50 for trend filter
     ema50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
+    # 12h volume average (20-period) for confirmation
+    vol_avg20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_avg20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_avg20_12h)
+    
     signals = np.zeros(n)
     
-    # Warmup: covers EMA20, ATR20, and 12h indicators
+    # Warmup: covers RSI and 12h indicators
     warmup = 50
     
     # Track position
@@ -55,8 +50,9 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(ema20[i]) or np.isnan(atr20[i]) or 
-            np.isnan(vol_avg20_12h_aligned[i]) or np.isnan(ema50_12h_aligned[i])):
+        if (np.isnan(rsi[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or 
+            np.isnan(vol_avg20_12h_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -64,29 +60,25 @@ def generate_signals(prices):
         # Get current 12h volume
         vol_12h_current = align_htf_to_ltf(prices, df_12h, volume_12h)[i]
         
-        # Volume filter: current volume > 1.8x 20-period average
-        vol_filter = vol_12h_current > 1.8 * vol_avg20_12h_aligned[i]
-        
-        # Trend filter: price above/below 12h EMA50
-        above_trend = close[i] > ema50_12h_aligned[i]
-        below_trend = close[i] < ema50_12h_aligned[i]
+        # Volume filter: current volume > 1.5x 20-period average
+        vol_filter = vol_12h_current > 1.5 * vol_avg20_12h_aligned[i]
         
         # Entry conditions
         if position == 0:
-            # Long: price breaks above Keltner upper + volume + above 12h trend
-            if close[i] > kc_upper[i] and vol_filter and above_trend:
+            # Long: RSI oversold + above 12h EMA50 + volume
+            if rsi[i] < 30 and close[i] > ema50_12h_aligned[i] and vol_filter:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price breaks below Keltner lower + volume + below 12h trend
-            elif close[i] < kc_lower[i] and vol_filter and below_trend:
+            # Short: RSI overbought + below 12h EMA50 + volume
+            elif rsi[i] > 70 and close[i] < ema50_12h_aligned[i] and vol_filter:
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit conditions: reverse signal when price crosses EMA20 (middle)
+        # Exit conditions: reverse when RSI returns to neutral zone (40-60)
         elif position == 1:
-            if close[i] < ema20[i]:  # price crosses below middle = exit long
+            if rsi[i] > 40:  # exit long when RSI recovers
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -94,7 +86,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            if close[i] > ema20[i]:  # price crosses above middle = exit short
+            if rsi[i] < 60:  # exit short when RSI declines
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -103,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Keltner_Channel_Breakout_Volume_Trend"
+name = "4h_RSI_MeanReversion_TrendFilter"
 timeframe = "4h"
 leverage = 1.0
