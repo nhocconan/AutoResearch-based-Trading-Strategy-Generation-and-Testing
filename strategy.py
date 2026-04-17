@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_Pivot_R1S1_Breakout_Volume_Regime
-Strategy: 12-hour Camarilla pivot level breakout with volume confirmation and 1d chop regime filter.
-Long: Price breaks above Camarilla R1 + volume > 1.5x average + 1d CHOP > 61.8 (range)
-Short: Price breaks below Camarilla S1 + volume > 1.5x average + 1d CHOP > 61.8 (range)
-Exit: Price returns to Camarilla pivot point (PP)
-Position size: 0.25
-Designed to fade false breakouts in ranging markets while capturing true breakouts with volume.
-Timeframe: 12h
+1h_BreakerBlock_Sweep_Multitimeframe
+Strategy: 1-hour Fair Value Gap (FVG) retest + breaker block (liquidity sweep) in direction of higher timeframe (4h/1d) trend.
+Long: Bullish FVG formed (low[0] > high[-2]), price returns to fill 50% of gap, and liquidity sweep below prior low occurs, while 4h close > 1d EMA50.
+Short: Bearish FVG formed (high[0] < low[-2]), price returns to fill 50% of gap, and liquidity sweep above prior high occurs, while 4h close < 1d EMA50.
+Exit: Opposite FVG forms or price reaches 2x gap size in favor.
+Position size: 0.20
+Designed to work in both bull (continuation) and bear (mean reversion via liquidity sweeps) by aligning with HTF trend.
+Timeframe: 1h
 """
 
 import numpy as np
@@ -16,115 +16,143 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Calculate Camarilla pivot levels from previous day
-    # PP = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    # Using previous day's OHLC
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    # First value will be invalid due to roll, but we'll handle with start_idx
+    # FVG detection: 3-bar sequence where middle bar gaps away from first and third
+    # Bullish FVG: low[i] > high[i-2] (gap up)
+    # Bearish FVG: high[i] < low[i-2] (gap down)
+    bullish_fvg = (low[2:] > high[:-2])  # aligned at index i (third bar)
+    bearish_fvg = (high[2:] < low[:-2])
     
-    PP = (prev_high + prev_low + prev_close) / 3.0
-    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12.0
-    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12.0
+    # Pad to original length
+    bullish_fvg = np.concatenate([np.full(2, False), bullish_fvg])
+    bearish_fvg = np.concatenate([np.full(2, False), bearish_fvg])
     
-    # Calculate 1-day CHOP (choppiness index) for regime filter
+    # FVG boundaries
+    fvg_top = np.where(bullish_fvg, low, np.nan)      # for bullish: entry zone is from high[i-2] to low[i]
+    fvg_bottom = np.where(bullish_fvg, high[:-2], np.nan)  # but we use high[i-2] as bottom, low[i] as top
+    # Actually: for bullish FVG, gap is between high[i-2] and low[i]
+    bullish_fvg_bottom = np.where(bullish_fvg, high[:-2], np.nan)
+    bullish_fvg_top = np.where(bullish_fvg, low, np.nan)
+    bearish_fvg_bottom = np.where(bearish_fvg, low, np.nan)
+    bearish_fvg_top = np.where(bearish_fvg, high[:-2], np.nan)
+    
+    # 50% level of FVG for entry
+    bullish_fvg_mid = (bullish_fvg_bottom + bullish_fvg_top) / 2
+    bearish_fvg_mid = (bearish_fvg_bottom + bearish_fvg_top) / 2
+    
+    # Liquidity sweep: price takes out prior swing high/low then reverses
+    # Bullish sweep: new low below prior low, then close > prior low (sweep and hold)
+    # Bearish sweep: new high above prior high, then close < prior high
+    lookback = 20
+    roll_max = pd.Series(high).rolling(window=lookback, min_periods=1).max().values
+    roll_min = pd.Series(low).rolling(window=lookback, min_periods=1).min().values
+    
+    # Sweep detection: price pierces level then closes back inside
+    bullish_sweep = (low < roll_min) & (close > roll_min)  # took out low, closed back above
+    bearish_sweep = (high > roll_max) & (close < roll_max)  # took out high, closed back below
+    
+    # HTF trend filter: 4h close vs 1d EMA50
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    close_series_4h = pd.Series(close_4h)
+    ema50_4h = close_series_4h.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    close_series_1d = pd.Series(close_1d)
+    ema50_1d = close_series_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # True Range for 1d
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    # First TR will be invalid due to roll, but we'll handle with start_idx
-    
-    # ATR(14) for 1d
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # CHOP = 100 * log15(sum(ATR(14)) / (max(high) - min(low)) over 14 periods
-    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
-    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop_1d = 100 * np.log10(sum_atr_14 / (max_high_14 - min_low_14)) / np.log10(15)
-    
-    # Align 1d CHOP to 12h timeframe
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    
-    # Volume confirmation (20-period MA on 12h)
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Trend: 4h close above/both 1d and 4h EMA50 for long, below for short
+    trend_up = (close_4h > ema50_1d_aligned[::4][:len(close_4h)]) & (close_4h > ema50_4h)  # approximate alignment
+    trend_down = (close_4h < ema50_1d_aligned[::4][:len(close_4h)]) & (close_4h < ema50_4h)
+    # Simpler: use aligned 1d EMA on 1h chart directly
+    trend_up = close > ema50_1d_aligned
+    trend_down = close < ema50_1d_aligned
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(14, 20)  # Need enough data for CHOP ATR and volume MA
+    start_idx = max(50, 20)  # ensure EMA and FVG lookback ready
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available
-        if (np.isnan(PP[i]) or 
-            np.isnan(R1[i]) or 
-            np.isnan(S1[i]) or 
-            np.isnan(chop_1d_aligned[i]) or 
-            np.isnan(volume_ma20[i])):
-            signals[i] = 0.0
-            continue
+        # Track most recent FVG
+        if bullish_fvg[i]:
+            # Bullish FVG formed at i
+            last_bullish_fvg_idx = i
+            last_bullish_fvg_bottom = bullish_fvg_bottom[i]
+            last_bullish_fvg_top = bullish_fvg_top[i]
+            last_bullish_fvg_mid = bullish_fvg_mid[i]
+        if bearish_fvg[i]:
+            # Bearish FVG formed at i
+            last_bearish_fvg_idx = i
+            last_bearish_fvg_bottom = bearish_fvg_bottom[i]
+            last_bearish_fvg_top = bearish_fvg_top[i]
+            last_bearish_fvg_mid = bearish_fvg_mid[i]
         
-        # Volume filter: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
-        
-        # Regime filter: 1d CHOP > 61.8 indicates ranging market (good for fade)
-        chop_filter = chop_1d_aligned[i] > 61.8
-        
-        # Breakout conditions
-        breakout_up = close[i] > R1[i]  # break above R1
-        breakout_down = close[i] < S1[i]  # break below S1
-        
-        # Return to pivot point (PP)
-        return_to_pp = abs(close[i] - PP[i]) < 0.005 * PP[i]  # within 0.5% of PP
-        
-        if position == 0:
-            # In ranging markets, fade false breakouts
-            # Long: price breaks below S1 but volume confirms and we expect reversion to PP
-            # Short: price breaks above R1 but volume confirms and we expect reversion to PP
-            if breakout_down and volume_filter and chop_filter:
-                # Price broke below S1, expect reversion to PP (long)
-                signals[i] = 0.25
+        # Exit conditions: opposite FVG forms or price moves 2x gap in favor
+        if position == 1:  # long
+            # Exit if bearish FVG forms (new resistance above)
+            if bearish_fvg[i]:
+                signals[i] = 0.0
+                position = 0
+            # Exit if price reaches 2x gap size above entry (take profit)
+            elif 'last_bullish_fvg_idx' in locals() and i - last_bullish_fvg_idx < 50:  # valid FVG
+                gap_size = last_bullish_fvg_top - last_bullish_fvg_bottom
+                target = last_bullish_fvg_bottom + 2 * gap_size  # 2x risk-reward
+                if close[i] >= target:
+                    signals[i] = 0.0
+                    position = 0
+            # Otherwise hold
+            else:
+                signals[i] = 0.20
+        elif position == -1:  # short
+            # Exit if bullish FVG forms (new support below)
+            if bullish_fvg[i]:
+                signals[i] = 0.0
+                position = 0
+            # Exit if price reaches 2x gap size below entry
+            elif 'last_bearish_fvg_idx' in locals() and i - last_bearish_fvg_idx < 50:
+                gap_size = last_bearish_fvg_top - last_bearish_fvg_bottom
+                target = last_bearish_fvg_top - 2 * gap_size
+                if close[i] <= target:
+                    signals[i] = 0.0
+                    position = 0
+            else:
+                signals[i] = -0.20
+        else:  # flat, look for entry
+            # Long entry: bullish FVG retest + liquidity sweep + uptrend
+            if ('last_bullish_fvg_idx' in locals() and 
+                i - last_bullish_fvg_idx >= 1 and  # at least one bar after formation
+                i - last_bullish_fvg_idx <= 20 and  # within reasonable retest window
+                bullish_sweep[i] and  # liquidity sweep occurred
+                low[i] <= last_bullish_fvg_mid and  # price retested to 50% level
+                trend_up[i]):  # HTF trend up
+                signals[i] = 0.20
                 position = 1
-            elif breakout_up and volume_filter and chop_filter:
-                # Price broke above R1, expect reversion to PP (short)
-                signals[i] = -0.25
+                last_bullish_fvg_idx = -1  # invalidate after use
+            # Short entry: bearish FVG retest + liquidity sweep + downtrend
+            elif ('last_bearish_fvg_idx' in locals() and 
+                  i - last_bearish_fvg_idx >= 1 and
+                  i - last_bearish_fvg_idx <= 20 and
+                  bearish_sweep[i] and
+                  high[i] >= last_bearish_fvg_mid and
+                  trend_down[i]):
+                signals[i] = -0.20
                 position = -1
-        
-        elif position == 1:
-            # Exit long: return to PP or break above R1 (invalidates the fade)
-            if return_to_pp or breakout_up:
-                signals[i] = 0.0
-                position = 0
+                last_bearish_fvg_idx = -1
             else:
-                signals[i] = 0.25
-        
-        elif position == -1:
-            # Exit short: return to PP or break below S1 (invalidates the fade)
-            if return_to_pp or breakout_down:
                 signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
     
     return signals
 
-name = "12h_Camarilla_Pivot_R1S1_Breakout_Volume_Regime"
-timeframe = "12h"
+name = "1h_BreakerBlock_Sweep_Multitimeframe"
+timeframe = "1h"
 leverage = 1.0
