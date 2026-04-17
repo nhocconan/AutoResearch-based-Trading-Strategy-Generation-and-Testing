@@ -1,17 +1,32 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with volume confirmation and 12h EMA34 trend filter.
-Long when price breaks above 20-period high with volume > 1.5x 4h avg volume AND 12h EMA34 rising.
-Short when price breaks below 20-period low with volume > 1.5x 4h avg volume AND 12h EMA34 falling.
-Exit when price touches the 12h EMA34.
-Uses 4h for execution and volume, 12h for EMA trend filter.
-Designed to capture strong trending moves with volume confirmation while avoiding false breakouts.
-Target: 20-50 trades/year per symbol.
+Hypothesis: 1d Williams Alligator with 1w trend filter and volume confirmation.
+Long when Alligator jaws (13-period SMMA) crosses above teeth (8-period SMMA) with 
+volume > 1.5x 20-day average AND 1w close > 1w open (bullish weekly candle).
+Short when jaws cross below teeth with volume confirmation AND 1w close < 1w open (bearish weekly candle).
+Exit when jaws re-cross teeth in opposite direction.
+Williams Alligator uses smoothed moving averages (SMMA) which reduce whipsaw in ranging markets.
+Designed to catch trends in both bull and bear markets with weekly confirmation to avoid counter-trend trades.
+Target: 10-25 trades/year per symbol.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def smma(source, length):
+    """Smoothed Moving Average (Williams Alligator)"""
+    if length < 1:
+        return np.full_like(source, np.nan, dtype=np.float64)
+    result = np.full_like(source, np.nan, dtype=np.float64)
+    if len(source) < length:
+        return result
+    # First value is simple SMA
+    result[length-1] = np.mean(source[:length])
+    # Subsequent values: SMMA = (PREV_SMMA * (length-1) + CURRENT_VALUE) / length
+    for i in range(length, len(source)):
+        result[i] = (result[i-1] * (length-1) + source[i]) / length
+    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,27 +38,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
+        return np.zeros(n)
+    close_1w = df_1w['close'].values
+    open_1w = df_1w['open'].values
     
-    # Calculate 12h EMA(34)
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_rising = ema_34_12h > np.roll(ema_34_12h, 1)
-    ema_34_falling = ema_34_12h < np.roll(ema_34_12h, 1)
-    ema_34_rising[0] = False
-    ema_34_falling[0] = False
+    # Calculate 1w bullish/bearish candle
+    weekly_bullish = close_1w > open_1w
+    weekly_bearish = close_1w < open_1w
     
-    # Align 12h EMA to 4h timeframe
-    ema_34_rising_aligned = align_htf_to_ltf(prices, df_12h, ema_34_rising)
-    ema_34_falling_aligned = align_htf_to_ltf(prices, df_12h, ema_34_falling)
+    # Get 1d data for Williams Alligator
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) == 0:
+        return np.zeros(n)
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 4h volume MA (20-period)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate Williams Alligator SMMA on 1d close
+    jaw = smma(close_1d, 13)   # Jaw (13-period SMMA)
+    teeth = smma(close_1d, 8)  # Teeth (8-period SMMA)
+    lips = smma(close_1d, 5)   # Lips (5-period SMMA) - not used in signals but part of Alligator
     
-    # Donchian channels (20-period)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d volume MA (20-period)
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all indicators to primary timeframe (1d)
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish)
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish)
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -52,47 +78,55 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_34_rising_aligned[i]) or 
-            np.isnan(ema_34_falling_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or
-            np.isnan(highest_20[i]) or
-            np.isnan(lowest_20[i])):
+        if (np.isnan(jaw_aligned[i]) or 
+            np.isnan(teeth_aligned[i]) or
+            np.isnan(weekly_bullish_aligned[i]) or
+            np.isnan(weekly_bearish_aligned[i]) or
+            np.isnan(vol_ma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x 20-bar average
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume confirmation: current 1d volume > 1.5x 20-day average
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20_aligned[i]
         
-        # Donchian breakout conditions
-        breakout_high = close[i] > highest_20[i]
-        breakout_low = close[i] < lowest_20[i]
+        # Williams Alligator crossover signals
+        jaw_above_teeth = jaw_aligned[i] > teeth_aligned[i]
+        jaw_below_teeth = jaw_aligned[i] < teeth_aligned[i]
         
-        # Exit condition: touch 12h EMA34 (we'll use a proxy since we don't have direct 12h EMA aligned)
-        # For exit, we use price crossing the 12h EMA trend - simplified as price reverting to mean
-        ema_34_proxy = pd.Series(close).ewm(span=34, min_periods=34, adjust=False).mean().values
-        touch_ema = abs(close[i] - ema_34_proxy[i]) < 0.01 * close[i]  # within 1%
+        # Previous bar values for crossover detection
+        if i > 0:
+            jaw_above_teeth_prev = jaw_aligned[i-1] > teeth_aligned[i-1]
+            jaw_below_teeth_prev = jaw_aligned[i-1] < teeth_aligned[i-1]
+        else:
+            jaw_above_teeth_prev = False
+            jaw_below_teeth_prev = False
+        
+        # Bullish crossover: jaw crosses above teeth
+        bullish_crossover = jaw_above_teeth and not jaw_above_teeth_prev
+        # Bearish crossover: jaw crosses below teeth
+        bearish_crossover = jaw_below_teeth and not jaw_below_teeth_prev
         
         if position == 0:
-            # Long: break above 20-period high with volume confirmation and rising 12h EMA
-            if (breakout_high and volume_confirmed and ema_34_rising_aligned[i]):
+            # Long: bullish crossover with volume confirmation and weekly bullish candle
+            if (bullish_crossover and volume_confirmed and weekly_bullish_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below 20-period low with volume confirmation and falling 12h EMA
-            elif (breakout_low and volume_confirmed and ema_34_falling_aligned[i]):
+            # Short: bearish crossover with volume confirmation and weekly bearish candle
+            elif (bearish_crossover and volume_confirmed and weekly_bearish_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price touches 12h EMA34 (mean reversion) or stoploss
-            if touch_ema:
+            # Exit long: bearish crossover (jaw crosses below teeth)
+            if bearish_crossover:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price touches 12h EMA34 (mean reversion) or stoploss
-            if touch_ema:
+            # Exit short: bullish crossover (jaw crosses above teeth)
+            if bullish_crossover:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Volume_12hEMA34_Trend"
-timeframe = "4h"
+name = "1d_WilliamsAlligator_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
