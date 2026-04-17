@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_Volume_Regime
-Strategy: 12h Camarilla pivot breakout with volume confirmation and chop regime filter.
-Long: Price breaks above R1 + volume > 1.5x 20-period avg + chop < 61.8 (trending)
-Short: Price breaks below S1 + volume > 1.5x 20-period avg + chop < 61.8 (trending)
-Exit: Opposite breakout or price crosses daily VWAP
+6h_MidPrice_MeanReversion_WeeklyTrend_Filter
+Strategy: Mean reversion to 6h mid-price (HLC/3) with weekly trend filter.
+Long: Price < mid-price by 0.5*ATR + weekly close > weekly SMA(50) + volume > 1.5x avg
+Short: Price > mid-price by 0.5*ATR + weekly close < weekly SMA(50) + volume > 1.5x avg
+Exit: Price crosses back to mid-price or ATR-based stop
 Position size: 0.25
-Designed for trending markets with volume confirmation to avoid whipsaws.
-Works in bull/bear by requiring trending regime (chop < 61.8).
+Designed for mean reversion in ranging markets with trend filter to avoid fighting strong trends.
+Works in both bull and bear by using weekly trend filter to align with higher timeframe direction.
 """
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,39 +24,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and chop
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 6h mid-price (HLC/3)
+    mid_price = (high + low + close) / 3.0
     
-    # Calculate Camarilla pivot levels (R1, S1)
-    # R1 = close + 1.1*(high-low)/12
-    # S1 = close - 1.1*(high-low)/12
-    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
-    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
+    # Calculate ATR(14) for volatility normalization
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Get weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    weekly_close = df_weekly['close'].values
     
-    # Calculate Chopiness Index (14-period) for regime filter
-    # CHOP = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(14)
-    tr1 = np.maximum(high - low, np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1)))
-    tr1[0] = high[0] - low[0]  # first period
-    atr = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
+    # Calculate weekly SMA(50) for trend filter
+    sma_50_weekly = pd.Series(weekly_close).rolling(window=50, min_periods=50).mean().values
+    sma_50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, sma_50_weekly)
     
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    chop = 100 * np.log10(atr * 14 / (highest_high - lowest_low + 1e-10)) / np.log10(14)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Get 12h data for volume average
-    df_12h = get_htf_data(prices, '12h')
-    volume_12h = df_12h['volume'].values
-    volume_ma20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    volume_ma20_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_ma20_12h)
+    # Calculate volume average (20-period)
+    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,50 +52,49 @@ def generate_signals(prices):
     # Precompute session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    for i in range(100, n):  # warmup for indicators
+    for i in range(50, n):  # warmup for indicators
         # Session filter: 08-20 UTC
         if not (8 <= hours[i] <= 20):
             signals[i] = 0.0
             continue
         
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or np.isnan(volume_ma20_12h_aligned[i])):
+        if (np.isnan(mid_price[i]) or np.isnan(atr[i]) or 
+            np.isnan(sma_50_weekly_aligned[i]) or np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Current 12h volume aligned to 12h
-        vol_12h_current = align_htf_to_ltf(prices, df_12h, volume_12h)[i]
-        volume_filter = vol_12h_current > (1.5 * volume_ma20_12h_aligned[i])
+        # Volume filter: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
-        # Regime filter: chop < 61.8 indicates trending market
-        trending_regime = chop_aligned[i] < 61.8
+        # Weekly trend filter
+        weekly_uptrend = weekly_close[-1] > sma_50_weekly[-1] if len(weekly_close) > 0 else False
+        weekly_downtrend = weekly_close[-1] < sma_50_weekly[-1] if len(weekly_close) > 0 else False
         
-        # Camarilla breakout signals
-        breakout_r1 = close[i] > r1_aligned[i]
-        breakout_s1 = close[i] < s1_aligned[i]
+        # Distance from mid-price in ATR units
+        dist_from_mid = (close[i] - mid_price[i]) / atr[i] if atr[i] > 0 else 0
         
         if position == 0:
-            # Long: Break above R1 + volume + trending regime
-            if breakout_r1 and volume_filter and trending_regime:
+            # Long: Price below mid-price + weekly uptrend + volume filter
+            if dist_from_mid < -0.5 and weekly_uptrend and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S1 + volume + trending regime
-            elif breakout_s1 and volume_filter and trending_regime:
+            # Short: Price above mid-price + weekly downtrend + volume filter
+            elif dist_from_mid > 0.5 and weekly_downtrend and volume_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Break below S1 or chop becomes too high (rangy)
-            if breakout_s1 or chop_aligned[i] >= 61.8:
+            # Exit long: Price crosses back to mid-price
+            if dist_from_mid >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Break above R1 or chop becomes too high (rangy)
-            if breakout_r1 or chop_aligned[i] >= 61.8:
+            # Exit short: Price crosses back to mid-price
+            if dist_from_mid <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -115,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_Volume_Regime"
-timeframe = "12h"
+name = "6h_MidPrice_MeanReversion_WeeklyTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
