@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -30,9 +30,9 @@ def generate_signals(prices):
     r1_prev[0] = np.nan
     s1_prev[0] = np.nan
     
-    # Align daily pivot levels to 12h timeframe
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1_prev)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1_prev)
+    # Align daily pivot levels to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1_prev)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1_prev)
     
     # Daily EMA(21) for trend filter
     ema21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
@@ -62,8 +62,8 @@ def generate_signals(prices):
         if (np.isnan(volume_ma20[i]) or 
             np.isnan(atr[i]) or 
             np.isnan(atr_ma10[i]) or 
-            np.isnan(r1_12h[i]) or 
-            np.isnan(s1_12h[i]) or
+            np.isnan(r1_4h[i]) or 
+            np.isnan(s1_4h[i]) or
             np.isnan(ema21_1d_aligned[i])):
             signals[i] = 0.0
             continue
@@ -78,11 +78,11 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price breaks above R1 with volume, volatility AND daily uptrend
-            if close[i] > r1_12h[i] and volume_filter and volatility_filter and trend_up:
+            if close[i] > r1_4h[i] and volume_filter and volatility_filter and trend_up:
                 signals[i] = 0.25
                 position = 1
             # Short: price breaks below S1 with volume, volatility AND daily downtrend
-            elif close[i] < s1_12h[i] and volume_filter and volatility_filter and trend_down:
+            elif close[i] < s1_4h[i] and volume_filter and volatility_filter and trend_down:
                 signals[i] = -0.25
                 position = -1
         
@@ -104,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_DailyEMA21_PivotBreakout_Volume"
-timeframe = "12h"
+name = "4h_DailyEMA21_PivotBreakout_Volume"
+timeframe = "4h"
 leverage = 1.0
