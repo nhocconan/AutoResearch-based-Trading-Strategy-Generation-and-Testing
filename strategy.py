@@ -76,13 +76,8 @@ def generate_signals(prices):
             position = 0
             continue
         
-        # Get current 1d volume
-        df_1d_current = get_htf_data(prices, '1d')
-        volume_1d_current = df_1d_current['volume'].values
-        volume_1d_aligned = align_htf_to_ltf(prices, df_1d_current, volume_1d_current)
-        
         # Volume spike: current 1d volume > 1.5x 20-period average AND 4h volume > 1.3x 10-period average
-        vol_spike_1d = volume_1d_aligned[i] > vol_ma_20_1d_aligned[i] * 1.5
+        vol_spike_1d = volume_1d[i] > vol_ma_20_1d[i] * 1.5
         vol_spike_4h = volume[i] > vol_ma_10_4h[i] * 1.3
         
         # Donchian breakout conditions
