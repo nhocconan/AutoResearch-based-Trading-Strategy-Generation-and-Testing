@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-4h_WeeklyPivot_R1_S1_Breakout_Volume_Filter
+4h_WeeklyPivot_R1_S1_Breakout_Volume_Filter_v2
 Strategy: 4h Weekly Pivot R1/S1 breakout with volume confirmation and 12h trend filter.
 Long: Price breaks above R1 + volume > 1.5x 12-period avg + 12h close > 12h open
 Short: Price breaks below S1 + volume > 1.5x 12-period avg + 12h close < 12h open
