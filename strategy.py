@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_20_Breakout_Volume_Trend_HTF_v2
-Enhanced version with tighter filters to reduce trade frequency and improve generalization.
-- Long when price breaks above 20-period high + volume > 2.0x 20-period avg + 12h close > 12h EMA34
-- Short when price breaks below 20-period low + volume > 2.0x 20-period avg + 12h close < 12h EMA34
-- Exit when price returns to 20-period midpoint or opposite breakout occurs
-- Position size: ±0.25
-- Uses 4h timeframe as primary with 12h for trend filter
+12h_1d_20_Donchian_Breakout_Volume_Trend_v1
+Hypothesis: 12h Donchian(20) breakout with volume confirmation and 1d EMA trend filter.
+Works in bull (captures breakouts) and bear (avoids false signals via trend filter).
+Target: 15-30 trades/year (60-120 total) to minimize fee drag.
 """
 
 import numpy as np
@@ -23,24 +20,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 20-period Donchian channels and midpoint
+    # 12h Donchian(20) channel
     high_max20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_min20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     donchian_mid = (high_max20 + low_min20) / 2.0
     
-    # Volume confirmation (20-period MA on 4h)
+    # Volume confirmation: 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    
-    # Calculate 12h EMA34 for trend filter
-    close_series_12h = pd.Series(close_12h)
-    ema34_12h = close_series_12h.ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align 12h EMA to 4h timeframe
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    # 1d EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -52,27 +44,27 @@ def generate_signals(prices):
         if (np.isnan(high_max20[i]) or 
             np.isnan(low_min20[i]) or 
             np.isnan(volume_ma20[i]) or 
-            np.isnan(ema34_12h_aligned[i])):
+            np.isnan(ema34_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2.0x 20-period average (increased from 1.8x)
+        # Volume filter: current volume > 2.0x 20-period average
         volume_filter = volume[i] > (2.0 * volume_ma20[i])
         
         # Breakout conditions
-        breakout_up = close[i] > high_max20[i-1]  # break above 20-period high
-        breakout_down = close[i] < low_min20[i-1]  # break below 20-period low
+        breakout_up = close[i] > high_max20[i-1]
+        breakout_down = close[i] < low_min20[i-1]
         
         # Return to midpoint for exit
-        return_to_mid = abs(close[i] - donchian_mid[i]) < 0.002 * close[i]  # within 0.2% of midpoint
+        return_to_mid = abs(close[i] - donchian_mid[i]) < 0.002 * close[i]
         
         if position == 0:
-            # Long: breakout up + volume filter + 12h uptrend
-            if breakout_up and volume_filter and close[i] > ema34_12h_aligned[i]:
+            # Long: breakout up + volume filter + 1d uptrend
+            if breakout_up and volume_filter and close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout down + volume filter + 12h downtrend
-            elif breakout_down and volume_filter and close[i] < ema34_12h_aligned[i]:
+            # Short: breakout down + volume filter + 1d downtrend
+            elif breakout_down and volume_filter and close[i] < ema34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
@@ -94,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_20_Breakout_Volume_Trend_HTF_v2"
-timeframe = "4h"
+name = "12h_1d_20_Donchian_Breakout_Volume_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
