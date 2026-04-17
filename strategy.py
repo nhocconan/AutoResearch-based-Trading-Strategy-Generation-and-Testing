@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian breakout with 1d volume confirmation and 1w trend filter.
-Uses Donchian channel breakouts (20-period) for entry, filtered by 1d volume > 1.5x 20-day average
-and 1w EMA50 trend direction. Exits when price crosses the opposite Donchian band or volume drops.
-Designed to capture strong trending moves with volume confirmation while avoiding false breakouts.
-Target: 20-40 trades/year by requiring confluence of breakout, volume, and trend filters.
-Works in bull markets (long on breakouts above upper band) and bear markets (short on breakdowns below lower band).
+Hypothesis: 4h KAMA trend with 1d RSI filter and volume confirmation.
+Uses Kaufman Adaptive Moving Average (KAMA) for trend direction, filtered by 1d RSI < 30 for long entries and > 70 for short entries.
+Requires volume > 1.5x 20-day average for confirmation. Exits when KAMA reverses or volume drops.
+Designed to capture trend reversals in both bull and bear markets with low trade frequency.
+Target: 20-40 trades/year by requiring confluence of KAMA direction, RSI extreme, and volume.
 """
 
 import numpy as np
@@ -22,34 +21,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Donchian Channel (20-period) on 4h ===
+    # === KAMA on 4h (trend) ===
     df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate Donchian bands
-    donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Calculate KAMA (ER=10, fast=2, slow=30)
+    change = np.abs(np.diff(close_4h, prepend=close_4h[0]))
+    volatility = np.sum(np.abs(np.diff(close_4h)), axis=0)  # placeholder, will compute properly below
+    # Recalculate volatility properly
+    volatility = np.zeros_like(close_4h)
+    for i in range(1, len(close_4h)):
+        volatility[i] = volatility[i-1] + np.abs(close_4h[i] - close_4h[i-1])
     
-    # Align to 4h timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_4h, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_4h, donch_low)
+    er = np.zeros_like(close_4h)
+    for i in range(len(close_4h)):
+        if volatility[i] > 0:
+            er[i] = change[i] / volatility[i]
+        else:
+            er[i] = 0
+    
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    kama = np.zeros_like(close_4h)
+    kama[0] = close_4h[0]
+    for i in range(1, len(close_4h)):
+        kama[i] = kama[i-1] + sc[i] * (close_4h[i] - kama[i-1])
+    
+    # Alternative simpler KAMA approximation using EMA of ER
+    # Using pandas for simplicity and correctness
+    close_4h_series = pd.Series(close_4h)
+    change = close_4h_series.diff().abs()
+    volatility = change.rolling(window=10, min_periods=1).sum()
+    er = change / volatility.replace(0, np.nan)
+    er = er.fillna(0)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    kama = [close_4h[0]]
+    for i in range(1, len(close_4h)):
+        kama.append(kama[-1] + sc.iloc[i] * (close_4h[i] - kama[-1]))
+    kama = np.array(kama)
+    
+    kama_4h = kama
+    kama_4h_series = pd.Series(kama_4h)
+    kama_slope = kama_4h_series.diff(periods=3)  # 3-period slope for trend
+    
+    # Align KAMA slope to 4h
+    kama_slope_aligned = align_htf_to_ltf(prices, df_4h, kama_slope.values)
+    
+    # === 1d RSI Filter ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    delta = pd.Series(close_1d).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
     # === 1d Volume Confirmation ===
-    df_1d = get_htf_data(prices, '1d')
     volume_1d = df_1d['volume'].values
     vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    
-    # === 1w EMA50 Trend Filter ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    vol_today_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
     
     signals = np.zeros(n)
     
-    # Warmup: need enough data for Donchian and EMA calculations
+    # Warmup
     warmup = 60
     
     # Track position
@@ -57,40 +95,40 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or
-            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(kama_slope_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or
+            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(vol_today_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Volume confirmation: current volume > 1.5x 20-day average
-        vol_today_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
         vol_confirm = vol_today_aligned[i] > vol_ma_20_1d_aligned[i] * 1.5
         
-        # Trend filter: price above/below weekly EMA50
-        price_vs_ema = close[i] > ema_50_1w_aligned[i]  # True for uptrend
+        # KAMA trend: positive slope = uptrend, negative = downtrend
+        kama_up = kama_slope_aligned[i] > 0
+        kama_down = kama_slope_aligned[i] < 0
         
-        # Breakout conditions
-        breakout_up = high[i] > donch_high_aligned[i]  # Price breaks above upper band
-        breakdown_down = low[i] < donch_low_aligned[i]  # Price breaks below lower band
+        # RSI extremes: <30 oversold, >70 overbought
+        rsi_oversold = rsi_1d_aligned[i] < 30
+        rsi_overbought = rsi_1d_aligned[i] > 70
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: bullish breakout with volume confirmation and uptrend
-            if breakout_up and vol_confirm and price_vs_ema:
+            # Long: KAMA up + RSI oversold + volume confirmation
+            if kama_up and rsi_oversold and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: bearish breakdown with volume confirmation and downtrend
-            elif breakdown_down and vol_confirm and not price_vs_ema:
+            # Short: KAMA down + RSI overbought + volume confirmation
+            elif kama_down and rsi_overbought and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price breaks below lower Donchian band or volume fails
-            if low[i] < donch_low_aligned[i] or not vol_confirm:
+            # Exit long: KAMA turns down or volume fails
+            if kama_down or not vol_confirm:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -98,8 +136,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above upper Donchian band or volume fails
-            if high[i] > donch_high_aligned[i] or not vol_confirm:
+            # Exit short: KAMA turns up or volume fails
+            if kama_up or not vol_confirm:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -108,6 +146,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dVolumeConfirm_1wEMA50Trend"
+name = "4h_KAMA_1dRSI_VolumeConfirm"
 timeframe = "4h"
 leverage = 1.0
