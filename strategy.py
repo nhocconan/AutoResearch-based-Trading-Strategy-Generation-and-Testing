@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour KAMA trend direction with 1-day Williams Alligator filter
-# KAMA adapts to market noise, reducing whipsaw in chop; Williams Alligator confirms trend alignment.
-# Designed for 4h timeframe to achieve 20-50 trades/year with low decay.
+# Hypothesis: 4-hour Donchian breakout with 1-day volume confirmation and ADX trend filter
+# Donchian(20) breakouts capture trending moves; volume ensures conviction; ADX>25 filters chop.
+# Designed for 4h timeframe to achieve 20-50 trades/year with low fee decay.
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,77 +17,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h KAMA (ER=10) ===
+    # === 4h Donchian Channel (20-period) ===
     df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Efficiency Ratio
-    change = np.abs(close_4h - np.concatenate([[close_4h[0]], close_4h[:-10]]))
-    erosion = np.sum(np.abs(np.diff(close_4h)), axis=0) if len(close_4h) >= 10 else np.full_like(close_4h, np.nan)
-    # Simplified erosion calculation for rolling window
-    erosion_roll = np.zeros_like(close_4h)
-    for i in range(len(close_4h)):
-        if i < 10:
-            erosion_roll[i] = np.nan
-        else:
-            erosion_roll[i] = np.sum(np.abs(np.diff(close_4h[i-9:i+1])))
-    er = change / np.where(erosion_roll == 0, 1, erosion_roll)
-    er = np.where(np.isnan(er), 0, er)
+    # Upper band: 20-period high
+    donch_high_20_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    # Lower band: 20-period low
+    donch_low_20_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    kama = np.zeros_like(close_4h)
-    kama[0] = close_4h[0]
-    for i in range(1, len(close_4h)):
-        kama[i] = kama[i-1] + sc[i] * (close_4h[i] - kama[i-1])
+    donch_high_20_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_high_20_4h)
+    donch_low_20_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_low_20_4h)
     
-    kama_slope = kama - np.concatenate([[kama[0]], kama[:-1]])
-    kama_up = kama_slope > 0
-    kama_down = kama_slope < 0
-    
-    kama_up_aligned = align_htf_to_ltf(prices, df_4h, kama_up)
-    kama_down_aligned = align_htf_to_ltf(prices, df_4h, kama_down)
-    
-    # === 1-day Williams Alligator ===
+    # === 1-day Volume Spike (vs 20-period average) ===
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    
+    # === 1-day ADX (14-period) for trend filter ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    median_price = (high_1d + low_1d + close_1d) / 3
+    close_1d = df_1d['close'].values
     
-    # Jaw (13-period SMMA, 8 bars ahead)
-    jaw = np.zeros_like(median_price)
-    for i in range(len(median_price)):
-        if i < 13:
-            jaw[i] = np.nan
-        else:
-            jaw[i] = np.mean(median_price[i-12:i+1])
-    jaw_shifted = np.concatenate([np.full(8, np.nan), jaw[:-8]]) if len(jaw) > 8 else np.full_like(jaw, np.nan)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Teeth (8-period SMMA, 5 bars ahead)
-    teeth = np.zeros_like(median_price)
-    for i in range(len(median_price)):
-        if i < 8:
-            teeth[i] = np.nan
-        else:
-            teeth[i] = np.mean(median_price[i-7:i+1])
-    teeth_shifted = np.concatenate([np.full(5, np.nan), teeth[:-5]]) if len(teeth) > 5 else np.full_like(teeth, np.nan)
+    # Directional Movement
+    up_move = high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])
+    down_move = np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Lips (5-period SMMA, 3 bars ahead)
-    lips = np.zeros_like(median_price)
-    for i in range(len(median_price)):
-        if i < 5:
-            lips[i] = np.nan
-        else:
-            lips[i] = np.mean(median_price[i-4:i+1])
-    lips_shifted = np.concatenate([np.full(3, np.nan), lips[:-3]]) if len(lips) > 3 else np.full_like(lips, np.nan)
+    # Smoothed values
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
+    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
     
-    # Alligator alignment: Lips > Teeth > Jaw = up, Lips < Teeth < Jaw = down
-    alligator_up = (lips_shifted > teeth_shifted) & (teeth_shifted > jaw_shifted)
-    alligator_down = (lips_shifted < teeth_shifted) & (teeth_shifted < jaw_shifted)
+    # Directional Indicators
+    plus_di = 100 * plus_dm_14 / tr_14
+    minus_di = 100 * minus_dm_14 / tr_14
     
-    alligator_up_aligned = align_htf_to_ltf(prices, df_1d, alligator_up)
-    alligator_down_aligned = align_htf_to_ltf(prices, df_1d, alligator_down)
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     
@@ -99,26 +77,44 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(kama_up_aligned[i]) or np.isnan(kama_down_aligned[i]) or
-            np.isnan(alligator_up_aligned[i]) or np.isnan(alligator_down_aligned[i])):
+        if (np.isnan(donch_high_20_4h_aligned[i]) or np.isnan(donch_low_20_4h_aligned[i]) or
+            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
+        # Get current 4h price and volume
+        close_4h_aligned = align_htf_to_ltf(prices, df_4h, df_4h['close'].values)
+        volume_4h_aligned = align_htf_to_ltf(prices, df_4h, df_4h['volume'].values)
+        volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+        
+        # Volume spike: current 1d volume > 1.5x 20-period average
+        vol_spike = volume_1d_aligned[i] > vol_ma_20_1d_aligned[i] * 1.5
+        
+        # Trend filter: ADX > 25
+        trend_filter = adx_aligned[i] > 25
+        
+        # Donchian breakout signals
+        breakout_up = close_4h_aligned[i] > donch_high_20_4h_aligned[i]
+        breakout_down = close_4h_aligned[i] < donch_low_20_4h_aligned[i]
+        
         # Entry logic: only enter when flat
         if position == 0:
-            if kama_up_aligned[i] and alligator_up_aligned[i]:
-                signals[i] = 0.25
-                position = 1
-                continue
-            elif kama_down_aligned[i] and alligator_down_aligned[i]:
-                signals[i] = -0.25
-                position = -1
-                continue
+            if vol_spike and trend_filter:
+                if breakout_up:
+                    signals[i] = 0.25
+                    position = 1
+                    continue
+                elif breakout_down:
+                    signals[i] = -0.25
+                    position = -1
+                    continue
         
-        # Exit logic: exit when trend alignment breaks
+        # Exit logic: exit when price returns to middle of channel or conditions fail
         elif position == 1:
-            if not (kama_up_aligned[i] and alligator_up_aligned[i]):
+            # Exit long if price returns to midpoint or conditions fail
+            midpoint = (donch_high_20_4h_aligned[i] + donch_low_20_4h_aligned[i]) / 2
+            if close_4h_aligned[i] < midpoint or not vol_spike or not trend_filter:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -126,7 +122,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            if not (kama_down_aligned[i] and alligator_down_aligned[i]):
+            # Exit short if price returns to midpoint or conditions fail
+            midpoint = (donch_high_20_4h_aligned[i] + donch_low_20_4h_aligned[i]) / 2
+            if close_4h_aligned[i] > midpoint or not vol_spike or not trend_filter:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -135,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_Alligator_Trend_Filter"
+name = "4h_Donchian20_1dVolume_ADXFilter"
 timeframe = "4h"
 leverage = 1.0
