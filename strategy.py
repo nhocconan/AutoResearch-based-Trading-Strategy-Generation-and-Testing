@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Donchian_Breakout_1d_Trend_v1
-12h timeframe strategy using Donchian channel breakouts with 1d trend filter.
-Long when price breaks above 20-period Donchian high and 1d EMA50 > EMA200.
-Short when price breaks below 20-period Donchian low and 1d EMA50 < EMA200.
-Exit when price crosses back through the Donchian midpoint.
-Designed to capture trends with defined risk and limited trade frequency.
+4h_ADX_CCI_Breakout_v1
+ADX(14) > 25 + CCI(20) > 100 for long, CCI(20) < -100 for short.
+Uses 12h timeframe for trend filter: price above/below 12h EMA50.
+Exit when CCI crosses back within [-50, 50] or ADX < 20.
+Designed to capture strong trends with momentum confirmation.
 Target: 50-150 total trades over 4 years (12-37/year).
 """
 
@@ -15,86 +14,83 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     
-    # === 12h Donchian Channel (20-period) ===
-    lookback = 20
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    donchian_mid = np.full(n, np.nan)
+    # === CCI(20) ===
+    typical_price = (high + low + close) / 3.0
+    sma_tp = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
+    mad = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(
+        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
+    ).values
+    cci = (typical_price - sma_tp) / (0.015 * mad)
     
-    for i in range(lookback - 1, n):
-        donchian_high[i] = np.max(high[i - lookback + 1:i + 1])
-        donchian_low[i] = np.min(low[i - lookback + 1:i + 1])
-        donchian_mid[i] = (donchian_high[i] + donchian_low[i]) / 2
+    # === ADX(14) ===
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
     
-    # === 1d Trend Filter: EMA50 and EMA200 ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first TR is just high-low
     
-    # Calculate EMAs on 1d data
-    ema50_1d = np.full(len(close_1d), np.nan)
-    ema200_1d = np.full(len(close_1d), np.nan)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / (atr * 14)
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / (atr * 14)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    if len(close_1d) >= 50:
-        alpha50 = 2 / (50 + 1)
-        ema50_1d[0] = close_1d[0]
-        for i in range(1, len(close_1d)):
-            ema50_1d[i] = ema50_1d[i-1] + alpha50 * (close_1d[i] - ema50_1d[i-1])
-    
-    if len(close_1d) >= 200:
-        alpha200 = 2 / (200 + 1)
-        ema200_1d[0] = close_1d[0]
-        for i in range(1, len(close_1d)):
-            ema200_1d[i] = ema200_1d[i-1] + alpha200 * (close_1d[i] - ema200_1d[i-1])
-    
-    # Align 1d EMAs to 12h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # === 12h EMA50 for trend filter ===
+    df_12h = get_htf_data(prices, '12h')
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = max(200, 20)
+    warmup = 50
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
-            np.isnan(donchian_mid[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(ema200_1d_aligned[i])):
+        if (np.isnan(cci[i]) or 
+            np.isnan(adx[i]) or 
+            np.isnan(ema_50_12h_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: Price breaks above Donchian high AND 1d EMA50 > EMA200 (uptrend)
-            if (close[i] > donchian_high[i] and 
-                ema50_1d_aligned[i] > ema200_1d_aligned[i]):
+            # Long: ADX > 25, CCI > 100, price above 12h EMA50
+            if (adx[i] > 25 and 
+                cci[i] > 100 and 
+                close[i] > ema_50_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: Price breaks below Donchian low AND 1d EMA50 < EMA200 (downtrend)
-            elif (close[i] < donchian_low[i] and 
-                  ema50_1d_aligned[i] < ema200_1d_aligned[i]):
+            # Short: ADX > 25, CCI < -100, price below 12h EMA50
+            elif (adx[i] > 25 and 
+                  cci[i] < -100 and 
+                  close[i] < ema_50_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: Price crosses below Donchian midpoint
-            if close[i] < donchian_mid[i]:
+            # Exit long: CCI < 50 OR ADX < 20
+            if (cci[i] < 50 or 
+                adx[i] < 20):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -102,8 +98,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price crosses above Donchian midpoint
-            if close[i] > donchian_mid[i]:
+            # Exit short: CCI > -50 OR ADX < 20
+            if (cci[i] > -50 or 
+                adx[i] < 20):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -112,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_1d_Trend_v1"
-timeframe = "12h"
+name = "4h_ADX_CCI_Breakout_v1"
+timeframe = "4h"
 leverage = 1.0
