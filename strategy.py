@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h timeframe with 1d ATR volatility regime filter + 4h Donchian(20) breakout + volume confirmation.
-Long when price breaks above 4h Donchian upper band in low volatility regime (ATR ratio < 0.8) with volume > 1.3x 20-period average.
-Short when price breaks below 4h Donchian lower band in low volatility regime with volume > 1.3x 20-period average.
+Hypothesis: 12h timeframe with 1d Supertrend trend filter + 1w Donchian channel breakout + volume confirmation.
+Long when price breaks above weekly Donchian(20) upper band with 1d Supertrend uptrend and volume > 1.3x 20-period 1d volume average.
+Short when price breaks below weekly Donchian(20) lower band with 1d Supertrend downtrend and volume > 1.3x 20-period 1d volume average.
 Uses discrete position sizing 0.25 to limit fee drag. Target: 50-150 total trades over 4 years.
-Low volatility breakouts capture explosive moves after consolidation; volume confirms institutional participation.
-Designed to work in bull markets (breakout continuation) and bear markets (volatility expansion after panic).
+Weekly Donchian channels provide structural breakout levels; Supertrend filters for trending markets only; volume confirms participation.
+Designed to work in bull markets (breakout continuation) and bear markets (strong trend continuation).
 """
 
 import numpy as np
@@ -22,20 +22,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR volatility regime
+    # Get 1d data for Supertrend trend and volume
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Get 4h data for Donchian channels
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    # Get 1w data for Donchian channels
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate 1d ATR (14-period) for volatility regime
+    # Calculate 1d ATR (10-period) for Supertrend
     # True Range
     tr1 = high_1d[1:] - low_1d[1:]
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
@@ -43,90 +42,105 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])  # align with index 0
     
-    # ATR using Wilder's smoothing
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            # first value is simple average
-            result[period-1] = np.nanmean(data[:period])
-            # subsequent values: Wilder's smoothing
-            for i in range(period, len(data)):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    atr_14 = wilders_smoothing(tr, 14)
+    # Calculate 1d Supertrend (10, 3.0)
+    hl2 = (high_1d + low_1d) / 2
+    upper_band = hl2 + (3.0 * atr)
+    lower_band = hl2 - (3.0 * atr)
     
-    # Calculate 1d ATR 50-period average for regime classification
-    atr_ma_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
+    supertrend = np.full_like(close_1d, np.nan)
+    direction = np.full_like(close_1d, np.nan)  # 1 for uptrend, -1 for downtrend
     
-    # Calculate ATR ratio (current ATR / 50-period average ATR)
-    # ATR ratio < 0.8 = low volatility regime (consolidation)
-    # ATR ratio > 1.2 = high volatility regime (expansion)
-    atr_ratio = atr_14 / atr_ma_50
+    # Initialize
+    supertrend[0] = upper_band[0]
+    direction[0] = 1
     
-    # Calculate 4h Donchian channels (20-period)
-    def donchian_channels(high, low, period):
-        upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-        lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-        return upper, lower
+    for i in range(1, len(close_1d)):
+        if np.isnan(supertrend[i-1]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]):
+            supertrend[i] = supertrend[i-1] if not np.isnan(supertrend[i-1]) else upper_band[i]
+            direction[i] = direction[i-1] if not np.isnan(direction[i-1]) else 1
+            continue
+            
+        if close_1d[i] <= supertrend[i-1]:
+            supertrend[i] = upper_band[i]
+            direction[i] = -1
+        else:
+            supertrend[i] = lower_band[i]
+            direction[i] = 1
+            
+        # Adjust bands
+        if direction[i] == direction[i-1]:
+            if direction[i] == 1:  # uptrend
+                supertrend[i] = max(supertrend[i], lower_band[i])
+            else:  # downtrend
+                supertrend[i] = min(supertrend[i], upper_band[i])
+        else:
+            # Trend change
+            if direction[i] == 1:  # changed to uptrend
+                supertrend[i] = upper_band[i]
+            else:  # changed to downtrend
+                supertrend[i] = lower_band[i]
     
-    donchian_upper, donchian_lower = donchian_channels(high_4h, low_4h, 20)
+    # Calculate 1d volume 20-period average
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 4h volume 20-period average
-    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    # Calculate weekly Donchian channels (20-period)
+    donchian_upper = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Align all to 6h
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
-    vol_ma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
-    volume_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_4h)
+    # Align all to 12h
+    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
+    direction_aligned = align_htf_to_ltf(prices, df_1d, direction)
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1w, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 100  # need enough for ATR MA and Donchian
+    start_idx = 50  # need enough for Supertrend and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(donchian_upper_aligned[i]) or 
-            np.isnan(donchian_lower_aligned[i]) or np.isnan(vol_ma_20_4h_aligned[i]) or 
-            np.isnan(volume_4h_aligned[i])):
+        if (np.isnan(direction_aligned[i]) or np.isnan(donchian_upper_aligned[i]) or 
+            np.isnan(donchian_lower_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or 
+            np.isnan(volume_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Low volatility regime: ATR ratio < 0.8 (consolidation phase)
-        low_vol_regime = atr_ratio_aligned[i] < 0.8
-        # Volume confirmation: current 4h volume > 1.3x 20-period average
-        volume_confirmed = volume_4h_aligned[i] > 1.3 * vol_ma_20_4h_aligned[i]
+        # Volume confirmation: current 1d volume > 1.3x 20-period average
+        volume_confirmed = volume_1d_aligned[i] > 1.3 * vol_ma_20_1d_aligned[i]
+        # Trend filter: direction from Supertrend (1 for uptrend, -1 for downtrend)
+        uptrend = direction_aligned[i] == 1
+        downtrend = direction_aligned[i] == -1
         
         if position == 0:
-            # Long: price breaks above 4h Donchian upper band in low vol with volume
+            # Long: price breaks above weekly Donchian upper band with uptrend and volume
             if (close[i] > donchian_upper_aligned[i] and 
-                low_vol_regime and 
+                uptrend and 
                 volume_confirmed):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 4h Donchian lower band in low vol with volume
+            # Short: price breaks below weekly Donchian lower band with downtrend and volume
             elif (close[i] < donchian_lower_aligned[i] and 
-                  low_vol_regime and 
+                  downtrend and 
                   volume_confirmed):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below 4h Donchian middle (mean reversion)
-            donchian_middle = (donchian_upper_4h + donchian_lower_4h) / 2
-            donchian_middle_aligned = align_htf_to_ltf(prices, df_4h, donchian_middle)
-            if close[i] < donchian_middle_aligned[i]:
+            # Exit long: price falls back below weekly Donchian lower band
+            if close[i] < donchian_lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above 4h Donchian middle
-            if close[i] > donchian_middle_aligned[i]:
+            # Exit short: price rises back above weekly Donchian upper band
+            if close[i] > donchian_upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -134,6 +148,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1dATR_VolRegime_4hDonchian20_Volume_Confirm"
-timeframe = "6h"
+name = "12h_1dSupertrend_1wDonchian20_Volume_Confirm"
+timeframe = "12h"
 leverage = 1.0
