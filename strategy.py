@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_1d_WilliamsVixFix_MeanReversion
-Strategy: 12-hour mean reversion using Williams Vix Fix (WVF) indicator with volume confirmation.
-Long: WVF > 0.8 (fear spike) + volume > 1.5x 20-period avg + price < 12h VWAP
-Short: WVF < 0.2 (complacency) + volume > 1.5x 20-period avg + price > 12h VWAP
-Exit: Price crosses 12h VWAP
+4h_TRIX_VolumeSpike_Regime
+Strategy: TRIX momentum + volume spike + chop regime filter.
+Long: TRIX crosses above zero + volume > 2x average + CHOP > 61.8 (range)
+Short: TRIX crosses below zero + volume > 2x average + CHOP > 61.8 (range)
+Exit: TRIX crosses zero in opposite direction or CHOP < 38.2 (trend)
 Position size: 0.25
-Designed to capture mean reversion spikes in both bull and bear markets via fear/greed signals.
-Timeframe: 12h
+Designed to capture mean reversion in ranging markets with momentum confirmation.
+Timeframe: 4h
 """
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,67 +24,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h VWAP for mean reversion target
-    typical_price = (high + low + close) / 3.0
-    vwap_num = (typical_price * volume).cumsum()
-    vwap_den = volume.cumsum()
-    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
+    # Calculate TRIX (15-period)
+    # TRIX = EMA(EMA(EMA(close, 15), 15), 15) - 1 period ago
+    close_series = pd.Series(close)
+    ema1 = close_series.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    trix = ema3.pct_change(1) * 100  # percentage change
+    trix_values = trix.values
+    trix_prev = np.roll(trix_values, 1)
+    trix_prev[0] = np.nan
     
-    # Williams Vix Fix: measures market fear (high = fear, low = complacency)
-    # WVF = ((Highest Close in period - Low) / Highest Close in period) * 100
-    lookback = 22  # ~1 month of trading days
-    highest_close = pd.Series(close).rolling(window=lookback, min_periods=lookback).max()
-    wvf = ((highest_close - low) / highest_close) * 100
-    wvf = wvf.values  # convert to numpy array
+    # Calculate CHOPPINESS INDEX (14-period)
+    # CHOP = 100 * log10(sum(ATR, 14) / (max(high,14) - min(low,14))) / log10(14)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume confirmation (20-period MA)
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    max_low = max_high - min_low
+    
+    # Avoid division by zero
+    chop_raw = np.divide(
+        pd.Series(atr).rolling(window=14, min_periods=14).sum().values,
+        max_low,
+        out=np.full_like(max_low, np.nan),
+        where=max_low!=0
+    )
+    chop = 100 * np.log10(chop_raw) / np.log10(14)
+    
+    # Volume confirmation (20-period average)
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback, 20)
+    start_idx = max(30, 20)  # TRIX needs ~30, volume MA needs 20
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(wvf[i]) or 
-            np.isnan(vwap[i]) or 
+        if (np.isnan(trix_values[i]) or 
+            np.isnan(trix_prev[i]) or 
+            np.isnan(chop[i]) or 
             np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        # Volume filter: current volume > 2x 20-period average
+        volume_filter = volume[i] > (2.0 * volume_ma20[i])
         
-        # Mean reversion signals
-        fear_signal = wvf[i] > 0.8  # Extreme fear - potential bottom
-        complacency_signal = wvf[i] < 0.2  # Extreme complacency - potential top
+        # Chop regime filter: CHOP > 61.8 (range-bound market)
+        chop_filter = chop[i] > 61.8
         
-        # Price relative to VWAP for mean reversion
-        price_below_vwap = close[i] < vwap[i]
-        price_above_vwap = close[i] > vwap[i]
+        # TRIX crossover signals
+        trix_cross_up = trix_values[i] > 0 and trix_prev[i] <= 0
+        trix_cross_down = trix_values[i] < 0 and trix_prev[i] >= 0
+        
+        # Exit conditions: TRIX cross opposite or chop < 38.2 (trending)
+        exit_long = trix_cross_down or chop[i] < 38.2
+        exit_short = trix_cross_up or chop[i] < 38.2
         
         if position == 0:
-            # Long: fear spike + volume + price below VWAP (oversold bounce)
-            if fear_signal and volume_filter and price_below_vwap:
+            # Long: TRIX crosses up + volume + chop (range)
+            if trix_cross_up and volume_filter and chop_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: complacency spike + volume + price above VWAP (overbought fade)
-            elif complacency_signal and volume_filter and price_above_vwap:
+            # Short: TRIX crosses down + volume + chop (range)
+            elif trix_cross_down and volume_filter and chop_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses above VWAP (mean reversion complete)
-            if price_above_vwap:
+            # Exit long: TRIX cross down or chop < 38.2 (trend)
+            if exit_long:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses below VWAP (mean reversion complete)
-            if price_below_vwap:
+            # Exit short: TRIX cross up or chop < 38.2 (trend)
+            if exit_short:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_WilliamsVixFix_MeanReversion"
-timeframe = "12h"
+name = "4h_TRIX_VolumeSpike_Regime"
+timeframe = "4h"
 leverage = 1.0
