@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Williams_Alligator_Trend_Filter
-Strategy: 12h Williams Alligator (Jaw/Teeth/Lips) with 1d volume confirmation.
-Long: Lips > Teeth > Jaw (bullish alignment) + volume > 1.3x 24-period average
-Short: Lips < Teeth < Jaw (bearish alignment) + volume > 1.3x 24-period average
-Exit: Alignment breaks
+6h_Ichimoku_Kumo_Twist_Trend
+Strategy: 6h Ichimoku Kumo twist with volume confirmation and weekly trend filter.
+Long: Tenkan > Kijun + price above Kumo + Kumo future twist bullish + weekly uptrend
+Short: Tenkan < Kijun + price below Kumo + Kumo future twist bearish + weekly downtrend
+Exit: Tenkan/Kijun cross reversal or Kumo break
 Position size: 0.25
-Designed to catch strong trends while avoiding choppy markets.
-Timeframe: 12h
+Designed to catch strong trends while avoiding chop using Ichimoku's multi-line confirmation.
+Timeframe: 6h
 """
 
 import numpy as np
@@ -16,90 +16,115 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
-    volume = prices['volume'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Williams Alligator components (13,8,5 smoothed)
-    jaw_period = 13
-    teeth_period = 8
-    lips_period = 5
+    # Ichimoku parameters
+    tenkan_period = 9
+    kijun_period = 26
+    senkou_span_b_period = 52
+    displacement = 26
     
-    # SMMA (Smoothed Moving Average) function
-    def smma(data, period):
-        result = np.full_like(data, np.nan, dtype=np.float64)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values: smoothed
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    highest_tenkan = np.maximum.accumulate(high)
+    lowest_tenkan = np.minimum.accumulate(low)
+    # For rolling window, use pandas for simplicity
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    tenkan = (high_series.rolling(window=tenkan_period, center=False).max() + 
+              low_series.rolling(window=tenkan_period, center=False).min()) / 2
+    tenkan = tenkan.values
     
-    jaw = smma((high + low) / 2, jaw_period)  # Jaw: 13-period SMMA of median price
-    teeth = smma((high + low) / 2, teeth_period)  # Teeth: 8-period SMMA
-    lips = smma((high + low) / 2, lips_period)  # Lips: 5-period SMMA
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    kijun = (high_series.rolling(window=kijun_period, center=False).max() + 
+             low_series.rolling(window=kijun_period, center=False).min()) / 2
+    kijun = kijun.values
     
-    # Get 1d volume average (24-period = 12 days of 12h data)
-    volume_ma24 = np.convolve(volume, np.ones(24)/24, mode='full')[:len(volume)]
-    volume_ma24 = np.concatenate([np.full(23, np.nan), volume_ma24[23:]])
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
     
-    # Get 1d trend filter (close > open = uptrend)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    senkou_b = (high_series.rolling(window=senkou_span_b_period, center=False).max() + 
+                low_series.rolling(window=senkou_span_b_period, center=False).min()) / 2
+    senkou_b = senkou_b.values
+    
+    # Future Kumo twist (bullish/bearish): compare current Senkou A/B with displaced Senkou A/B
+    # Kumo twist bullish: Senkou A > Senkou B (future)
+    # Kumo twist bearish: Senkou A < Senkou B (future)
+    # We need to compare current Senkou with Senkou from 'displacement' periods ago
+    senkou_a_lagged = np.roll(senkou_a, displacement)
+    senkou_b_lagged = np.roll(senkou_b, displacement)
+    # First 'displacement' values are invalid due to roll
+    senkou_a_lagged[:displacement] = np.nan
+    senkou_b_lagged[:displacement] = np.nan
+    
+    kumo_twist_bullish = senkou_a > senkou_b_lagged  # Future Kumo bullish twist
+    kumo_twist_bearish = senkou_a < senkou_b_lagged  # Future Kumo bearish twist
+    
+    # Get weekly trend (close > open = uptrend)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    trend_1d = (df_1d['close'] > df_1d['open']).astype(float).values  # 1 for up, 0 for down
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    trend_1w = (df_1w['close'] > df_1w['open']).astype(float).values  # 1 for up, 0 for down
+    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    
+    # Volume filter: volume > 1.5x 20-period average
+    volume_series = pd.Series(volume)
+    volume_ma20 = volume_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from sufficient warmup
-    start_idx = max(jaw_period, teeth_period, lips_period, 24)
+    start_idx = max(tenkan_period, kijun_period, senkou_span_b_period, displacement, 20) + 5
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(volume_ma24[i]) or np.isnan(trend_1d_aligned[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or np.isnan(senkou_a[i]) or 
+            np.isnan(senkou_b[i]) or np.isnan(trend_1w_aligned[i]) or np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
         # Current volume
         volume_current = volume[i]
-        volume_filter = volume_current > (1.3 * volume_ma24[i])
+        volume_filter = volume_current > (1.5 * volume_ma20[i])
         
-        # Alligator alignment
-        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
+        # Ichimoku conditions
+        price_above_kumo = close[i] > max(senkou_a[i], senkou_b[i])
+        price_below_kumo = close[i] < min(senkou_a[i], senkou_b[i])
+        tenkan_above_kijun = tenkan[i] > kijun[i]
+        tenkan_below_kijun = tenkan[i] < kijun[i]
         
         # Entry signals
         if position == 0:
-            # Long: Bullish alignment + volume filter + 1d uptrend
-            if bullish_alignment and volume_filter and trend_1d_aligned[i] > 0.5:
+            # Long: Tenkan > Kijun + price above Kumo + bullish Kumo twist + weekly uptrend + volume
+            if (tenkan_above_kijun and price_above_kumo and kumo_twist_bullish[i] and 
+                trend_1w_aligned[i] > 0.5 and volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish alignment + volume filter + 1d downtrend
-            elif bearish_alignment and volume_filter and trend_1d_aligned[i] < 0.5:
+            # Short: Tenkan < Kijun + price below Kumo + bearish Kumo twist + weekly downtrend + volume
+            elif (tenkan_below_kijun and price_below_kumo and kumo_twist_bearish[i] and 
+                  trend_1w_aligned[i] < 0.5 and volume_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Bullish alignment breaks
-            if not bullish_alignment:
+            # Exit long: Tenkan/Kijun cross down OR price breaks below Kumo
+            if not tenkan_above_kijun or not price_above_kumo:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Bearish alignment breaks
-            if not bearish_alignment:
+            # Exit short: Tenkan/Kijun cross up OR price breaks above Kumo
+            if not tenkan_below_kijun or not price_below_kumo:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Williams_Alligator_Trend_Filter"
-timeframe = "12h"
+name = "6h_Ichimoku_Kumo_Twist_Trend"
+timeframe = "6h"
 leverage = 1.0
