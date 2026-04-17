@@ -13,13 +13,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for weekly pivot calculation (using 5 daily bars)
+    # Get daily data
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points from daily data
+    # Calculate weekly pivot points from daily data (5-day window)
     high_5d = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
     low_5d = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
     close_5d = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values
