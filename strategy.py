@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-12h 1D High/Low Breakout with Volume and 1D Trend Filter
-Long: Price breaks above prior 1D high + volume > 1.5x 12h volume MA + price > 1D EMA50
-Short: Price breaks below prior 1D low + volume > 1.5x 12h volume MA + price < 1D EMA50
-Exit: Opposite break of prior 1D level
-Uses 1D EMA50 (not 12h) to align with longer-term bias and reduce false breakouts in chop
+4h Donchian(20) Breakout + Volume Spike + 12h EMA34 Trend Filter
+Long: Price breaks above Donchian(20) high + volume > 2x 12h volume MA + price > 12h EMA34
+Short: Price breaks below Donchian(20) low + volume > 2x 12h volume MA + price < 12h EMA34
+Exit: Price crosses back below/above 12h EMA34
 Target: 20-30 trades/year per symbol
 """
 
@@ -22,18 +21,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for prior high/low and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    prior_1d_high = df_1d['high'].shift(1)  # Prior day's high
-    prior_1d_low = df_1d['low'].shift(1)    # Prior day's low
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Donchian channel (20-period)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max()
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min()
+    donchian_high = high_roll.values
+    donchian_low = low_roll.values
     
-    prior_1d_high_aligned = align_htf_to_ltf(prices, df_1d, prior_1d_high.values)
-    prior_1d_low_aligned = align_htf_to_ltf(prices, df_1d, prior_1d_low.values)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # 12h volume moving average (24-period for confirmation)
+    # 12h EMA34 for trend filter
     df_12h = get_htf_data(prices, '12h')
+    ema_34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    
+    # 12h volume MA (24-period for confirmation)
     volume_ma_24 = pd.Series(df_12h['volume']).rolling(window=24, min_periods=24).mean()
     volume_ma_24_12h = align_htf_to_ltf(prices, df_12h, volume_ma_24.values)
     
@@ -44,8 +43,8 @@ def generate_signals(prices):
     start_idx = 50  # warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(prior_1d_high_aligned[i]) or np.isnan(prior_1d_low_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ma_24_12h[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_34_12h_aligned[i]) or np.isnan(volume_ma_24_12h[i])):
             signals[i] = 0.0
             continue
         
@@ -54,28 +53,28 @@ def generate_signals(prices):
         vol_ma = volume_ma_24_12h[i]
         
         if position == 0:
-            # Long: break above prior 1D high + volume + 1D trend
-            if price > prior_1d_high_aligned[i] and vol > 1.5 * vol_ma and price > ema_50_1d_aligned[i]:
+            # Long: break above Donchian high + volume spike + 12h uptrend
+            if price > donchian_high[i] and vol > 2.0 * vol_ma and price > ema_34_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: break below prior 1D low + volume + 1D trend
-            elif price < prior_1d_low_aligned[i] and vol > 1.5 * vol_ma and price < ema_50_1d_aligned[i]:
+            # Short: break below Donchian low + volume spike + 12h downtrend
+            elif price < donchian_low[i] and vol > 2.0 * vol_ma and price < ema_34_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Long exit: break below prior 1D low
-            if price < prior_1d_low_aligned[i]:
+            # Long exit: price crosses below 12h EMA34
+            if price < ema_34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: break above prior 1D high
-            if price > prior_1d_high_aligned[i]:
+            # Short exit: price crosses above 12h EMA34
+            if price > ema_34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -83,6 +82,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Prior1D_HL_Breakout_Volume_1DTrend"
-timeframe = "12h"
+name = "4h_Donchian20_VolumeSpike_12hEMA34"
+timeframe = "4h"
 leverage = 1.0
