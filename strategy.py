@@ -1,14 +1,11 @@
-# 6H_1D_RSI_MEANREV_OVERSOLD
-
 #!/usr/bin/env python3
 """
-Hypothesis: On 6-hour timeframe, RSI(14) extreme readings with daily trend filter
-capture mean-reversion opportunities in both bull and bear markets.
-- Long when RSI < 30 and price > daily EMA50 (oversold in uptrend)
-- Short when RSI > 70 and price < daily EMA50 (overbought in downtrend)
-- Exit when RSI returns to neutral zone (40-60)
-Uses daily EMA50 for trend filter to avoid counter-trend trades.
-Designed for ~25-40 trades/year with discrete sizing to minimize fee drag.
+Hypothesis: On the 12-hour timeframe, price respects the 1-day high/low as key support/resistance levels.
+We combine this with a 1-day EMA34 trend filter and volume confirmation to capture breakouts.
+Long when price breaks above prior 1-day high with volume > 2x average and price above 1-day EMA34.
+Short when price breaks below prior 1-day low with volume > 2x average and price below 1-day EMA34.
+Exit when price returns to the prior 1-day midpoint (mean reversion) or on opposite breakout.
+Designed for 12h to work in trending (breakouts) and ranging (mean reversion to mid-point) markets with ~10-30 trades per year.
 """
 
 import numpy as np
@@ -17,68 +14,73 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for EMA50 and RSI calculation
+    # Get 1d data for prior period's high/low and EMA34
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily RSI(14)
-    delta = pd.Series(df_1d['close']).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Prior 1d high and low (use shift(1) to avoid look-ahead: use completed period's levels)
+    phigh = df_1d['high'].shift(1).values
+    plow = df_1d['low'].shift(1).values
+    pclose = df_1d['close'].values
     
-    # Calculate daily EMA50 for trend filter
-    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Prior 1d midpoint for mean reversion exit
+    pmid = (phigh + plow) / 2
     
-    # Align daily indicators to 6h timeframe
-    rsi_6h = align_htf_to_ltf(prices, df_1d, rsi_values)
-    ema_50_6h = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Calculate 1d EMA34 for trend filter (use prior period's close to avoid look-ahead)
+    ema_34 = pd.Series(pclose).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align all 1d levels to 12h timeframe (waits for 1d bar to close)
+    phigh_12h = align_htf_to_ltf(prices, df_1d, phigh)
+    plow_12h = align_htf_to_ltf(prices, df_1d, plow)
+    pmid_12h = align_htf_to_ltf(prices, df_1d, pmid)
+    ema_34_12h = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # Volume confirmation: 20-period volume MA on 12h
+    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 60  # warmup for daily indicators
+    start_idx = 50  # warmup for EMA34 and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(rsi_6h[i]) or np.isnan(ema_50_6h[i]):
+        if (np.isnan(phigh_12h[i]) or np.isnan(plow_12h[i]) or np.isnan(pmid_12h[i]) or
+            np.isnan(ema_34_12h[i]) or np.isnan(volume_ma_20.iloc[i])):
             signals[i] = 0.0
             continue
-            
+        
         price = close[i]
-        rsi_val = rsi_6h[i]
-        ema_val = ema_50_6h[i]
+        vol = volume[i]
+        vol_ma = volume_ma_20.iloc[i]
         
         if position == 0:
-            # Long: RSI oversold (<30) and price above daily EMA50 (uptrend)
-            if rsi_val < 30 and price > ema_val:
+            # Long: price breaks above prior 1d high with volume spike and above 1d EMA34
+            if price > phigh_12h[i] and vol > 2.0 * vol_ma and price > ema_34_12h[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought (>70) and price below daily EMA50 (downtrend)
-            elif rsi_val > 70 and price < ema_val:
+            # Short: price breaks below prior 1d low with volume spike and below 1d EMA34
+            elif price < plow_12h[i] and vol > 2.0 * vol_ma and price < ema_34_12h[i]:
                 signals[i] = -0.25
                 position = -1
-                
+        
         elif position == 1:
-            # Long exit: RSI returns to neutral (>=40) or turns overbought
-            if rsi_val >= 40:
+            # Long exit: price returns to prior 1d midpoint (mean reversion) OR breaks below prior 1d low (invalidates breakout)
+            if price < pmid_12h[i] or price < plow_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-                
+        
         elif position == -1:
-            # Short exit: RSI returns to neutral (<=60) or turns oversold
-            if rsi_val <= 60:
+            # Short exit: price returns to prior 1d midpoint (mean reversion) OR breaks above prior 1d high (invalidates breakout)
+            if price > pmid_12h[i] or price > phigh_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -86,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_1D_RSI_MEANREV_OVERSOLD"
-timeframe = "6h"
+name = "12h_Prior1D_HL_Breakout_MeanRev"
+timeframe = "12h"
 leverage = 1.0
