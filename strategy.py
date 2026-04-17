@@ -1,40 +1,26 @@
 #!/usr/bin/env python3
 """
-12h_Pivot_R1_S1_Breakout_Volume_ATRFilter_v3
-Hypothesis: On 12h timeframe, buy when price breaks above daily Pivot R1 with volume spike (>1.5x median) and ATR expansion (>1.2x median), sell when breaks below daily Pivot S1. Uses volume and volatility filters to avoid false breakouts. Designed for low trade frequency (12-37/year) to minimize fee drag and work in both bull and bear markets via strict entry conditions.
+4h_Alligator_ElderRay_Direction_Plus_VolumeSpike
+Hypothesis: On 4h timeframe, use Williams Alligator (13,8,5 SMAs) and Elder Ray (bull/bear power from EMA13) to determine trend direction. Enter long when bull power > 0 and price > Alligator teeth (red line) with volume spike (>1.5x 20-period median volume). Enter short when bear power < 0 and price < Alligator teeth with volume spike. Exit on opposite signal. Designed for low trade frequency (<50/year) to work in both bull and bear markets by requiring trend alignment and volume confirmation.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_atr(high, low, close, period=14):
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    
-    # Wilder smoothing
-    def smooth_wilder(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        result[period-1] = np.nansum(arr[1:period])
-        for i in range(period, len(arr)):
-            if not np.isnan(arr[i]) and not np.isnan(result[i-1]):
-                result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
-    
-    return smooth_wilder(tr, period)
+def calculate_alligator(high, low, close, jaw_period=13, teeth_period=8, lips_period=5):
+    """Williams Alligator: Jaw (13), Teeth (8), Lips (5) SMAs"""
+    jaw = pd.Series(close).rolling(window=jaw_period, min_periods=jaw_period).mean().values
+    teeth = pd.Series(close).rolling(window=teeth_period, min_periods=teeth_period).mean().values
+    lips = pd.Series(close).rolling(window=lips_period, min_periods=lips_period).mean().values
+    return jaw, teeth, lips
 
-def calculate_pivot_points(high, low, close):
-    # Standard pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    return r1, s1, pivot
+def calculate_elder_ray(close, high, low, ema_period=13):
+    """Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13"""
+    ema = pd.Series(close).ewm(span=ema_period, adjust=False, min_periods=ema_period).mean().values
+    bull_power = high - ema
+    bear_power = low - ema
+    return bull_power, bear_power, ema
 
 def generate_signals(prices):
     n = len(prices)
@@ -46,76 +32,49 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Daily Data (HTF for Pivot levels, volume, ATR) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # === Williams Alligator and Elder Ray on 4h (same timeframe) ===
+    jaw, teeth, lips = calculate_alligator(high, low, close)
+    bull_power, bear_power, ema13 = calculate_elder_ray(close, high, low)
     
-    # Daily ATR (14-period)
-    atr_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Daily median ATR (50-period) for expansion filter
-    atr_median_1d = pd.Series(atr_1d).rolling(window=50, min_periods=50).median().values
-    atr_median_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_median_1d)
-    
-    # Daily Pivot levels (R1, S1)
-    r1_1d, s1_1d, _ = calculate_pivot_points(high_1d, low_1d, close_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # Daily median volume (50-period) for volume spike filter
-    vol_median_1d = pd.Series(volume_1d).rolling(window=50, min_periods=50).median().values
-    vol_median_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_median_1d)
+    # === Volume confirmation (20-period median volume) ===
+    vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median().values
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 50
+    warmup = 20
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(atr_median_1d_aligned[i]) or
-            np.isnan(r1_1d_aligned[i]) or
-            np.isnan(s1_1d_aligned[i]) or
-            np.isnan(vol_median_1d_aligned[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(vol_median[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Get current daily bar's volume and ATR for confirmation
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
-        atr_1d_current = atr_1d_aligned[i]
-        
         # Volume spike: current volume > 1.5x median volume
-        vol_spike = vol_1d_current > 1.5 * vol_median_1d_aligned[i]
-        
-        # ATR expansion: current ATR > 1.2x median ATR
-        atr_expansion = atr_1d_current > 1.2 * atr_median_1d_aligned[i]
+        vol_spike = volume[i] > 1.5 * vol_median[i]
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price breaks above daily Pivot R1 with volume spike and ATR expansion
-            if close[i] > r1_1d_aligned[i] and vol_spike and atr_expansion:
+            # Long: bull power > 0 (bullish energy), price > teeth (above Alligator's teeth), volume spike
+            if bull_power[i] > 0 and close[i] > teeth[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price breaks below daily Pivot S1 with volume spike and ATR expansion
-            elif close[i] < s1_1d_aligned[i] and vol_spike and atr_expansion:
+            # Short: bear power < 0 (bearish energy), price < teeth (below Alligator's teeth), volume spike
+            elif bear_power[i] < 0 and close[i] < teeth[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic
+        # Exit logic: reverse signal
         elif position == 1:
-            # Exit when price breaks below S1 (opposite breakout)
-            if close[i] < s1_1d_aligned[i]:
+            # Exit long when bear power < 0 and price < teeth (bearish takeover)
+            if bear_power[i] < 0 and close[i] < teeth[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -123,8 +82,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price breaks above R1 (opposite breakout)
-            if close[i] > r1_1d_aligned[i]:
+            # Exit short when bull power > 0 and price > teeth (bullish takeover)
+            if bull_power[i] > 0 and close[i] > teeth[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -133,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_R1_S1_Breakout_Volume_ATRFilter_v3"
-timeframe = "12h"
+name = "4h_Alligator_ElderRay_Direction_Plus_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
