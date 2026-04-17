@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d ADX trend filter and ATR-based stoploss.
-Long when price breaks above Donchian upper band in strong uptrend (ADX > 25).
-Short when price breaks below Donchian lower band in strong downtrend (ADX > 25).
-Exit when price reverts to the middle band (20-period average of high/low) or ATR stoploss hit.
-Uses 1d for ADX calculation to ensure trend stability, 4h for price/volume/Donchian.
-Target: 75-200 total trades over 4 years (19-50/year). Discrete sizing 0.25 to minimize fee churn.
+Hypothesis: 4h Williams %R Extreme Reversion with Volume Spike and Regime Filter.
+Long when Williams %R crosses above -80 (oversold exit) with volume > 1.8x average in choppy/transition market (CHOP > 50).
+Short when Williams %R crosses below -20 (overbought exit) with volume > 1.8x average in choppy/transition market.
+Exit when Williams %R returns to -50 (mean reversion midpoint) or chop regime ends (trending: CHOP < 38.2 or CHOP > 61.8).
+Uses 1d for Williams %R calculation (more stable extremes) and 1d for chop filter.
+Target: 80-160 total trades over 4 years (20-40/year). Uses Williams %R for mean reversion edge in ranging markets and volume confirmation to avoid false signals.
 """
 
 import numpy as np
@@ -22,168 +22,116 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter
+    # Get 1d data for Williams %R and chop filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d ADX (Average Directional Index)
-    def calculate_adx(high, low, close, period=14):
-        # True Range
+    # Calculate 1d Williams %R (14-period)
+    def calculate_williams_r(high, low, close, period=14):
+        highest_high = np.zeros_like(close)
+        lowest_low = np.zeros_like(close)
+        williams_r = np.full_like(close, -50.0)  # default to neutral
+        
+        for i in range(period, len(close)):
+            highest_high[i] = np.max(high[i-period+1:i+1])
+            lowest_low[i] = np.min(low[i-period+1:i+1])
+            if highest_high[i] != lowest_low[i]:
+                williams_r[i] = (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i]) * -100
+            else:
+                williams_r[i] = -50.0  # avoid division by zero
+        return williams_r
+    
+    williams_r_1d = calculate_williams_r(high_1d, low_1d, close_1d, 14)
+    
+    # Calculate 1d Choppiness Index (CHOP)
+    def calculate_chop(high, low, close, period=14):
+        atr = np.zeros_like(close)
         tr = np.zeros_like(close)
+        
         for i in range(1, len(close)):
             tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
         
-        # Directional Movement
-        dm_plus = np.zeros_like(close)
-        dm_minus = np.zeros_like(close)
-        for i in range(1, len(close)):
-            up_move = high[i] - high[i-1]
-            down_move = low[i-1] - low[i]
-            dm_plus[i] = up_move if up_move > down_move and up_move > 0 else 0
-            dm_minus[i] = down_move if down_move > up_move and down_move > 0 else 0
-        
-        # Smoothed TR, DM+, DM- (Wilder's smoothing)
-        atr = np.zeros_like(close)
-        dmp = np.zeros_like(close)
-        dmm = np.zeros_like(close)
-        
-        # Initial values
+        # Wilder's ATR
         atr[period] = np.mean(tr[1:period+1])
-        dmp[period] = np.mean(dm_plus[1:period+1])
-        dmm[period] = np.mean(dm_minus[1:period+1])
-        
-        # Wilder's smoothing
-        for i in range(period+1, len(close)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-            dmp[i] = (dmp[i-1] * (period-1) + dm_plus[i]) / period
-            dmm[i] = (dmm[i-1] * (period-1) + dm_minus[i]) / period
-        
-        # Directional Indicators
-        dip = np.zeros_like(close)
-        dim = np.zeros_like(close)
-        for i in range(period, len(close)):
-            if atr[i] > 0:
-                dip[i] = 100 * dmp[i] / atr[i]
-                dim[i] = 100 * dmm[i] / atr[i]
-        
-        # Directional Index (DX)
-        dx = np.zeros_like(close)
-        for i in range(period, len(close)):
-            if dip[i] + dim[i] > 0:
-                dx[i] = 100 * abs(dip[i] - dim[i]) / (dip[i] + dim[i])
-        
-        # ADX (smoothed DX)
-        adx = np.zeros_like(close)
-        adx[2*period-1] = np.mean(dx[period:2*period])
-        for i in range(2*period, len(close)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
-    
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    
-    # Align 1d ADX to 4h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Calculate 4h Donchian channels (20-period)
-    def calculate_donchian(high, low, period=20):
-        upper = np.zeros_like(high)
-        lower = np.zeros_like(low)
-        middle = np.zeros_like(high)
-        
-        for i in range(period-1, len(high)):
-            upper[i] = np.max(high[i-period+1:i+1])
-            lower[i] = np.min(low[i-period+1:i+1])
-            middle[i] = (upper[i] + lower[i]) / 2.0
-        
-        return upper, lower, middle
-    
-    donch_upper, donch_lower, donch_middle = calculate_donchian(high, low, 20)
-    
-    # Calculate ATR for dynamic stoploss (4h)
-    def calculate_atr(high, low, close, period=14):
-        tr = np.zeros_like(close)
-        for i in range(1, len(close)):
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        atr = np.zeros_like(close)
-        atr[period] = np.mean(tr[1:period+1])
-        for i in range(period+1, len(close)):
+        for i in range(period+1, len(tr)):
             atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
         
-        return atr
+        # Sum of ATR over period
+        atr_sum = np.zeros_like(close)
+        for i in range(period, len(close)):
+            atr_sum[i] = np.sum(atr[i-period+1:i+1])
+        
+        # Max true range over period
+        max_tr = np.zeros_like(close)
+        for i in range(period, len(close)):
+            max_tr[i] = np.max(tr[i-period+1:i+1])
+        
+        # Chop formula: 100 * log10(atr_sum / max_tr) / log10(period)
+        chop = np.zeros_like(close)
+        for i in range(period, len(close)):
+            if max_tr[i] > 0:
+                chop[i] = 100 * np.log10(atr_sum[i] / max_tr[i]) / np.log10(period)
+            else:
+                chop[i] = 50  # neutral
+        return chop
     
-    atr_4h = calculate_atr(high, low, close, 14)
+    chop_1d = calculate_chop(high_1d, low_1d, close_1d, 14)
+    
+    # Align 1d indicators to 4h timeframe
+    williams_r_1d_aligned = align_htf_to_ltf(prices, df_1d, williams_r_1d)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    
+    # Calculate volume spike (current volume > 1.8x 20-period average)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (volume_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    entry_price = 0.0
     
     start_idx = 50  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donch_upper[i]) or 
-            np.isnan(donch_lower[i]) or 
-            np.isnan(donch_middle[i]) or 
-            np.isnan(adx_1d_aligned[i]) or 
-            np.isnan(atr_4h[i])):
+        if (np.isnan(williams_r_1d_aligned[i]) or 
+            np.isnan(chop_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        adx_val = adx_1d_aligned[i]
-        atr_val = atr_4h[i]
-        upper = donch_upper[i]
-        lower = donch_lower[i]
-        middle = donch_middle[i]
+        vol_spike = volume_spike[i]
+        chop_val = chop_1d_aligned[i]
+        williams_r = williams_r_1d_aligned[i]
         
-        # Trend filter: ADX > 25 indicates strong trend
-        is_strong_trend = adx_val > 25
+        # Regime filters: avoid extreme trending or ranging conditions
+        # Chop regime: 38.2 <= CHOP <= 61.8 = transition/fair value (good for mean reversion)
+        is_fair_value = (chop_val >= 38.2) and (chop_val <= 61.8)
+        # Avoid strong trends: CHOP < 38.2 = trending up, CHOP > 61.8 = ranging/choppy
+        avoid_trending_up = chop_val < 38.2
+        avoid_strong_chop = chop_val > 61.8
         
         if position == 0:
-            # Long: price breaks above upper Donchian band in strong uptrend
-            if price > upper and is_strong_trend:
+            # Long: Williams %R crosses above -80 (exiting oversold) with volume spike in fair value
+            if williams_r > -80 and williams_r_1d_aligned[i-1] <= -80 and vol_spike and is_fair_value:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-            # Short: price breaks below lower Donchian band in strong downtrend
-            elif price < lower and is_strong_trend:
+            # Short: Williams %R crosses below -20 (exiting overbought) with volume spike in fair value
+            elif williams_r < -20 and williams_r_1d_aligned[i-1] >= -20 and vol_spike and is_fair_value:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
         
         elif position == 1:
-            # Exit conditions for long
-            exit_signal = False
-            
-            # 1. Price reverts to middle band
-            if price <= middle:
-                exit_signal = True
-            # 2. ATR-based stoploss (2.5 ATR below entry)
-            elif price < entry_price - 2.5 * atr_val:
-                exit_signal = True
-            
-            if exit_signal:
+            # Exit long: Williams %R returns to -50 (mean) or regime deteriorates
+            if williams_r >= -50 or avoid_trending_up or avoid_strong_chop:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit conditions for short
-            exit_signal = False
-            
-            # 1. Price reverts to middle band
-            if price >= middle:
-                exit_signal = True
-            # 2. ATR-based stoploss (2.5 ATR above entry)
-            elif price > entry_price + 2.5 * atr_val:
-                exit_signal = True
-            
-            if exit_signal:
+            # Exit short: Williams %R returns to -50 (mean) or regime deteriorates
+            if williams_r <= -50 or avoid_trending_up or avoid_strong_chop:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -191,6 +139,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_ADXTrend_ATRStop"
+name = "4h_WilliamsR_ExtremeReversion_VolumeSpike_FairValue"
 timeframe = "4h"
 leverage = 1.0
