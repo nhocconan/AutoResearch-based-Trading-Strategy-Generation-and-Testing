@@ -5,52 +5,20 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
     volume = prices['volume'].values
-    high = prices['high'].values
-    low = prices['low'].values
     
-    # === 12h KAMA (Kaufman Adaptive Moving Average) ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # === 4h Donchian channel (20-period) ===
+    high_20 = pd.Series(close).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(close).rolling(window=20, min_periods=20).min().values
     
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_12h, prepend=close_12h[0]))
-    abs_change = np.abs(np.diff(close_12h))
-    er = np.zeros_like(close_12h)
-    er[1:] = change[1:] / (np.abs(np.diff(close_12h, n=10)) + 1e-10)  # 10-period change
-    
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # KAMA calculation
-    kama = np.zeros_like(close_12h)
-    kama[0] = close_12h[0]
-    for i in range(1, len(close_12h)):
-        kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
-    
-    kama_aligned = align_htf_to_ltf(prices, df_12h, kama)
-    
-    # === 12h RSI(14) ===
-    delta = np.diff(close_12h, prepend=close_12h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_aligned = align_htf_to_ltf(prices, df_12h, rsi)
-    
-    # === 1d Chopiness Index (CHOP) for regime filter ===
+    # === 1d ADX(14) for trend filter ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
-    low_1d = low_1d = df_1d['low'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
     # True Range
@@ -59,53 +27,89 @@ def generate_signals(prices):
     tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Sum of True Range over 14 periods
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])) > 
+                       (np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d), 
+                       np.maximum(high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]]), 0), 0)
+    dm_minus = np.where((np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d) > 
+                        (high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])), 
+                        np.maximum(np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d, 0), 0)
     
-    # Highest high and lowest low over 14 periods
-    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Smoothed values
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
     
-    # Chopiness Index
-    chop = 100 * np.log10(atr_sum / (hh - ll + 1e-10)) / np.log10(14)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop, additional_delay_bars=0)
+    # Directional Indicators
+    plus_di = 100 * dm_plus_14 / (tr14 + 1e-10)
+    minus_di = 100 * dm_minus_14 / (tr14 + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align 1d ADX to 4h
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # === 1d volume confirmation ===
+    volume_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    
+    # === 4h volume confirmation ===
+    vol_ma_10_4h = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 40
+    warmup = 30
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(adx_1d_aligned[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(vol_ma_10_4h[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Chop regime: CHOP > 50 = ranging market (mean revert)
-        ranging = chop_aligned[i] > 50
+        # Get current 1d volume
+        df_1d_current = get_htf_data(prices, '1d')
+        volume_1d_current = df_1d_current['volume'].values
+        volume_1d_aligned = align_htf_to_ltf(prices, df_1d_current, volume_1d_current)
+        
+        # Volume spike: current 1d volume > 1.5x 20-period average AND 4h volume > 1.3x 10-period average
+        vol_spike_1d = volume_1d_aligned[i] > vol_ma_20_1d_aligned[i] * 1.5
+        vol_spike_4h = volume[i] > vol_ma_10_4h[i] * 1.3
+        
+        # Donchian breakout conditions
+        breakout_up = close[i] > high_20[i-1]  # Break above previous period's high
+        breakout_down = close[i] < low_20[i-1]  # Break below previous period's low
+        
+        # Trend filter
+        trending = adx_1d_aligned[i] > 25
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price > KAMA + RSI > 50 + ranging market
-            if close[i] > kama_aligned[i] and rsi_aligned[i] > 50 and ranging:
+            # Long: Donchian breakout up + volume spike + trending
+            if breakout_up and vol_spike_1d and vol_spike_4h and trending:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price < KAMA + RSI < 50 + ranging market
-            elif close[i] < kama_aligned[i] and rsi_aligned[i] < 50 and ranging:
+            # Short: Donchian breakout down + volume spike + trending
+            elif breakout_down and vol_spike_1d and vol_spike_4h and trending:
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long when price crosses below KAMA or RSI < 40
-            if close[i] < kama_aligned[i] or rsi_aligned[i] < 40:
+            # Exit long when price returns to middle of channel or trend weakens
+            mid_channel = (high_20[i] + low_20[i]) / 2
+            if close[i] < mid_channel or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -113,8 +117,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price crosses above KAMA or RSI > 60
-            if close[i] > kama_aligned[i] or rsi_aligned[i] > 60:
+            # Exit short when price returns to middle of channel or trend weakens
+            mid_channel = (high_20[i] + low_20[i]) / 2
+            if close[i] > mid_channel or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -123,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_KAMA_RSI_Chop_Range"
-timeframe = "12h"
+name = "4h_Donchian20_1dADX25_Volume1.5x_4hVol1.3x"
+timeframe = "4h"
 leverage = 1.0
