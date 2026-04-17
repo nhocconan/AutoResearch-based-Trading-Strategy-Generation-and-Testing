@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_WeeklyPivot_R1_S1_Breakout_VolumeTrend_v3
-Hypothesis: Weekly pivot points (R1/S1) with volume confirmation and 1d EMA50 trend filter. Only takes long above R1 in uptrend (close>EMA50) and short below S1 in downtrend (close<EMA50). Reduces whipsaw by requiring trend alignment. Target: 20-40 trades/year to minimize fee drag.
+4h_WeeklyPivot_R1_S1_Breakout_VolumeTrend_v4
+Hypothesis: Weekly pivot points (R1/S1) with volume confirmation and 1d EMA50 trend filter. Only takes long above R1 in uptrend (close>EMA50) and short below S1 in downtrend (close<EMA50). Reduces whipsaw by requiring trend alignment. Target: 20-40 trades/year to minimize fee drift.
 """
 
 import numpy as np
@@ -105,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WeeklyPivot_R1_S1_Breakout_VolumeTrend_v3"
+name = "4h_WeeklyPivot_R1_S1_Breakout_VolumeTrend_v4"
 timeframe = "4h"
 leverage = 1.0
