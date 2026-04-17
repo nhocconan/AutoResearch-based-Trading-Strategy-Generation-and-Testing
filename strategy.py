@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-6h Weekly Donchian Breakout with Volume Spike and ADX Trend Filter
-Enters long when price breaks above weekly Donchian high with volume > 1.5x 20-period average and ADX > 25 (uptrend)
-Enters short when price breaks below weekly Donchian low with volume > 1.5x 20-period average and ADX > 25 (downtrend)
-Exits when price returns to the weekly midline (average of weekly Donchian high and low).
-Designed for 6h timeframe to capture weekly trend continuation with volume confirmation.
-Target: 15-30 trades/year (60-120 total over 4 years) by requiring confluence of breakout, volume, and trend.
-Works in both bull and bear markets by trading breakouts in direction of higher timeframe trend.
+6h 1-Day SuperTrend with Volume Confirmation
+Enters long when price closes above SuperTrend (ATR=10, multiplier=3) on daily timeframe with volume > 1.5x 20-period average
+Enters short when price closes below SuperTrend with volume > 1.5x 20-period average
+Exits when price closes back below/above SuperTrend respectively.
+SuperTrend adapts to volatility and trend strength, working in both bull and bear markets.
+Target: 20-40 trades/year (80-160 total over 4 years) by requiring SuperTrend signal and volume confirmation.
 """
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,42 +22,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Weekly Donchian Channels (20-period) ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === Daily SuperTrend (ATR=10, multiplier=3) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 20-period Donchian channels
-    donch_high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donch_low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    donch_mid_20 = (donch_high_20 + donch_low_20) / 2  # Midline for exit
-    
-    # Align to 6h timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_1w, donch_high_20)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1w, donch_low_20)
-    donch_mid_aligned = align_htf_to_ltf(prices, df_1w, donch_mid_20)
-    
-    # === Weekly Volume Spike (1.5x 20-period average) ===
-    volume_1w = df_1w['volume'].values
-    vol_ma_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20_1w)
-    
-    # === Weekly ADX Trend Filter (ADX > 25) ===
     # Calculate True Range (TR)
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First period
     
-    # Calculate Directional Movement (+DM, -DM)
-    up_move = high_1w - np.roll(high_1w, 1)
-    down_move = np.roll(low_1w, 1) - low_1w
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Wilder's smoothing function
+    # Calculate ATR using Wilder's smoothing
     def wilders_smoothing(data, period):
         result = np.zeros_like(data)
         if len(data) < period:
@@ -68,61 +45,78 @@ def generate_signals(prices):
             result[i] = result[i-1] - (result[i-1] / period) + data[i]
         return result
     
-    period = 14
-    atr_1w = wilders_smoothing(tr, period)
-    plus_di_1w = 100 * wilders_smoothing(plus_dm, period) / atr_1w
-    minus_di_1w = 100 * wilders_smoothing(minus_dm, period) / atr_1w
-    dx_1w = 100 * np.abs(plus_di_1w - minus_di_1w) / (plus_di_1w + minus_di_1w + 1e-10)  # Avoid division by zero
-    adx_1w = wilders_smoothing(dx_1w, period)
+    period = 10
+    atr_1d = wilders_smoothing(tr, period)
     
-    # Handle division by zero and NaN
-    adx_1w = np.where((plus_di_1w + minus_di_1w) == 0, 0, adx_1w)
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    # Calculate basic upper and lower bands
+    hl2 = (high_1d + low_1d) / 2
+    upper_band = hl2 + 3 * atr_1d
+    lower_band = hl2 - 3 * atr_1d
+    
+    # Initialize SuperTrend
+    supertrend = np.zeros_like(close_1d)
+    direction = np.ones_like(close_1d)  # 1 for uptrend, -1 for downtrend
+    
+    # First valid value
+    supertrend[period-1] = upper_band[period-1]
+    direction[period-1] = 1
+    
+    for i in range(period, len(close_1d)):
+        if close_1d[i] > supertrend[i-1]:
+            # Potential uptrend
+            supertrend[i] = max(lower_band[i], supertrend[i-1])
+            direction[i] = 1
+        else:
+            # Potential downtrend
+            supertrend[i] = min(upper_band[i], supertrend[i-1])
+            direction[i] = -1
+    
+    # Align SuperTrend and direction to 6h timeframe
+    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
+    direction_aligned = align_htf_to_ltf(prices, df_1d, direction)
+    
+    # === Daily Volume Spike (1.5x 20-period average) ===
+    volume_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
     signals = np.zeros(n)
     
     # Warmup: need enough data for all calculations
-    warmup = 50
+    warmup = 40
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or np.isnan(donch_mid_aligned[i]) or
-            np.isnan(vol_ma_20_1w_aligned[i]) or np.isnan(adx_1w_aligned[i])):
+        if (np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-week average
-        vol_today_aligned = align_htf_to_ltf(prices, df_1w, volume_1w)
-        vol_confirm = vol_today_aligned[i] > vol_ma_20_1w_aligned[i] * 1.5
-        
-        # Trend filter: ADX > 25 indicates strong trend
-        trend_filter = adx_1w_aligned[i] > 25
-        
-        # Breakout conditions
-        breakout_up = high[i] > donch_high_aligned[i]   # Price breaks above weekly Donchian high
-        breakdown_down = low[i] < donch_low_aligned[i]  # Price breaks below weekly Donchian low
+        # Volume confirmation: current volume > 1.5x 20-day average
+        vol_today_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+        vol_confirm = vol_today_aligned[i] > vol_ma_20_1d_aligned[i] * 1.5
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: bullish breakout above weekly Donchian high with volume confirmation and trend
-            if breakout_up and vol_confirm and trend_filter:
+            # Long: price closes above SuperTrend (uptrend) with volume confirmation
+            if close[i] > supertrend_aligned[i] and direction_aligned[i] == 1 and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: bearish breakdown below weekly Donchian low with volume confirmation and trend
-            elif breakdown_down and vol_confirm and trend_filter:
+            # Short: price closes below SuperTrend (downtrend) with volume confirmation
+            elif close[i] < supertrend_aligned[i] and direction_aligned[i] == -1 and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic: return to weekly midline or volume fails
+        # Exit logic: price closes back below/above SuperTrend
         elif position == 1:
-            # Exit long: price returns to weekly midline or volume confirmation fails
-            if low[i] <= donch_mid_aligned[i] or not vol_confirm:
+            # Exit long: price closes below SuperTrend
+            if close[i] < supertrend_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -130,8 +124,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to weekly midline or volume confirmation fails
-            if high[i] >= donch_mid_aligned[i] or not vol_confirm:
+            # Exit short: price closes above SuperTrend
+            if close[i] > supertrend_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -140,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyDonchian20_VolumeSpike_ADXFilter"
+name = "6h_1dSuperTrend10x3_VolumeConfirmation"
 timeframe = "6h"
 leverage = 1.0
