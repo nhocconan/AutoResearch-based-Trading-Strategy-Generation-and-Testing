@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot reversal with 1d volume spike and 1d ADX trend filter
-# Reverses at key intraday support/resistance levels during trending markets with institutional volume
-# Works in bull/bear by taking reversals at R1/S1 in uptrend and R3/S3 in downtrend
-# Position size: 0.25 for balanced risk/return
+# Hypothesis: 12h Williams %R reversal with 1d volume spike and 1d ADX trend filter
+# Williams %R identifies overbought/oversold conditions. Reversals occur when %R crosses back from extremes.
+# Works in bull/bear by taking reversals from oversold in uptrend and overbought in downtrend.
+# Position size: 0.25 for balanced risk/return.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,7 +18,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data for volume, ADX, and pivot calculation ===
+    # === 1d data for volume, ADX, and Williams %R ===
     df_1d = get_htf_data(prices, '1d')
     
     high_1d = df_1d['high'].values
@@ -52,35 +52,11 @@ def generate_signals(prices):
     volume_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     volume_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma20_1d)
     
-    # 1d Camarilla pivot levels (using previous day's OHLC)
-    def calculate_camarilla(h, l, c):
-        range_val = h - l
-        return {
-            'S1': c - range_val * 1.1 / 12,
-            'S2': c - range_val * 1.1 / 6,
-            'S3': c - range_val * 1.1 / 4,
-            'R1': c + range_val * 1.1 / 12,
-            'R2': c + range_val * 1.1 / 6,
-            'R3': c + range_val * 1.1 / 4
-        }
-    
-    # Calculate pivots for previous day
-    camarilla_levels = calculate_camarilla(high_1d[-1], low_1d[-1], close_1d[-1])  # yesterday's levels
-    camarilla_S1 = camarilla_levels['S1']
-    camarilla_S3 = camarilla_levels['S3']
-    camarilla_R1 = camarilla_levels['R1']
-    camarilla_R3 = camarilla_levels['R3']
-    
-    # Align Camarilla levels to 4h (constant until new day)
-    camarilla_S1_arr = np.full(len(close_1d), camarilla_S1)
-    camarilla_S3_arr = np.full(len(close_1d), camarilla_S3)
-    camarilla_R1_arr = np.full(len(close_1d), camarilla_R1)
-    camarilla_R3_arr = np.full(len(close_1d), camarilla_R3)
-    
-    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1_arr)
-    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3_arr)
-    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1_arr)
-    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3_arr)
+    # 1d Williams %R (14-period)
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low + 1e-10)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -88,7 +64,7 @@ def generate_signals(prices):
     for i in range(20, n):
         # Skip if any required data is not available
         if np.isnan(adx_1d_aligned[i]) or np.isnan(volume_ma20_1d_aligned[i]) or \
-           np.isnan(camarilla_S1_aligned[i]) or np.isnan(camarilla_R1_aligned[i]):
+           np.isnan(williams_r_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -103,29 +79,20 @@ def generate_signals(prices):
         filter_ok = volume_filter and trend_filter
         
         if position == 0:
-            # Long reversal at S1 in uptrend OR S3 in strong downtrend (oversold bounce)
-            if (close[i] <= camarilla_S1_aligned[i] and close[i-1] > camarilla_S1_aligned[i-1] and 
-                adx_1d_aligned[i] > 25 and filter_ok):  # Uptrend reversal at S1
+            # Long when Williams %R crosses above -80 from oversold in uptrend
+            if (williams_r_aligned[i] > -80 and williams_r_aligned[i-1] <= -80 and 
+                adx_1d_aligned[i] > 25 and filter_ok):
                 signals[i] = 0.25
                 position = 1
-            elif (close[i] <= camarilla_S3_aligned[i] and close[i-1] > camarilla_S3_aligned[i-1] and 
-                  adx_1d_aligned[i] > 30 and filter_ok):  # Strong oversold bounce at S3
-                signals[i] = 0.25
-                position = 1
-            # Short reversal at R1 in downtrend OR R3 in strong uptrend (overbought pullback)
-            elif (close[i] >= camarilla_R1_aligned[i] and close[i-1] < camarilla_R1_aligned[i-1] and 
-                  adx_1d_aligned[i] > 25 and filter_ok):  # Downtrend reversal at R1
-                signals[i] = -0.25
-                position = -1
-            elif (close[i] >= camarilla_R3_aligned[i] and close[i-1] < camarilla_R3_aligned[i-1] and 
-                  adx_1d_aligned[i] > 30 and filter_ok):  # Strong overbought pullback at R3
+            # Short when Williams %R crosses below -20 from overbought in downtrend
+            elif (williams_r_aligned[i] < -20 and williams_r_aligned[i-1] >= -20 and 
+                  adx_1d_aligned[i] > 25 and filter_ok):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price reaches R1 (target) or R3 (extended target) or filter fails
-            if (close[i] >= camarilla_R1_aligned[i] or 
-                close[i] >= camarilla_R3_aligned[i] or 
+            # Long exit: Williams %R crosses below -20 (overbought) or filter fails
+            if (williams_r_aligned[i] < -20 or 
                 not filter_ok):
                 signals[i] = 0.0
                 position = 0
@@ -133,9 +100,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price reaches S1 (target) or S3 (extended target) or filter fails
-            if (close[i] <= camarilla_S1_aligned[i] or 
-                close[i] <= camarilla_S3_aligned[i] or 
+            # Short exit: Williams %R crosses above -80 (oversold) or filter fails
+            if (williams_r_aligned[i] > -80 or 
                 not filter_ok):
                 signals[i] = 0.0
                 position = 0
@@ -144,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_Reversal_Volume_ADX_Filter"
-timeframe = "4h"
+name = "12h_WilliamsR_1dVolume_ADX_Filter"
+timeframe = "12h"
 leverage = 1.0
