@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Pivot_R1_S1_Breakout_Volume_Trend
-Hypothesis: Weekly pivot levels (R1/S1) act as strong support/resistance on daily chart.
-Long when price breaks above R1 with volume > 1.5x average and weekly close > weekly EMA34 (uptrend).
-Short when price breaks below S1 with volume > 1.5x average and weekly close < weekly EMA34 (downtrend).
-Exit on opposite signal. Position size: ±0.25. Uses 1d primary with 1w trend filter.
-Designed for low-frequency, high-conviction trades in both bull and bear markets.
+6h_12h_Camarilla_Pivot_Breakout_Volume_Confirmation
+Hypothesis: Camarilla pivot levels from 12h act as strong support/resistance. Breakouts above R3 or below S3 with volume confirmation indicate institutional interest and trend continuation. Works in bull markets by capturing breakouts and in bear markets by fading false breaks at R3/S3 and confirming real breaks with volume. Targets 15-30 trades/year.
 """
 
 import numpy as np
@@ -22,72 +18,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate weekly pivot points (R1, S1, PP)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get 12h data for Camarilla pivot calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
     
-    # Pivot point calculation: PP = (H + L + C) / 3
-    pp = (high_1w + low_1w + close_1w) / 3.0
-    # R1 = 2*PP - L, S1 = 2*PP - H
-    r1 = 2 * pp - low_1w
-    s1 = 2 * pp - high_1w
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Align weekly levels to daily timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    # Calculate Camarilla levels for each 12h bar
+    R4 = np.zeros_like(close_12h)
+    R3 = np.zeros_like(close_12h)
+    S3 = np.zeros_like(close_12h)
+    S4 = np.zeros_like(close_12h)
     
-    # Weekly EMA34 for trend filter
-    close_series_1w = pd.Series(close_1w)
-    ema34_1w = close_series_1w.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    for i in range(1, len(close_12h)):
+        # Use previous 12h bar's high, low, close to calculate today's levels
+        H = high_12h[i-1]
+        L = low_12h[i-1]
+        C = close_12h[i-1]
+        diff = H - L
+        R3[i] = C + (diff * 1.1 / 4)
+        S3[i] = C - (diff * 1.1 / 4)
+        R4[i] = C + (diff * 1.1 / 2)
+        S4[i] = C - (diff * 1.1 / 2)
     
-    # Volume confirmation (20-period MA on 1d)
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align 12h Camarilla levels to 6h timeframe (with 1-bar delay for completed bar)
+    R3_6h = align_htf_to_ltf(prices, df_12h, R3)
+    S3_6h = align_htf_to_ltf(prices, df_12h, S3)
+    R4_6h = align_htf_to_ltf(prices, df_12h, R4)
+    S4_6h = align_htf_to_ltf(prices, df_12h, S4)
+    
+    # Volume confirmation: 20-period EMA on 6h
+    volume_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = max(20, 34)  # Volume MA20, EMA34
+    start_idx = 20  # Volume EMA20
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(volume_ma20[i]) or 
-            np.isnan(ema34_1w_aligned[i])):
+        if (np.isnan(R3_6h[i]) or 
+            np.isnan(S3_6h[i]) or 
+            np.isnan(R4_6h[i]) or 
+            np.isnan(S4_6h[i]) or 
+            np.isnan(volume_ema20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
-        
-        # Breakout conditions
-        breakout_long = close[i] > r1_aligned[i]
-        breakout_short = close[i] < s1_aligned[i]
+        # Volume filter: current volume > 1.5x 20-period EMA
+        volume_filter = volume[i] > (1.5 * volume_ema20[i])
         
         if position == 0:
-            # Long: break above R1 + volume filter + weekly uptrend
-            if breakout_long and volume_filter and close[i] > ema34_1w_aligned[i]:
+            # Long breakout: price breaks above R3 with volume, target R4
+            if close[i] > R3_6h[i] and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 + volume filter + weekly downtrend
-            elif breakout_short and volume_filter and close[i] < ema34_1w_aligned[i]:
+            # Short breakdown: price breaks below S3 with volume, target S4
+            elif close[i] < S3_6h[i] and volume_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below S1 (opposite level)
-            if close[i] < s1_aligned[i]:
+            # Exit long: price reaches R4 or reverses below R3
+            if close[i] >= R4_6h[i] or close[i] < R3_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above R1 (opposite level)
-            if close[i] > r1_aligned[i]:
+            # Exit short: price reaches S4 or reverses above S3
+            if close[i] <= S4_6h[i] or close[i] > S3_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -95,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Weekly_Pivot_R1_S1_Breakout_Volume_Trend"
-timeframe = "1d"
+name = "6h_12h_Camarilla_Pivot_Breakout_Volume_Confirmation"
+timeframe = "6h"
 leverage = 1.0
