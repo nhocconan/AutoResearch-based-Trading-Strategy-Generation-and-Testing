@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d ATR regime filter and volume confirmation.
-Long when price breaks above 20-period 1d Donchian upper band AND 1d ATR(14) < 30-period 1d ATR mean (low volatility regime) AND 12h volume > 1.5x 20-bar average volume.
-Short when price breaks below 20-period 1d Donchian lower band AND 1d ATR(14) < 30-period 1d ATR mean AND 12h volume > 1.5x 20-bar average volume.
-Exit when price touches the 20-period 1d Donchian midpoint (mean of upper and lower bands).
-Uses 1d for Donchian channels and ATR regime, 12h for execution and volume confirmation.
-Designed to capture breakouts from low volatility contractions in any market regime. Target: 15-25 trades/year per symbol.
+Hypothesis: 4h Donchian(20) breakout with 1d ADX trend filter and volume spike confirmation.
+Long when price breaks above Donchian upper (20) AND 1d ADX > 25 (strong trend) AND 4h volume > 1.5x 20-bar average volume.
+Short when price breaks below Donchian lower (20) AND 1d ADX > 25 (strong trend) AND 4h volume > 1.5x 20-bar average volume.
+Exit when price touches Donchian middle (20-period midpoint) or opposite Donchian band.
+Uses 1d for ADX trend filter, 4h for execution and Donchian channels/volume confirmation.
+Designed to capture strong breakouts in trending markets with volume confirmation and trend filter.
+Target: 20-50 trades/year per symbol (80-200 total over 4 years).
 """
 
 import numpy as np
@@ -22,38 +23,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels and ATR regime
+    # Get 1d data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Donchian(20) channels
-    lookback = 20
-    upper_20 = pd.Series(high_1d).rolling(window=lookback, min_periods=lookback).max().values
-    lower_20 = pd.Series(low_1d).rolling(window=lookback, min_periods=lookback).min().values
-    mid_20 = (upper_20 + lower_20) / 2.0
+    # Calculate 1d ADX (14)
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.nan], tr])  # prepend NaN for index alignment
+        
+        # Directional Movement
+        dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                           np.maximum(high[1:] - high[:-1], 0), 0)
+        dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                            np.maximum(low[:-1] - low[1:], 0), 0)
+        dm_plus = np.concatenate([[np.nan], dm_plus])
+        dm_minus = np.concatenate([[np.nan], dm_minus])
+        
+        # Smoothed TR, DM+ , DM- (Wilder's smoothing = EMA with alpha=1/period)
+        def wilders_smoothing(data, period):
+            result = np.full_like(data, np.nan)
+            alpha = 1.0 / period
+            # First value: simple average
+            if period < len(data):
+                result[period-1] = np.nanmean(data[:period])
+            # Rest: Wilder's smoothing
+            for i in range(period, len(data)):
+                if np.isnan(result[i-1]):
+                    result[i] = np.nanmean(data[i-period+1:i+1])
+                else:
+                    result[i] = result[i-1] + alpha * (data[i] - result[i-1])
+            return result
+        
+        tr_smoothed = wilders_smoothing(tr, period)
+        dm_plus_smoothed = wilders_smoothing(dm_plus, period)
+        dm_minus_smoothed = wilders_smoothing(dm_minus, period)
+        
+        # Directional Indicators
+        di_plus = 100 * dm_plus_smoothed / (tr_smoothed + 1e-10)
+        di_minus = 100 * dm_minus_smoothed / (tr_smoothed + 1e-10)
+        
+        # DX and ADX
+        dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+        adx = wilders_smoothing(dx, period)
+        
+        return adx
     
-    # Calculate 1d ATR(14) for volatility regime
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    # Calculate 1d ATR mean for regime filter (30-period mean of ATR)
-    atr_mean_30 = pd.Series(atr_14).rolling(window=30, min_periods=30).mean().values
+    # Calculate 4h Donchian channels (20)
+    def donchian_channels(high, low, period=20):
+        upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+        lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+        middle = (upper + lower) / 2
+        return upper, lower, middle
     
-    # Calculate 12h volume MA for confirmation
+    upper, lower, middle = donchian_channels(high, low, 20)
+    
+    # Calculate 4h volume MA for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align all 1d indicators to 12h timeframe
-    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
-    mid_20_aligned = align_htf_to_ltf(prices, df_1d, mid_20)
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    atr_mean_30_aligned = align_htf_to_ltf(prices, df_1d, atr_mean_30)
+    # Align all 1d indicators to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -62,49 +99,47 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_20_aligned[i]) or 
-            np.isnan(lower_20_aligned[i]) or
-            np.isnan(mid_20_aligned[i]) or
-            np.isnan(atr_14_aligned[i]) or
-            np.isnan(atr_mean_30_aligned[i]) or
+        if (np.isnan(adx_aligned[i]) or 
+            np.isnan(upper[i]) or
+            np.isnan(lower[i]) or
+            np.isnan(middle[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x 20-bar average
+        # Volume confirmation: current 4h volume > 1.5x 20-bar average
         volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Volatility regime: current ATR < ATR mean (low volatility)
-        low_vol_regime = atr_14_aligned[i] < atr_mean_30_aligned[i]
-        
         # Breakout conditions
-        breakout_upper = close[i] > upper_20_aligned[i]
-        breakout_lower = close[i] < lower_20_aligned[i]
+        breakout_upper = close[i] > upper[i]
+        breakout_lower = close[i] < lower[i]
         
-        # Exit condition: touch midpoint
-        touch_mid = abs(close[i] - mid_20_aligned[i]) < 0.001 * close[i]  # within 0.1%
+        # Exit conditions: touch middle or opposite band
+        touch_middle = abs(close[i] - middle[i]) < 0.001 * close[i]  # within 0.1%
+        touch_opposite = (position == 1 and close[i] < lower[i]) or \
+                         (position == -1 and close[i] > upper[i])
         
         if position == 0:
-            # Long: break above upper band with volume confirmation and low volatility regime
-            if (breakout_upper and volume_confirmed and low_vol_regime):
+            # Long: break above upper with volume confirmation and strong trend (ADX > 25)
+            if (breakout_upper and volume_confirmed and adx_aligned[i] > 25):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower band with volume confirmation and low volatility regime
-            elif (breakout_lower and volume_confirmed and low_vol_regime):
+            # Short: break below lower with volume confirmation and strong trend (ADX > 25)
+            elif (breakout_lower and volume_confirmed and adx_aligned[i] > 25):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: touch midpoint
-            if touch_mid:
+            # Exit long: touch middle or break below lower
+            if (touch_middle or touch_opposite):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: touch midpoint
-            if touch_mid:
+            # Exit short: touch middle or break above upper
+            if (touch_middle or touch_opposite):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,6 +147,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Volume_ATRRegime"
-timeframe = "12h"
+name = "4h_Donchian20_1dADXTrend_Volume_Confirmation"
+timeframe = "4h"
 leverage = 1.0
