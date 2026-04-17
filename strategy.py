@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h VWAP Deviation with 4h Trend Filter and Session Filter.
-Long when price > VWAP(20) and 4h close > 4h EMA50 during 08-20 UTC.
-Short when price < VWAP(20) and 4h close < 4h EMA50 during 08-20 UTC.
-Exit when price crosses VWAP or 4h trend reverses.
-Uses 4h for trend direction, 1h for VWAP-based entry timing and session filter.
-Target: 60-150 total trades over 4 years (15-37/year).
+Hypothesis: 4h Williams %R + 1d Volume Spike + ADX Regime Filter.
+Long when Williams %R < -80 (oversold) + 1d volume > 1.5x 20-period average + ADX < 25 (low trend strength = mean reversion favorable).
+Short when Williams %R > -20 (overbought) + same volume + ADX conditions.
+Exit when Williams %R reverses (> -50 for long exit, < -50 for short exit) or volume/spike condition fails.
+Uses 1d for volume spike and ADX regime, 4h for Williams %R.
+Target: 20-60 total trades over 4 years (5-15/year) to avoid fee drag.
 """
 
 import numpy as np
@@ -20,93 +20,116 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Get 1d data for regime filters (volume spike, ADX)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 4h EMA50
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate 1d ADX (14-period)
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(high[i] - high[i-1], 0)
+            minus_dm[i] = max(low[i-1] - low[i], 0)
+            if plus_dm[i] < minus_dm[i]:
+                plus_dm[i] = 0
+            if minus_dm[i] < plus_dm[i]:
+                minus_dm[i] = 0
+            if plus_dm[i] == minus_dm[i]:
+                plus_dm[i] = 0
+                minus_dm[i] = 0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Wilder's smoothing
+        atr = np.zeros_like(tr)
+        atr[period] = np.mean(tr[1:period+1])
+        for i in range(period+1, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        plus_di = 100 * (pd.Series(plus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr)
+        minus_di = 100 * (pd.Series(minus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr)
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = pd.Series(dx).ewm(alpha=1/period, adjust=False).mean().values
+        return adx
     
-    # Calculate 1h VWAP (20-period)
-    typical_price = (high + low + close) / 3.0
-    pv = typical_price * volume
-    cum_pv = np.cumsum(pv)
-    cum_vol = np.cumsum(volume)
-    # Avoid division by zero
-    vwap = np.divide(cum_pv, cum_vol, out=np.full_like(cum_pv, np.nan), where=cum_vol!=0)
-    # Rolling VWAP: reset every 20 periods using windowed approach
-    vwap_20 = np.full(n, np.nan)
-    for i in range(19, n):
-        start_idx = i - 19
-        window_pv = np.sum(pv[start_idx:i+1])
-        window_vol = np.sum(volume[start_idx:i+1])
-        if window_vol > 0:
-            vwap_20[i] = window_pv / window_vol
+    # Calculate 1d volume spike: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume_1d > (1.5 * vol_ma_20)
     
-    # Precompute session filter (08-20 UTC)
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    in_session = (hours >= 8) & (hours <= 20)
+    # Calculate 1d ADX
+    adx_14 = calculate_adx(high_1d, low_1d, close_1d, 14)
+    
+    # Align 1d indicators
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
+    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
+    
+    # Calculate 4h Williams %R (14-period)
+    def calculate_williams_r(high, low, close, period=14):
+        highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+        lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+        wr = -100 * (highest_high - close) / (highest_high - lowest_low)
+        return wr
+    
+    wr_14 = calculate_williams_r(high, low, close, 14)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # warmup for 4h EMA50 and 1h VWAP20
+    start_idx = 50  # warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema50_4h_aligned[i]) or 
-            np.isnan(vwap_20[i])):
+        if (np.isnan(volume_spike_aligned[i]) or 
+            np.isnan(adx_14_aligned[i]) or 
+            np.isnan(wr_14[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade during 08-20 UTC
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
+        # Regime conditions
+        vol_spike = volume_spike_aligned[i] > 0.5  # boolean from aligned float
+        low_adx = adx_14_aligned[i] < 25  # low trend strength favors mean reversion
         
-        price = close[i]
-        vwap_val = vwap_20[i]
-        ema50_4h_val = ema50_4h_aligned[i]
+        # Williams %R levels
+        wr_val = wr_14[i]
+        oversold = wr_val < -80
+        overbought = wr_val > -20
+        exit_long = wr_val > -50  # exit long when recovering from oversold
+        exit_short = wr_val < -50  # exit short when declining from overbought
         
         if position == 0:
-            # Long: price > VWAP and 4h close > 4h EMA50
-            if price > vwap_val and close_4h[-1] > ema50_4h_val if len(close_4h) > 0 else False:
-                # Need to get current 4h close - use the last value from aligned 4h close
-                df_4h_close = get_htf_data(prices, '4h')['close'].values
-                df_4h_close_aligned = align_htf_to_ltf(prices, df_4h, df_4h_close)
-                if price > vwap_val and df_4h_close_aligned[i] > ema50_4h_val:
-                    signals[i] = 0.20
-                    position = 1
-            # Short: price < VWAP and 4h close < 4h EMA50
-            elif price < vwap_val and df_4h_close_aligned[i] < ema50_4h_val:
-                signals[i] = -0.20
+            # Long: oversold + volume spike + low ADX (mean reversion setup)
+            if oversold and vol_spike and low_adx:
+                signals[i] = 0.25
+                position = 1
+            # Short: overbought + volume spike + low ADX
+            elif overbought and vol_spike and low_adx:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price < VWAP OR 4h close < 4h EMA50
-            if price < vwap_val or df_4h_close_aligned[i] < ema50_4h_val:
+            # Exit long: Williams %R recovers above -50 OR volume spike ends
+            if exit_long or not vol_spike:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price > VWAP OR 4h close > 4h EMA50
-            if price > vwap_val or df_4h_close_aligned[i] > ema50_4h_val:
+            # Exit short: Williams %R declines below -50 OR volume spike ends
+            if exit_short or not vol_spike:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_VWAP_4hEMA50_Session"
-timeframe = "1h"
+name = "4h_WilliamsR_1dVolumeSpike_ADXRegime"
+timeframe = "4h"
 leverage = 1.0
