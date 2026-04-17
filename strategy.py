@@ -13,32 +13,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # Get weekly data for trend direction
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
     # Get daily data for pivot levels
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot points (Standard)
+    # Calculate weekly EMA50 for trend filter
+    close_1w_series = pd.Series(close_1w)
+    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # Calculate daily Camarilla pivot levels
     pivot_1d = (high_1d + low_1d + close_1d) / 3.0
     range_1d = high_1d - low_1d
-    r1_1d = pivot_1d + (range_1d * 1.0)
-    s1_1d = pivot_1d - (range_1d * 1.0)
-    r2_1d = pivot_1d + (range_1d * 2.0)
-    s2_1d = pivot_1d - (range_1d * 2.0)
+    r3_1d = close_1d + (range_1d * 1.1000)
+    s3_1d = close_1d - (range_1d * 1.1000)
+    r4_1d = close_1d + (range_1d * 1.5000)
+    s4_1d = close_1d - (range_1d * 1.5000)
     
-    # Align pivot levels to 1h timeframe
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    
-    # Get 4h EMA34 for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    close_4h_series = pd.Series(close_4h)
-    ema34_4h = close_4h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
+    # Align pivot levels to 6h timeframe
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,40 +53,40 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(r2_1d_aligned[i]) or np.isnan(s2_1d_aligned[i]) or 
-            np.isnan(ema34_4h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
+            np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with volume and above 4h EMA34
-            if close[i] > r1_1d_aligned[i] and volume_filter[i] and close[i] > ema34_4h_aligned[i]:
-                signals[i] = 0.20
+            # Long: price breaks above R4 with volume and above weekly EMA50
+            if close[i] > r4_1d_aligned[i] and volume_filter[i] and close[i] > ema50_1w_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume and below 4h EMA34
-            elif close[i] < s1_1d_aligned[i] and volume_filter[i] and close[i] < ema34_4h_aligned[i]:
-                signals[i] = -0.20
+            # Short: price breaks below S4 with volume and below weekly EMA50
+            elif close[i] < s4_1d_aligned[i] and volume_filter[i] and close[i] < ema50_1w_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below S2
-            if close[i] < s2_1d_aligned[i]:
+            # Exit long: price breaks below S3
+            if close[i] < s3_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above R2
-            if close[i] > r2_1d_aligned[i]:
+            # Exit short: price breaks above R3
+            if close[i] > r3_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Pivot_R1S1_R2S2_Breakout_Volume_Trend_v2"
-timeframe = "1h"
+name = "6h_Camarilla_R3_S3_R4_S4_Breakout_Volume_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
