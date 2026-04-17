@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_1d_RSI_Reversal_With_Filter
-Strategy: Mean reversion on RSI extremes with trend and volatility filters.
-Long: RSI(14) < 30 + price above 4h EMA20 + ATR(14) < 1.5x ATR(50) (low vol)
-Short: RSI(14) > 70 + price below 4h EMA20 + ATR(14) < 1.5x ATR(50)
-Exit: RSI crosses back to 50 (mean reversion complete)
+12h_1d_Ichimoku_Bounce_Trend
+Strategy: 12-hour Ichimoku Cloud bounce with trend confirmation.
+Long: Price touches Kumo (cloud) support + Tenkan > Kijun + price above daily EMA50
+Short: Price touches Kumo resistance + Tenkan < Kijun + price below daily EMA50
+Exit: Price crosses opposite Kumo boundary or Tenkan/Kijun cross reverses
 Position size: 0.25
-Designed to capture reversals in overbought/oversold conditions during low volatility periods,
-which occur in both bull and bear markets. Filters prevent whipsaws in strong trends.
-Timeframe: 4h
+Designed to capture trend continuations after pullbacks in both bull and bear markets.
+Timeframe: 12h
 """
 
 import numpy as np
@@ -23,76 +22,89 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate Ichimoku components on 12h data
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2.0
     
-    # Wilder's smoothing (equivalent to alpha=1/14)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, 0.0), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2.0
     
-    # Calculate EMA20 on 4h
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = ((tenkan + kijun) / 2.0)
     
-    # Calculate ATR(14) and ATR(50) for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]  # first bar
-    tr2[0] = np.abs(high[0] - close[0])
-    tr3[0] = np.abs(low[0] - close[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr50 = pd.Series(tr).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((period52_high + period52_low) / 2.0)
     
-    # Volatility filter: current ATR < 1.5 * long-term ATR (avoid high volatility whipsaws)
-    vol_filter = atr14 < (1.5 * atr50)
+    # Kumo (Cloud) boundaries: Senkou Span A and B shifted forward 26 periods
+    # For backtesting, we use current Senkou spans as cloud boundaries
+    # Cloud top = max(Senkou A, Senkou B), Cloud bottom = min(Senkou A, Senkou B)
+    cloud_top = np.maximum(senkou_a, senkou_b)
+    cloud_bottom = np.minimum(senkou_a, senkou_b)
+    
+    # Calculate 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    close_series_1d = pd.Series(close_1d)
+    ema50_1d = close_series_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough data for ATR50
+    start_idx = 52  # Need enough data for Senkou B
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if np.isnan(rsi[i]) or np.isnan(ema20[i]) or np.isnan(vol_filter[i]):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
+            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or
+            np.isnan(ema50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # RSI conditions
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
-        rsi_neutral = (rsi[i] >= 40) & (rsi[i] <= 60)  # exit zone
+        # Trend filter: price above/below 1d EMA50
+        price_above_ema = close[i] > ema50_1d_aligned[i]
+        price_below_ema = close[i] < ema50_1d_aligned[i]
         
-        # Trend filter: price relative to EMA20
-        price_above_ema = close[i] > ema20[i]
-        price_below_ema = close[i] < ema20[i]
+        # Ichimoku signals
+        price_in_cloud = (close[i] >= cloud_bottom[i]) and (close[i] <= cloud_top[i])
+        price_above_cloud = close[i] > cloud_top[i]
+        price_below_cloud = close[i] < cloud_bottom[i]
+        tenkan_above_kijun = tenkan[i] > kijun[i]
+        tenkan_below_kijun = tenkan[i] < kijun[i]
+        
+        # Touch cloud boundaries (within 0.3% of cloud edge)
+        touch_cloud_top = abs(close[i] - cloud_top[i]) < (0.003 * cloud_top[i])
+        touch_cloud_bottom = abs(close[i] - cloud_bottom[i]) < (0.003 * cloud_bottom[i])
         
         if position == 0:
-            # Long: RSI oversold + price above EMA + low volatility
-            if rsi_oversold and price_above_ema and vol_filter[i]:
+            # Long: touch cloud bottom + Tenkan > Kijun + price above daily EMA
+            if touch_cloud_bottom and tenkan_above_kijun and price_above_ema:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought + price below EMA + low volatility
-            elif rsi_overbought and price_below_ema and vol_filter[i]:
+            # Short: touch cloud top + Tenkan < Kijun + price below daily EMA
+            elif touch_cloud_top and tenkan_below_kijun and price_below_ema:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI returns to neutral zone (mean reversion)
-            if rsi_neutral:
+            # Exit long: price crosses below cloud bottom OR Tenkan < Kijun
+            if close[i] < cloud_bottom[i] or tenkan_below_kijun:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI returns to neutral zone
-            if rsi_neutral:
+            # Exit short: price crosses above cloud top OR Tenkan > Kijun
+            if close[i] > cloud_top[i] or tenkan_above_kijun:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_RSI_Reversal_With_Filter"
-timeframe = "4h"
+name = "12h_1d_Ichimoku_Bounce_Trend"
+timeframe = "12h"
 leverage = 1.0
