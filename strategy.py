@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_1d_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V1
-Hypothesis: On 6h timeframe, buy when price breaks above daily Camarilla R1 with volume spike (>1.5x median volume) and ATR expansion (ATR > 1.2x median ATR), sell when breaks below daily S1. Uses volume and volatility filters to avoid false breakouts. Target: 15-25 trades/year for low fee drag.
+12h_1d_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V2
+Hypothesis: On 12h timeframe, buy when price breaks above daily Camarilla R1 with volume spike (>1.5x median volume) and ATR expansion (ATR > 1.2x median ATR), sell when breaks below daily S1. Uses volume and volatility filters to avoid false breakouts. Target: 15-25 trades/year for low fee drag. This version fixes the volume spike calculation by using the correct aligned volume data.
 """
 
 import numpy as np
@@ -70,6 +70,9 @@ def generate_signals(prices):
     vol_median_1d = pd.Series(volume_1d).rolling(window=50, min_periods=50).median().values
     vol_median_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_median_1d)
     
+    # Daily volume aligned for current volume check
+    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+    
     signals = np.zeros(n)
     
     # Warmup period
@@ -84,13 +87,14 @@ def generate_signals(prices):
             np.isnan(atr_median_1d_aligned[i]) or
             np.isnan(r1_1d_aligned[i]) or
             np.isnan(s1_1d_aligned[i]) or
-            np.isnan(vol_median_1d_aligned[i])):
+            np.isnan(vol_median_1d_aligned[i]) or
+            np.isnan(volume_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Get current daily bar's volume and ATR for confirmation
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
+        vol_1d_current = volume_1d_aligned[i]
         atr_1d_current = atr_1d_aligned[i]
         
         # Volume spike: current volume > 1.5x median volume
@@ -133,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V1"
-timeframe = "6h"
+name = "12h_1d_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V2"
+timeframe = "12h"
 leverage = 1.0
