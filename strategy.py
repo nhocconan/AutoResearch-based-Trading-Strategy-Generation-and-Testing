@@ -71,6 +71,25 @@ def generate_signals(prices):
     middle_20_aligned = align_htf_to_ltf(prices, df_1d, middle_20)
     adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
     
+    # === 1d RSI (14-period) for mean reversion filter ===
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    def wilders_smoothing_rsi(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            result[period-1] = np.mean(data[:period])
+            for i in range(period, len(data)):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    avg_gain = wilders_smoothing_rsi(gain, 14)
+    avg_loss = wilders_smoothing_rsi(loss, 14)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_14 = 100 - (100 / (1 + rs))
+    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
+    
     signals = np.zeros(n)
     
     # Warmup period
@@ -82,7 +101,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # Skip if any required data is NaN
         if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
-            np.isnan(adx_14_aligned[i])):
+            np.isnan(adx_14_aligned[i]) or np.isnan(rsi_14_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -98,26 +117,29 @@ def generate_signals(prices):
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price breaks above upper Donchian + strong trend (ADX>25) + volume
+            # Long: price breaks above upper Donchian + strong trend (ADX>25) + volume + RSI not overbought
             if (close[i] > upper_20_aligned[i] and 
                 adx_14_aligned[i] > 25 and 
-                vol_confirm):
+                vol_confirm and
+                rsi_14_aligned[i] < 70):
                 signals[i] = 0.30
                 position = 1
                 continue
-            # Short: price breaks below lower Donchian + strong trend (ADX>25) + volume
+            # Short: price breaks below lower Donchian + strong trend (ADX>25) + volume + RSI not oversold
             elif (close[i] < lower_20_aligned[i] and 
                   adx_14_aligned[i] > 25 and 
-                  vol_confirm):
+                  vol_confirm and
+                  rsi_14_aligned[i] > 30):
                 signals[i] = -0.30
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price returns to middle Donchian OR trend weakens (ADX<20)
+            # Exit long: price returns to middle Donchian OR trend weakens (ADX<20) OR RSI overbought
             if (close[i] < middle_20_aligned[i] or 
-                adx_14_aligned[i] < 20):
+                adx_14_aligned[i] < 20 or
+                rsi_14_aligned[i] > 70):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -125,9 +147,10 @@ def generate_signals(prices):
                 signals[i] = 0.30
         
         elif position == -1:
-            # Exit short: price returns to middle Donchian OR trend weakens (ADX<20)
+            # Exit short: price returns to middle Donchian OR trend weakens (ADX<20) OR RSI oversold
             if (close[i] > middle_20_aligned[i] or 
-                adx_14_aligned[i] < 20):
+                adx_14_aligned[i] < 20 or
+                rsi_14_aligned[i] < 30):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -136,6 +159,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "Donchian_ADX_Volume_Breakout_v2"
+name = "Donchian_ADX_RSI_Volume_Breakout_v1"
 timeframe = "4h"
 leverage = 1.0
