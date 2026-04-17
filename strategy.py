@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: Weekly price extremes act as significant support/resistance levels.
-Price tends to reverse or consolidate when reaching prior week's high/low.
-Combining weekly range boundaries with daily RSI extremes and volume confirmation
-creates high-probability mean-reversion trades. Targets 50-80 trades total over 4 years
-by requiring price touch of weekly high/low, RSI <30 or >70, and volume >1.5x average.
-Works in both bull (buy dips to weekly support) and bear (sell rallies to weekly resistance).
+Hypothesis: On 12h timeframe, price tends to respect weekly Ichimoku Cloud support/resistance.
+Combining weekly Ichimoku Cloud with 12h volume spikes and price above/below Kumo creates
+high-probability trend-following trades. The weekly Cloud acts as dynamic support/resistance
+while volume confirms breakout strength. Strategy targets 15-25 trades per year by requiring
+price to break above/below Cloud with volume confirmation. Works in bull markets (trend
+continuation above Cloud) and bear markets (trend continuation below Cloud).
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,67 +22,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for range calculation
+    # Get weekly data for Ichimoku Cloud
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly high/low from previous week
-    whigh = df_1w['high'].values
-    wlow = df_1w['low'].values
+    # Calculate Ichimoku Cloud components (weekly)
+    # Tenkan-sen (Conversion Line): (9-period high + low)/2
+    period9_high = pd.Series(df_1w['high']).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(df_1w['low']).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    # Calculate daily RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Kijun-sen (Base Line): (26-period high + low)/2
+    period26_high = pd.Series(df_1w['high']).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(df_1w['low']).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
     
-    # Volume confirmation: 20-day average volume
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2, plotted 26 periods ahead
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + low)/2, plotted 26 periods ahead
+    period52_high = pd.Series(df_1w['high']).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(df_1w['low']).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = ((period52_high + period52_low) / 2)
+    
+    # Align Ichimoku components to 12h timeframe
+    tenkan_12h = align_htf_to_ltf(prices, df_1w, tenkan_sen)
+    kijun_12h = align_htf_to_ltf(prices, df_1w, kijun_sen)
+    span_a_12h = align_htf_to_ltf(prices, df_1w, senkou_span_a)
+    span_b_12h = align_htf_to_ltf(prices, df_1w, senkou_span_b)
+    
+    # Volume confirmation: 20-period volume MA on 12h
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    
-    # Align weekly levels to daily timeframe
-    whigh_daily = align_htf_to_ltf(prices, df_1w, whigh)
-    wlow_daily = align_htf_to_ltf(prices, df_1w, wlow)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 35  # warmup for RSI and volume MA
+    start_idx = 100  # warmup for Ichimoku calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(whigh_daily[i]) or np.isnan(wlow_daily[i]) or
-            np.isnan(rsi_values[i]) or np.isnan(volume_ma_20.iloc[i])):
+        if (np.isnan(tenkan_12h[i]) or np.isnan(kijun_12h[i]) or 
+            np.isnan(span_a_12h[i]) or np.isnan(span_b_12h[i]) or
+            np.isnan(volume_ma_20.iloc[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = volume_ma_20.iloc[i]
-        rsi_val = rsi_values[i]
+        
+        # Determine Cloud boundaries and trend
+        upper_cloud = max(span_a_12h[i], span_b_12h[i])
+        lower_cloud = min(span_a_12h[i], span_b_12h[i])
+        in_cloud = lower_cloud <= price <= upper_cloud
+        above_cloud = price > upper_cloud
+        below_cloud = price < lower_cloud
         
         if position == 0:
-            # Long: price at weekly low, oversold RSI, volume confirmation
-            if price <= wlow_daily[i] * 1.002 and rsi_val < 30 and vol > 1.5 * vol_ma:
+            # Long: price breaks above Cloud with volume spike
+            if above_cloud and vol > 1.8 * vol_ma:
                 signals[i] = 0.25
                 position = 1
-            # Short: price at weekly high, overbought RSI, volume confirmation
-            elif price >= whigh_daily[i] * 0.998 and rsi_val > 70 and vol > 1.5 * vol_ma:
+            # Short: price breaks below Cloud with volume spike
+            elif below_cloud and vol > 1.8 * vol_ma:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price reaches weekly high or RSI overbought
-            if price >= whigh_daily[i] * 0.995 or rsi_val > 70:
+            # Long exit: price re-enters Cloud or volume drops
+            if in_cloud or vol < 0.7 * vol_ma:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price reaches weekly low or RSI oversold
-            if price <= wlow_daily[i] * 1.005 or rsi_val < 30:
+            # Short exit: price re-enters Cloud or volume drops
+            if in_cloud or vol < 0.7 * vol_ma:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyHighLow_RSI_Volume"
-timeframe = "1d"
+name = "12h_IchimokuCloud_Volume_Breakout"
+timeframe = "12h"
 leverage = 1.0
