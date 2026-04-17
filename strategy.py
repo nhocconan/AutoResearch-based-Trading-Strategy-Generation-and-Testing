@@ -1,13 +1,9 @@
-#!/usr/bin/env python3
-"""
-1d Keltner Channel Breakout + Volume Spike + ADX Trend Filter
-Long: Close > Upper KC(20,2) + ADX > 25 + Volume > 1.5x 20-period average
-Short: Close < Lower KC(20,2) + ADX > 25 + Volume > 1.5x 20-period average
-Exit: Opposite signal or Close crosses middle KC line (EMA20)
-Uses weekly trend filter to avoid counter-trend trades in strong trends.
-Designed to work in both bull and bear markets by capturing volatility expansions.
-Target: 30-100 total trades over 4 years (7-25/year)
-"""
+# 12h_Camarilla_R1S1_Breakout_VolumeSpike_ADXFilter
+# Hypothesis: Camarilla pivot levels from daily timeframe act as strong support/resistance.
+# Breakout above R1 or below S1 with volume confirmation and ADX trend filter captures
+# institutional order flow. Works in both bull/bear markets by only taking breakouts
+# in direction of higher timeframe trend (ADX > 25).
+# Target: 20-50 trades over 4 years (5-12/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
@@ -23,78 +19,101 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get 1d data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly EMA(20) for trend filter
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate Camarilla levels for each day
+    # R1 = Close + (High - Low) * 1.12 / 12
+    # S1 = Close - (High - Low) * 1.12 / 12
+    camarilla_range = high_1d - low_1d
+    r1 = close_1d + camarilla_range * 1.12 / 12
+    s1 = close_1d - camarilla_range * 1.12 / 12
     
-    # Calculate Keltner Channel components (20,2)
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    atr = pd.Series(high - low).rolling(window=20, min_periods=20).mean().values
-    upper_kc = ema_20 + 2 * atr
-    lower_kc = ema_20 - 2 * atr
-    middle_kc = ema_20  # EMA20 as middle line
+    # Align Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Calculate volume average for spike detection
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate ADX(14) on 12h for trend strength filter
+    # ADX requires +DM, -DM, TR
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                       np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                        np.maximum(low[:-1] - low[1:], 0), 0)
+    tr = np.maximum(high[1:] - low[1:], 
+                    np.maximum(np.abs(high[1:] - close[:-1]), 
+                               np.abs(low[1:] - close[:-1])))
     
-    # Calculate ADX for trend strength
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    plus_dm = np.insert(plus_dm, 0, 0)
-    minus_dm = np.insert(minus_dm, 0, 0)
-    tr = np.maximum(high - low, np.absolute(high - np.roll(low, 1)), np.absolute(low - np.roll(high, 1)))
-    tr[0] = high[0] - low[0]
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_14
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_14
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # Pad arrays to original length
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    tr = np.concatenate([[0], tr])
+    
+    # Smooth with Wilder's smoothing (alpha = 1/period)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            result[period-1] = np.nansum(data[:period])
+            for i in range(period, len(data)):
+                result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    period = 14
+    plus_dm_smooth = wilders_smoothing(plus_dm, period)
+    minus_dm_smooth = wilders_smoothing(minus_dm, period)
+    tr_smooth = wilders_smoothing(tr, period)
+    
+    # Avoid division by zero
+    plus_di = np.where(tr_smooth != 0, 100 * plus_dm_smooth / tr_smooth, 0)
+    minus_di = np.where(tr_smooth != 0, 100 * minus_dm_smooth / tr_smooth, 0)
+    dx = np.where((plus_di + minus_di) != 0, 
+                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = wilders_smoothing(dx, period)
+    
+    # Volume spike filter: volume > 2x 20-period volume SMA
+    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = max(30, 20)  # need sufficient data for indicators
+    start_idx = max(30, 34)  # need ADX and volume SMA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(upper_kc[i]) or np.isnan(lower_kc[i]) or
-            np.isnan(middle_kc[i]) or np.isnan(vol_avg[i]) or np.isnan(adx[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(adx[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
-        
+            
         price = close[i]
         vol = volume[i]
-        vol_avg_val = vol_avg[i]
+        vol_sma_val = vol_sma_20[i]
         adx_val = adx[i]
-        upper = upper_kc[i]
-        lower = lower_kc[i]
-        middle = middle_kc[i]
-        weekly_trend = ema_20_1w_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
         
         if position == 0:
-            # Long: Close > Upper KC + ADX > 25 + Volume spike + Weekly uptrend (price > weekly EMA20)
-            if price > upper and adx_val > 25 and vol > 1.5 * vol_avg_val and price > weekly_trend:
+            # Long: Breakout above R1 with volume spike and ADX > 25 (trending market)
+            if price > r1_val and vol > 2.0 * vol_sma_val and adx_val > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close < Lower KC + ADX > 25 + Volume spike + Weekly downtrend (price < weekly EMA20)
-            elif price < lower and adx_val > 25 and vol > 1.5 * vol_avg_val and price < weekly_trend:
+            # Short: Breakdown below S1 with volume spike and ADX > 25
+            elif price < s1_val and vol > 2.0 * vol_sma_val and adx_val > 25:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Close < Middle KC or weekly trend turns down
-            if price < middle or price < weekly_trend:
+            # Long exit: Price re-enters below R1 or ADX weakens (< 20)
+            if price < r1_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Close > Middle KC or weekly trend turns up
-            if price > middle or price > weekly_trend:
+            # Short exit: Price re-enters above S1 or ADX weakens (< 20)
+            if price > s1_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Keltner_Breakout_Volume_ADX_WeeklyTrend"
-timeframe = "1d"
+name = "12h_Camarilla_R1S1_Breakout_VolumeSpike_ADXFilter"
+timeframe = "12h"
 leverage = 1.0
