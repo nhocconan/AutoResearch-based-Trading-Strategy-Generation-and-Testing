@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Kumo_Twist_Trend
-Strategy: 6h Ichimoku Kumo twist with volume confirmation and weekly trend filter.
-Long: Tenkan > Kijun + price above Kumo + Kumo future twist bullish + weekly uptrend
-Short: Tenkan < Kijun + price below Kumo + Kumo future twist bearish + weekly downtrend
-Exit: Tenkan/Kijun cross reversal or Kumo break
+6h_Pivot_R1_S1_Breakout_Volume_ATRFilter_v3
+Strategy: 6h Camarilla pivot breakout with volume and ATR confirmation.
+Long: Break above R3 with volume > 1.5x MA and ATR(14) > 0.5 * ATR(50)
+Short: Break below S3 with volume > 1.5x MA and ATR(14) > 0.5 * ATR(50)
+Exit: Price returns to Pivot level or ATR condition fails
 Position size: 0.25
-Designed to catch strong trends while avoiding chop using Ichimoku's multi-line confirmation.
+Designed to capture institutional breakouts while avoiding false signals in low volatility.
 Timeframe: 6h
 """
 
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,107 +24,82 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Ichimoku parameters
-    tenkan_period = 9
-    kijun_period = 26
-    senkou_span_b_period = 52
-    displacement = 26
+    # Calculate ATR for volatility filter
+    tr1 = high - low
+    tr2 = np.abs(np.concatenate([[high[0]], high[:-1]]) - np.concatenate([[close[0]], close[:-1]]))
+    tr3 = np.abs(np.concatenate([[low[0]], low[:-1]]) - np.concatenate([[close[0]], close[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = np.convolve(tr, np.ones(14)/14, mode='full')[:len(tr)]
+    atr = np.concatenate([np.full(13, np.nan), atr[13:]])
+    atr_long = np.convolve(tr, np.ones(50)/50, mode='full')[:len(tr)]
+    atr_long = np.concatenate([np.full(49, np.nan), atr_long[49:]])
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    highest_tenkan = np.maximum.accumulate(high)
-    lowest_tenkan = np.minimum.accumulate(low)
-    # For rolling window, use pandas for simplicity
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    tenkan = (high_series.rolling(window=tenkan_period, center=False).max() + 
-              low_series.rolling(window=tenkan_period, center=False).min()) / 2
-    tenkan = tenkan.values
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    kijun = (high_series.rolling(window=kijun_period, center=False).max() + 
-             low_series.rolling(window=kijun_period, center=False).min()) / 2
-    kijun = kijun.values
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    senkou_b = (high_series.rolling(window=senkou_span_b_period, center=False).max() + 
-                low_series.rolling(window=senkou_span_b_period, center=False).min()) / 2
-    senkou_b = senkou_b.values
-    
-    # Future Kumo twist (bullish/bearish): compare current Senkou A/B with displaced Senkou A/B
-    # Kumo twist bullish: Senkou A > Senkou B (future)
-    # Kumo twist bearish: Senkou A < Senkou B (future)
-    # We need to compare current Senkou with Senkou from 'displacement' periods ago
-    senkou_a_lagged = np.roll(senkou_a, displacement)
-    senkou_b_lagged = np.roll(senkou_b, displacement)
-    # First 'displacement' values are invalid due to roll
-    senkou_a_lagged[:displacement] = np.nan
-    senkou_b_lagged[:displacement] = np.nan
-    
-    kumo_twist_bullish = senkou_a > senkou_b_lagged  # Future Kumo bullish twist
-    kumo_twist_bearish = senkou_a < senkou_b_lagged  # Future Kumo bearish twist
-    
-    # Get weekly trend (close > open = uptrend)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 12h data for Camarilla pivots
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    trend_1w = (df_1w['close'] > df_1w['open']).astype(float).values  # 1 for up, 0 for down
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    # Calculate Camarilla pivots for each 12h bar
+    # Formula: Pivot = (H+L+C)/3
+    # R3 = Pivot + 1.1*(H-L), S3 = Pivot - 1.1*(H-L)
+    h_12h = df_12h['high'].values
+    l_12h = df_12h['low'].values
+    c_12h = df_12h['close'].values
     
-    # Volume filter: volume > 1.5x 20-period average
-    volume_series = pd.Series(volume)
-    volume_ma20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    pivot_12h = (h_12h + l_12h + c_12h) / 3.0
+    range_12h = h_12h - l_12h
+    r3_12h = pivot_12h + 1.1 * range_12h
+    s3_12h = pivot_12h - 1.1 * range_12h
+    
+    # Align to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
+    r3_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
+    s3_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
+    
+    # Volume filter
+    volume_ma20 = np.convolve(volume, np.ones(20)/20, mode='full')[:len(volume)]
+    volume_ma20 = np.concatenate([np.full(19, np.nan), volume_ma20[19:]])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start from sufficient warmup
-    start_idx = max(tenkan_period, kijun_period, senkou_span_b_period, displacement, 20) + 5
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or np.isnan(senkou_a[i]) or 
-            np.isnan(senkou_b[i]) or np.isnan(trend_1w_aligned[i]) or np.isnan(volume_ma20[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(volume_ma20[i]) or np.isnan(atr[i]) or np.isnan(atr_long[i])):
             signals[i] = 0.0
             continue
         
-        # Current volume
-        volume_current = volume[i]
-        volume_filter = volume_current > (1.5 * volume_ma20[i])
+        # Volume filter
+        volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
-        # Ichimoku conditions
-        price_above_kumo = close[i] > max(senkou_a[i], senkou_b[i])
-        price_below_kumo = close[i] < min(senkou_a[i], senkou_b[i])
-        tenkan_above_kijun = tenkan[i] > kijun[i]
-        tenkan_below_kijun = tenkan[i] < kijun[i]
+        # ATR volatility filter: short-term ATR > 50% of long-term ATR
+        atr_filter = atr[i] > (0.5 * atr_long[i])
         
         # Entry signals
         if position == 0:
-            # Long: Tenkan > Kijun + price above Kumo + bullish Kumo twist + weekly uptrend + volume
-            if (tenkan_above_kijun and price_above_kumo and kumo_twist_bullish[i] and 
-                trend_1w_aligned[i] > 0.5 and volume_filter):
+            # Long: Break above R3 with volume and volatility confirmation
+            if close[i] > r3_aligned[i] and volume_filter and atr_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Tenkan < Kijun + price below Kumo + bearish Kumo twist + weekly downtrend + volume
-            elif (tenkan_below_kijun and price_below_kumo and kumo_twist_bearish[i] and 
-                  trend_1w_aligned[i] < 0.5 and volume_filter):
+            # Short: Break below S3 with volume and volatility confirmation
+            elif close[i] < s3_aligned[i] and volume_filter and atr_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Tenkan/Kijun cross down OR price breaks below Kumo
-            if not tenkan_above_kijun or not price_above_kumo:
+            # Exit long: Price returns to pivot or ATR condition fails
+            if close[i] <= pivot_aligned[i] or not atr_filter:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Tenkan/Kijun cross up OR price breaks above Kumo
-            if not tenkan_below_kijun or not price_below_kumo:
+            # Exit short: Price returns to pivot or ATR condition fails
+            if close[i] >= pivot_aligned[i] or not atr_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -132,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Kumo_Twist_Trend"
+name = "6h_Pivot_R1_S1_Breakout_Volume_ATRFilter_v3"
 timeframe = "6h"
 leverage = 1.0
