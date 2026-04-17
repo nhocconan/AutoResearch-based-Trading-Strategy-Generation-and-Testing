@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Bollinger Band breakout with volume confirmation and ATR-based trend filter.
-Long when price closes above upper BB AND volume > 1.5x average AND ATR(14) > ATR(50) (trending).
-Short when price closes below lower BB AND volume > 1.5x average AND ATR(14) > ATR(50).
-Exit when price reverts to middle BB OR ATR(14) < ATR(50) (ranging).
-Uses 4h for BB and volume, 1d for ATR regime filter to avoid whipsaw in sideways markets.
-Target: 75-200 total trades over 4 years (19-50/year). BB breakouts capture momentum,
-volume confirmation filters fakeouts, ATR regime ensures trades only in trending conditions.
+Hypothesis: 12h Donchian(20) breakout with volume confirmation and 1d choppiness regime filter.
+Long when price breaks above Donchian upper band AND volume > 1.5x average AND chop < 61.8 (trending).
+Short when price breaks below Donchian lower band AND volume > 1.5x average AND chop < 61.8.
+Exit when price reverts to Donchian middle (20-period mean) or chop > 61.8 (choppy market).
+Uses 12h for Donchian calculation and 1d for choppiness filter to reduce whipsaw.
+Target: 50-150 total trades over 4 years (12-37/year). Donchian breakouts capture trends,
+volume confirmation filters fakeouts, chop filter avoids ranging markets.
 Works in bull markets (captures uptrends) and bear markets (captures downtrends).
 """
 
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,27 +24,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Bollinger Bands and volume
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    # Get 12h data for Donchian calculation
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate Bollinger Bands on 4h timeframe (20-period, 2 std)
-    close_4h_series = pd.Series(close_4h)
-    bb_middle = close_4h_series.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_4h_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
+    # Calculate Donchian channels on 12h timeframe (20-period)
+    high_12h_series = pd.Series(high_12h)
+    low_12h_series = pd.Series(low_12h)
+    donchian_upper = high_12h_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_12h_series.rolling(window=20, min_periods=20).min().values
+    donchian_middle = ((donchian_upper + donchian_lower) / 2).values
     
-    # Get 1d data for ATR regime filter
+    # Get 1d data for choppiness filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ATR on 1d timeframe
+    # Calculate choppiness index on 1d timeframe (14-period)
     high_1d_series = pd.Series(high_1d)
     low_1d_series = pd.Series(low_1d)
     close_1d_series = pd.Series(close_1d)
@@ -56,69 +56,73 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # first period
     
-    # ATR(14) and ATR(50) for trend regime
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    # ATR (14-period)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align 4h Bollinger Bands to 4h timeframe (no alignment needed)
-    bb_upper_aligned = bb_upper
-    bb_lower_aligned = bb_lower
-    bb_middle_aligned = bb_middle
+    # Highest high and lowest low over 14 periods
+    hh = high_1d_series.rolling(window=14, min_periods=14).max().values
+    ll = low_1d_series.rolling(window=14, min_periods=14).min().values
     
-    # Align 1d ATR to 4h timeframe
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    atr_50_aligned = align_htf_to_ltf(prices, df_1d, atr_50)
+    # Chop = 100 * log10(sum(atr)/log(hh/ll)) / log10(14)
+    sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    ratio = hh / ll
+    ratio = np.where(ratio <= 1, 1.001, ratio)  # avoid division by zero or log<=0
+    chop = 100 * (np.log10(sum_atr) - np.log10(ratio)) / np.log10(14)
     
-    # Volume average (20-period) on 4h
-    volume_ma = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_4h, volume_ma)
+    # Align 12h Donchian to 12h timeframe (no alignment needed)
+    donchian_upper_aligned = donchian_upper
+    donchian_lower_aligned = donchian_lower
+    donchian_middle_aligned = donchian_middle
+    
+    # Align 1d chop to 12h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Volume average (20-period) on 12h
+    volume_ma = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_ma_aligned = align_htf_to_ltf(prices, df_12h, volume_ma)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 100  # warmup for indicators
+    start_idx = 50  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or 
-            np.isnan(bb_middle_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
-            np.isnan(atr_50_aligned[i]) or np.isnan(volume_ma_aligned[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(donchian_middle_aligned[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(volume_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        bu = bb_upper_aligned[i]
-        bl = bb_lower_aligned[i]
-        bm = bb_middle_aligned[i]
-        atr14 = atr_14_aligned[i]
-        atr50 = atr_50_aligned[i]
+        du = donchian_upper_aligned[i]
+        dl = donchian_lower_aligned[i]
+        dm = donchian_middle_aligned[i]
+        chop_val = chop_aligned[i]
         vol_ma = volume_ma_aligned[i]
         vol = volume[i]
         price = close[i]
         
-        # Trend condition: ATR(14) > ATR(50) indicates trending market
-        is_trending = atr14 > atr50
-        
         if position == 0:
-            # Long: price > upper BB AND volume > 1.5x avg AND trending
-            if price > bu and vol > 1.5 * vol_ma and is_trending:
+            # Long: price > Donchian upper AND volume > 1.5x avg AND chop < 61.8 (trending)
+            if price > du and vol > 1.5 * vol_ma and chop_val < 61.8:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < lower BB AND volume > 1.5x avg AND trending
-            elif price < bl and vol > 1.5 * vol_ma and is_trending:
+            # Short: price < Donchian lower AND volume > 1.5x avg AND chop < 61.8 (trending)
+            elif price < dl and vol > 1.5 * vol_ma and chop_val < 61.8:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price < middle BB OR not trending
-            if price < bm or not is_trending:
+            # Exit long: price < Donchian middle OR chop > 61.8 (choppy market)
+            if price < dm or chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price > middle BB OR not trending
-            if price > bm or not is_trending:
+            # Exit short: price > Donchian middle OR chop > 61.8 (choppy market)
+            if price > dm or chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -126,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_BollingerBreakout_Volume_ATRTrend"
-timeframe = "4h"
+name = "12h_Donchian20_Volume_Chop_Filter"
+timeframe = "12h"
 leverage = 1.0
