@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian channel breakout with 1-day volume confirmation and ADX trend filter.
-In bull markets: price breaks above upper Donchian band (20-period high) with strong volume and ADX > 25.
-In bear markets: price breaks below lower Donchian band (20-period low) with strong volume and ADX > 25.
-This captures breakouts in both directions while filtering choppy markets. Volume confirms institutional participation.
-Designed for low trade frequency (<50/year) to minimize fee drag.
+Hypothesis: 6h timeframe strategy using 1-day pivot points with volume confirmation and trend filter.
+Long when price breaks above R1 with volume > 1.5x 20-bar volume MA and price > 20-bar EMA.
+Short when price breaks below S1 with volume > 1.5x 20-bar volume MA and price < 20-bar EMA.
+Exit when price returns to pivot point (PP) or volume drops below average.
+Designed for 6h timeframe with strict entry conditions to limit trades to 50-150 total over 4 years.
+Uses 1-day pivot points calculated from prior day's OHLC.
 """
 
 import numpy as np
@@ -21,73 +22,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max()
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min()
-    
-    # ADX (14-period)
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr[0] = tr1[0]
-    
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean()
-    plus_di = 100 * (pd.Series(plus_dm).rolling(window=14, min_periods=14).mean() / atr)
-    minus_di = 100 * (pd.Series(minus_dm).rolling(window=14, min_periods=14).mean() / atr)
-    dx = (np.abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean()
-    adx = adx.values
-    
-    # 1-day volume confirmation (using 1d average volume)
+    # Get 1-day data once before loop
     df_1d = get_htf_data(prices, '1d')
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean()
-    vol_ma_1d_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d_20.values)
+    
+    # Calculate pivot points from prior day's OHLC
+    # PP = (H + L + C) / 3
+    # R1 = 2*PP - L
+    # S1 = 2*PP - H
+    pp = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    r1 = 2 * pp - df_1d['low']
+    s1 = 2 * pp - df_1d['high']
+    
+    # Align pivot levels to 6h timeframe (wait for daily bar to close)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp.values)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
+    
+    # 20-bar EMA for trend filter
+    close_series = pd.Series(close)
+    ema_20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Volume confirmation: 20-period volume MA
+    volume_series = pd.Series(volume)
+    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 40  # warmup for Donchian(20) + ADX(14)
+    start_idx = max(30, 20)  # warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(adx[i]) or np.isnan(vol_ma_1d_20_aligned[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema_20[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = vol_ma_1d_20_aligned[i]
+        vol_ma = volume_ma_20[i]
+        pp_val = pp_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema_val = ema_20[i]
         
         if position == 0:
-            # Long breakout: price > 20-period high + volume > 1.5x 1d avg + ADX > 25
-            if price > highest_high[i] and vol > 1.5 * vol_ma and adx[i] > 25:
+            # Long: price breaks above R1 with volume confirmation and uptrend
+            if price > r1_val and vol > 1.5 * vol_ma and price > ema_val:
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price < 20-period low + volume > 1.5x 1d avg + ADX > 25
-            elif price < lowest_low[i] and vol > 1.5 * vol_ma and adx[i] > 25:
+            # Short: price breaks below S1 with volume confirmation and downtrend
+            elif price < s1_val and vol > 1.5 * vol_ma and price < ema_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when price breaks below 10-period low (trailing exit) or ADX weak
-            lowest_low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values[i]
-            if price < lowest_low_10 or adx[i] < 20:
+            # Exit when price returns to pivot point or volume drops
+            if price <= pp_val or vol < vol_ma:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price breaks above 10-period high (trailing exit) or ADX weak
-            highest_high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values[i]
-            if price > highest_high_10 or adx[i] < 20:
+            # Exit when price returns to pivot point or volume drops
+            if price >= pp_val or vol < vol_ma:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -95,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DonchianBreakout_1dVolume_ADX"
-timeframe = "4h"
+name = "6h_1D_Pivot_R1S1_Volume_EMA_Filter"
+timeframe = "6h"
 leverage = 1.0
