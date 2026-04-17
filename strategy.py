@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-hour price action filtered by 4-hour momentum and 1-day volatility regime.
-# Uses 4h RSI for trend bias and 1d ATR ratio for volatility filtering to avoid chop.
-# Entry: 1h price crosses above/below 4h EMA with momentum confirmation.
-# Exit: opposite signal or volatility expansion.
-# Designed for low trade frequency (15-35/year) to minimize fee drag.
-# Works in bull via momentum continuation and in bear via mean-reversion in low volatility.
+# Hypothesis: 12-hour Donchian breakout with 1-day ATR filter and volume confirmation
+# Uses 12h timeframe for entry, 1d timeframe for volatility and volume filters
+# Designed to work in both bull and bear markets by capturing breakouts during expansion phases
+# Entry: Price breaks above/below 20-period 12h Donchian channel with 1d volume confirmation
+# Filter: 1d ATR > 20-period average ATR (volatility expansion)
+# Exit: Opposite break or volatility contraction
+# Position size: 0.25 (25% of capital) to manage drawdown
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,101 +21,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h data for trend bias ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    rsi_period = 14
-    delta = np.diff(close_4h, prepend=close_4h[0])
-    gain = np.maximum(delta, 0)
-    loss = np.maximum(-delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, min_periods=rsi_period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, min_periods=rsi_period).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_4h = 100 - (100 / (1 + rs))
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
-    
-    # 4h EMA for trend
-    ema_4h = pd.Series(close_4h).ewm(span=21, min_periods=21).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # === 1d data for volatility regime ===
+    # === 1d data for volatility and volume filters ===
     df_1d = get_htf_data(prices, '1d')
+    
+    # 1d ATR calculation
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).ewm(span=14, min_periods=14).mean().values
-    atr_ma_1d = pd.Series(atr_1d).ewm(span=50, min_periods=50).mean().values
-    atr_ratio_1d = atr_1d / (atr_ma_1d + 1e-10)
-    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # === 1h RSI for entry timing ===
-    delta_1h = np.diff(close, prepend=close[0])
-    gain_1h = np.maximum(delta_1h, 0)
-    loss_1h = np.maximum(-delta_1h, 0)
-    avg_gain_1h = pd.Series(gain_1h).ewm(alpha=1/rsi_period, min_periods=rsi_period).mean().values
-    avg_loss_1h = pd.Series(loss_1h).ewm(alpha=1/rsi_period, min_periods=rsi_period).mean().values
-    rs_1h = avg_gain_1h / (avg_loss_1h + 1e-10)
-    rsi_1h = 100 - (100 / (1 + rs_1h))
+    # 20-period average ATR on daily data
+    atr_ma20_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
+    atr_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma20_1d)
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # 1d volume and its 20-period average
+    volume_1d = df_1d['volume'].values
+    volume_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma20_1d)
+    
+    # === 12h Donchian channel (20-period) ===
+    # Calculate rolling max/min for high/low
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        if not session_filter[i]:
+    for i in range(20, n):
+        # Skip if any required data is not available
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
+           np.isnan(atr_1d_aligned[i]) or np.isnan(atr_ma20_1d_aligned[i]) or \
+           np.isnan(volume_ma20_1d_aligned[i]):
             signals[i] = 0.0
             continue
-            
-        if np.isnan(rsi_4h_aligned[i]) or np.isnan(ema_4h_aligned[i]) or np.isnan(atr_ratio_1d_aligned[i]):
-            signals[i] = 0.0
-            continue
         
-        # Volatility filter: avoid high volatility regimes
-        vol_filter = atr_ratio_1d_aligned[i] < 1.2
+        # Volatility filter: current 1d ATR > 20-period average ATR
+        vol_filter = atr_1d_aligned[i] > atr_ma20_1d_aligned[i]
         
-        # Trend bias from 4h RSI
-        bullish_bias = rsi_4h_aligned[i] > 50
-        bearish_bias = rsi_4h_aligned[i] < 50
+        # Volume filter: current 1d volume > 20-period average volume
+        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
+        volume_filter = vol_1d_current > volume_ma20_1d_aligned[i]
         
-        # Entry conditions
+        # Combined filter: need both volatility expansion and volume confirmation
+        filter_ok = vol_filter and volume_filter
+        
         if position == 0:
-            # Long: price above 4h EMA, bullish bias, low volatility
-            if close[i] > ema_4h_aligned[i] and bullish_bias and vol_filter:
-                signals[i] = 0.20
+            # Long entry: price breaks above Donchian high with filter confirmation
+            if close[i] > donchian_high[i-1] and filter_ok:
+                signals[i] = 0.25
                 position = 1
-            # Short: price below 4h EMA, bearish bias, low volatility
-            elif close[i] < ema_4h_aligned[i] and bearish_bias and vol_filter:
-                signals[i] = -0.20
+            # Short entry: price breaks below Donchian low with filter confirmation
+            elif close[i] < donchian_low[i-1] and filter_ok:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long: hold until bearish bias or volatility expansion
-            if not bullish_bias or not vol_filter:
+            # Long exit: price breaks below Donchian low or filter fails
+            if close[i] < donchian_low[i-1] or not filter_ok:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short: hold until bullish bias or volatility expansion
-            if not bearish_bias or not vol_filter:
+            # Short exit: price breaks above Donchian high or filter fails
+            if close[i] > donchian_high[i-1] or not filter_ok:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_4hRSI_1dATR_VolumeFilter"
-timeframe = "1h"
+name = "12h_Donchian20_1dATR_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
