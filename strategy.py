@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla pivot (R1/S1) breakout + 1d EMA50 trend filter + volume spike confirmation
-- Camarilla pivot levels from 1d provide high-probability intraday support/resistance with proven edge
-- Breakout above R1 or below S1 with volume confirmation captures institutional moves
-- 1d EMA50 ensures alignment with higher timeframe trend to avoid counter-trend trades
-- Discrete position sizing (0.25) minimizes fee churn
-- Target: 20-40 trades/year per symbol (~80-160 total over 4 years)
-- Works in bull markets (buying R1 breakouts in uptrend) and bear markets (selling S1 breakdowns in downtrend)
+Hypothesis: 4h Camarilla pivot (R2/S2) breakout with volume confirmation and 1w EMA200 trend filter
+- Uses wider Camarilla levels (R2/S2) for higher-probability breakouts with less noise
+- Volume confirmation ensures institutional participation
+- 1w EMA200 provides strong long-term trend filter to avoid counter-trend trades
+- Designed for fewer trades (target: 15-25/year) to minimize fee drag
+- Works in bull markets (buying R2 breakouts in uptrend) and bear markets (selling S2 breakdowns in downtrend)
 """
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -29,67 +28,71 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Get 4h data for primary timeframe
+    # Get 1w data for EMA200 trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Get 4h data for volume average
     df_4h = get_htf_data(prices, '4h')
     volume_4h = df_4h['volume'].values
     
-    # Calculate Camarilla pivot levels (R1, S1) from 1d OHLC
+    # Calculate Camarilla pivot levels (R2, S2) from 1d OHLC
     def calculate_camarilla(high_arr, low_arr, close_arr):
         # Typical price
         pp = (high_arr + low_arr + close_arr) / 3.0
         # Range
         rng = high_arr - low_arr
         # Camarilla levels
-        r1 = pp + (rng * 1.1 / 12)
-        s1 = pp - (rng * 1.1 / 12)
-        return r1, s1
+        r2 = pp + (rng * 1.1 / 6)
+        s2 = pp - (rng * 1.1 / 6)
+        return r2, s2
     
-    camarilla_r1_1d, camarilla_s1_1d = calculate_camarilla(high_1d, low_1d, close_1d)
+    camarilla_r2_1d, camarilla_s2_1d = calculate_camarilla(high_1d, low_1d, close_1d)
     
-    # Calculate EMA50 on 1d for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA200 on 1w for trend filter
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Volume average (20-period) on 4h
-    volume_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    # Volume average (50-period) on 4h
+    volume_ma_4h = pd.Series(volume_4h).rolling(window=50, min_periods=50).mean().values
     
     # Align all indicators to 4h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    camarilla_r2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r2_1d)
+    camarilla_s2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s2_1d)
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     volume_ma_aligned = align_htf_to_ltf(prices, df_4h, volume_ma_4h)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 100  # warmup
+    start_idx = 200  # warmup for EMA200
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_ma_aligned[i])):
+        if (np.isnan(camarilla_r2_aligned[i]) or np.isnan(camarilla_s2_aligned[i]) or 
+            np.isnan(ema200_1w_aligned[i]) or np.isnan(volume_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        r1 = camarilla_r1_aligned[i]
-        s1 = camarilla_s1_aligned[i]
-        ema_trend = ema50_1d_aligned[i]
+        r2 = camarilla_r2_aligned[i]
+        s2 = camarilla_s2_aligned[i]
+        ema_trend = ema200_1w_aligned[i]
         vol_ma = volume_ma_aligned[i]
         vol = volume[i]
         price = close[i]
         
         if position == 0:
             # Look for breakouts with volume confirmation and trend alignment
-            # Long: price breaks above R1 + volume spike + price > 1d EMA50 (uptrend)
-            if price > r1 and vol > 2.0 * vol_ma and price > ema_trend:
+            # Long: price breaks above R2 + volume spike + price > 1w EMA200 (uptrend)
+            if price > r2 and vol > 1.5 * vol_ma and price > ema_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + volume spike + price < 1d EMA50 (downtrend)
-            elif price < s1 and vol > 2.0 * vol_ma and price < ema_trend:
+            # Short: price breaks below S2 + volume spike + price < 1w EMA200 (downtrend)
+            elif price < s2 and vol > 1.5 * vol_ma and price < ema_trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price retracement to midpoint between R1 and S1
-            mid_point = (r1 + s1) / 2.0
+            # Exit long: price retracement to midpoint between R2 and S2
+            mid_point = (r2 + s2) / 2.0
             if price < mid_point:
                 signals[i] = 0.0
                 position = 0
@@ -97,8 +100,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price retracement to midpoint between R1 and S1
-            mid_point = (r1 + s1) / 2.0
+            # Exit short: price retracement to midpoint between R2 and S2
+            mid_point = (r2 + s2) / 2.0
             if price > mid_point:
                 signals[i] = 0.0
                 position = 0
@@ -107,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_1dEMA50_VolumeSpike"
+name = "4h_Camarilla_R2S2_1wEMA200_Volume"
 timeframe = "4h"
 leverage = 1.0
