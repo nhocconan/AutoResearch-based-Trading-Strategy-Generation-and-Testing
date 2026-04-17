@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V1
-Hypothesis: Camarilla pivot levels from 1d timeframe with breakout/mean-reversion logic. 
+12h_Pivot_R1_S1_Breakout_Volume_ATRFilter
+Hypothesis: Camarilla pivot levels from 1d timeframe with breakout logic on 12h timeframe.
 Long when price breaks above R1 with volume confirmation in uptrend (price > EMA34).
 Short when price breaks below S1 with volume confirmation in downtrend (price < EMA34).
 Exit when price reaches opposite S1/R1 level or closes back inside the (R1,S1) range.
-ATR filter ensures volatility is sufficient to avoid chop. Designed for 6s timeframe to capture 
-intraday swings with low frequency. Works in both bull (breakouts) and bear (mean reversion at extremes).
+ATR filter ensures volatility is sufficient to avoid chop. Designed for 12h timeframe to capture 
+swing moves with low frequency. Works in both bull (breakouts) and bear (mean reversion at extremes).
 """
 
 import numpy as np
@@ -31,27 +31,14 @@ def generate_signals(prices):
     volume_1d = df_1d['volume'].values
     
     # Calculate Camarilla pivot levels from previous 1d bar
-    # R4 = close + 1.5 * (high - low)
-    # R3 = close + 1.0 * (high - low)
-    # R2 = close + 0.5 * (high - low)
-    # R1 = close + 0.25 * (high - low)
-    # S1 = close - 0.25 * (high - low)
-    # S2 = close - 0.5 * (high - low)
-    # S3 = close - 1.0 * (high - low)
-    # S4 = close - 1.5 * (high - low)
-    # We use R1, S1 for breakout and S3, R3 for extreme fade (not used here for simplicity)
-    
-    # Need previous day's high, low, close to calculate today's pivot
-    # Since we're calculating for current bar, we use previous day's values
     prev_high_1d = np.roll(high_1d, 1)
     prev_low_1d = np.roll(low_1d, 1)
     prev_close_1d = np.roll(close_1d, 1)
-    # First day will have rolled values from last - handle with nans
     
     cam_r1 = prev_close_1d + 0.25 * (prev_high_1d - prev_low_1d)
     cam_s1 = prev_close_1d - 0.25 * (prev_high_1d - prev_low_1d)
     
-    # Align Camarilla levels to 6s timeframe (these levels are constant throughout the day)
+    # Align Camarilla levels to 12h timeframe
     cam_r1_aligned = align_htf_to_ltf(prices, df_1d, cam_r1)
     cam_s1_aligned = align_htf_to_ltf(prices, df_1d, cam_s1)
     
@@ -63,7 +50,7 @@ def generate_signals(prices):
     vol_avg20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_avg20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg20_1d)
     
-    # ATR filter (6s timeframe) - use 14-period ATR
+    # ATR filter (12h timeframe) - use 14-period ATR
     high_low = high - low
     high_close = np.abs(high - np.roll(close, 1))
     low_close = np.abs(low - np.roll(close, 1))
@@ -135,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V1"
-timeframe = "6h"
+name = "12h_Pivot_R1_S1_Breakout_Volume_ATRFilter"
+timeframe = "12h"
 leverage = 1.0
