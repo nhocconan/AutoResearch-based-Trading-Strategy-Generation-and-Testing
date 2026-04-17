@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Williams %R Extreme Reversion with Volume Spike and Chop Regime Filter.
-Long when Williams %R < -80 (oversold) with volume > 1.8x average in choppy market (CHOP > 61.8).
-Short when Williams %R > -20 (overbought) with volume > 1.8x average in choppy market.
-Exit when Williams %R reverts to -50 level or chop regime ends (CHOP < 38.2).
-Uses 12h for Williams %R and volume, 1d for chop filter.
-Target: 50-150 total trades over 4 years (12-37/year). Uses tighter Williams %R thresholds and volume confirmation to reduce trade frequency.
+Hypothesis: 4h Donchian(20) breakout + HMA(21) trend + volume confirmation (>1.5x average) + ATR(14) stoploss.
+Long when price breaks above Donchian upper band with HMA up and volume spike.
+Short when price breaks below Donchian lower band with HMA down and volume spike.
+Exit via ATR-based trailing stop: signal=0 when price < highest high since entry - 2.5*ATR (long) or
+price > lowest low since entry + 2.5*ATR (short). Uses 1d for volume average to reduce noise.
+Target: 75-200 total trades over 4 years (19-50/year). Discrete sizing: 0.25.
 """
 
 import numpy as np
@@ -22,112 +22,111 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for chop filter
+    # Get 1d data for volume average (less noisy than 4h)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    vol_1d = df_1d['volume'].values
     
-    # Calculate 12h Williams %R (14-period)
-    def calculate_williams_r(high, low, close, period=14):
-        highest_high = np.zeros_like(close)
-        lowest_low = np.zeros_like(close)
-        for i in range(period-1, len(close)):
-            highest_high[i] = np.max(high[i-period+1:i+1])
-            lowest_low[i] = np.min(low[i-period+1:i+1])
-        wr = np.full_like(close, -50.0)  # default neutral
-        for i in range(period-1, len(close)):
-            if highest_high[i] != lowest_low[i]:
-                wr[i] = -100 * (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i])
-            else:
-                wr[i] = -50
-        return wr
+    # Calculate 4h Donchian channels (20-period)
+    def donchian_channels(high, low, period=20):
+        upper = np.full_like(high, np.nan)
+        lower = np.full_like(low, np.nan)
+        for i in range(period-1, len(high)):
+            upper[i] = np.max(high[i-period+1:i+1])
+            lower[i] = np.min(low[i-period+1:i+1])
+        return upper, lower
     
-    wr_12h = calculate_williams_r(high, low, close, 14)
+    upper_4h, lower_4h = donchian_channels(high, low, 20)
     
-    # Calculate 1d Choppiness Index (CHOP)
-    def calculate_chop(high, low, close, period=14):
-        atr = np.zeros_like(close)
+    # Calculate 4h HMA(21) for trend filter
+    def hma(arr, period):
+        half = period // 2
+        sqrt = int(np.sqrt(period))
+        wma2 = pd.Series(arr).rolling(window=half, min_periods=half).mean().values
+        wma1 = pd.Series(arr).rolling(window=period, min_periods=period).mean().values
+        raw = 2 * wma2 - wma1
+        hma_vals = pd.Series(raw).rolling(window=sqrt, min_periods=sqrt).mean().values
+        return hma_vals
+    
+    hma_4h = hma(close, 21)
+    
+    # Calculate 14-period ATR for stoploss
+    def atr(high, low, close, period=14):
         tr = np.zeros_like(close)
-        
         for i in range(1, len(close)):
             tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Wilder's ATR
-        atr[period] = np.mean(tr[1:period+1])
+        tr[0] = high[0] - low[0]
+        atr_vals = np.zeros_like(close)
+        atr_vals[period] = np.mean(tr[1:period+1])
         for i in range(period+1, len(tr)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        
-        # Sum of ATR over period
-        atr_sum = np.zeros_like(close)
-        for i in range(period, len(close)):
-            atr_sum[i] = np.sum(atr[i-period+1:i+1])
-        
-        # Max true range over period
-        max_tr = np.zeros_like(close)
-        for i in range(period, len(close)):
-            max_tr[i] = np.max(tr[i-period+1:i+1])
-        
-        # Chop formula: 100 * log10(atr_sum / max_tr) / log10(period)
-        chop = np.zeros_like(close)
-        for i in range(period, len(close)):
-            if max_tr[i] > 0:
-                chop[i] = 100 * np.log10(atr_sum[i] / max_tr[i]) / np.log10(period)
-            else:
-                chop[i] = 50  # neutral
-        return chop
+            atr_vals[i] = (atr_vals[i-1] * (period-1) + tr[i]) / period
+        return atr_vals
     
-    chop_1d = calculate_chop(high_1d, low_1d, close_1d, 14)
+    atr_14 = atr(high, low, close, 14)
     
-    # Align 1d chop to 12h timeframe
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # Calculate 1d volume average (20-period) for spike detection
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Calculate volume spike (current volume > 1.8x 20-period average)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 1.8)
+    # Align 4h indicators to 4h timeframe (self-aligning)
+    upper_4h_aligned = align_htf_to_ltf(prices, prices, upper_4h)  # self-align
+    lower_4h_aligned = align_htf_to_ltf(prices, prices, lower_4h)
+    hma_4h_aligned = align_htf_to_ltf(prices, prices, hma_4h)
+    atr_14_aligned = align_htf_to_ltf(prices, prices, atr_14)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
     start_idx = 50  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if np.isnan(wr_12h[i]) or np.isnan(chop_1d_aligned[i]):
+        if (np.isnan(upper_4h_aligned[i]) or 
+            np.isnan(lower_4h_aligned[i]) or 
+            np.isnan(hma_4h_aligned[i]) or 
+            np.isnan(atr_14_aligned[i]) or 
+            np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_spike = volume_spike[i]
-        chop_val = chop_1d_aligned[i]
-        wr = wr_12h[i]
-        
-        # Chop regime: CHOP > 61.8 = ranging (good for mean reversion at extremes)
-        is_choppy = chop_val > 61.8
-        # Exit chop regime: CHOP < 38.2 = trending (avoid false signals)
-        is_trending = chop_val < 38.2
+        vol_spike = volume[i] > (vol_ma_1d_aligned[i] * 1.5)
+        upper = upper_4h_aligned[i]
+        lower = lower_4h_aligned[i]
+        hma = hma_4h_aligned[i]
+        atr_val = atr_14_aligned[i]
         
         if position == 0:
-            # Long: Williams %R < -80 (oversold) with volume spike in choppy market
-            if wr < -80 and vol_spike and is_choppy:
+            # Long: price breaks above upper Donchian with HMA up and volume spike
+            if price > upper and hma > hma_4h_aligned[i-1] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R > -20 (overbought) with volume spike in choppy market
-            elif wr > -20 and vol_spike and is_choppy:
+                entry_price = price
+                highest_since_entry = price
+            # Short: price breaks below lower Donchian with HMA down and volume spike
+            elif price < lower and hma < hma_4h_aligned[i-1] and vol_spike:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
+                lowest_since_entry = price
         
         elif position == 1:
-            # Exit long: Williams %R reverts to -50 OR chop regime ends (trending)
-            if wr >= -50 or is_trending:
+            # Update highest high since entry
+            highest_since_entry = max(highest_since_entry, price)
+            # ATR trailing stop: exit if price drops below highest - 2.5*ATR
+            if price < highest_since_entry - 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Williams %R reverts to -50 OR chop regime ends (trending)
-            if wr <= -50 or is_trending:
+            # Update lowest low since entry
+            lowest_since_entry = min(lowest_since_entry, price)
+            # ATR trailing stop: exit if price rises above lowest + 2.5*ATR
+            if price > lowest_since_entry + 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -135,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsR_ExtremeReversion_VolumeSpike_ChopRegime"
-timeframe = "12h"
+name = "4h_Donchian20_HMA21_VolumeSpike_ATRStop"
+timeframe = "4h"
 leverage = 1.0
