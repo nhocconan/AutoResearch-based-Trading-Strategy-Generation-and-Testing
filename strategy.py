@@ -1,11 +1,13 @@
-#!/usr/bin/env python3
-"""
-1h_Pivot_R1_S1_Breakout_Volume_ATRFilter_v1
-Breakout above/below daily Camarilla pivot resistance/support with volume confirmation and ATR filter.
-Uses 1d Camarilla pivots (R1/S1) for direction, 1h for entry timing, and ATR to avoid low-volatility whipsaws.
-Session filter (08-20 UTC) to focus on active hours. Fixed position size 0.20 to control risk.
-Target: 60-120 total trades over 4 years (15-30/year) to minimize fee drag.
-"""
+# 4H_NADIR_Momentum_v1
+# Nadir-weighted momentum with volatility regime filter.
+# Uses momentum with lookback = 40 (10-day equivalent in 4h) and Nadir weighting.
+# Nadir weighting gives exponentially more weight to recent momentum lows,
+# making it sensitive to emerging momentum shifts while rejecting noise.
+# Combined with 1D volatility regime filter (ATR ratio < 0.8 = low vol environment)
+# to avoid whipsaw in choppy markets. Designed to work in both bull and bear
+# by capturing momentum shifts regardless of direction, with volatility filter
+# reducing false signals during high volatility periods.
+# Target: 20-50 trades/year (~80-200 total over 4 years).
 
 import numpy as np
 import pandas as pd
@@ -13,110 +15,106 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # === Daily ATR(14) for volatility filter ===
+    # === Nadir-weighted momentum (40 period) ===
+    # Momentum = close - close[40]
+    momentum = close - np.roll(close, 40)
+    momentum[:40] = 0  # First 40 values undefined
+    
+    # Nadir weights: exponential decay with emphasis on recent lows
+    # Weight = exp(-5 * (1 - momentum/max_momentum)) for normalization
+    # Actually simpler: use sigmoid of momentum rank to emphasize extremes
+    momentum_abs = np.abs(momentum)
+    momentum_rank = pd.Series(momentum_abs).rolling(window=80, min_periods=10).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
+    ).values
+    
+    # Nadir weighting: emphasize when momentum is at recent extremes (low rank = low momentum abs)
+    nadir_weight = 1.0 - momentum_rank  # High weight when momentum is weak
+    nadir_momentum = momentum * nadir_weight
+    
+    # Smooth the nadir momentum
+    nadir_momentum_smooth = pd.Series(nadir_momentum).ewm(
+        span=10, adjust=False, min_periods=10
+    ).mean().values
+    
+    # === 1D volatility regime filter ===
     df_1d = get_htf_data(prices, '1d')
-    atr_1d = np.zeros(len(df_1d))
-    if len(df_1d) >= 14:
-        tr = np.maximum(df_1d['high'] - df_1d['low'],
-                        np.maximum(np.abs(df_1d['high'] - np.roll(df_1d['close'], 1)),
-                                   np.abs(df_1d['low'] - np.roll(df_1d['close'], 1))))
-        tr[0] = df_1d['high'].iloc[0] - df_1d['low'].iloc[0]
-        atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_14_1d = pd.Series(
+        np.maximum(
+            np.maximum(df_1d['high'] - df_1d['low'],
+                       np.abs(df_1d['high'] - np.roll(df_1d['close'], 1))),
+            np.abs(df_1d['low'] - np.roll(df_1d['close'], 1))
+        )
+    ).rolling(window=14, min_periods=14).mean().values
     
-    # === Daily Camarilla Pivots (R1, S1) ===
-    # Based on previous day's OHLC
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    atr_50_1d = pd.Series(atr_14_1d).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr_14_1d / (atr_50_1d + 1e-10)  # Current ATR vs 50-period average
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    # Pivot = (H + L + C) / 3
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    # R1 = C + (H - L) * 1.1 / 12
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    # S1 = C - (H - L) * 1.1 / 12
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
-    
-    # Align to 1h (values become available after the daily candle closes)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # === Volume confirmation: current volume > 1.5x 20-period average ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # === Session filter: 08-20 UTC ===
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Volatility regime: low volatility environment (ATR ratio < 0.8)
+    vol_regime = atr_ratio_aligned < 0.8
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 30
+    warmup = 60
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(nadir_momentum_smooth[i]) or 
+            np.isnan(atr_ratio_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Session filter: only trade between 08:00-20:00 UTC
-        hour = hours[i]
-        in_session = 8 <= hour <= 20
-        
-        # Volatility filter: avoid extremely low volatility (ATR too small)
-        vol_filter = atr_1d_aligned[i] > 0
-        
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
-        
-        if position == 0 and in_session and vol_filter:
-            # Long: price breaks above R1 with volume confirmation
-            if close[i] > r1_aligned[i] and vol_confirm:
-                signals[i] = 0.20
+        # Entry logic: only enter when flat
+        if position == 0:
+            # Long: positive nadir momentum AND low volatility regime
+            if (nadir_momentum_smooth[i] > 0 and 
+                vol_regime[i]):
+                signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price breaks below S1 with volume confirmation
-            elif close[i] < s1_aligned[i] and vol_confirm:
-                signals[i] = -0.20
+            # Short: negative nadir momentum AND low volatility regime
+            elif (nadir_momentum_smooth[i] < 0 and 
+                  vol_regime[i]):
+                signals[i] = -0.25
                 position = -1
                 continue
         
+        # Exit logic: reverse signal or volatility regime change
         elif position == 1:
-            # Exit long: price returns below pivot (mean reversion) OR session end
-            if close[i] < pivot_aligned[i] or not in_session:
+            # Exit long: negative momentum OR high volatility
+            if (nadir_momentum_smooth[i] < 0 or 
+                not vol_regime[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns above pivot (mean reversion) OR session end
-            if close[i] > pivot_aligned[i] or not in_session:
+            # Exit short: positive momentum OR high volatility
+            if (nadir_momentum_smooth[i] > 0 or 
+                not vol_regime[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Pivot_R1_S1_Breakout_Volume_ATRFilter_v1"
-timeframe = "1h"
+name = "4H_NADIR_Momentum_v1"
+timeframe = "4h"
 leverage = 1.0
