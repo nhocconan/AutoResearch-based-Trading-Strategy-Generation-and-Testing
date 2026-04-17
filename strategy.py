@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,47 +13,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1w High/Low for range identification (weekly range) ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly range position: where current price sits in weekly range
-    weekly_range = high_1w - low_1w
-    # Avoid division by zero
-    weekly_range_safe = np.where(weekly_range == 0, 1, weekly_range)
-    weekly_position = (close_1w - low_1w) / weekly_range_safe  # 0 at low, 1 at high
-    
-    # === 1d Close for daily trend and momentum ===
+    # === 1d ATR for volatility regime ===
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 20-period EMA for daily trend
-    ema_20 = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 20:
-        ema_20[19] = np.mean(close_1d[:20])
-        alpha = 2 / (20 + 1)
-        for i in range(20, len(close_1d)):
-            ema_20[i] = alpha * close_1d[i] + (1 - alpha) * ema_20[i-1]
+    # Calculate True Range
+    tr = np.zeros(len(high_1d))
+    tr[0] = high_1d[0] - low_1d[0]
+    for i in range(1, len(high_1d)):
+        tr[i] = max(high_1d[i] - low_1d[i], 
+                    abs(high_1d[i] - close_1d[i-1]), 
+                    abs(low_1d[i] - close_1d[i-1]))
+    
+    # ATR(14)
+    atr = np.full_like(tr, np.nan)
+    if len(tr) >= 14:
+        atr[13] = np.mean(tr[:14])
+        for i in range(14, len(tr)):
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    
+    # ATR(50)
+    atr_long = np.full_like(tr, np.nan)
+    if len(tr) >= 50:
+        atr_long[49] = np.mean(tr[:50])
+        for i in range(50, len(tr)):
+            atr_long[i] = (atr_long[i-1] * 49 + tr[i]) / 50
+    
+    # ATR Ratio (short/long) - measures volatility regime
+    atr_ratio = np.full_like(tr, np.nan)
+    for i in range(len(tr)):
+        if atr_long[i] > 0:
+            atr_ratio[i] = atr[i] / atr_long[i]
+    
+    # === 1d EMA(50) for trend filter ===
+    ema_50 = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 50:
+        ema_50[49] = np.mean(close_1d[:50])
+        alpha = 2 / (50 + 1)
+        for i in range(50, len(close_1d)):
+            ema_50[i] = alpha * close_1d[i] + (1 - alpha) * ema_50[i-1]
     else:
         for i in range(len(close_1d)):
-            ema_20[i] = np.mean(close_1d[:i+1]) if i >= 0 else close_1d[0]
+            ema_50[i] = np.mean(close_1d[:i+1]) if i >= 0 else close_1d[0]
     
-    # Calculate daily price change momentum (1-day return)
-    daily_return = np.full_like(close_1d, np.nan)
-    for i in range(1, len(close_1d)):
-        if close_1d[i-1] != 0:
-            daily_return[i] = (close_1d[i] - close_1d[i-1]) / close_1d[i-1]
+    # === Align indicators to 6h timeframe ===
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    
+    # === 6h Donchian(20) breakout ===
+    # Highest high of last 20 periods
+    highest_high = np.full_like(high, np.nan)
+    lowest_low = np.full_like(low, np.nan)
+    
+    for i in range(len(high)):
+        if i >= 19:
+            highest_high[i] = np.max(high[i-19:i+1])
+            lowest_low[i] = np.min(low[i-19:i+1])
+        elif i > 0:
+            highest_high[i] = np.max(high[0:i+1])
+            lowest_low[i] = np.min(low[0:i+1])
         else:
-            daily_return[i] = 0
+            highest_high[i] = high[0]
+            lowest_low[i] = low[0]
     
-    # === Align indicators to daily timeframe ===
-    weekly_position_aligned = align_htf_to_ltf(prices, df_1w, weekly_position)
-    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
-    daily_return_aligned = align_htf_to_ltf(prices, df_1d, daily_return)
-    
-    # === Daily Volume confirmation ===
+    # === 6h Volume confirmation ===
     vol_ma_20 = np.full_like(volume, np.nan)
     for i in range(len(volume)):
         if i >= 19:
@@ -63,57 +88,53 @@ def generate_signals(prices):
         else:
             vol_ma_20[i] = volume[0]
     
-    vol_confirm = volume > vol_ma_20 * 1.5
-    
-    # === Signal parameters ===
-    # Weekly range boundaries for mean reversion
-    WEAK_LONG_THRESHOLD = 0.2   # Near weekly low (oversold)
-    WEAK_SHORT_THRESHOLD = 0.8  # Near weekly high (overbought)
-    MOMENTUM_THRESHOLD = 0.02   # 2% daily momentum
+    # Volume spike: current volume > 2x 20-period average
+    vol_spike = volume > vol_ma_20 * 2.0
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 50
+    warmup = 100
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(weekly_position_aligned[i]) or 
-            np.isnan(ema_20_aligned[i]) or 
-            np.isnan(daily_return_aligned[i]) or 
-            np.isnan(vol_confirm[i])):
+        if (np.isnan(atr_ratio_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or 
+            np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or 
+            np.isnan(vol_spike[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: Near weekly low AND positive daily momentum AND above daily EMA20
-            if (weekly_position_aligned[i] < WEAK_LONG_THRESHOLD and
-                daily_return_aligned[i] > MOMENTUM_THRESHOLD and
-                close[i] > ema_20_aligned[i] and
-                vol_confirm[i]):
+            # Low volatility regime (ATR ratio < 0.8) + volume spike + breakout
+            vol_condition = atr_ratio_aligned[i] < 0.8
+            vol_spike_condition = vol_spike[i]
+            
+            # Long: price breaks above Donchian high AND above EMA50
+            if (vol_condition and vol_spike_condition and 
+                close[i] > highest_high[i] and 
+                close[i] > ema_50_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: Near weekly high AND negative daily momentum AND below daily EMA20
-            elif (weekly_position_aligned[i] > WEAK_SHORT_THRESHOLD and
-                  daily_return_aligned[i] < -MOMENTUM_THRESHOLD and
-                  close[i] < ema_20_aligned[i] and
-                  vol_confirm[i]):
+            # Short: price breaks below Donchian low AND below EMA50
+            elif (vol_condition and vol_spike_condition and 
+                  close[i] < lowest_low[i] and 
+                  close[i] < ema_50_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: Weekly position > 0.5 (middle) OR momentum turns negative OR below EMA20
-            if (weekly_position_aligned[i] > 0.5 or
-                daily_return_aligned[i] < -MOMENTUM_THRESHOLD/2 or
-                close[i] < ema_20_aligned[i]):
+            # Exit: price retests Donchian low OR volatility expands (ATR ratio > 1.2)
+            if close[i] < lowest_low[i] or atr_ratio_aligned[i] > 1.2:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -121,10 +142,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Weekly position < 0.5 (middle) OR momentum turns positive OR above EMA20
-            if (weekly_position_aligned[i] < 0.5 or
-                daily_return_aligned[i] > MOMENTUM_THRESHOLD/2 or
-                close[i] > ema_20_aligned[i]):
+            # Exit: price retests Donchian high OR volatility expands (ATR ratio > 1.2)
+            if close[i] > highest_high[i] or atr_ratio_aligned[i] > 1.2:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -133,6 +152,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyRange_Momentum_EMA20_VolumeFilter"
-timeframe = "1d"
+name = "6h_ATR_Volatility_Breakout_EMA50"
+timeframe = "6h"
 leverage = 1.0
