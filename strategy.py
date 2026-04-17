@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_1w_1w_Return_Trend_Filter
-Hypothesis: Use 1-week return as a trend filter on daily timeframe. Go long when 1-week return is positive and price breaks above 20-day high with volume confirmation; go short when 1-week return is negative and price breaks below 20-day low with volume confirmation. This strategy aims to capture medium-term momentum while avoiding counter-trend trades, with low trade frequency to minimize fee drag.
+12h_Donchian20_Breakout_Volume_Trend_1d
+Hypothesis: On 12h timeframe, enter long when price breaks above 20-bar Donchian high with volume confirmation and daily close above daily EMA50; enter short when price breaks below 20-bar Donchian low with volume confirmation and daily close below daily EMA50. Uses daily EMA50 as trend filter to align with higher timeframe trend. Designed for low trade frequency (12-37/year) to minimize fee decay while capturing strong trending moves in both bull and bear markets.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Need enough data for 20-day high/low and 5-day week return
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,72 +18,66 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 20-day high/low for breakout ===
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    high_20 = high_series.rolling(window=20, min_periods=20).max().values
-    low_20 = low_series.rolling(window=20, min_periods=20).min().values
+    # === 12h Donchian Channels (20-period) ===
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 1-week return trend filter (using 1w data) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # === 1d EMA50 trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate 5-period return (1 week = 5 trading days)
-    ret_5 = np.zeros_like(close_1w)
-    ret_5[5:] = (close_1w[5:] - close_1w[:-5]) / close_1w[:-5]
-    
-    # Align 1-week return to daily timeframe
-    ret_5_aligned = align_htf_to_ltf(prices, df_1w, ret_5)
-    
-    # === 20-day volume average for confirmation ===
-    volume_series = pd.Series(volume)
-    vol_avg_20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    # === 1d volume average for confirmation ===
+    volume_1d = df_1d['volume'].values
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 20  # For 20-day indicators
+    warmup = 20  # For Donchian and volume average
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or
-            np.isnan(ret_5_aligned[i]) or
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or
+            np.isnan(ema50_1d_aligned[i]) or
+            np.isnan(vol_avg_20_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Get current day's volume for confirmation
-        vol_current = volume[i]
+        # Get current daily bar's volume for confirmation
+        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
         
-        # Volume filter: current volume > 1.5x 20-day average volume
-        vol_filter = vol_current > 1.5 * vol_avg_20[i]
+        # Volume filter: current volume > 1.5x daily average volume
+        vol_filter = vol_1d_current > 1.5 * vol_avg_20_1d_aligned[i]
         
-        # Trend filter from 1-week return
-        trend_up = ret_5_aligned[i] > 0
-        trend_down = ret_5_aligned[i] < 0
+        # Daily trend filters
+        daily_uptrend = close[i] > ema50_1d_aligned[i]
+        daily_downtrend = close[i] < ema50_1d_aligned[i]
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price breaks above 20-day high + volume filter + up-trend
-            if close[i] > high_20[i] and vol_filter and trend_up:
+            # Long: break above Donchian high + volume filter + daily uptrend
+            if close[i] > donchian_high[i] and vol_filter and daily_uptrend:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price breaks below 20-day low + volume filter + down-trend
-            elif close[i] < low_20[i] and vol_filter and trend_down:
+            # Short: break below Donchian low + volume filter + daily downtrend
+            elif close[i] < donchian_low[i] and vol_filter and daily_downtrend:
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic: reverse when opposite breakout occurs
+        # Exit logic
         elif position == 1:
-            # Exit long when price breaks below 20-day low (trend reversal)
-            if close[i] < low_20[i]:
+            # Exit when price closes below Donchian low (reversal signal)
+            if close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -91,8 +85,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price breaks above 20-day high (trend reversal)
-            if close[i] > high_20[i]:
+            # Exit when price closes above Donchian high (reversal signal)
+            if close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -101,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_1w_Return_Trend_Filter"
-timeframe = "1d"
+name = "12h_Donchian20_Breakout_Volume_Trend_1d"
+timeframe = "12h"
 leverage = 1.0
