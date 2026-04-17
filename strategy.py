@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Williams %R with 1d volume confirmation and ADX trend filter.
-- Williams %R(14) identifies overbought/oversold conditions
-- Only trade when 1d ADX > 25 (trending market) to avoid chop
-- Require 1d volume > 1.5x 20-period average for confirmation
-- Enter long when %R crosses above -80 from below (oversold bounce)
-- Enter short when %R crosses below -20 from above (overbought rejection)
+Hypothesis: 4h Donchian breakout with 12h volume confirmation and 1d ADX trend filter.
+- Donchian(20) identifies breakouts from recent price ranges
+- Only trade when 12h volume > 1.5x 20-period average (confirm breakout strength)
+- Require 1d ADX > 25 to ensure trending market (avoid chop)
+- Enter long when price breaks above 20-period high
+- Enter short when price breaks below 20-period low
 - Exit on opposite signal or when trend weakens (ADX < 20)
-- Designed for 4h timeframe to capture swings in both bull and bear markets
+- Designed for 4h timeframe to capture trends in both bull and bear markets
 """
 
 import numpy as np
@@ -23,12 +23,15 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     
-    # === Williams %R(14) on 4h ===
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when high == low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # === Donchian(20) on 4h ===
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # === 12h volume confirmation ===
+    df_12h = get_htf_data(prices, '12h')
+    volume_12h = df_12h['volume'].values
+    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
     
     # === 1d ADX(25) for trend filter ===
     df_1d = get_htf_data(prices, '1d')
@@ -67,11 +70,6 @@ def generate_signals(prices):
     # Align 1d ADX to 4h
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # === 1d volume confirmation ===
-    volume_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
-    
     signals = np.zeros(n)
     
     # Warmup
@@ -82,49 +80,39 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(williams_r[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ma_20_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ma_20_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Get current 1d volume and align
-        df_1d_current = get_htf_data(prices, '1d')
-        vol_1d_current = df_1d_current['volume'].values
-        vol_1d_aligned = align_htf_to_ltf(prices, df_1d_current, vol_1d_current)
+        # Volume spike: current 12h volume > 1.5x 20-period average
+        vol_spike = volume_12h[i // 48] > vol_ma_20[i // 48] * 1.5 if i >= 48 else False
         
-        # Volume spike: current 1d volume > 1.5x 20-period average
-        vol_spike = vol_1d_aligned[i] > vol_ma_20_aligned[i] * 1.5
-        
-        # Williams %R conditions
-        wr = williams_r[i]
-        wr_prev = williams_r[i-1]
-        
-        # Bullish: %R crosses above -80 from below (oversold bounce)
-        bullish_cross = (wr_prev <= -80) and (wr > -80)
-        # Bearish: %R crosses below -20 from above (overbought rejection)
-        bearish_cross = (wr_prev >= -20) and (wr < -20)
+        # Donchian breakout conditions
+        breakout_up = close[i] > highest_high[i-1]  # Break above previous high
+        breakout_down = close[i] < lowest_low[i-1]   # Break below previous low
         
         # ADX trend filter
         trending = adx_aligned[i] > 25
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: bullish cross + volume spike + trending
-            if bullish_cross and vol_spike and trending:
+            # Long: upward breakout + volume spike + trending
+            if breakout_up and vol_spike and trending:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: bearish cross + volume spike + trending
-            elif bearish_cross and vol_spike and trending:
+            # Short: downward breakout + volume spike + trending
+            elif breakout_down and vol_spike and trending:
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long on bearish cross or trend weakness
-            if bearish_cross or adx_aligned[i] < 20:
+            # Exit long on downward breakout or trend weakness
+            if breakout_down or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -132,8 +120,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short on bullish cross or trend weakness
-            if bullish_cross or adx_aligned[i] < 20:
+            # Exit short on upward breakout or trend weakness
+            if breakout_up or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -142,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR14_1dVolume1.5x_1dADX25"
+name = "4h_Donchian20_12hVolume1.5x_1dADX25"
 timeframe = "4h"
 leverage = 1.0
