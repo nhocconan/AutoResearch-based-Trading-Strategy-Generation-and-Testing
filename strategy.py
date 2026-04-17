@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_1d1w_VolumeSpike_TrendBreak_v2
-Hypothesis: On 4h timeframe, buy when price breaks above daily Donchian high (20-period) with volume spike (>2x average volume) during strong weekly trend (ADX > 25), sell when breaks below daily Donchian low. Exit on opposite breakout or trend weakening (ADX < 20). Uses volume spike to confirm institutional interest and weekly ADX to avoid false breakouts in ranging markets. Target: 20-50 trades/year for low fee drag.
+4h_1d1w_Pivot_Breakout_Volume_Strict_V1
+Hypothesis: On 4h timeframe, buy when price breaks above daily Camarilla R1 with volume spike (>2x avg volume) during strong weekly trend (ADX > 25), sell when breaks below daily S1. Exit on opposite breakout or trend weakening (ADX < 20). Uses strict volume confirmation and weekly ADX to filter false breakouts. Target: 15-25 trades/year for low fee drag.
 """
 
 import numpy as np
@@ -42,6 +42,13 @@ def calculate_adx(high, low, close, period=14):
     adx = smooth_wilder(dx, period)
     return adx
 
+def calculate_camarilla(high, low, close):
+    # Camarilla pivot levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    range_hl = high - low
+    r1 = close + range_hl * 1.1 / 12
+    s1 = close - range_hl * 1.1 / 12
+    return r1, s1
+
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
@@ -52,7 +59,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Daily Data (HTF for channels) ===
+    # === Daily Data (HTF for Camarilla levels) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -63,35 +70,10 @@ def generate_signals(prices):
     adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Daily Donchian channels (20-period)
-    def rolling_max(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i < window - 1:
-                continue
-            window_slice = arr[max(0, i-window+1):i+1]
-            if np.all(np.isnan(window_slice)):
-                result[i] = np.nan
-            else:
-                result[i] = np.nanmax(window_slice)
-        return result
-    
-    def rolling_min(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i < window - 1:
-                continue
-            window_slice = arr[max(0, i-window+1):i+1]
-            if np.all(np.isnan(window_slice)):
-                result[i] = np.nan
-            else:
-                result[i] = np.nanmin(window_slice)
-        return result
-    
-    high_20_1d = rolling_max(high_1d, 20)
-    low_20_1d = rolling_min(low_1d, 20)
-    high_20_1d_aligned = align_htf_to_ltf(prices, df_1d, high_20_1d)
-    low_20_1d_aligned = align_htf_to_ltf(prices, df_1d, low_20_1d)
+    # Daily Camarilla levels (R1, S1)
+    r1_1d, s1_1d = calculate_camarilla(high_1d, low_1d, close_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
     # Volume confirmation on daily
     vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
@@ -119,8 +101,8 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(adx_1d_aligned[i]) or 
             np.isnan(adx_1w_aligned[i]) or
-            np.isnan(high_20_1d_aligned[i]) or
-            np.isnan(low_20_1d_aligned[i]) or
+            np.isnan(r1_1d_aligned[i]) or
+            np.isnan(s1_1d_aligned[i]) or
             np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
@@ -142,21 +124,21 @@ def generate_signals(prices):
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price breaks above 20-period daily high with volume spike and strong trend
-            if close[i] > high_20_1d_aligned[i] and vol_spike and strong_trend:
+            # Long: price breaks above daily R1 with volume spike and strong trend
+            if close[i] > r1_1d_aligned[i] and vol_spike and strong_trend:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price breaks below 20-period daily low with volume spike and strong trend
-            elif close[i] < low_20_1d_aligned[i] and vol_spike and strong_trend:
+            # Short: price breaks below daily S1 with volume spike and strong trend
+            elif close[i] < s1_1d_aligned[i] and vol_spike and strong_trend:
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit conditions: trend weakening OR opposite breakout
-            if weak_trend or close[i] < low_20_1d_aligned[i]:
+            # Exit conditions: trend weakening OR opposite breakout (below S1)
+            if weak_trend or close[i] < s1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -164,8 +146,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit conditions: trend weakening OR opposite breakout
-            if weak_trend or close[i] > high_20_1d_aligned[i]:
+            # Exit conditions: trend weakening OR opposite breakout (above R1)
+            if weak_trend or close[i] > r1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -174,6 +156,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d1w_VolumeSpike_TrendBreak_v2"
+name = "4h_1d1w_Pivot_Breakout_Volume_Strict_V1"
 timeframe = "4h"
 leverage = 1.0
