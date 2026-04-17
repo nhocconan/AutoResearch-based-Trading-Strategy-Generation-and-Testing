@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI(14) mean reversion with 4h EMA21 trend filter and volume spike confirmation.
-# Goes long when RSI < 30 (oversold) and price > 4h EMA21 (uptrend), short when RSI > 70 (overbought) and price < 4h EMA21 (downtrend).
-# Uses 4h EMA21 for trend direction to avoid counter-trend trades, reducing whipsaw in sideways markets.
-# Volume spike (>1.5x 20-bar average) confirms momentum behind the move.
-# Designed for 1h timeframe with tight entry conditions to limit trades to 15-35/year.
-# Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
+# Hypothesis: 6h Elder Ray with weekly trend filter and volume confirmation.
+# Uses weekly EMA13 for trend (bull/bear regime) and Elder Ray (bull/bear power) for entry timing.
+# In bull regime (price > weekly EMA13): enter long when bear power crosses above zero.
+# In bear regime (price < weekly EMA13): enter short when bull power crosses below zero.
+# Weekly trend filter reduces whipsaw, Elder Ray provides timely entries.
+# Target: 20-35 trades/year to avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,26 +20,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA21 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 4h EMA21
-    close_4h_series = pd.Series(close_4h)
-    ema21_4h = close_4h_series.ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Calculate weekly EMA13 for trend filter
+    close_1w_series = pd.Series(close_1w)
+    ema13_1w = close_1w_series.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Align 4h EMA21 to 1h
-    ema21_1h = align_htf_to_ltf(prices, df_4h, ema21_4h)
+    # Calculate 13-period EMA for Elder Ray (on 6h data)
+    close_series = pd.Series(close)
+    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate RSI(14) on 1h close
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Calculate Elder Ray components
+    bull_power = high - ema13  # High minus EMA13
+    bear_power = low - ema13   # Low minus EMA13
+    
+    # Align weekly EMA13 to 6h
+    ema13_1w_aligned = align_htf_to_ltf(prices, df_1w, ema13_1w)
     
     # Volume filter: current volume > 1.5 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -47,55 +45,53 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 34  # Need RSI(14) + EMA21(4h) + volume MA20
+    start_idx = 30  # Need weekly EMA13 + EMA13 + volume MA20
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema21_1h[i]) or 
-            np.isnan(rsi[i]) or 
+        if (np.isnan(ema13_1w_aligned[i]) or 
+            np.isnan(ema13[i]) or 
+            np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or 
             np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: spike > 1.5x average (moderate to allow some trades)
+        # Determine regime from weekly EMA13
+        bull_regime = close[i] > ema13_1w_aligned[i]
+        bear_regime = close[i] < ema13_1w_aligned[i]
+        
+        # Volume filter
         volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
-        # RSI conditions
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
-        
-        # Trend filter: price relative to 4h EMA21
-        price_above_ema = close[i] > ema21_1h[i]
-        price_below_ema = close[i] < ema21_1h[i]
-        
         if position == 0:
-            # Long: RSI oversold + price above 4h EMA21 + volume spike
-            if (rsi_oversold and price_above_ema and volume_filter):
-                signals[i] = 0.20
+            # Long: Bull regime AND bear power crosses above zero (selling pressure weakening)
+            if bull_regime and (bear_power[i] > 0) and (bear_power[i-1] <= 0) and volume_filter:
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought + price below 4h EMA21 + volume spike
-            elif (rsi_overbought and price_below_ema and volume_filter):
-                signals[i] = -0.20
+            # Short: Bear regime AND bull power crosses below zero (buying pressure weakening)
+            elif bear_regime and (bull_power[i] < 0) and (bull_power[i-1] >= 0) and volume_filter:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI returns to neutral (50) or price crosses below 4h EMA21
-            if (rsi[i] >= 50) or (close[i] < ema21_1h[i]):
+            # Exit long: Bear power crosses below zero OR regime turns bearish
+            if (bear_power[i] < 0 and bear_power[i-1] >= 0) or bear_regime:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI returns to neutral (50) or price crosses above 4h EMA21
-            if (rsi[i] <= 50) or (close[i] > ema21_1h[i]):
+            # Exit short: Bull power crosses above zero OR regime turns bullish
+            if (bull_power[i] > 0 and bull_power[i-1] <= 0) or bull_regime:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_RSI14_4hEMA21_VolumeMeanReversion"
-timeframe = "1h"
+name = "6h_ElderRay_WeeklyEMA13_Volume"
+timeframe = "6h"
 leverage = 1.0
