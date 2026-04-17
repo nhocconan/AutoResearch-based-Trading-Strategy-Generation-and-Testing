@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h timeframe with 1d Donchian channel breakout + volume confirmation + ADX trend filter.
-Long when price breaks above 1d Donchian upper channel (20) with volume > 1.3x 20-period average and ADX(14) > 25.
-Short when price breaks below 1d Donchian lower channel (20) with volume > 1.3x 20-period average and ADX(14) > 25.
-Exit when price returns to 1d Donchian middle (mean of upper/lower) or ADX < 20 (trend weak).
-Donchian channels capture volatility-based structure; breakouts with volume and trend filter reduce false signals in both bull and bear markets.
+Hypothesis: 4h timeframe with Donchian(20) breakout + volume confirmation + 1d chop regime filter.
+Long when price breaks above Donchian high(20) with volume > 1.3x 20-period average and chop > 61.8 (range).
+Short when price breaks below Donchian low(20) with volume > 1.3x 20-period average and chop > 61.8 (range).
+Exit when price reverts to Donchian midpoint or chop < 38.2 (trend).
+Chop filter ensures we only trade in ranging markets where mean reversion works.
 Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag. Uses discrete sizing 0.25.
 """
 
@@ -22,96 +22,96 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels and ADX
+    # Get 1d data for chop regime filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Donchian channels (20-period)
-    donchian_len = 20
-    upper_1d = pd.Series(high_1d).rolling(window=donchian_len, min_periods=donchian_len).max().values
-    lower_1d = pd.Series(low_1d).rolling(window=donchian_len, min_periods=donchian_len).min().values
-    middle_1d = (upper_1d + lower_1d) / 2.0
+    # Calculate 1d ATR(14) for chop
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr2 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, tr2)])
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1d ADX (14-period)
-    adx_len = 14
-    # True Range
-    tr1 = pd.Series(high_1d).diff().abs()
-    tr2 = (pd.Series(high_1d) - pd.Series(close_1d).shift(1)).abs()
-    tr3 = (pd.Series(low_1d) - pd.Series(close_1d).shift(1)).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=adx_len, adjust=False, min_periods=adx_len).mean()
+    # Calculate 1d Donchian(20) for chop denominator
+    highest_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lowest_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    chop_denom = highest_1d - lowest_1d
+    # Avoid division by zero
+    chop_denom = np.where(chop_denom == 0, 1e-10, chop_denom)
+    chop_1d = 100 * (np.log10(atr_1d * np.sqrt(20) / chop_denom) / np.log10(20))
     
-    # Directional Movement
-    up_move = pd.Series(high_1d).diff()
-    down_move = -pd.Series(low_1d).diff()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Get 4h data for Donchian breakout
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
     
-    # Smoothed DM
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=adx_len, adjust=False, min_periods=adx_len).mean() / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=adx_len, adjust=False, min_periods=adx_len).mean() / atr
+    # Calculate 4h Donchian(20)
+    highest_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lowest_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_mid_4h = (highest_4h + lowest_4h) / 2
     
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(span=adx_len, adjust=False, min_periods=adx_len).mean().values
+    # Calculate 4h volume 20-period average
+    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d volume 20-period average
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all to 4h
-    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
-    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
-    middle_1d_aligned = align_htf_to_ltf(prices, df_1d, middle_1d)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+    # Align all to 4h timeframe (primary)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    highest_4h_aligned = align_htf_to_ltf(prices, df_4h, highest_4h)
+    lowest_4h_aligned = align_htf_to_ltf(prices, df_4h, lowest_4h)
+    donchian_mid_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid_4h)
+    vol_ma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
+    volume_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_4h)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = max(200, 50)  # need enough for ADX and Donchian
+    start_idx = 40  # need enough for Donchian(20) and chop calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_1d_aligned[i]) or np.isnan(lower_1d_aligned[i]) or 
-            np.isnan(middle_1d_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(volume_1d_aligned[i])):
+        if (np.isnan(chop_1d_aligned[i]) or np.isnan(highest_4h_aligned[i]) or 
+            np.isnan(lowest_4h_aligned[i]) or np.isnan(donchian_mid_4h_aligned[i]) or 
+            np.isnan(vol_ma_20_4h_aligned[i]) or np.isnan(volume_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.3x 20-period average
-        volume_confirmed = volume_1d_aligned[i] > 1.3 * vol_ma_20_1d_aligned[i]
+        # Volume confirmation: current 4h volume > 1.3x 20-period average
+        volume_confirmed = volume_4h_aligned[i] > 1.3 * vol_ma_20_4h_aligned[i]
+        
+        # Chop regime: > 61.8 = ranging (good for mean reversion), < 38.2 = trending
+        chop_ranging = chop_1d_aligned[i] > 61.8
+        chop_trending = chop_1d_aligned[i] < 38.2
         
         if position == 0:
-            # Long: price breaks above 1d Donchian upper channel with volume and strong trend (ADX > 25)
-            if (close[i] > upper_1d_aligned[i] and 
+            # Long: price breaks above Donchian high with volume and ranging market
+            if (close[i] > highest_4h_aligned[i] and 
                 volume_confirmed and 
-                adx_aligned[i] > 25):
+                chop_ranging):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 1d Donchian lower channel with volume and strong trend (ADX > 25)
-            elif (close[i] < lower_1d_aligned[i] and 
+            # Short: price breaks below Donchian low with volume and ranging market
+            elif (close[i] < lowest_4h_aligned[i] and 
                   volume_confirmed and 
-                  adx_aligned[i] > 25):
+                  chop_ranging):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to middle channel or trend weakens (ADX < 20)
-            if (close[i] < middle_1d_aligned[i] or 
-                adx_aligned[i] < 20):
+            # Exit long: price returns to Donchian midpoint OR market starts trending
+            if (close[i] < donchian_mid_4h_aligned[i] or 
+                chop_trending):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to middle channel or trend weakens (ADX < 20)
-            if (close[i] > middle_1d_aligned[i] or 
-                adx_aligned[i] < 20):
+            # Exit short: price returns to Donchian midpoint OR market starts trending
+            if (close[i] > donchian_mid_4h_aligned[i] or 
+                chop_trending):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -119,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dDonchian20_Volume_ADX"
+name = "4h_Donchian20_Volume_ChopRegime"
 timeframe = "4h"
 leverage = 1.0
