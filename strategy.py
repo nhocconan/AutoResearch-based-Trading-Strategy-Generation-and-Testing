@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h strategy using 1-week pivot levels (R1/S1, R2/S2) with volume confirmation and 1-day EMA trend filter.
-- Weekly pivot levels calculated from prior week OHLC
-- Enter long when price breaks above R1 with volume > 1.5x 20-period volume MA and price above 1d EMA50
-- Enter short when price breaks below S1 with volume > 1.5x 20-period volume MA and price below 1d EMA50
-- Exit when price crosses back to opposite pivot level (S1 for longs, R1 for shorts)
-- Fixed position size 0.25 to manage drawdown
-- Designed for 6h timeframe with strict entry conditions to limit trades to 50-150 total over 4 years
-- Uses weekly structure for trend context and daily EMA for intermediate trend filter
+12h strategy combining 1d Williams Alligator with 12h price momentum and volume confirmation.
+Williams Alligator: Jaw (13-period SMA shifted 8), Teeth (8-period SMA shifted 5), Lips (5-period SMA shifted 3)
+Trend condition: Lips > Teeth > Jaw (bullish) or Lips < Teeth < Jaw (bearish)
+Entry: 12h price crosses above/below 12-period EMA with volume > 1.5x 20-period volume MA in trend direction
+Exit: Price crosses back below/above the 12-period EMA
+Position size: 0.25
+Designed for 12h timeframe with strict trend and momentum filters to limit trades to 50-150 total over 4 years
 """
 
 import numpy as np
@@ -24,41 +23,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Get daily data for EMA filter
+    # Get 1-day data for Williams Alligator
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1-day EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate Williams Alligator components on 1d data
+    # Jaw: 13-period SMMA shifted 8 bars
+    jaw_13 = pd.Series(df_1d['close']).rolling(window=13, min_periods=13).mean()
+    jaw = jaw_13.shift(8)  # shift 8 bars forward
     
-    # Calculate weekly pivot points from previous week's OHLC
-    # Standard pivot point: P = (H + L + C) / 3
-    # R1 = 2*P - L
-    # S1 = 2*P - H
-    # R2 = P + (H - L)
-    # S2 = P - (H - L)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Teeth: 8-period SMMA shifted 5 bars
+    teeth_8 = pd.Series(df_1d['close']).rolling(window=8, min_periods=8).mean()
+    teeth = teeth_8.shift(5)  # shift 5 bars forward
     
-    pivot = (high_1w + low_1w + close_1w) / 3.0
-    R1 = 2 * pivot - low_1w
-    S1 = 2 * pivot - high_1w
-    R2 = pivot + (high_1w - low_1w)
-    S2 = pivot - (high_1w - low_1w)
+    # Lips: 5-period SMMA shifted 3 bars
+    lips_5 = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).mean()
+    lips = lips_5.shift(3)  # shift 3 bars forward
     
-    # Align weekly pivot levels to 6h timeframe (use previous week's levels)
-    R1_aligned = align_htf_to_ltf(prices, df_1w, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1w, S1)
-    R2_aligned = align_htf_to_ltf(prices, df_1w, R2)
-    S2_aligned = align_htf_to_ltf(prices, df_1w, S2)
+    # Align Alligator components to 12h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw.values)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth.values)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips.values)
+    
+    # 12h EMA12 for momentum
+    ema_12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
     
     # Volume confirmation: 20-period volume MA
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -66,47 +55,49 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 20  # warmup for volume MA
+    start_idx = 34  # warmup for Alligator (max shift 8 + jaw period 13)
     
     for i in range(start_idx, n):
-        if (np.isnan(volume_ma_20.iloc[i]) or 
-            np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(R2_aligned[i]) or np.isnan(S2_aligned[i]) or
-            np.isnan(ema_50_aligned[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+            np.isnan(ema_12[i]) or np.isnan(volume_ma_20.iloc[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = volume_ma_20.iloc[i]
-        R1_val = R1_aligned[i]
-        S1_val = S1_aligned[i]
-        R2_val = R2_aligned[i]
-        S2_val = S2_aligned[i]
-        ema_val = ema_50_aligned[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        ema_val = ema_12[i]
+        
+        # Bullish Alligator alignment: Lips > Teeth > Jaw
+        bullish_align = lips_val > teeth_val and teeth_val > jaw_val
+        # Bearish Alligator alignment: Lips < Teeth < Jaw
+        bearish_align = lips_val < teeth_val and teeth_val < jaw_val
         
         if position == 0:
-            # Look for weekly pivot level breakouts with volume confirmation and trend filter
-            # Long: price breaks above R1 + volume spike + price above 1d EMA50
-            if price > R1_val and vol > 1.5 * vol_ma and price > ema_val:
+            # Look for entries with Alligator trend confirmation
+            # Long: price crosses above EMA12 + volume spike + bullish Alligator
+            if price > ema_val and vol > 1.5 * vol_ma and bullish_align:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + volume spike + price below 1d EMA50
-            elif price < S1_val and vol > 1.5 * vol_ma and price < ema_val:
+            # Short: price crosses below EMA12 + volume spike + bearish Alligator
+            elif price < ema_val and vol > 1.5 * vol_ma and bearish_align:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when price crosses below S1 (opposite level)
-            if price < S1_val:
+            # Exit when price crosses back below EMA12
+            if price < ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price crosses above R1 (opposite level)
-            if price > R1_val:
+            # Exit when price crosses back above EMA12
+            if price > ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -114,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R1S1_Volume_1dEMA50"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_EMA12_Volume"
+timeframe = "12h"
 leverage = 1.0
