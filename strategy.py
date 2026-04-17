@@ -1,8 +1,12 @@
-# 6h Weekly Pivot Breakout with Volume Confirmation
-# Hypothesis: Weekly pivots act as strong support/resistance levels. Breakouts above weekly R1/R2 or below S1/S2 with volume confirmation capture institutional flow.
-# Works in bull/bear: In bull markets, breaks above R1/R2 continue upward; in bear markets, breaks below S1/S2 continue downward.
-# Uses 6h timeframe for balance of signal frequency and noise reduction.
-# Target: 15-25 trades/year per symbol (60-100 total over 4 years).
+#!/usr/bin/env python3
+"""
+12h Camarilla Pivot Breakout with Volume Spike and 1D EMA Trend Filter
+Long: Price breaks above R1 + volume > 2.0x 12h volume MA + price > 1D EMA100
+Short: Price breaks below S1 + volume > 2.0x 12h volume MA + price < 1D EMA100
+Exit: Opposite break of S1 (long) or R1 (short)
+Uses 1D Camarilla levels and 1D EMA100 to filter breakouts in low-volatility regimes
+Target: 20-30 trades/year per symbol
+"""
 
 import numpy as np
 import pandas as pd
@@ -18,68 +22,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points (using prior week's OHLC)
-    df_1w = get_htf_data(prices, '1w')
-    # Calculate weekly pivot points: PP = (H+L+C)/3, R1 = 2*PP - L, S1 = 2*PP - H
-    # R2 = PP + (H - L), S2 = PP - (H - L)
-    # Using prior week's data to avoid look-ahead
-    weekly_high = df_1w['high'].shift(1)
-    weekly_low = df_1w['low'].shift(1)
-    weekly_close = df_1w['close'].shift(1)
+    # Get 1D data for Camarilla pivot levels and trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate pivot levels
-    pp = (weekly_high + weekly_low + weekly_close) / 3.0
-    r1 = 2 * pp - weekly_low
-    s1 = 2 * pp - weekly_high
-    r2 = pp + (weekly_high - weekly_low)
-    s2 = pp - (weekly_high - weekly_low)
+    # Calculate Camarilla levels for previous day
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Align to 6h timeframe (waits for weekly bar to close)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1.values)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1.values)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2.values)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2.values)
+    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Volume confirmation: 6h volume > 1.5x 24-period EMA of volume
-    volume_ema_24 = pd.Series(volume).ewm(span=24, adjust=False, min_periods=24).mean().values
+    # Shift to get previous day's levels
+    camarilla_r1_prev = camarilla_r1[1:]  # Shift forward to align with next day
+    camarilla_s1_prev = camarilla_s1[1:]
+    # Prepend NaN for first day
+    camarilla_r1_prev = np.concatenate([np.array([np.nan]), camarilla_r1_prev])
+    camarilla_s1_prev = np.concatenate([np.array([np.nan]), camarilla_s1_prev])
+    
+    # 1D EMA100 for trend filter
+    ema_100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
+    
+    # Align all 1D indicators to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_prev)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_prev)
+    ema_100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_100_1d)
+    
+    # 12h volume moving average (20-period for confirmation)
+    df_12h = get_htf_data(prices, '12h')
+    volume_ma_20 = pd.Series(df_12h['volume']).rolling(window=20, min_periods=20).mean()
+    volume_ma_20_12h = align_htf_to_ltf(prices, df_12h, volume_ma_20.values)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
+    entry_price = 0.0
     
-    start_idx = 100  # warmup for weekly data and volume EMA
+    start_idx = 100  # warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
-            np.isnan(volume_ema_24[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(ema_100_1d_aligned[i]) or np.isnan(volume_ma_20_12h[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ema = volume_ema_24[i]
+        vol_ma = volume_ma_20_12h[i]
         
         if position == 0:
-            # Long: break above R1 or R2 with volume confirmation
-            if (price > r1_aligned[i] or price > r2_aligned[i]) and vol > 1.5 * vol_ema:
+            # Long: break above R1 + volume spike + 1D uptrend
+            if price > camarilla_r1_aligned[i] and vol > 2.0 * vol_ma and price > ema_100_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 or S2 with volume confirmation
-            elif (price < s1_aligned[i] or price < s2_aligned[i]) and vol > 1.5 * vol_ema:
+                entry_price = price
+            # Short: break below S1 + volume spike + 1D downtrend
+            elif price < camarilla_s1_aligned[i] and vol > 2.0 * vol_ma and price < ema_100_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         elif position == 1:
-            # Long exit: price falls below S1 (invalidates bullish breakout)
-            if price < s1_aligned[i]:
+            # Long exit: break below S1
+            if price < camarilla_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises above R1 (invalidates bearish breakout)
-            if price > r1_aligned[i]:
+            # Short exit: break above R1
+            if price > camarilla_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_Breakout_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_VolumeSpike_1DEMA100"
+timeframe = "12h"
 leverage = 1.0
