@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h timeframe with 1w Camarilla R1/S1 breakout + volume confirmation + 1d EMA50 trend filter.
-Long when price breaks above 1w Camarilla R1 with volume confirmation and price > 1d EMA50 (uptrend).
-Short when price breaks below 1w Camarilla S1 with volume confirmation and price < 1d EMA50 (downtrend).
-Exit when price returns to the 1w Camarilla midpoint (H4/L4) or reverses with volume.
-Uses 12h for execution, 1w for structure (reduces noise), and 1d for trend filter.
-Designed to capture medium-term breakouts with institutional volume while avoiding false breakouts in choppy markets.
-Camarilla levels provide precise support/resistance based on prior week's range, effective in both trending and ranging markets.
-Target trades: 12-37/year (50-150 total over 4 years) to minimize fee drag.
+Hypothesis: 4h timeframe with 1d Williams %R mean reversion + volume spike + choppiness regime filter.
+Williams %R identifies overbought/oversold conditions. Long when %R < -80 (oversold) with volume spike and choppy market (CHOP > 61.8).
+Short when %R > -20 (overbought) with volume spike and choppy market. Exit when %R returns to -50 (mean reversion) or volume spike reversal.
+Uses 1d for Williams %R calculation (more stable) and 4h for volume confirmation and entry timing.
+Designed to work in both bull and bear markets by capturing mean reversion in ranging conditions (chop filter avoids trending markets).
 """
 
 import numpy as np
@@ -24,78 +21,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Camarilla calculation
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate 1w Camarilla levels (based on prior 1w bar)
-    range_1w = high_1w - low_1w
-    r1_1w = close_1w + 0.833 * range_1w
-    s1_1w = close_1w - 0.833 * range_1w
-    midpoint_1w = close_1w  # Camarilla midpoint is close
-    
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for Williams %R calculation
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    close_1d_series = pd.Series(close_1d)
-    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 12h volume 20-period average for confirmation
+    # Calculate 1d Williams %R: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # Using 14-period lookback
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
+    
+    # Calculate 4h volume 20-period average for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align HTF indicators to 12h timeframe
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    midpoint_1w_aligned = align_htf_to_ltf(prices, df_1w, midpoint_1w)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate 1d Choppiness Index: CHOP = 100 * log10(sum(ATR(1)) / (n * ATR(n))) / log10(1/n)
+    # Using 14-period CHOP
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]), np.abs(low_1d[1:] - close_1d[:-1]))
+    tr1 = np.concatenate([[np.abs(high_1d[0] - low_1d[0])], tr1])  # First TR is just high-low
+    atr1 = tr1  # ATR(1) is just true range
+    sum_tr1 = pd.Series(atr1).rolling(window=14, min_periods=14).sum().values
+    atr14 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
+    chop = 100 * np.log10(sum_tr1 / (14 * atr14)) / np.log10(1/14)
+    # Handle division by zero and invalid values
+    chop = np.where((atr14 == 0) | np.isnan(chop) | np.isinf(chop), 50, chop)
+    
+    # Align 1d indicators to 4h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # need enough for EMA50 and volume MA
+    start_idx = 50  # need enough for Williams %R and CHOP calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_1w_aligned[i]) or 
-            np.isnan(s1_1w_aligned[i]) or 
-            np.isnan(midpoint_1w_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or 
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(chop_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume confirmation: current 4h volume > 2.0x 20-period average (tighter filter)
+        volume_confirmed = volume[i] > 2.0 * vol_ma_20[i]
+        
+        # Chop regime filter: only trade in choppy markets (CHOP > 61.8 = ranging)
+        chop_filter = chop_aligned[i] > 61.8
         
         if position == 0:
-            # Long: price breaks above 1w Camarilla R1 with volume and uptrend (price > EMA50)
-            if (close[i] > r1_1w_aligned[i] and 
+            # Long: Williams %R oversold (< -80) with volume confirmation and choppy market
+            if (williams_r_aligned[i] < -80 and 
                 volume_confirmed and 
-                close[i] > ema50_1d_aligned[i]):
+                chop_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 1w Camarilla S1 with volume and downtrend (price < EMA50)
-            elif (close[i] < s1_1w_aligned[i] and 
+            # Short: Williams %R overbought (> -20) with volume confirmation and choppy market
+            elif (williams_r_aligned[i] > -20 and 
                   volume_confirmed and 
-                  close[i] < ema50_1d_aligned[i]):
+                  chop_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to or below midpoint OR breaks below S1 with volume (reversal)
-            if (close[i] <= midpoint_1w_aligned[i] or 
-                (close[i] < s1_1w_aligned[i] and volume_confirmed)):
+            # Exit long: Williams %R returns to mean (-50) or volume spike reversal
+            if (williams_r_aligned[i] >= -50 or 
+                (volume[i] > 2.0 * vol_ma_20[i] and williams_r_aligned[i] < williams_r_aligned[i-1])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to or above midpoint OR breaks above R1 with volume (reversal)
-            if (close[i] >= midpoint_1w_aligned[i] or 
-                (close[i] > r1_1w_aligned[i] and volume_confirmed)):
+            # Exit short: Williams %R returns to mean (-50) or volume spike reversal
+            if (williams_r_aligned[i] <= -50 or 
+                (volume[i] > 2.0 * vol_ma_20[i] and williams_r_aligned[i] > williams_r_aligned[i-1])):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -103,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1wCamarilla_R1S1_Breakout_Volume_1dEMA50_Trend"
-timeframe = "12h"
+name = "4h_1dWilliamsR_MeanReversion_Volume_Chop_Regime"
+timeframe = "4h"
 leverage = 1.0
