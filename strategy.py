@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_RSI25_75_EMA200_Trend_Filter
-Hypothesis: RSI extreme reversals with EMA200 trend filter on 4h timeframe.
-Long when RSI < 25 and price > EMA200 (oversold in uptrend).
-Short when RSI > 75 and price < EMA200 (overbought in downtrend).
-Exit when RSI returns to neutral (40-60 range).
-Works in both bull (buy dips in uptrend) and bear (sell rallies in downtrend).
-Low-frequency signals to avoid overtrading.
+6h_RSI_Overbought_Oversold_With_Stochastic_Confirmation
+Hypothesis: 6h RSI extremes (overbought >70, oversold <30) confirmed by 6h Stochastic Oscillator to reduce false signals in trending markets. Works in both bull (mean reversion in uptrend) and bear (mean reversion in downtrend) regimes. Uses 60-period RSI to reduce noise and 14-period Stochastic with smoothing. Entry when RSI crosses extreme with Stochastic confirmation, exit when RSI returns to neutral zone (40-60). Position size 0.25 to manage drawdown.
 """
 
 import numpy as np
@@ -19,51 +14,75 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Calculate RSI(14)
+    # RSI(60) calculation
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
+    
+    # Use Wilder's smoothing (alpha = 1/period)
+    alpha = 1.0 / 60
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    avg_gain[0] = gain[0]
+    avg_loss[0] = loss[0]
+    
+    for i in range(1, n):
+        avg_gain[i] = alpha * gain[i] + (1 - alpha) * avg_gain[i-1]
+        avg_loss[i] = alpha * loss[i] + (1 - alpha) * avg_loss[i-1]
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
     rsi = 100 - (100 / (1 + rs))
     
-    # Calculate EMA200
-    ema200 = pd.Series(close).ewm(span=200, min_periods=200, adjust=False).mean().values
+    # Stochastic Oscillator (14,3,3)
+    lowest_low = np.zeros(n)
+    highest_high = np.zeros(n)
+    
+    for i in range(n):
+        start_idx = max(0, i - 13)
+        lowest_low[i] = np.min(low[start_idx:i+1])
+        highest_high[i] = np.max(high[start_idx:i+1])
+    
+    # Avoid division by zero
+    denominator = highest_high - lowest_low
+    stoch_k = np.where(denominator != 0, 100 * (close - lowest_low) / denominator, 0)
+    
+    # Smooth %K to get %D (3-period SMA of %K)
+    stoch_d = np.zeros(n)
+    for i in range(n):
+        if i < 2:
+            stoch_d[i] = stoch_k[i] if i == 0 else (stoch_k[0] + stoch_k[1]) / 2
+        else:
+            stoch_d[i] = (stoch_k[i-2] + stoch_k[i-1] + stoch_k[i]) / 3
     
     signals = np.zeros(n)
     
-    # Warmup: covers RSI and EMA200
-    warmup = 200
+    # Warmup: covers RSI and Stochastic calculations
+    warmup = 80
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
-        # Skip if any data is NaN
-        if np.isnan(rsi[i]) or np.isnan(ema200[i]):
-            signals[i] = 0.0
-            position = 0
-            continue
-        
         # Entry conditions
         if position == 0:
-            # Long: RSI < 25 (oversold) and price > EMA200 (uptrend)
-            if rsi[i] < 25 and close[i] > ema200[i]:
+            # Long: RSI crosses above 30 from below AND Stochastic %K crosses above %D
+            if rsi[i-1] <= 30 and rsi[i] > 30 and stoch_k[i-1] <= stoch_d[i-1] and stoch_k[i] > stoch_d[i]:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: RSI > 75 (overbought) and price < EMA200 (downtrend)
-            elif rsi[i] > 75 and close[i] < ema200[i]:
+            # Short: RSI crosses below 70 from above AND Stochastic %K crosses below %D
+            elif rsi[i-1] >= 70 and rsi[i] < 70 and stoch_k[i-1] >= stoch_d[i-1] and stoch_k[i] < stoch_d[i]:
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit conditions
         elif position == 1:
-            # Exit long when RSI returns to neutral (40-60)
-            if 40 <= rsi[i] <= 60:
+            # Exit long when RSI returns to neutral zone (above 40)
+            if rsi[i] >= 40:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -71,8 +90,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when RSI returns to neutral (40-60)
-            if 40 <= rsi[i] <= 60:
+            # Exit short when RSI returns to neutral zone (below 60)
+            if rsi[i] <= 60:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -81,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI25_75_EMA200_Trend_Filter"
-timeframe = "4h"
+name = "6h_RSI_Overbought_Oversold_With_Stochastic_Confirmation"
+timeframe = "6h"
 leverage = 1.0
