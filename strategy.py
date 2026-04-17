@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout + 1d volume spike + chop regime filter.
-Long when price breaks above Donchian upper band with volume > 1.5x 20-period average and chop > 61.8 (range regime).
-Short when price breaks below Donchian lower band with volume > 1.5x 20-period average and chop > 61.8.
-Exit when price touches opposite Donchian band or chop < 38.2 (trend regime).
-Uses 1d for volume and chop filters, 12h for Donchian channels.
+Hypothesis: 12h Donchian(20) breakout + 1d volume spike + choppiness regime filter.
+Long when price breaks above Donchian(20) high with volume > 1.5x 20-period average and CHOP > 61.8 (range regime).
+Short when price breaks below Donchian(20) low with volume > 1.5x 20-period average and CHOP > 61.8.
+Exit when price reverts to Donchian(20) midpoint or volume drops below average.
+Uses 1d for volume spike and CHOP regime, 12h for Donchian channels.
 Target: 50-150 total trades over 4 years (12-37/year).
 """
 
@@ -22,59 +22,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian channels
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Get 1d data for volume and chop filters
+    # Get 1d data for volume and choppiness regime
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 12h Donchian channels (20-period)
-    def donchian_channels(high, low, period=20):
-        upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-        lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-        return upper, lower
-    
-    upper_12h, lower_12h = donchian_channels(high_12h, low_12h, 20)
-    upper_12h_aligned = align_htf_to_ltf(prices, df_12h, upper_12h)
-    lower_12h_aligned = align_htf_to_ltf(prices, df_12h, lower_12h)
-    
-    # Calculate 1d volume spike filter (volume > 1.5x 20-period average)
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = volume_1d > (vol_ma_1d * 1.5)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
-    
-    # Calculate 1d Choppiness Index (CHOP) - range regime filter
-    def choppiness_index(high, low, close, period=14):
-        atr = np.zeros_like(high)
+    # Calculate 1d ATR for choppiness
+    def calculate_atr(high, low, close, period=14):
+        tr = np.zeros_like(high)
         for i in range(1, len(high)):
-            atr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Wilder's smoothing for ATR
-        atr_smoothed = np.zeros_like(atr)
-        atr_smoothed[period] = np.mean(atr[1:period+1])
-        for i in range(period+1, len(atr)):
-            atr_smoothed[i] = (atr_smoothed[i-1] * (period-1) + atr[i]) / period
-        
-        highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-        lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-        
-        chop = np.zeros_like(high)
-        for i in range(period, len(high)):
-            if atr_smoothed[i] > 0 and (highest_high[i] - lowest_low[i]) > 0:
-                chop[i] = 100 * np.log10(atr_smoothed[i] * period / (highest_high[i] - lowest_low[i])) / np.log10(period)
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        tr[0] = high[0] - low[0]
+        atr = np.zeros_like(tr)
+        atr[period] = np.mean(tr[1:period+1])
+        for i in range(period+1, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        return atr
+    
+    # Calculate 1d choppiness index
+    def calculate_chop(high, low, close, atr_period=14, chop_period=14):
+        atr = calculate_atr(high, low, close, atr_period)
+        sum_atr = np.zeros_like(close)
+        for i in range(len(close)):
+            if i < chop_period:
+                sum_atr[i] = np.nan
             else:
-                chop[i] = 50  # neutral
+                sum_atr[i] = np.sum(atr[i-chop_period+1:i+1])
+        
+        max_high = np.zeros_like(high)
+        min_low = np.zeros_like(low)
+        for i in range(len(high)):
+            if i < chop_period:
+                max_high[i] = np.nan
+                min_low[i] = np.nan
+            else:
+                max_high[i] = np.max(high[i-chop_period+1:i+1])
+                min_low[i] = np.min(low[i-chop_period+1:i+1])
+        
+        chop = np.zeros_like(close)
+        for i in range(len(close)):
+            if np.isnan(sum_atr[i]) or np.isnan(max_high[i]) or np.isnan(min_low[i]) or max_high[i] == min_low[i]:
+                chop[i] = np.nan
+            else:
+                chop[i] = 100 * np.log10(sum_atr[i] / (max_high[i] - min_low[i])) / np.log10(chop_period)
         return chop
     
-    chop_1d = choppiness_index(high_1d, low_1d, close_1d, 14)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # Calculate 1d volume spike (volume > 1.5x 20-period average)
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume_1d > (1.5 * vol_ma_20)
+    
+    # Calculate 1d choppiness
+    chop = calculate_chop(high_1d, low_1d, close_1d, 14, 14)
+    chop_regime = chop > 61.8  # range regime
+    
+    # Align 1d indicators
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
+    chop_regime_aligned = align_htf_to_ltf(prices, df_1d, chop_regime.astype(float))
+    
+    # Calculate 12h Donchian channels
+    def donchian_channels(high, low, period=20):
+        upper = np.zeros_like(high)
+        lower = np.zeros_like(high)
+        mid = np.zeros_like(high)
+        for i in range(len(high)):
+            if i < period:
+                upper[i] = np.nan
+                lower[i] = np.nan
+                mid[i] = np.nan
+            else:
+                upper[i] = np.max(high[i-period+1:i+1])
+                lower[i] = np.min(low[i-period+1:i+1])
+                mid[i] = (upper[i] + lower[i]) / 2
+        return upper, lower, mid
+    
+    upper_20, lower_20, mid_20 = donchian_channels(high, low, 20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -83,41 +106,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_12h_aligned[i]) or 
-            np.isnan(lower_12h_aligned[i]) or
-            np.isnan(vol_spike_1d_aligned[i]) or
-            np.isnan(chop_1d_aligned[i])):
+        if (np.isnan(upper_20[i]) or np.isnan(lower_20[i]) or 
+            np.isnan(volume_spike_aligned[i]) or np.isnan(chop_regime_aligned[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        vol_spike = vol_spike_1d_aligned[i] > 0.5
-        chop_val = chop_1d_aligned[i]
-        
-        # Regime: range when CHOP > 61.8
-        is_range = chop_val > 61.8
+        # Regime and volume conditions
+        vol_spike = volume_spike_aligned[i] > 0.5  # boolean as float
+        chop_range = chop_regime_aligned[i] > 0.5   # boolean as float
         
         if position == 0:
-            # Long: price > upper Donchian + volume spike + range regime
-            if price > upper_12h_aligned[i] and vol_spike and is_range:
+            # Long: price > upper Donchian + volume spike + chop regime (range)
+            if close[i] > upper_20[i] and vol_spike and chop_range:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < lower Donchian + volume spike + range regime
-            elif price < lower_12h_aligned[i] and vol_spike and is_range:
+            # Short: price < lower Donchian + volume spike + chop regime (range)
+            elif close[i] < lower_20[i] and vol_spike and chop_range:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price < lower Donchian OR regime shifts to trend (CHOP < 38.2)
-            if price < lower_12h_aligned[i] or chop_val < 38.2:
+            # Exit long: price < midpoint OR volume drops below average OR chop regime ends
+            if close[i] < mid_20[i] or not vol_spike or not chop_range:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price > upper Donchian OR regime shifts to trend (CHOP < 38.2)
-            if price > upper_12h_aligned[i] or chop_val < 38.2:
+            # Exit short: price > midpoint OR volume drops below average OR chop regime ends
+            if close[i] > mid_20[i] or not vol_spike or not chop_range:
                 signals[i] = 0.0
                 position = 0
             else:
