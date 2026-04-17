@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter and volume spike confirmation.
-Long when price breaks above R1 AND close > 4h EMA50 AND volume > 2.0x 20-period average.
-Short when price breaks below S1 AND close < 4h EMA50 AND volume > 2.0x 20-period average.
-Exit when price crosses the Camarilla pivot point (mean) OR ATR-based stoploss hit.
-Uses 4h HTF for trend filter to reduce false signals and improve Sharpe in both bull and bear markets.
-Target: 15-37 trades/year (60-150 over 4 years) for 1h timeframe with session filter (08-20 UTC).
+Hypothesis: 6h Camarilla pivot breakout with volume confirmation and 1d EMA50 trend filter.
+Long when price breaks above Camarilla R3 level AND volume > 1.8x 20-period average AND close > 1d EMA50.
+Short when price breaks below Camarilla S3 level AND volume > 1.8x 20-period average AND close < 1d EMA50.
+Exit when price crosses the Camarilla Pivot point (PP) OR ATR-based stoploss hit (2.0 * ATR).
+Uses 1d HTF for trend filter and 1d OHLC for Camarilla calculation to reduce false signals.
+Designed for 6h timeframe to capture medium-term swings with controlled trade frequency (~20-40 trades/year).
 """
 
 import numpy as np
@@ -22,45 +22,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1h data for Camarilla calculation (primary timeframe)
-    df_1h = prices.copy()
-    high_1h = df_1h['high'].values
-    low_1h = df_1h['low'].values
-    close_1h = df_1h['close'].values
+    # Get 1d data for Camarilla calculation and EMA50 trend (higher timeframe)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels (based on previous bar)
-    def calculate_camarilla(high_arr, low_arr, close_arr):
-        """Calculate Camarilla pivot levels"""
-        pivot = (high_arr + low_arr + close_arr) / 3.0
-        range_val = high_arr - low_arr
-        r1 = pivot + (range_val * 1.1 / 12)
-        s1 = pivot - (range_val * 1.1 / 12)
-        return pivot, r1, s1
+    # Calculate Camarilla pivot levels from previous 1d bar
+    # PP = (H + L + C) / 3
+    # R3 = PP + (H - L) * 1.1 / 2
+    # S3 = PP - (H - L) * 1.1 / 2
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
+    pp_1d = typical_price_1d
+    range_1d = high_1d - low_1d
+    r3_1d = pp_1d + range_1d * 1.1 / 2.0
+    s3_1d = pp_1d - range_1d * 1.1 / 2.0
     
-    # Calculate for previous bar (to avoid look-ahead)
-    pivot = np.full_like(close_1h, np.nan, dtype=float)
-    r1 = np.full_like(close_1h, np.nan, dtype=float)
-    s1 = np.full_like(close_1h, np.nan, dtype=float)
+    # Calculate EMA50 on 1d for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    for i in range(1, len(close_1h)):
-        p, r, s = calculate_camarilla(high_1h[i-1], low_1h[i-1], close_1h[i-1])
-        pivot[i] = p
-        r1[i] = r
-        s1[i] = s
+    # Calculate volume average (20-period) on 1d
+    volume_1d = df_1d['volume'].values
+    volume_1d_series = pd.Series(volume_1d)
+    volume_ma_1d = volume_1d_series.rolling(window=20, min_periods=20).mean().values
     
-    # Get 4h data for EMA50 trend filter (higher timeframe)
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    
-    # Calculate EMA50 on 4h
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Calculate volume average (20-period) on 1h
-    volume_1h = df_1h['volume'].values
-    volume_1h_series = pd.Series(volume_1h)
-    volume_ma_1h = volume_1h_series.rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate ATR (14-period) for stoploss on 1h
+    # Calculate ATR (14-period) for stoploss on 1d
     def calculate_atr(high_arr, low_arr, close_arr, window):
         """Average True Range"""
         tr1 = high_arr - low_arr
@@ -71,15 +57,15 @@ def generate_signals(prices):
         atr = pd.Series(tr).ewm(span=window, adjust=False, min_periods=window).mean().values
         return atr
     
-    atr = calculate_atr(high_1h, low_1h, close_1h, 14)
+    atr_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
     
-    # Align all indicators to 1h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1h, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1h, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1h, s1)
-    ema50_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1h, volume_ma_1h)
-    atr_aligned = align_htf_to_ltf(prices, df_1h, atr)
+    # Align all indicators to 6h timeframe (primary)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -87,25 +73,16 @@ def generate_signals(prices):
     
     start_idx = 50  # warmup for indicators
     
-    # Precompute session filter (08-20 UTC)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+        if (np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
             np.isnan(ema50_aligned[i]) or np.isnan(volume_ma_aligned[i]) or np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Skip if outside trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-        
-        pivot_val = pivot_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
+        pp = pp_aligned[i]
+        r3 = r3_aligned[i]
+        s3 = s3_aligned[i]
         ema50 = ema50_aligned[i]
         vol_ma = volume_ma_aligned[i]
         atr_val = atr_aligned[i]
@@ -113,14 +90,14 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: Breakout above R1 + price > 4h EMA50 + volume spike
-            if price > r1_val and price > ema50 and vol > 2.0 * vol_ma:
-                signals[i] = 0.20
+            # Long: Breakout above R3 + volume spike + price > 1d EMA50
+            if price > r3 and vol > 1.8 * vol_ma and price > ema50:
+                signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: Breakout below S1 + price < 4h EMA50 + volume spike
-            elif price < s1_val and price < ema50 and vol > 2.0 * vol_ma:
-                signals[i] = -0.20
+            # Short: Breakout below S3 + volume spike + price < 1d EMA50
+            elif price < s3 and vol > 1.8 * vol_ma and price < ema50:
+                signals[i] = -0.25
                 position = -1
                 entry_price = price
         
@@ -128,8 +105,8 @@ def generate_signals(prices):
             # Exit conditions for long
             exit_signal = False
             
-            # Exit 1: Price crosses pivot point (mean reversion)
-            if price < pivot_val:
+            # Exit 1: Price crosses pivot point (mean reversion to PP)
+            if price < pp:
                 exit_signal = True
             
             # Exit 2: ATR-based stoploss (2.0 * ATR below entry)
@@ -140,14 +117,14 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
             # Exit conditions for short
             exit_signal = False
             
-            # Exit 1: Price crosses pivot point (mean reversion)
-            if price > pivot_val:
+            # Exit 1: Price crosses pivot point (mean reversion to PP)
+            if price > pp:
                 exit_signal = True
             
             # Exit 2: ATR-based stoploss (2.0 * ATR above entry)
@@ -158,10 +135,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_R1S1_4hEMA50_VolumeSpike_ATRStop"
-timeframe = "1h"
+name = "6h_Camarilla_R3S3_Volume_1dEMA50_ATRStop"
+timeframe = "6h"
 leverage = 1.0
