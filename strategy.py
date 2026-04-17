@@ -5,13 +5,23 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # Get weekly data for directional filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly EMA(21) for trend filter
+    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    
+    # Align weekly EMA to 6h timeframe
+    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
     
     # Get daily data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
@@ -26,7 +36,7 @@ def generate_signals(prices):
     r2 = pivot + (high_1d - low_1d)
     s2 = pivot - (high_1d - low_1d)
     
-    # Shift to use previous day's pivots (avoid look-ahead)
+    # Use previous day's pivots (avoid look-ahead)
     r1_prev = np.roll(r1, 1)
     s1_prev = np.roll(s1, 1)
     r2_prev = np.roll(r2, 1)
@@ -36,14 +46,12 @@ def generate_signals(prices):
     r2_prev[0] = np.nan
     s2_prev[0] = np.nan
     
-    # Align daily pivot levels to 12h timeframe
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1_prev)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1_prev)
-    r2_12h = align_htf_to_ltf(prices, df_1d, r2_prev)
-    s2_12h = align_htf_to_ltf(prices, df_1d, s2_prev)
+    # Align daily pivot levels to 6h timeframe
+    r2_6h = align_htf_to_ltf(prices, df_1d, r2_prev)
+    s2_6h = align_htf_to_ltf(prices, df_1d, s2_prev)
     
-    # Volume confirmation: current volume > 1.3 * 2-period average (12h * 2 = 24h)
-    volume_ma2 = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
+    # Volume confirmation: current volume > 1.5 * 4-period average (6h * 4 = 24h)
+    volume_ma4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     # ATR filter to avoid low volatility environments
     tr1 = high - low
@@ -59,46 +67,48 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 20  # Need R2/S2 and ATR MA10
+    start_idx = 30  # Need EMA21, R2/S2 and ATR MA10
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(volume_ma2[i]) or 
+        if (np.isnan(volume_ma4[i]) or 
             np.isnan(atr[i]) or 
             np.isnan(atr_ma10[i]) or 
-            np.isnan(r2_12h[i]) or 
-            np.isnan(s2_12h[i]) or
-            np.isnan(r1_12h[i]) or 
-            np.isnan(s1_12h[i])):
+            np.isnan(r2_6h[i]) or 
+            np.isnan(s2_6h[i]) or
+            np.isnan(ema21_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.3x 2-period average
-        volume_filter = volume[i] > (1.3 * volume_ma2[i])
+        # Volume filter: current volume > 1.5x 4-period average
+        volume_filter = volume[i] > (1.5 * volume_ma4[i])
         # Volatility filter: ATR > ATR MA10 (avoid low volatility)
         volatility_filter = atr[i] > atr_ma10[i]
+        # Weekly trend filter: price above/below weekly EMA21
+        weekly_uptrend = close[i] > ema21_1w_aligned[i]
+        weekly_downtrend = close[i] < ema21_1w_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R2 with volume and volatility (strong breakout)
-            if close[i] > r2_12h[i] and volume_filter and volatility_filter:
+            # Long: price breaks above R2 with volume, volatility AND weekly uptrend
+            if close[i] > r2_6h[i] and volume_filter and volatility_filter and weekly_uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S2 with volume and volatility (strong breakdown)
-            elif close[i] < s2_12h[i] and volume_filter and volatility_filter:
+            # Short: price breaks below S2 with volume, volatility AND weekly downtrend
+            elif close[i] < s2_6h[i] and volume_filter and volatility_filter and weekly_downtrend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns below R1 or volatility drops
-            if close[i] < r1_12h[i] or not volatility_filter:
+            # Exit long: price returns below weekly EMA21 or volatility drops
+            if close[i] < ema21_1w_aligned[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns above S1 or volatility drops
-            if close[i] > s1_12h[i] or not volatility_filter:
+            # Exit short: price returns above weekly EMA21 or volatility drops
+            if close[i] > ema21_1w_aligned[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_R2_S2_Breakout_Volume_Filter"
-timeframe = "12h"
+name = "6h_WeeklyEMA21Filter_PivotBreakout_Volume"
+timeframe = "6h"
 leverage = 1.0
