@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Elder Ray Index with 1d Weekly Trend Filter and Volume Spike.
-Long when Elder Bull Power > 0, Bear Power < 0, volume > 1.5x average, and 1d close > 1d EMA50.
-Short when Elder Bull Power < 0, Bear Power > 0, volume > 1.5x average, and 1d close < 1d EMA50.
-Exit when Elder Bull Power and Bear Power converge (|Bull - Bear| < 0.1 * ATR) or volume drops.
-Uses 12h for price/volume/Elder Ray, 1d for trend filter. Target: 50-150 total trades over 4 years.
+Hypothesis: 4h Donchian(20) breakout with volume confirmation and ATR-based trailing stop.
+Long when price breaks above upper Donchian channel with volume > 1.5x average.
+Short when price breaks below lower Donchian channel with volume > 1.5x average.
+Trailing stop: exit long when price drops 2.5x ATR from highest high since entry.
+Exit short when price rises 2.5x ATR from lowest low since entry.
+Uses discrete position sizing (0.25) to minimize fee churn. Designed to capture trends in both bull and bear markets while avoiding whipsaws.
 """
 
 import numpy as np
@@ -13,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,89 +22,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1d EMA50 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Calculate 12h Elder Ray Index (requires 13-period EMA)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13  # Bull Power = High - EMA13
-    bear_power = low - ema13   # Bear Power = Low - EMA13
-    
-    # Calculate 12h ATR(14) for exit condition
+    # Calculate ATR for trailing stop (14-period)
     tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    atr14 = np.zeros(n)
-    atr14[14] = np.mean(tr[1:15])  # Seed with first 14 values
+    atr = np.zeros(n)
+    atr[14] = np.mean(tr[1:15])  # Seed with first 14 values
     for i in range(15, n):
-        atr14[i] = (atr14[i-1] * 13 + tr[i]) / 14
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14  # Wilder's smoothing
     
-    # Calculate 12h volume MA(20) for volume spike filter
+    # Calculate Donchian channels (20-period)
+    upper_channel = np.zeros(n)
+    lower_channel = np.zeros(n)
+    
+    for i in range(20, n):
+        upper_channel[i] = np.max(high[i-19:i+1])
+        lower_channel[i] = np.min(low[i-19:i+1])
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 1.5)
+    volume_confirm = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
+    entry_price = 0.0
+    highest_high_since_entry = 0.0
+    lowest_low_since_entry = 0.0
     
-    start_idx = 50  # warmup for indicators
+    start_idx = 30  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema50_1d[i]) or 
-            np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or 
-            np.isnan(atr14[i]) or 
+        if (np.isnan(upper_channel[i]) or 
+            np.isnan(lower_channel[i]) or 
+            np.isnan(atr[i]) or 
             np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Get 1d values (already aligned via index alignment in get_htf_data)
-        ema50 = ema50_1d[i]
-        vol_spike = volume_spike[i]
-        
-        # Elder Ray values
-        bull = bull_power[i]
-        bear = bear_power[i]
-        atr = atr14[i]
-        
-        # Convergence condition: |Bull - Bear| < 0.1 * ATR
-        convergence = abs(bull - bear) < (0.1 * atr)
+        price = close[i]
+        vol_conf = volume_confirm[i]
+        atr_val = atr[i]
+        upper = upper_channel[i]
+        lower = lower_channel[i]
         
         if position == 0:
-            # Long: Bull > 0, Bear < 0, volume spike, uptrend (1d close > EMA50)
-            if bull > 0 and bear < 0 and vol_spike and close[i] > ema50:
+            # Long: price breaks above upper Donchian with volume confirmation
+            if price > upper and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bull < 0, Bear > 0, volume spike, downtrend (1d close < EMA50)
-            elif bull < 0 and bear > 0 and vol_spike and close[i] < ema50:
+                entry_price = price
+                highest_high_since_entry = price
+            # Short: price breaks below lower Donchian with volume confirmation
+            elif price < lower and vol_conf:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
+                lowest_low_since_entry = price
         
         elif position == 1:
-            # Exit long: convergence OR volume drops OR trend breaks
-            if convergence or not vol_spike or close[i] < ema50:
+            # Update highest high since entry
+            highest_high_since_entry = max(highest_high_since_entry, price)
+            # Trailing stop: exit if price drops 2.5x ATR from highest high
+            if price <= highest_high_since_entry - 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
+                highest_high_since_entry = 0.0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: convergence OR volume drops OR trend breaks
-            if convergence or not vol_spike or close[i] > ema50:
+            # Update lowest low since entry
+            lowest_low_since_entry = min(lowest_low_since_entry, price)
+            # Trailing stop: exit if price rises 2.5x ATR from lowest low
+            if price >= lowest_low_since_entry + 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
+                lowest_low_since_entry = 0.0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "12h_ElderRay_VolumeSpike_1dTrend"
-timeframe = "12h"
+name = "4h_Donchian20_Volume_ATRTrail"
+timeframe = "4h"
 leverage = 1.0
