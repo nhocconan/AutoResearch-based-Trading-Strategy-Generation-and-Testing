@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points
+    # Get daily data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -25,31 +25,26 @@ def generate_signals(prices):
     s1_1d = 2 * pivot_1d - high_1d
     r2_1d = pivot_1d + (high_1d - low_1d)
     s2_1d = pivot_1d - (high_1d - low_1d)
+    r3_1d = high_1d + 2 * (pivot_1d - low_1d)
+    s3_1d = low_1d - 2 * (high_1d - pivot_1d)
     
-    # Align pivot levels to 12h timeframe
+    # Align pivot levels to 4h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
     s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly EMA50 for trend
-    close_1w_series = pd.Series(close_1w)
-    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # Calculate 12h ATR for volatility filter
+    # Get 4h ATR for volatility filter
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 12h volume ratio for confirmation
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
+    # Calculate 4h EMA21 for trend filter
+    close_series = pd.Series(close)
+    ema21 = close_series.ewm(span=21, adjust=False, min_periods=21).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -58,43 +53,44 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
-            np.isnan(r2_1d_aligned[i]) or np.isnan(s2_1d_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or
-            np.isnan(atr[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(s1_1d_aligned[i]) or np.isnan(s2_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
+            np.isnan(r1_1d_aligned[i]) or np.isnan(r2_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or
+            np.isnan(atr[i]) or np.isnan(ema21[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above weekly EMA50 for long, below for short
-        long_trend = close[i] > ema50_1w_aligned[i]
-        short_trend = close[i] < ema50_1w_aligned[i]
+        # Trend filter: price above EMA21 for long, below for short
+        long_trend = close[i] > ema21[i]
+        short_trend = close[i] < ema21[i]
         
         # Volatility filter: avoid extremely low volatility periods
-        vol_filter = atr[i] > np.nanpercentile(atr[max(0, i-50):i+1], 30) if i >= 50 else True
-        
-        # Volume confirmation: require above-average volume
-        vol_confirm = vol_ratio[i] > 1.2
+        if i >= 50:
+            vol_ma = np.nanmean(atr[i-50:i])
+            vol_filter = atr[i] > 0.5 * vol_ma
+        else:
+            vol_filter = True
         
         if position == 0:
-            # Long: price breaks above S1 with trend and volume confirmation
-            if long_trend and vol_filter and vol_confirm and close[i] > s1_1d_aligned[i]:
+            # Long: price breaks above S3 with trend alignment
+            if long_trend and vol_filter and close[i] > s3_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below R1 with trend and volume confirmation
-            elif short_trend and vol_filter and vol_confirm and close[i] < r1_1d_aligned[i]:
+            # Short: price breaks below R3 with trend alignment
+            elif short_trend and vol_filter and close[i] < r3_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below pivot or reverses at R2
-            if close[i] < pivot_1d_aligned[i] or close[i] > r2_1d_aligned[i]:
+            # Exit long: price breaks below S2
+            if close[i] < s2_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above pivot or reverses at S2
-            if close[i] > pivot_1d_aligned[i] or close[i] < s2_1d_aligned[i]:
+            # Exit short: price breaks above R2
+            if close[i] > r2_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_S1R1_Breakout_WeeklyTrend_VolumeConfirm"
-timeframe = "12h"
+name = "4h_Pivot_S2S3_R2R3_Breakout_EMA21"
+timeframe = "4h"
 leverage = 1.0
