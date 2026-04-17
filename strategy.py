@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-1h_4hDonchian20_1dEMA34_Trend
-Strategy: 1h trend following using 4h Donchian(20) breakout + 1d EMA(34) filter.
-Long: Price breaks above 4h Donchian upper + price > 1d EMA(34)
-Short: Price breaks below 4h Donchian lower + price < 1d EMA(34)
-Exit: Opposite Donchian break or EMA filter fails
-Position size: 0.20
-Uses 4h for trend direction/breakout, 1d for trend filter, 1h only for entry timing.
-Session filter 08-20 UTC to reduce noise. Target 20-40 trades/year.
+6h_WeeklyPivot_R1_S1_Breakout_VolumeFilter
+Strategy: 6h weekly pivot point (R1/S1) breakout with volume filter.
+Long: Price breaks above weekly pivot R1 + volume > 1.5x 20-period avg
+Short: Price breaks below weekly pivot S1 + volume > 1.5x 20-period avg
+Exit: Opposite pivot level break
+Position size: 0.25
+Uses weekly pivot levels for structure, volume for confirmation.
+Designed to work in both bull and bear markets by capturing breakouts from key levels.
+Timeframe: 6h
 """
 
 import numpy as np
@@ -22,89 +23,88 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 4h data for Donchian breakout
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for pivot points
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 1:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channels (20-period)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Calculate weekly pivot points: P = (H+L+C)/3
+    # R1 = 2*P - L, S1 = 2*P - H
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    r1 = 2 * pivot - weekly_low
+    s1 = 2 * pivot - weekly_high
     
-    # Align to 1h
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    # Align weekly pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
     
-    # Get 1d data for EMA filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
-    
-    # Calculate 1d EMA(34)
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align to 1h
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Precompute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Calculate 6h volume average (20-period)
+    df_6h = get_htf_data(prices, '6h')
+    volume_6h = df_6h['volume'].values
+    volume_ma20_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    volume_ma20_6h_aligned = align_htf_to_ltf(prices, df_6h, volume_ma20_6h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    # Precompute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    
+    for i in range(50, n):  # warmup for indicators
         # Session filter: 08-20 UTC
         if not (8 <= hours[i] <= 20):
             signals[i] = 0.0
             continue
         
         # Skip if any required data is not available
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_34_aligned[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(volume_ma20_6h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend direction from EMA
-        uptrend = close[i] > ema_34_aligned[i]
-        downtrend = close[i] < ema_34_aligned[i]
+        # Current 6h volume aligned to 6h
+        vol_6h_current = align_htf_to_ltf(prices, df_6h, volume_6h)[i]
+        volume_filter = vol_6h_current > (1.5 * volume_ma20_6h_aligned[i])
         
         # Breakout signals
-        breakout_up = close[i] > donchian_high_aligned[i]
-        breakout_down = close[i] < donchian_low_aligned[i]
+        breakout_up = close[i] > r1_aligned[i]
+        breakout_down = close[i] < s1_aligned[i]
         
         if position == 0:
-            # Long: Breakout above Donchian high + uptrend
-            if breakout_up and uptrend:
-                signals[i] = 0.20
+            # Long: Breakout above R1 + volume filter
+            if breakout_up and volume_filter:
+                signals[i] = 0.25
                 position = 1
-            # Short: Breakdown below Donchian low + downtrend
-            elif breakout_down and downtrend:
-                signals[i] = -0.20
+            # Short: Breakdown below S1 + volume filter
+            elif breakout_down and volume_filter:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Breakdown below Donchian low OR trend fails
-            if breakout_down or not uptrend:
+            # Exit long: Breakdown below S1 (opposite level)
+            if breakout_down:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Breakout above Donchian high OR trend fails
-            if breakout_up or not downtrend:
+            # Exit short: Breakout above R1 (opposite level)
+            if breakout_up:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_4hDonchian20_1dEMA34_Trend"
-timeframe = "1h"
+name = "6h_WeeklyPivot_R1_S1_Breakout_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
