@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_EMA21_RangeFilter_V1
-Strategy: Elder Ray (Bull/Bear Power) + EMA21 trend filter + Bollinger Band range filter.
-Long: Bull Power > 0, price > EMA21, price below upper Bollinger Band (20,2)
-Short: Bear Power < 0, price < EMA21, price above lower Bollinger Band (20,2)
-Exit: Price crosses EMA21 in opposite direction
+12h_1d_Camarilla_R1_S1_Breakout_Volume
+Strategy: 12-hour breakout of daily Camarilla R1/S1 with volume confirmation.
+Long: Price breaks above daily R1 + volume > 1.8x 20-period avg
+Short: Price breaks below daily S1 + volume > 1.8x 20-period avg
+Exit: Opposite breakout (reverse signal)
 Position size: 0.25
-Designed to capture trend continuation in moderate volatility regimes.
-Timeframe: 6h
+Designed to capture institutional breakout levels with volume confirmation.
+Timeframe: 12h
 """
 
 import numpy as np
@@ -16,74 +16,74 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate 6h EMA21
-    close_s = pd.Series(close)
-    ema21 = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Calculate daily Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 6-day EMA13 for Elder Ray (13 periods on 6h = ~3.25 days)
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Camarilla R1 and S1 (daily)
+    # R1 = C + (H-L)*1.1/12
+    # S1 = C - (H-L)*1.1/12
+    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Elder Ray components
-    bull_power = high - ema13  # High - EMA13
-    bear_power = low - ema13   # Low - EMA13
+    # Align to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Bollinger Bands (20,2)
-    sma20 = close_s.rolling(window=20, min_periods=20).mean().values
-    std20 = close_s.rolling(window=20, min_periods=20).std().values
-    upper_bb = sma20 + (2 * std20)
-    lower_bb = sma20 - (2 * std20)
+    # Volume confirmation (20-period MA on 12h)
+    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 21  # Need EMA21
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema21[i]) or 
-            np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or 
-            np.isnan(upper_bb[i]) or 
-            np.isnan(lower_bb[i])):
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to EMA21
-        price_above_ema = close[i] > ema21[i]
-        price_below_ema = close[i] < ema21[i]
+        # Volume filter: current volume > 1.8x 20-period average
+        volume_filter = volume[i] > (1.8 * volume_ma20[i])
         
-        # Range filter: price within Bollinger Bands
-        price_below_upper = close[i] < upper_bb[i]
-        price_above_lower = close[i] > lower_bb[i]
+        # Breakout conditions
+        breakout_r1 = close[i] > r1_aligned[i-1]  # break above previous day R1
+        breakout_s1 = close[i] < s1_aligned[i-1]  # break below previous day S1
         
         if position == 0:
-            # Long: Bull Power positive + price above EMA21 + below upper BB
-            if bull_power[i] > 0 and price_above_ema and price_below_upper:
+            # Long: breakout above R1 + volume filter
+            if breakout_r1 and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power negative + price below EMA21 + above lower BB
-            elif bear_power[i] < 0 and price_below_ema and price_above_lower:
+            # Short: breakout below S1 + volume filter
+            elif breakout_s1 and volume_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below EMA21
-            if not price_above_ema:
+            # Exit long: breakout below S1 (reverse signal)
+            if breakout_s1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above EMA21
-            if not price_below_ema:
+            # Exit short: breakout above R1 (reverse signal)
+            if breakout_r1:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_EMA21_RangeFilter_V1"
-timeframe = "6h"
+name = "12h_1d_Camarilla_R1_S1_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
