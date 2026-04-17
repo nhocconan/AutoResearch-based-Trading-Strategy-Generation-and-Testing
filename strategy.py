@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_VolumeTrend_v2
-4-hour strategy using Donchian channel breakout with volume confirmation and trend filter.
-Enters long when price breaks above Donchian upper band with volume above average and price above 1d EMA50.
-Enters short when price breaks below Donchian lower band with volume above average and price below 1d EMA50.
-Uses tight entry conditions to limit trades and avoid fee drag.
+4h_KAMA_Trend_RSI_Confirm_v1
+4-hour strategy using KAMA (Kaufman Adaptive Moving Average) as trend filter with RSI confirmation and volume spike.
+Long when price > KAMA, RSI < 50, and volume spike (momentum in uptrend).
+Short when price < KAMA, RSI > 50, and volume spike (momentum in downtrend).
+Uses KAMA's adaptive nature to reduce whipsaw in choppy markets.
 """
 
 import numpy as np
@@ -13,81 +13,80 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Donchian Channel (20-period) ===
-    donchian_window = 20
-    donchian_upper = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    donchian_lower = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    # === KAMA (Kaufman Adaptive Moving Average) ===
+    kama_period = 10
+    fast_ema = 2
+    slow_ema = 30
+    change = np.abs(np.diff(close, k=10))  # |close - close 10 periods ago|
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # sum of absolute changes
+    er = np.where(volatility != 0, change / volatility, 0)  # efficiency ratio
+    sc = np.power(er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1), 2)  # smoothing constant
+    kama = np.full_like(close, np.nan)
+    kama[kama_period] = close[kama_period]  # seed
+    for i in range(kama_period + 1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # === 1d EMA50 for Trend Filter ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # === RSI (14-period) ===
+    rsi_period = 14
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.full_like(close, np.nan)
+    avg_loss = np.full_like(close, np.nan)
+    avg_gain[rsi_period] = np.mean(gain[:rsi_period])
+    avg_loss[rsi_period] = np.mean(loss[:rsi_period])
+    for i in range(rsi_period + 1, n):
+        avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i-1]) / rsi_period
+        avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i-1]) / rsi_period
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # === 1d Volume for Confirmation ===
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # === Volume Spike Detection ===
+    vol_ma_period = 20
+    vol_ma = np.full_like(volume, np.nan)
+    for i in range(vol_ma_period, n):
+        vol_ma[i] = np.mean(volume[i-vol_ma_period:i])
+    vol_ratio = volume / vol_ma
+    vol_spike = vol_ratio > 1.5  # volume 50% above average
     
     signals = np.zeros(n)
-    
-    # Warmup period
-    warmup = 60
+    warmup = max(kama_period, rsi_period, vol_ma_period) + 5
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(kama[i]) or 
+            np.isnan(rsi[i]) or 
+            np.isnan(vol_spike[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Get current 1d bar's volume for confirmation
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
-        vol_confirmed = vol_1d_current > 1.5 * vol_ma_1d_aligned[i]
-        
-        # Trend filter: price above/below 1d EMA50
-        trend_up = close[i] > ema50_1d_aligned[i]
-        trend_down = close[i] < ema50_1d_aligned[i]
-        
-        # Breakout conditions
-        breakout_long = close[i] > donchian_upper[i]
-        breakout_short = close[i] < donchian_lower[i]
-        
-        # Exit conditions: return to opposite side of Donchian channel
-        exit_long = close[i] < donchian_lower[i]
-        exit_short = close[i] > donchian_upper[i]
-        
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: break above upper band with volume and trend filter
-            if breakout_long and vol_confirmed and trend_up:
+            # Long: price above KAMA, RSI < 50 (not overbought), volume spike
+            if close[i] > kama[i] and rsi[i] < 50 and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: break below lower band with volume and trend filter
-            elif breakout_short and vol_confirmed and trend_down:
+            # Short: price below KAMA, RSI > 50 (not oversold), volume spike
+            elif close[i] < kama[i] and rsi[i] > 50 and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic
+        # Exit logic: reverse signal or loss of momentum
         elif position == 1:
-            # Exit long: price breaks below lower band
-            if exit_long:
+            # Exit long: price crosses below KAMA or RSI > 70 (overbought)
+            if close[i] < kama[i] or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -95,8 +94,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above upper band
-            if exit_short:
+            # Exit short: price crosses above KAMA or RSI < 30 (oversold)
+            if close[i] > kama[i] or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -105,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_VolumeTrend_v2"
+name = "4h_KAMA_Trend_RSI_Confirm_v1"
 timeframe = "4h"
 leverage = 1.0
