@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_DonchianBreakout_Volume_Confirmation
-Breakout strategy using 1d Donchian(20) channels for direction, 12h price breakout for entry, and 1d volume surge confirmation.
-Long when: Price breaks above 1d Donchian upper channel + 1d volume > 1.5x 20-day average.
-Short when: Price breaks below 1d Donchian lower channel + 1d volume > 1.5x 20-day average.
-Exit when price returns to the 1d Donchian midpoint.
-Position size: 0.25. Target: 15-35 trades/year.
-Uses 1d for trend structure and volume confirmation, 12h for entry timing. Works in bull/bear: breakouts capture momentum in both directions.
+4h_HTF_CounterTrend_Momentum
+4-hour counter-trend momentum strategy using 1-week RSI extremes and 1-day volume confirmation.
+Long when: 1w RSI < 25 (deep oversold) + 1d volume > 1.5x 20-day average + price > 10-period EMA.
+Short when: 1w RSI > 75 (overbought) + 1d volume > 1.5x 20-day average + price < 10-period EMA.
+Exit when: 1w RSI crosses back to neutral (40-60 range).
+Position size: 0.25. Target: 20-50 trades/year.
+Uses 1w RSI for extreme condition, 1d volume for momentum confirmation, 4h EMA for trend alignment.
+Works in both bull/bear: mean reversion in extremes, volume ensures momentum behind reversals.
 """
 
 import numpy as np
@@ -19,72 +20,106 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     
-    # Get 1d data for Donchian channels and volume
+    # Get 1w data for RSI
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Calculate 1w RSI(14)
+    delta = np.diff(close_1w)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.zeros_like(close_1w)
+    avg_loss = np.zeros_like(close_1w)
+    avg_gain[14] = np.mean(gain[1:15])
+    avg_loss[14] = np.mean(loss[1:15])
+    for i in range(15, len(close_1w)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi_1w = 100 - (100 / (1 + rs))
+    rsi_1w[:14] = np.nan  # Not enough data
+    
+    # Align 1w RSI to 4h
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    
+    # Get 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
-    
-    # Calculate Donchian channels (20-period) on 1d
-    donch_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donch_mid_1d = (donch_high_1d + donch_low_1d) / 2.0
-    
-    # Calculate 20-day average volume on 1d
-    volume_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all 1d indicators to 12h timeframe
-    donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
-    donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
-    donch_mid_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_mid_1d)
+    volume_ma20_1d = np.full_like(volume_1d, np.nan)
+    for i in range(19, len(volume_1d)):
+        volume_ma20_1d[i] = np.mean(volume_1d[i-19:i+1])
     volume_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma20_1d)
-    volume_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)
+    
+    # Calculate 4h EMA10 for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema10_4h = np.full_like(close_4h, np.nan)
+    for i in range(9, len(close_4h)):
+        ema10_4h[i] = (close_4h[i] * 2 + ema10_4h[i-1] * 9) / 11 if i > 9 else np.mean(close_4h[:i+1])
+    ema10_4h_aligned = align_htf_to_ltf(prices, df_4h, ema10_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # warmup for Donchian channels
+    # Precompute current 4h close price (approximation using latest available)
+    # For each 4h bar, we use the last 4h close available
+    last_4h_close_idx = -1
+    last_4h_close_val = np.nan
+    
+    for i in range(40, n):  # warmup for indicators
+        # Update last known 4h close (simplified: assume we can track it)
+        # In practice, we use the aligned EMA as trend proxy
+        
         # Skip if any required data is not available
-        if (np.isnan(donch_high_1d_aligned[i]) or np.isnan(donch_low_1d_aligned[i]) or 
-            np.isnan(donch_mid_1d_aligned[i]) or np.isnan(volume_ma20_1d_aligned[i]) or
-            np.isnan(volume_1d_current[i])):
+        if (np.isnan(rsi_1w_aligned[i]) or np.isnan(volume_ma20_1d_aligned[i]) or 
+            np.isnan(ema10_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        volume_filter = volume_1d_current[i] > (1.5 * volume_ma20_1d_aligned[i])
+        # Current 1d volume aligned to 4h
+        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
+        
+        volume_filter = vol_1d_current > (1.5 * volume_ma20_1d_aligned[i])
+        
+        # RSI extremes
+        rsi_oversold = rsi_1w_aligned[i] < 25
+        rsi_overbought = rsi_1w_aligned[i] > 75
+        rsi_neutral = (rsi_1w_aligned[i] >= 40) & (rsi_1w_aligned[i] <= 60)
+        
+        # Price vs EMA10 trend filter
+        # Use close price vs EMA10 (we approximate current close with EMA for simplicity)
+        price_above_ema = close[i] > ema10_4h_aligned[i]  # Simplified
+        price_below_ema = close[i] < ema10_4h_aligned[i]  # Simplified
         
         if position == 0:
-            # Long: price breaks above Donchian upper channel + volume surge
-            if close[i] > donch_high_1d_aligned[i] and volume_filter:
+            # Long: 1w RSI oversold + volume surge + price above EMA10
+            if rsi_oversold and volume_filter and price_above_ema:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower channel + volume surge
-            elif close[i] < donch_low_1d_aligned[i] and volume_filter:
+            # Short: 1w RSI overbought + volume surge + price below EMA10
+            elif rsi_overbought and volume_filter and price_below_ema:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to Donchian midpoint
-            if close[i] > donch_mid_1d_aligned[i]:
-                signals[i] = 0.25
-            else:
+            # Exit long: 1w RSI returns to neutral
+            if rsi_neutral:
                 signals[i] = 0.0
                 position = 0
+            else:
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to Donchian midpoint
-            if close[i] < donch_mid_1d_aligned[i]:
-                signals[i] = -0.25
-            else:
+            # Exit short: 1w RSI returns to neutral
+            if rsi_neutral:
                 signals[i] = 0.0
                 position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "12h_DonchianBreakout_Volume_Confirmation"
-timeframe = "12h"
+name = "4h_HTF_CounterTrend_Momentum"
+timeframe = "4h"
 leverage = 1.0
