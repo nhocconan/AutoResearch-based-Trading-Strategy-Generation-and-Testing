@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla pivot (R2/S2) breakout with volume confirmation and 1w EMA200 trend filter
-- Uses wider Camarilla levels (R2/S2) for higher-probability breakouts with less noise
-- Volume confirmation ensures institutional participation
-- 1w EMA200 provides strong long-term trend filter to avoid counter-trend trades
-- Designed for fewer trades (target: 15-25/year) to minimize fee drag
-- Works in bull markets (buying R2 breakouts in uptrend) and bear markets (selling S2 breakdowns in downtrend)
+Hypothesis: 6h Donchian(20) breakout + 1d EMA50 trend filter + volume spike confirmation
+- Donchian breakouts capture momentum moves with proven edge in crypto
+- 1d EMA50 ensures alignment with daily trend to avoid counter-trend trades
+- Volume confirmation filters false breakouts
+- Discrete position sizing (0.25) minimizes fee churn
+- Target: 12-37 trades/year per symbol (~50-150 total over 4 years)
+- Works in bull markets (buying upper band breakouts in uptrend) and bear markets (selling lower band breakouts in downtrend)
 """
 
 import numpy as np
@@ -14,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,77 +23,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation (HTF)
+    # Get 1d data for EMA50 trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Get 1w data for EMA200 trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Calculate EMA50 on 1d for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Get 4h data for volume average
-    df_4h = get_htf_data(prices, '4h')
-    volume_4h = df_4h['volume'].values
+    # Calculate Donchian channels (20-period) on 6h primary timeframe
+    # We need 20 periods of high/low for the channel
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla pivot levels (R2, S2) from 1d OHLC
-    def calculate_camarilla(high_arr, low_arr, close_arr):
-        # Typical price
-        pp = (high_arr + low_arr + close_arr) / 3.0
-        # Range
-        rng = high_arr - low_arr
-        # Camarilla levels
-        r2 = pp + (rng * 1.1 / 6)
-        s2 = pp - (rng * 1.1 / 6)
-        return r2, s2
+    # Volume average (20-period) on 6h
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    camarilla_r2_1d, camarilla_s2_1d = calculate_camarilla(high_1d, low_1d, close_1d)
-    
-    # Calculate EMA200 on 1w for trend filter
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Volume average (50-period) on 4h
-    volume_ma_4h = pd.Series(volume_4h).rolling(window=50, min_periods=50).mean().values
-    
-    # Align all indicators to 4h timeframe
-    camarilla_r2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r2_1d)
-    camarilla_s2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s2_1d)
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_4h, volume_ma_4h)
+    # Align 1d EMA50 to 6h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 200  # warmup for EMA200
+    start_idx = 100  # warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_r2_aligned[i]) or np.isnan(camarilla_s2_aligned[i]) or 
-            np.isnan(ema200_1w_aligned[i]) or np.isnan(volume_ma_aligned[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        r2 = camarilla_r2_aligned[i]
-        s2 = camarilla_s2_aligned[i]
-        ema_trend = ema200_1w_aligned[i]
-        vol_ma = volume_ma_aligned[i]
+        upper_band = highest_high[i]
+        lower_band = lowest_low[i]
+        ema_trend = ema50_1d_aligned[i]
+        vol_ma = volume_ma[i]
         vol = volume[i]
         price = close[i]
         
         if position == 0:
             # Look for breakouts with volume confirmation and trend alignment
-            # Long: price breaks above R2 + volume spike + price > 1w EMA200 (uptrend)
-            if price > r2 and vol > 1.5 * vol_ma and price > ema_trend:
+            # Long: price breaks above upper Donchian band + volume spike + price > 1d EMA50 (uptrend)
+            if price > upper_band and vol > 2.0 * vol_ma and price > ema_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S2 + volume spike + price < 1w EMA200 (downtrend)
-            elif price < s2 and vol > 1.5 * vol_ma and price < ema_trend:
+            # Short: price breaks below lower Donchian band + volume spike + price < 1d EMA50 (downtrend)
+            elif price < lower_band and vol > 2.0 * vol_ma and price < ema_trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price retracement to midpoint between R2 and S2
-            mid_point = (r2 + s2) / 2.0
+            # Exit long: price retracement to midpoint of Donchian channel
+            mid_point = (upper_band + lower_band) / 2.0
             if price < mid_point:
                 signals[i] = 0.0
                 position = 0
@@ -100,8 +81,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price retracement to midpoint between R2 and S2
-            mid_point = (r2 + s2) / 2.0
+            # Exit short: price retracement to midpoint of Donchian channel
+            mid_point = (upper_band + lower_band) / 2.0
             if price > mid_point:
                 signals[i] = 0.0
                 position = 0
@@ -110,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R2S2_1wEMA200_Volume"
-timeframe = "4h"
+name = "6h_Donchian20_1dEMA50_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
