@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h RSI Mean Reversion with 4h Trend Filter and Volume Spike.
-Long when 1h RSI < 30, price > 4h EMA50, and volume > 1.5x 20-bar average in 08-20 UTC session.
-Short when 1h RSI > 70, price < 4h EMA50, and volume > 1.5x 20-bar average in 08-20 UTC session.
-Exit when RSI reverts to 50 or volume condition fails.
-Uses 4h for trend direction (reduces whipsaw), 1h for precise entry timing.
-Target: 80-120 total trades over 4 years (20-30/year). Discrete sizing 0.20 to control turnover.
+Hypothesis: 6h Elder Ray + Weekly Trend Filter.
+Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) with EMA13 on 6h.
+Weekly trend from 1w EMA34: bullish when close > EMA34, bearish when close < EMA34.
+Long when Bull Power > 0 and weekly trend bullish; Short when Bear Power > 0 and weekly trend bearish.
+Exit when power reverses or weekly trend changes.
+Uses discrete position sizing (0.25) to minimize fee churn.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -20,33 +21,31 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Pre-compute session hours (08-20 UTC)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Calculate 6h EMA13 for Elder Ray
+    close_s = pd.Series(close)
+    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    bull_power = high - ema13
+    bear_power = ema13 - low
     
-    # 4h EMA50 for trend direction
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Get 1w data for weekly trend
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # 1h RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate 1w EMA34 for trend filter
+    close_1w_s = pd.Series(close_1w)
+    ema34_1w = close_1w_s.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Weekly trend: bullish when close > EMA34, bearish when close < EMA34
+    weekly_bullish = close_1w > ema34_1w
+    weekly_bearish = close_1w < ema34_1w
     
-    # Volume spike: current volume > 1.5x 20-bar average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 1.5)
+    # Align weekly trend to 6h
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -55,45 +54,45 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(rsi[i])):
+        if (np.isnan(ema34_1w_aligned[i]) or 
+            np.isnan(weekly_bullish_aligned[i]) or 
+            np.isnan(weekly_bearish_aligned[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        rsi_val = rsi[i]
-        vol_spike = volume_spike[i]
-        session_ok = in_session[i]
-        ema_50 = ema_50_4h_aligned[i]
+        bp = bull_power[i]
+        br = bear_power[i]
+        w_bull = weekly_bullish_aligned[i] > 0.5
+        w_bear = weekly_bearish_aligned[i] > 0.5
         
         if position == 0:
-            # Long: RSI oversold, above 4h EMA50, volume spike, in session
-            if rsi_val < 30 and price > ema_50 and vol_spike and session_ok:
-                signals[i] = 0.20
+            # Long: Bull Power > 0 and weekly trend bullish
+            if bp > 0 and w_bull:
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought, below 4h EMA50, volume spike, in session
-            elif rsi_val > 70 and price < ema_50 and vol_spike and session_ok:
-                signals[i] = -0.20
+            # Short: Bear Power > 0 and weekly trend bearish
+            elif br > 0 and w_bear:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI reverts to 50 or volume/spike/session condition fails
-            if rsi_val >= 50 or not vol_spike or not session_ok:
+            # Exit long: Bull Power <= 0 or weekly trend turns bearish
+            if bp <= 0 or not w_bull:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI reverts to 50 or volume/spike/session condition fails
-            if rsi_val <= 50 or not vol_spike or not session_ok:
+            # Exit short: Bear Power <= 0 or weekly trend turns bullish
+            if br <= 0 or not w_bear:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_RSI_MeanReversion_4hEMA50_VolumeSpike_Session"
-timeframe = "1h"
+name = "6h_ElderRay_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
