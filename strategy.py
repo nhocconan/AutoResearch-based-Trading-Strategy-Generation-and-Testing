@@ -1,22 +1,31 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_DonchianBreakout_VolumeFilter_V1
-Hypothesis: On 6h timeframe, buy when price breaks above weekly Donchian(20) high with price above weekly pivot point and volume > 1.5x weekly average; sell when price breaks below weekly Donchian(20) low with price below weekly pivot and volume > 1.5x weekly average. Uses weekly structure for trend direction and volume confirmation to filter false breakouts, designed for low trade frequency (12-37/year) to minimize fee drag and work in both bull and bear markets.
+12h_1d_Camarilla_R1_S1_Breakout_Volume_Strict
+Hypothesis: On 12h timeframe, trade Camarilla pivot R1/S1 breakouts with daily volume confirmation to capture institutional breakouts while avoiding false signals. Designed for low trade frequency (12-37/year) to minimize fee drag and work in both bull and bear markets by using daily structure for trend context and volume filtering.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_donchian_channels(high, low, period=20):
-    """Calculate Donchian channels: upper = max(high, period), lower = min(low, period)"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
-def calculate_weekly_pivot(high, low, close):
-    """Calculate weekly pivot point: P = (H+L+C)/3"""
-    return (high + low + close) / 3.0
+def calculate_camarilla_pivot(high, low, close):
+    """
+    Calculate Camarilla pivot levels:
+    R4 = close + (high - low) * 1.5000
+    R3 = close + (high - low) * 1.2500
+    R2 = close + (high - low) * 1.1666
+    R1 = close + (high - low) * 1.0833
+    PP = (high + low + close) / 3
+    S1 = close - (high - low) * 1.0833
+    S2 = close - (high - low) * 1.1666
+    S3 = close - (high - low) * 1.2500
+    S4 = close - (high - low) * 1.5000
+    """
+    range_hl = high - low
+    r1 = close + range_hl * 1.0833
+    s1 = close - range_hl * 1.0833
+    pp = (high + low + close) / 3.0
+    return r1, s1, pp
 
 def generate_signals(prices):
     n = len(prices)
@@ -28,25 +37,22 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Weekly Data (HTF for Donchian, pivot, volume) ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # === Daily Data (HTF for Camarilla pivot, volume) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Weekly Donchian channels (20-period)
-    upper_1w, lower_1w = calculate_donchian_channels(high_1w, low_1w, 20)
-    upper_1w_aligned = align_htf_to_ltf(prices, df_1w, upper_1w)
-    lower_1w_aligned = align_htf_to_ltf(prices, df_1w, lower_1w)
+    # Daily Camarilla levels
+    r1_1d, s1_1d, pp_1d = calculate_camarilla_pivot(high_1d, low_1d, close_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
     
-    # Weekly pivot point
-    pivot_1w = calculate_weekly_pivot(high_1w, low_1w, close_1w)
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    
-    # Weekly average volume (20-period)
-    vol_avg_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    vol_avg_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_avg_1w)
+    # Daily average volume (20-period)
+    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
     
@@ -58,37 +64,37 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_1w_aligned[i]) or 
-            np.isnan(lower_1w_aligned[i]) or
-            np.isnan(pivot_1w_aligned[i]) or
-            np.isnan(vol_avg_1w_aligned[i])):
+        if (np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or
+            np.isnan(pp_1d_aligned[i]) or
+            np.isnan(vol_avg_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Get current weekly bar's volume for confirmation
-        vol_1w_current = align_htf_to_ltf(prices, df_1w, volume_1w)[i]
+        # Get current daily bar's volume for confirmation
+        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
         
-        # Volume filter: current volume > 1.5x weekly average volume
-        vol_filter = vol_1w_current > 1.5 * vol_avg_1w_aligned[i]
+        # Volume filter: current volume > 2.0x daily average volume
+        vol_filter = vol_1d_current > 2.0 * vol_avg_1d_aligned[i]
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price breaks above weekly Donchian upper with price above weekly pivot and volume filter
-            if close[i] > upper_1w_aligned[i] and close[i] > pivot_1w_aligned[i] and vol_filter:
+            # Long: price breaks above R1 with price above pivot point and volume filter
+            if close[i] > r1_1d_aligned[i] and close[i] > pp_1d_aligned[i] and vol_filter:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price breaks below weekly Donchian lower with price below weekly pivot and volume filter
-            elif close[i] < lower_1w_aligned[i] and close[i] < pivot_1w_aligned[i] and vol_filter:
+            # Short: price breaks below S1 with price below pivot point and volume filter
+            elif close[i] < s1_1d_aligned[i] and close[i] < pp_1d_aligned[i] and vol_filter:
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit when price breaks below weekly Donchian lower (opposite breakout)
-            if close[i] < lower_1w_aligned[i]:
+            # Exit when price breaks below S1 (opposite level)
+            if close[i] < s1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -96,8 +102,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price breaks above weekly Donchian upper (opposite breakout)
-            if close[i] > upper_1w_aligned[i]:
+            # Exit when price breaks above R1 (opposite level)
+            if close[i] > r1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -106,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_DonchianBreakout_VolumeFilter_V1"
-timeframe = "6h"
+name = "12h_1d_Camarilla_R1_S1_Breakout_Volume_Strict"
+timeframe = "12h"
 leverage = 1.0
