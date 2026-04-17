@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_Volume_Regime_v1
-Camarilla pivot breakout with volume confirmation and Choppiness regime filter.
-Designed to work in both bull and bear markets by avoiding range-bound conditions.
-Target: 75-200 total trades over 4 years (19-50/year).
+12h_Camarilla_R1_S1_Breakout_Volume_Regime_v1
+Camarilla pivot breakout on 12h timeframe with volume confirmation and chop regime filter.
+Uses daily Camarilla pivot levels (R1, S1) for entry, volume spike for confirmation,
+and Choppiness Index to avoid ranging markets.
+Breakouts in trending markets (CHOP < 61.8) have higher success rate.
+Designed to work in both bull and bear markets by following breakouts with trend.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -20,26 +23,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Camarilla Pivot Levels ===
+    # === Daily Camarilla Pivot Levels ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivots using previous day's OHLC
+    # Calculate Camarilla levels for each day
     pivot = (high_1d + low_1d + close_1d) / 3
     range_1d = high_1d - low_1d
     R1 = close_1d + (range_1d * 1.1 / 12)
     S1 = close_1d - (range_1d * 1.1 / 12)
+    R2 = close_1d + (range_1d * 1.1 / 6)
+    S2 = close_1d - (range_1d * 1.1 / 6)
     
-    # Align to 4h timeframe (previous day's levels)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    # Align Camarilla levels to 12h timeframe
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
+    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
     
-    # === 4h Volume Confirmation (20-period average) ===
+    # === 12h Choppiness Index (14-period) ===
+    atr_14 = np.full_like(close, np.nan)
+    for i in range(n):
+        if i >= 14:
+            tr = np.max([
+                high[i] - low[i],
+                np.abs(high[i] - close[i-1]),
+                np.abs(low[i] - close[i-1])
+            ])
+            if i == 14:
+                atr_14[i] = np.mean([
+                    high[1:15] - low[1:15],
+                    np.abs(high[1:15] - close[0:14]),
+                    np.abs(low[1:15] - close[0:14])
+                ])
+            else:
+                atr_14[i] = (atr_14[i-1] * 13 + tr) / 14
+    
+    chop = np.full_like(close, np.nan)
+    for i in range(n):
+        if i >= 14 and not np.isnan(atr_14[i]):
+            sum_atr = 0
+            for j in range(14):
+                idx = i - j
+                if idx >= 0 and not np.isnan(atr_14[idx]):
+                    sum_atr += atr_14[idx]
+            if sum_atr > 0:
+                chop[i] = 100 * np.log10(sum_atr / (atr_14[i] * 14)) / np.log10(14)
+            else:
+                chop[i] = 50
+        else:
+            chop[i] = 50
+    
+    # === 12h Volume confirmation (20-period average) ===
     vol_ma_20 = np.full_like(volume, np.nan)
-    for i in range(len(volume)):
+    for i in range(n):
         if i >= 20:
             vol_ma_20[i] = np.mean(volume[i-19:i+1])
         elif i > 0:
@@ -48,43 +87,6 @@ def generate_signals(prices):
             vol_ma_20[i] = volume[0]
     
     vol_confirm = volume > vol_ma_20 * 1.5  # volume spike: 1.5x average
-    
-    # === 1d Choppiness Index (14-period) ===
-    atr_1d = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
-        if i == 0:
-            tr = high_1d[i] - low_1d[i]
-        else:
-            tr = max(high_1d[i] - low_1d[i], 
-                     abs(high_1d[i] - close_1d[i-1]), 
-                     abs(low_1d[i] - close_1d[i-1]))
-        atr_1d[i] = tr
-    
-    # Smooth ATR
-    atr_smoothed = np.full_like(close_1d, np.nan)
-    for i in range(len(atr_1d)):
-        if i >= 14:
-            if i == 14:
-                atr_smoothed[i] = np.mean(atr_1d[0:15])
-            else:
-                atr_smoothed[i] = (atr_smoothed[i-1] * 13 + atr_1d[i]) / 14
-    
-    # Calculate Chop
-    sum_atr = np.zeros_like(close_1d)
-    max_h = np.zeros_like(close_1d)
-    min_l = np.zeros_like(close_1d)
-    
-    for i in range(len(close_1d)):
-        if i >= 14:
-            sum_atr[i] = np.sum(atr_smoothed[i-13:i+1])
-            max_h[i] = np.max(high_1d[i-13:i+1])
-            min_l[i] = np.min(low_1d[i-13:i+1])
-            range_14 = max_h[i] - min_l[i]
-            chop[i] = 100 * np.log10(sum_atr[i] / range_14) / np.log10(14)
-        else:
-            chop[i] = 50  # neutral
-    
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     
@@ -98,34 +100,34 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(R1_aligned[i]) or 
             np.isnan(S1_aligned[i]) or 
-            np.isnan(vol_confirm[i]) or 
-            np.isnan(chop_aligned[i])):
+            np.isnan(chop[i]) or 
+            np.isnan(vol_confirm[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price breaks above R1 AND volume confirmation AND trending market (Chop < 38.2)
+            # Long: price breaks above R1 with volume AND trending market (CHOP < 61.8)
             if (close[i] > R1_aligned[i] and 
                 vol_confirm[i] and 
-                chop_aligned[i] < 38.2):
+                chop[i] < 61.8):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price breaks below S1 AND volume confirmation AND trending market (Chop < 38.2)
+            # Short: price breaks below S1 with volume AND trending market (CHOP < 61.8)
             elif (close[i] < S1_aligned[i] and 
                   vol_confirm[i] and 
-                  chop_aligned[i] < 38.2):
+                  chop[i] < 61.8):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price crosses below pivot OR Chop > 61.8 (ranging market)
-            if (close[i] < pivot_aligned[i] or 
-                chop_aligned[i] > 61.8):
+            # Exit long: price breaks below S1 OR chop becomes too high (ranging)
+            if (close[i] < S1_aligned[i] or 
+                chop[i] > 61.8):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -133,9 +135,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above pivot OR Chop > 61.8 (ranging market)
-            if (close[i] > pivot_aligned[i] or 
-                chop_aligned[i] > 61.8):
+            # Exit short: price breaks above R1 OR chop becomes too high (ranging)
+            if (close[i] > R1_aligned[i] or 
+                chop[i] > 61.8):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -144,6 +146,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_Volume_Regime_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_Volume_Regime_v1"
+timeframe = "12h"
 leverage = 1.0
