@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and ATR-based volatility filter.
-Long when price breaks above upper Donchian channel (20-period high) AND close > 1w EMA34 (uptrend) AND ATR(14) < 0.5 * ATR(50) (low volatility regime).
-Short when price breaks below lower Donchian channel (20-period low) AND close < 1w EMA34 (downtrend) AND ATR(14) < 0.5 * ATR(50).
-Exit when price touches the middle of the Donchian channel (median of 20-period high/low) or opposite band.
-Uses 1d for price action and Donchian levels, 1w for trend filter.
-Designed to capture breakouts in low-volatility trending markets. Target: 10-25 trades/year per symbol.
+Hypothesis: 6h Donchian(20) breakout with 12h volume regime filter and 1d ADX trend confirmation.
+Long when price breaks above 20-period Donchian high AND 12h volume ratio > 1.5 (high volume regime) AND 1d ADX > 25 (trending market).
+Short when price breaks below 20-period Donchian low AND 12h volume ratio > 1.5 AND 1d ADX > 25.
+Exit when price touches the 20-period Donchian midpoint or opposite band.
+Uses 12h for volume regime, 1d for ADX trend, 6h for execution and Donchian calculation.
+Designed to capture strong breakouts in high-volume trending markets. Target: 15-25 trades/year per symbol.
 """
 
 import numpy as np
@@ -20,46 +20,48 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels
+    # Get 12h data for volume regime
+    df_12h = get_htf_data(prices, '12h')
+    volume_12h = df_12h['volume'].values
+    
+    # Get 1d data for ADX trend
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Donchian(20) channels
-    # Upper band = 20-period high
-    # Lower band = 20-period low
-    # Middle band = median of upper and lower
-    lookback = 20
-    upper = pd.Series(high_1d).rolling(window=lookback, min_periods=lookback).max().values
-    lower = pd.Series(low_1d).rolling(window=lookback, min_periods=lookback).min().values
-    middle = (upper + lower) / 2
+    # Calculate 12h volume MA for regime filter
+    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_12h = volume_12h / np.where(vol_ma_20_12h == 0, 1, vol_ma_20_12h)  # avoid div by zero
+    vol_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio_12h)
     
-    # Get 1w data for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1d ADX (14-period)
+    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    tr = np.maximum(high_1d[1:] - low_1d[1:], 
+                    np.maximum(abs(high_1d[1:] - high_1d[:-1]), 
+                               abs(low_1d[1:] - low_1d[:-1])))
+    # Pad first element
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    tr = np.concatenate([[0], tr])
     
-    # Calculate ATR(14) and ATR(50) for volatility filter on 1d
-    # ATR = average of true ranges
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # first bar
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di_14 = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / np.where(atr_14 == 0, 1, atr_14)
+    minus_di_14 = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / np.where(atr_14 == 0, 1, atr_14)
+    dx_14 = 100 * np.abs(plus_di_14 - minus_di_14) / np.where((plus_di_14 + minus_di_14) == 0, 1, (plus_di_14 + minus_di_14))
+    adx_14 = pd.Series(dx_14).rolling(window=14, min_periods=14).mean().values
     
-    # Align all indicators to 1d timeframe (primary timeframe)
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
-    middle_aligned = align_htf_to_ltf(prices, df_1d, middle)
-    ema34_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
-    atr50_aligned = align_htf_to_ltf(prices, df_1d, atr50)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
+    
+    # Calculate 6h Donchian channels (20-period)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -68,48 +70,50 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_aligned[i]) or 
-            np.isnan(lower_aligned[i]) or
-            np.isnan(middle_aligned[i]) or
-            np.isnan(ema34_aligned[i]) or
-            np.isnan(atr14_aligned[i]) or
-            np.isnan(atr50_aligned[i])):
+        if (np.isnan(donch_high[i]) or 
+            np.isnan(donch_low[i]) or
+            np.isnan(donch_mid[i]) or
+            np.isnan(vol_ratio_12h_aligned[i]) or
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: ATR(14) < 0.5 * ATR(50) (low volatility regime)
-        vol_filter = atr14_aligned[i] < 0.5 * atr50_aligned[i]
+        # Volume regime: 12h volume ratio > 1.5 (high volume)
+        volume_regime = vol_ratio_12h_aligned[i] > 1.5
+        
+        # Trend filter: 1d ADX > 25 (trending market)
+        trending = adx_aligned[i] > 25
         
         # Breakout conditions
-        breakout_upper = close[i] > upper_aligned[i]
-        breakout_lower = close[i] < lower_aligned[i]
+        breakout_up = close[i] > donch_high[i]
+        breakout_down = close[i] < donch_low[i]
         
-        # Exit conditions: touch middle band or opposite band
-        touch_middle = abs(close[i] - middle_aligned[i]) < 0.001 * close[i]  # within 0.1%
-        touch_opposite = (position == 1 and close[i] < lower_aligned[i]) or \
-                         (position == -1 and close[i] > upper_aligned[i])
+        # Exit conditions: touch midpoint or opposite band
+        touch_mid = abs(close[i] - donch_mid[i]) < 0.001 * close[i]  # within 0.1%
+        touch_opposite = (position == 1 and close[i] < donch_low[i]) or \
+                         (position == -1 and close[i] > donch_high[i])
         
         if position == 0:
-            # Long: break above upper band with vol filter and uptrend (close > EMA34)
-            if (breakout_upper and vol_filter and close[i] > ema34_aligned[i]):
+            # Long: break above Donchian high with volume regime and trending market
+            if (breakout_up and volume_regime and trending):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower band with vol filter and downtrend (close < EMA34)
-            elif (breakout_lower and vol_filter and close[i] < ema34_aligned[i]):
+            # Short: break below Donchian low with volume regime and trending market
+            elif (breakout_down and volume_regime and trending):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: touch middle band or break below lower band
-            if (touch_middle or touch_opposite):
+            # Exit long: touch midpoint or break below Donchian low
+            if (touch_mid or touch_opposite):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: touch middle band or break above upper band
-            if (touch_middle or touch_opposite):
+            # Exit short: touch midpoint or break above Donchian high
+            if (touch_mid or touch_opposite):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -117,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_VolFilter_EMA34_Trend"
-timeframe = "1d"
+name = "6h_Donchian20_VolumeRegime_ADXTrend"
+timeframe = "6h"
 leverage = 1.0
