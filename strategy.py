@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_Breakout_VolumeTrend_v1
-Breakout above/below Donchian(20) + volume spike + ADX(14) > 20 trend filter.
-Exit when price crosses back below/above Donchian(10) or volume drops.
-Designed to capture strong trending moves with volume confirmation.
-Target: 20-40 trades/year (80-160 total over 4 years).
+1d_Weekly_13x34_SMA_Crossover_v1
+Weekly SMA(13) crossing above SMA(34) for long, below for short.
+Uses daily timeframe with weekly trend filter to reduce noise.
+Exit when SMAs cross back or after 5 bars to limit exposure.
+Designed to capture medium-term trends with clear signals.
+Target: 20-60 total trades over 4 years (5-15/year).
 """
 
 import numpy as np
@@ -13,90 +14,51 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # === Donchian Channels ===
-    donchian_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
-    donchian_low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
-    
-    # === Volume Spike (2x 20-period average) ===
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
-    
-    # === ADX(14) Trend Filter ===
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / (atr * 14)
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / (atr * 14)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # === 1d Trend Filter (EMA50) ===
-    df_1d = get_htf_data(prices, '1d')
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # === Weekly SMAs (13, 34) ===
+    df_1w = get_htf_data(prices, '1w')
+    sma_13_1w = pd.Series(df_1w['close'].values).rolling(window=13, min_periods=13).mean().values
+    sma_34_1w = pd.Series(df_1w['close'].values).rolling(window=34, min_periods=34).mean().values
+    sma_13_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_13_1w)
+    sma_34_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_34_1w)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 30
+    warmup = 34
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_20[i]) or 
-            np.isnan(donchian_low_20[i]) or 
-            np.isnan(adx[i]) or 
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(sma_13_1w_aligned[i]) or 
+            np.isnan(sma_34_1w_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: Donchian breakout up + volume spike + ADX > 20 + price above 1d EMA50
-            if (close[i] > donchian_high_20[i] and 
-                volume_spike[i] and 
-                adx[i] > 20 and 
-                close[i] > ema_50_1d_aligned[i]):
+            # Long: SMA13 > SMA34
+            if sma_13_1w_aligned[i] > sma_34_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: Donchian breakdown down + volume spike + ADX > 20 + price below 1d EMA50
-            elif (close[i] < donchian_low_20[i] and 
-                  volume_spike[i] and 
-                  adx[i] > 20 and 
-                  close[i] < ema_50_1d_aligned[i]):
+            # Short: SMA13 < SMA34
+            elif sma_13_1w_aligned[i] < sma_34_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price below Donchian(10) low OR volume drops OR ADX < 15
-            if (close[i] < donchian_low_10[i] or 
-                not volume_spike[i] or 
-                adx[i] < 15):
+            # Exit long: SMA13 < SMA34 OR after 5 bars
+            if sma_13_1w_aligned[i] < sma_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -104,10 +66,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price above Donchian(10) high OR volume drops OR ADX < 15
-            if (close[i] > donchian_high_10[i] or 
-                not volume_spike[i] or 
-                adx[i] < 15):
+            # Exit short: SMA13 > SMA34 OR after 5 bars
+            if sma_13_1w_aligned[i] > sma_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -116,6 +76,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_VolumeTrend_v1"
-timeframe = "4h"
+name = "1d_Weekly_13x34_SMA_Crossover_v1"
+timeframe = "1d"
 leverage = 1.0
