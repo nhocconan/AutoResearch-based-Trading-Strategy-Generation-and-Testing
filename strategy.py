@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h timeframe with 4h trend filter (EMA50) and 1d volatility regime (ATR ratio) for entry timing.
-Long when: price > 4h EMA50 (uptrend) AND 1d ATR(7)/ATR(30) > 1.5 (high volatility) AND RSI(14) < 30 (oversold bounce).
-Short when: price < 4h EMA50 (downtrend) AND 1d ATR(7)/ATR(30) > 1.5 (high volatility) AND RSI(14) > 70 (overbought bounce).
-Uses volatility expansion after compression for mean reversion in trending markets.
-Session filter (08-20 UTC) reduces noise. Target 15-30 trades/year.
+Hypothesis: 6h timeframe with 1d Williams %R filter + 6h Donchian(20) breakout + volume confirmation.
+Long when price breaks above 20-period high with 1d Williams %R < -80 (oversold) and volume > 1.5x 20-period volume average.
+Short when price breaks below 20-period low with 1d Williams %R > -20 (overbought) and volume > 1.5x 20-period volume average.
+Williams %R on daily timeframe helps identify overextended moves in the primary trend, increasing probability of continuation breakouts.
+Designed to work in bull markets (breakout from oversold) and bear markets (breakdown from overbought).
+Target trades: 50-150 over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -13,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,104 +22,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    
-    # Get 1d data for ATR-based volatility regime
+    # Get 1d data for Williams %R
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 4h EMA50
-    close_4h_series = pd.Series(close_4h)
-    ema_50_4h = close_4h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate 1d Williams %R (14-period)
+    def williams_r(high_vals, low_vals, close_vals, window):
+        highest_high = pd.Series(high_vals).rolling(window=window, min_periods=window).max().values
+        lowest_low = pd.Series(low_vals).rolling(window=window, min_periods=window).min().values
+        wr = -100 * (highest_high - close_vals) / (highest_high - lowest_low)
+        # Handle division by zero when highest_high == lowest_low
+        wr = np.where((highest_high - lowest_low) == 0, -50, wr)
+        return wr
     
-    # Calculate 1d ATR(7) and ATR(30)
-    def calculate_atr(high_vals, low_vals, close_vals, window):
-        tr1 = high_vals - low_vals
-        tr2 = np.abs(high_vals - np.roll(close_vals, 1))
-        tr3 = np.abs(low_vals - np.roll(close_vals, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]  # first period TR is just high-low
-        atr = pd.Series(tr).ewm(span=window, adjust=False, min_periods=window).mean().values
-        return atr
+    wr_14_1d = williams_r(high_1d, low_1d, close_1d, 14)
     
-    atr_7_1d = calculate_atr(high_1d, low_1d, close_1d, 7)
-    atr_30_1d = calculate_atr(high_1d, low_1d, close_1d, 30)
+    # Calculate 6h Donchian(20) channels
+    def donchian_channel(high_vals, low_vals, window):
+        upper = pd.Series(high_vals).rolling(window=window, min_periods=window).max().values
+        lower = pd.Series(low_vals).rolling(window=window, min_periods=window).min().values
+        return upper, lower
     
-    # Avoid division by zero
-    atr_ratio_1d = np.where(atr_30_1d > 0, atr_7_1d / atr_30_1d, 1.0)
-    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
+    donchian_upper, donchian_lower = donchian_channel(high, low, 20)
     
-    # Calculate 1h RSI(14) for entry timing
-    def calculate_rsi(close_vals, window):
-        delta = np.diff(close_vals, prepend=close_vals[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = pd.Series(gain).ewm(span=window, adjust=False, min_periods=window).mean().values
-        avg_loss = pd.Series(loss).ewm(span=window, adjust=False, min_periods=window).mean().values
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    # Calculate 6h volume 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    rsi_14 = calculate_rsi(close, 14)
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Align all to primary timeframe (6h)
+    wr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, wr_14_1d)
+    donchian_upper_aligned = align_htf_to_ltf(prices, prices, donchian_upper)  # same timeframe
+    donchian_lower_aligned = align_htf_to_ltf(prices, prices, donchian_lower)  # same timeframe
+    vol_ma_20_aligned = align_htf_to_ltf(prices, prices, vol_ma_20)  # same timeframe
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # need enough for EMA50 and ATR
+    start_idx = 100  # need enough for Williams %R and Donchian
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available or outside session
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(atr_ratio_1d_aligned[i]) or 
-            np.isnan(rsi_14[i]) or 
-            not in_session[i]):
+        # Skip if any required data is not available
+        if (np.isnan(wr_14_1d_aligned[i]) or 
+            np.isnan(donchian_upper_aligned[i]) or 
+            np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(vol_ma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility expansion condition: ATR ratio > 1.5
-        vol_expansion = atr_ratio_1d_aligned[i] > 1.5
+        # Volume confirmation: current 6h volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20_aligned[i]
         
         if position == 0:
-            # Long: uptrend + volatility expansion + oversold
-            if (close[i] > ema_50_4h_aligned[i] and 
-                vol_expansion and 
-                rsi_14[i] < 30):
-                signals[i] = 0.20
+            # Long: price breaks above 20-period high with daily oversold and volume
+            if (close[i] > donchian_upper_aligned[i] and 
+                wr_14_1d_aligned[i] < -80 and 
+                volume_confirmed):
+                signals[i] = 0.25
                 position = 1
-            # Short: downtrend + volatility expansion + overbought
-            elif (close[i] < ema_50_4h_aligned[i] and 
-                  vol_expansion and 
-                  rsi_14[i] > 70):
-                signals[i] = -0.20
+            # Short: price breaks below 20-period low with daily overbought and volume
+            elif (close[i] < donchian_lower_aligned[i] and 
+                  wr_14_1d_aligned[i] > -20 and 
+                  volume_confirmed):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI reverts to midpoint or trend breaks
-            if rsi_14[i] > 50 or close[i] < ema_50_4h_aligned[i]:
+            # Exit long: price falls back below 20-period low (opposite side of channel)
+            if close[i] < donchian_lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI reverts to midpoint or trend breaks
-            if rsi_14[i] < 50 or close[i] > ema_50_4h_aligned[i]:
+            # Exit short: price rises back above 20-period high (opposite side of channel)
+            if close[i] > donchian_upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_4hEMA50_1dATRratio_VolExpansion_RSI14_MeanReversion"
-timeframe = "1h"
+name = "6h_1dWilliamsR14_Donchian20_Breakout_Volume_Confirm"
+timeframe = "6h"
 leverage = 1.0
