@@ -1,10 +1,3 @@
-# Hypothesis: 4h Camarilla R1/S1 breakout with volume confirmation and RSI filter
-# Uses daily pivot points from previous day to avoid look-ahead
-# Breakouts above R1 or below S1 with volume > 1.5x 20-period average and RSI(14) > 50 (long) or < 50 (short)
-# Exit when price returns to pivot level
-# Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets
-# Target: 20-50 trades/year per symbol to avoid fee drag
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -37,9 +30,10 @@ def generate_signals(prices):
     r1_1d_prev[0] = np.nan
     s1_1d_prev[0] = np.nan
     
-    # Align daily pivot levels to 4h timeframe
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1_1d_prev)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1_1d_prev)
+    # Align daily pivot levels to 1h timeframe
+    r1_1h = align_htf_to_ltf(prices, df_1d, r1_1d_prev)
+    s1_1h = align_htf_to_ltf(prices, df_1d, s1_1d_prev)
+    pivot_1h = align_htf_to_ltf(prices, df_1d, pivot_1d)
     
     # Volume confirmation: current volume > 1.5 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -62,8 +56,9 @@ def generate_signals(prices):
         # Skip if any required data is not available
         if (np.isnan(volume_ma20[i]) or 
             np.isnan(rsi[i]) or 
-            np.isnan(r1_4h[i]) or 
-            np.isnan(s1_4h[i])):
+            np.isnan(r1_1h[i]) or 
+            np.isnan(s1_1h[i]) or
+            np.isnan(pivot_1h[i])):
             signals[i] = 0.0
             continue
         
@@ -72,34 +67,32 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price breaks above R1 with volume and RSI > 50
-            if (close[i] > r1_4h[i] and volume_filter and rsi[i] > 50):
-                signals[i] = 0.25
+            if (close[i] > r1_1h[i] and volume_filter and rsi[i] > 50):
+                signals[i] = 0.20
                 position = 1
             # Short: price breaks below S1 with volume and RSI < 50
-            elif (close[i] < s1_4h[i] and volume_filter and rsi[i] < 50):
-                signals[i] = -0.25
+            elif (close[i] < s1_1h[i] and volume_filter and rsi[i] < 50):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
             # Exit long: price returns to pivot level
-            pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-            if close[i] < pivot_4h[i]:
+            if close[i] < pivot_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
             # Exit short: price returns to pivot level
-            pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-            if close[i] > pivot_4h[i]:
+            if close[i] > pivot_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_Volume_RSI"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_Volume_RSI"
+timeframe = "1h"
 leverage = 1.0
