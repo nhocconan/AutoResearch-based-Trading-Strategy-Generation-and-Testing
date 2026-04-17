@@ -1,129 +1,95 @@
 #!/usr/bin/env python3
 """
-4h_ChaikinMoneyFlow_Breakout_V1
-Hypothesis: Use Chaikin Money Flow (CMF) on 4h to detect institutional buying/selling pressure, combined with 4h price breakout above/below Donchian(20) channels. CMF > 0.25 indicates strong buying pressure for longs; CMF < -0.25 indicates selling pressure for shorts. Designed for low trade frequency (~20-40/year) to capture strong momentum moves with institutional confirmation, working in both bull (catch breakouts) and bear (fade false breaks) markets.
+12h_Pivot_R1_S1_Breakout_Volume_Confirm
+Hypothesis: Use daily Camarilla pivot levels (R1/S1) with volume confirmation and 1-week trend filter.
+Enter long when price breaks above R1 with volume > 1.5x 20-day average and weekly close > weekly open.
+Enter short when price breaks below S1 with volume > 1.5x 20-day average and weekly close < weekly open.
+Designed for low trade frequency (12-37/year) to capture intraday momentum in trending markets while avoiding chop.
 """
 
 import numpy as np
 import pandas as pd
-from mtr_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Chaikin Money Flow (CMF) on 4h (20-period) ===
-    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
-    # Money Flow Volume = Money Flow Multiplier * Volume
-    # CMF = 20-period sum of Money Flow Volume / 20-period sum of Volume
-    
-    # Avoid division by zero
-    high_low = high - low
-    high_low[high_low == 0] = 1e-10
-    
-    mf_multiplier = ((close - low) - (high - close)) / high_low
-    mf_volume = mf_multiplier * volume
-    
-    # Calculate 20-period sums
-    mf_volume_sum = np.zeros_like(mf_volume)
-    volume_sum = np.zeros_like(volume)
-    
-    for i in range(20, len(mf_volume)):
-        mf_volume_sum[i] = np.sum(mf_volume[i-19:i+1])
-        volume_sum[i] = np.sum(volume[i-19:i+1])
-    
-    # Initialize CMF array
-    cmf = np.full_like(close, np.nan)
-    for i in range(20, len(volume_sum)):
-        if volume_sum[i] != 0:
-            cmf[i] = mf_volume_sum[i] / volume_sum[i]
-    
-    # === Donchian Channel (20-period) for breakout ===
-    highest_high = np.full_like(high, np.nan)
-    lowest_low = np.full_like(low, np.nan)
-    
-    for i in range(20, len(high)):
-        highest_high[i] = np.max(high[i-19:i+1])
-        lowest_low[i] = np.min(low[i-19:i+1])
-    
-    # === 1-day RSI filter for trend strength ===
+    # === Daily Camarilla pivot levels ===
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate RSI(14) on daily
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate pivot point and ranges
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    range_hl = high_1d - low_1d
     
-    avg_gain = np.zeros_like(close_1d)
-    avg_loss = np.zeros_like(close_1d)
+    # Camarilla levels: R1 = PP + (Range * 1.1/12), S1 = PP - (Range * 1.1/12)
+    r1 = pp + (range_hl * 1.1 / 12.0)
+    s1 = pp - (range_hl * 1.1 / 12.0)
     
-    # First average
-    avg_gain[13] = np.mean(gain[1:15])
-    avg_loss[13] = np.mean(loss[1:15])
+    # Align to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Subsequent averages (Wilder's smoothing)
-    for i in range(14, len(close_1d)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # === Daily volume average for confirmation ===
+    volume_1d = df_1d['volume'].values
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi_14 = 100 - (100 / (1 + rs))
-    rsi_14[0:14] = np.nan
-    
-    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
+    # === Weekly trend filter (1-week close > open for uptrend) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    open_1w = df_1w['open'].values
+    weekly_uptrend = close_1w > open_1w  # True for uptrend week
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
     
     signals = np.zeros(n)
     
-    # Warmup: enough for CMF(20), Donchian(20), and RSI(14)
-    warmup = 40
+    # Warmup period: enough for daily calculations
+    warmup = 30  # Covers 20-day volume average
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(cmf[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(rsi_14_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(vol_avg_20_1d_aligned[i]) or np.isnan(weekly_uptrend_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Entry conditions
-        long_breakout = close[i] > highest_high[i]
-        short_breakout = close[i] < lowest_low[i]
+        # Get current daily volume for confirmation
+        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
         
-        # CMF thresholds for institutional pressure
-        cmf_buy_pressure = cmf[i] > 0.25
-        cmf_sell_pressure = cmf[i] < -0.25
-        
-        # RSI filter: avoid extreme overbought/oversold for better follow-through
-        rsi_not_overbought = rsi_14_aligned[i] < 70
-        rsi_not_oversold = rsi_14_aligned[i] > 30
+        # Volume filter: current volume > 1.5x daily average volume
+        vol_filter = vol_1d_current > 1.5 * vol_avg_20_1d_aligned[i]
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: bullish breakout + buying pressure + RSI not overbought
-            if long_breakout and cmf_buy_pressure and rsi_not_overbought:
+            # Long: Price breaks above R1 + volume filter + weekly uptrend
+            if close[i] > r1_aligned[i] and vol_filter and weekly_uptrend_aligned[i] > 0.5:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: bearish breakout + selling pressure + RSI not oversold
-            elif short_breakout and cmf_sell_pressure and rsi_not_oversold:
+            # Short: Price breaks below S1 + volume filter + weekly downtrend
+            elif close[i] < s1_aligned[i] and vol_filter and weekly_uptrend_aligned[i] < 0.5:
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic
+        # Exit logic: reverse signal or volatility-based
         elif position == 1:
-            # Exit when price breaks below Donchian low OR CMF turns negative
-            if close[i] < lowest_low[i] or cmf[i] < 0:
+            # Exit when price breaks below S1 (reversal signal)
+            if close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -131,8 +97,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price breaks above Donchian high OR CMF turns positive
-            if close[i] > highest_high[i] or cmf[i] > 0:
+            # Exit when price breaks above R1 (reversal signal)
+            if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -141,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_ChaikinMoneyFlow_Breakout_V1"
-timeframe = "4h"
+name = "12h_Pivot_R1_S1_Breakout_Volume_Confirm"
+timeframe = "12h"
 leverage = 1.0
