@@ -1,12 +1,13 @@
-# Your turn. Remember: NO REASONING, no explanation, just the code. Let's go.  
 #!/usr/bin/env python3
 """
-Hypothesis: Weekly price extremes (highest high and lowest low) act as strong support/resistance.
-On 6h timeframe, price breaking above the weekly high with volume confirmation indicates
-continuation of the weekly uptrend, while breaking below the weekly low indicates
-continuation of the weekly downtrend. Entries are filtered by 1d EMA50 to ensure alignment
-with the daily trend. Exits occur when price returns to the weekly midpoint, reducing
-exposure during reversals. Designed for 6h to capture multi-day trends with low frequency.
+12h_KAMA_Trend_1d_RSI_Momentum
+- Uses KAMA (Kaufman Adaptive Moving Average) on 12h for adaptive trend detection
+- Filters with 1d RSI to avoid extreme overbought/oversold conditions
+- Enters long when KAMA slopes up and RSI < 70, short when KAMA slopes down and RSI > 30
+- Exits when KAMA slope reverses or RSI reaches opposite extreme
+- Position size: 0.25 for trend alignment, 0.0 otherwise
+- Designed for 12h timeframe to reduce trade frequency and avoid fee drag
+- Works in bull (trend following) and bear (mean reversion via RSI extremes) regimes
 """
 
 import numpy as np
@@ -15,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,66 +24,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for high/low extremes and midpoint
-    df_1w = get_htf_data(prices, '1w')
+    # Get 12h data for KAMA calculation
+    df_12h = get_htf_data(prices, '12h')
     
-    # Weekly highest high and lowest low
-    whigh = df_1w['high'].values
-    wlow = df_1w['low'].values
-    
-    # Weekly midpoint for exit
-    wmid = (whigh + wlow) / 2
-    
-    # Get daily data for EMA50 trend filter
+    # Get 1d data for RSI filter
     df_1d = get_htf_data(prices, '1d')
-    dclose = df_1d['close'].values
-    ema_50 = pd.Series(dclose).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align weekly and daily levels to 6h timeframe
-    whigh_6h = align_htf_to_ltf(prices, df_1w, whigh)
-    wlow_6h = align_htf_to_ltf(prices, df_1w, wlow)
-    wmid_6h = align_htf_to_ltf(prices, df_1w, wmid)
-    ema_50_6h = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Calculate KAMA on 12h close
+    close_12h = df_12h['close'].values
+    # Efficiency ratio
+    change = np.abs(np.diff(close_12h, n=10))  # 10-period change
+    volatility = np.sum(np.abs(np.diff(close_12h, n=1)), axis=0)  # 10-period volatility
+    # Avoid division by zero
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2 / (2 + 1) - 2 / (30 + 1)) + 2 / (30 + 1)) ** 2  # fast=2, slow=30
+    # KAMA calculation
+    kama = np.full_like(close_12h, np.nan)
+    kama[29] = close_12h[29]  # seed
+    for i in range(30, len(close_12h)):
+        kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
     
-    # Volume confirmation: 24-period volume MA on 6h (4 days)
-    volume_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean()
+    # Calculate RSI on 1d close
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
+    
+    # Align KAMA and RSI to 12h timeframe
+    kama_12h_aligned = align_htf_to_ltf(prices, df_12h, kama)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi, additional_delay_bars=0)  # RSI uses current 1d bar
+    
+    # Calculate KAMA slope (1-period change)
+    kama_slope = np.diff(kama_12h_aligned, prepend=0)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 60  # warmup for all indicators
+    start_idx = 40  # warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(whigh_6h[i]) or np.isnan(wlow_6h[i]) or np.isnan(wmid_6h[i]) or
-            np.isnan(ema_50_6h[i]) or np.isnan(volume_ma_24.iloc[i])):
+        if (np.isnan(kama_12h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(kama_slope[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol = volume[i]
-        vol_ma = volume_ma_24.iloc[i]
+        kama_val = kama_12h_aligned[i]
+        rsi_val = rsi_1d_aligned[i]
+        slope = kama_slope[i]
         
         if position == 0:
-            # Long: break above weekly high with volume and above daily EMA50
-            if price > whigh_6h[i] and vol > 2.0 * vol_ma and price > ema_50_6h[i]:
+            # Long: KAMA slope up and RSI not overbought
+            if slope > 0 and rsi_val < 70:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below weekly low with volume and below daily EMA50
-            elif price < wlow_6h[i] and vol > 2.0 * vol_ma and price < ema_50_6h[i]:
+            # Short: KAMA slope down and RSI not oversold
+            elif slope < 0 and rsi_val > 30:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to weekly midpoint
-            if price < wmid_6h[i]:
+            # Long exit: KAMA slope down or RSI overbought
+            if slope <= 0 or rsi_val >= 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to weekly midpoint
-            if price > wmid_6h[i]:
+            # Short exit: KAMA slope up or RSI oversold
+            if slope >= 0 or rsi_val <= 30:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyHighLow_Volume_EMA50"
-timeframe = "6h"
+name = "12h_KAMA_Trend_1d_RSI_Momentum"
+timeframe = "12h"
 leverage = 1.0
