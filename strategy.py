@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Donchian_Breakout_Volume_Filter_v1
-Weekly Donchian(20) breakout with volume confirmation on 1d timeframe.
-Long when price breaks above weekly Donchian high with volume > 1.5x average.
-Short when price breaks below weekly Donchian low with volume > 1.5x average.
-Exit when price crosses the weekly Donchian midpoint.
-Designed to capture strong trends with volume confirmation, avoiding false breakouts.
-Target: 30-100 total trades over 4 years (7-25/year).
+6h_Pivot_R1S1_Fade_v1
+1d Camarilla pivot fade strategy on 6h timeframe.
+Fade at R1/S1 with momentum confirmation, breakout continuation at R4/S4.
+Uses 1d pivot levels for structure, 60-period EMA for momentum filter.
+Targets 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -15,83 +13,96 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # === Weekly Donchian channels ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
-        return np.zeros(n)
+    # === 60-period EMA for momentum filter ===
+    alpha = 2 / (60 + 1)
+    ema60 = np.zeros_like(close)
+    ema60[0] = close[0]
+    for i in range(1, n):
+        ema60[i] = ema60[i-1] + alpha * (close[i] - ema60[i-1])
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === Daily Camarilla pivot levels ===
+    df_1d = get_htf_data(prices, '1d')
+    # Typical price for pivot calculation
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    pivot = typical_price.values
+    # Calculate ranges
+    range_high_low = df_1d['high'].values - df_1d['low'].values
+    # Camarilla levels
+    r1 = pivot + 0.1166 * range_high_low
+    s1 = pivot - 0.1166 * range_high_low
+    r4 = pivot + 0.5500 * range_high_low
+    s4 = pivot - 0.5500 * range_high_low
     
-    # Calculate Donchian channels (20-period)
-    donchian_high = np.full_like(close_1w, np.nan)
-    donchian_low = np.full_like(close_1w, np.nan)
-    donchian_mid = np.full_like(close_1w, np.nan)
-    
-    for i in range(20, len(close_1w)):
-        donchian_high[i] = np.max(high_1w[i-20:i])
-        donchian_low[i] = np.min(low_1w[i-20:i])
-        donchian_mid[i] = (donchian_high[i] + donchian_low[i]) / 2
-    
-    # Align to daily timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid)
-    
-    # Volume average (20-period)
-    vol_avg = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_avg[i] = np.mean(volume[i-20:i])
+    # Align pivot levels to 6h timeframe (with 1-bar delay for completed daily bar)
+    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
+    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
+    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 20
+    warmup = 60
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(donchian_mid_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(ema60[i]) or 
+            np.isnan(r1_6h[i]) or 
+            np.isnan(s1_6h[i]) or 
+            np.isnan(r4_6h[i]) or 
+            np.isnan(s4_6h[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Volume condition: current volume > 1.5x average
-        volume_condition = volume[i] > 1.5 * vol_avg[i]
-        
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price breaks above weekly Donchian high with volume confirmation
-            if (close[i] > donchian_high_aligned[i] and 
-                volume_condition):
+            # Fade at R1/S1: price rejects pivot level with momentum
+            # Long: price crosses below S1 but closes above it with bullish momentum
+            if (low[i] <= s1_6h[i] and 
+                close[i] > s1_6h[i] and 
+                close[i] > ema60[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price breaks below weekly Donchian low with volume confirmation
-            elif (close[i] < donchian_low_aligned[i] and 
-                  volume_condition):
+            # Short: price crosses above R1 but closes below it with bearish momentum
+            elif (high[i] >= r1_6h[i] and 
+                  close[i] < r1_6h[i] and 
+                  close[i] < ema60[i]):
+                signals[i] = -0.25
+                position = -1
+                continue
+            # Breakout continuation at R4/S4: strong momentum breaks key levels
+            # Long: breaks above R4 with momentum
+            elif (high[i] >= r4_6h[i] and 
+                  close[i] > r4_6h[i] and 
+                  close[i] > ema60[i]):
+                signals[i] = 0.25
+                position = 1
+                continue
+            # Short: breaks below S4 with momentum
+            elif (low[i] <= s4_6h[i] and 
+                  close[i] < s4_6h[i] and 
+                  close[i] < ema60[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price crosses below weekly Donchian midpoint
-            if close[i] < donchian_mid_aligned[i]:
+            # Exit long: price returns to pivot or momentum fails
+            if (close[i] <= pivot[i] or 
+                close[i] < ema60[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -99,8 +110,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above weekly Donchian midpoint
-            if close[i] > donchian_mid_aligned[i]:
+            # Exit short: price returns to pivot or momentum fails
+            if (close[i] >= pivot[i] or 
+                close[i] > ema60[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -109,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Weekly_Donchian_Breakout_Volume_Filter_v1"
-timeframe = "1d"
+name = "6h_Pivot_R1S1_Fade_v1"
+timeframe = "6h"
 leverage = 1.0
