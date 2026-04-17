@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_WaveTrend_Trend_Scalp
-Strategy: 4h WaveTrend oscillator with 12h trend filter and volume confirmation.
-Long: WT crosses above -60 + 12h uptrend + volume > 1.5x 12-period average
-Short: WT crosses below 60 + 12h downtrend + volume > 1.5x 12-period average
-Exit: WT crosses back through 0 or trend reversal
+4h_Camarilla_Pivot_Volume_Squeeze
+Strategy: 4h Camarilla pivot level breakouts with volume squeeze filter and 12h trend.
+Long: Break above R1 with volume contraction followed by expansion + 12h uptrend
+Short: Break below S1 with volume contraction followed by expansion + 12h downtrend
+Exit: Price returns to Pivot point or trend reversal
 Position size: 0.25
-Designed to catch momentum swings in trending markets while filtering chop.
+Designed to work in both trending and ranging markets by combining volatility contraction/expansion with institutional levels.
 Timeframe: 4h
 """
 
@@ -24,36 +24,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate WaveTrend (WT) oscillator
-    # WT1 = EMA(EMA((hlc3 - ema) / (0.015 * mad)), n1)
-    # WT2 = SMA(WT1, n2)
-    # Where hlc3 = (high + low + close) / 3
-    # ema = EMA(hlc3, n1)
-    # mad = mean absolute deviation
+    # Calculate daily Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    n1 = 10
-    n2 = 21
+    # Calculate pivot levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    hlc3 = (high + low + close) / 3.0
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r1 = pivot + (range_1d * 1.1 / 12)
+    s1 = pivot - (range_1d * 1.1 / 12)
     
-    # First EMA of hlc3
-    ema1 = pd.Series(hlc3).ewm(span=n1, adjust=False).mean().values
+    # Align daily levels to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Deviation
-    dev = hlc3 - ema1
-    
-    # Mean absolute deviation
-    mad = pd.Series(np.abs(dev)).ewm(span=n1, adjust=False).mean().values
-    
-    # WT1
-    wi = np.where(mad != 0, dev / (0.015 * mad), 0)
-    wt1 = pd.Series(wi).ewm(span=n1, adjust=False).mean().values
-    wt1 = pd.Series(wt1).ewm(span=n1, adjust=False).mean().values  # Double smoothed
-    
-    # WT2 = SMA of WT1
-    wt2 = pd.Series(wt1).rolling(window=n2, min_periods=n2).mean().values
-    
-    # Calculate 12h trend (close > open = uptrend, close < open = downtrend)
+    # Calculate 12h trend (bullish/bearish)
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 2:
         return np.zeros(n)
@@ -61,11 +52,14 @@ def generate_signals(prices):
     trend_12h = (df_12h['close'] > df_12h['open']).astype(float).values  # 1 for up, 0 for down
     trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
     
-    # Calculate 4h volume average (12-period)
-    df_4h = get_htf_data(prices, '4h')
-    volume_4h = df_4h['volume'].values
-    volume_ma12_4h = pd.Series(volume_4h).rolling(window=12, min_periods=12).mean().values
-    volume_ma12_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_ma12_4h)
+    # Volume squeeze detection: look for low volume followed by expansion
+    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ratio = volume / np.maximum(volume_ma20, 1e-10)  # Avoid division by zero
+    
+    # Volume contraction: current volume < 70% of 20-period average
+    # Volume expansion: current volume > 120% of 20-period average
+    volume_contraction = volume_ratio < 0.7
+    volume_expansion = volume_ratio > 1.2
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -73,54 +67,46 @@ def generate_signals(prices):
     # Precompute session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    for i in range(max(n1*2, n2*2, 12), n):  # warmup for indicators
+    for i in range(20, n):  # warmup for volume MA
         # Session filter: 08-20 UTC
         if not (8 <= hours[i] <= 20):
             signals[i] = 0.0
             continue
         
         # Skip if any required data is not available
-        if (np.isnan(wt1[i]) or np.isnan(wt2[i]) or np.isnan(trend_12h_aligned[i]) or 
-            np.isnan(volume_ma12_4h_aligned[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(trend_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Current 4h volume
-        vol_4h_current = align_htf_to_ltf(prices, df_4h, volume_4h)[i]
-        volume_filter = vol_4h_current > (1.5 * volume_ma12_4h_aligned[i])
-        
-        # Trend filter: 12h bullish/bearish
-        trend_up = trend_12h_aligned[i] > 0.5  # 12h close > open
-        trend_down = trend_12h_aligned[i] < 0.5  # 12h close < open
-        
-        # WaveTrend signals
-        wt1_cross_up = wt1[i-1] < wt2[i-1] and wt1[i] > wt2[i]  # WT1 crosses above WT2
-        wt1_cross_down = wt1[i-1] > wt2[i-1] and wt1[i] < wt2[i]  # WT1 crosses below WT2
-        wt_cross_zero_up = wt1[i-1] < 0 and wt1[i] >= 0  # WT1 crosses above zero
-        wt_cross_zero_down = wt1[i-1] > 0 and wt1[i] <= 0  # WT1 crosses below zero
-        
-        # Entry signals
+        # Entry conditions
         if position == 0:
-            # Long: WT1 crosses above WT2 + volume filter + 12h uptrend
-            if wt1_cross_up and volume_filter and trend_up:
+            # Long: Price breaks above R1 with volume expansion after contraction + 12h uptrend
+            if (close[i-1] <= r1_aligned[i-1] and close[i] > r1_aligned[i] and
+                volume_expansion[i] and 
+                np.any(volume_contraction[max(0, i-5):i]) and  # Contraction in last 5 bars
+                trend_12h_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: WT1 crosses below WT2 + volume filter + 12h downtrend
-            elif wt1_cross_down and volume_filter and trend_down:
+            # Short: Price breaks below S1 with volume expansion after contraction + 12h downtrend
+            elif (close[i-1] >= s1_aligned[i-1] and close[i] < s1_aligned[i] and
+                  volume_expansion[i] and 
+                  np.any(volume_contraction[max(0, i-5):i]) and  # Contraction in last 5 bars
+                  trend_12h_aligned[i] < 0.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: WT1 crosses below zero or 12h trend turns down
-            if wt_cross_zero_down or not trend_up:
+            # Exit long: Price returns to pivot or 12h trend turns down
+            if close[i] <= pivot_aligned[i] or trend_12h_aligned[i] < 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: WT1 crosses above zero or 12h trend turns up
-            if wt_cross_zero_up or not trend_down:
+            # Exit short: Price returns to pivot or 12h trend turns up
+            if close[i] >= pivot_aligned[i] or trend_12h_aligned[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -128,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WaveTrend_Trend_Scalp"
+name = "4h_Camarilla_Pivot_Volume_Squeeze"
 timeframe = "4h"
 leverage = 1.0
