@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,45 +13,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculation
+    # Get daily data for monthly pivot calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot points (standard formula)
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
-    r3 = high_1d + 2 * (pivot - low_1d)
-    s3 = low_1d - 2 * (high_1d - pivot)
+    # Calculate monthly pivots (using previous month's high/low/close)
+    # We'll use a 20-day lookback for monthly high/low/close approximation
+    high_20d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    close_20d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Shift to use previous day's pivots (avoid look-ahead)
-    r1_prev = np.roll(r1, 1)
-    s1_prev = np.roll(s1, 1)
-    r2_prev = np.roll(r2, 1)
-    s2_prev = np.roll(s2, 1)
-    r3_prev = np.roll(r3, 1)
-    s3_prev = np.roll(s3, 1)
-    r1_prev[0] = np.nan
-    s1_prev[0] = np.nan
-    r2_prev[0] = np.nan
-    s2_prev[0] = np.nan
-    r3_prev[0] = np.nan
-    s3_prev[0] = np.nan
+    # Monthly pivot points
+    monthly_pivot = (high_20d + low_20d + close_20d) / 3.0
+    monthly_r1 = 2 * monthly_pivot - low_20d
+    monthly_s1 = 2 * monthly_pivot - high_20d
+    monthly_r2 = monthly_pivot + (high_20d - low_20d)
+    monthly_s2 = monthly_pivot - (high_20d - low_20d)
     
-    # Align daily pivot levels to 4h timeframe
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1_prev)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1_prev)
-    r2_4h = align_htf_to_ltf(prices, df_1d, r2_prev)
-    s2_4h = align_htf_to_ltf(prices, df_1d, s2_prev)
-    r3_4h = align_htf_to_ltf(prices, df_1d, r3_prev)
-    s3_4h = align_htf_to_ltf(prices, df_1d, s3_prev)
+    # Shift to use previous month's data (avoid look-ahead)
+    monthly_r1_prev = np.roll(monthly_r1, 1)
+    monthly_s1_prev = np.roll(monthly_s1, 1)
+    monthly_r2_prev = np.roll(monthly_r2, 1)
+    monthly_s2_prev = np.roll(monthly_s2, 1)
+    monthly_r1_prev[0] = np.nan
+    monthly_s1_prev[0] = np.nan
+    monthly_r2_prev[0] = np.nan
+    monthly_s2_prev[0] = np.nan
     
-    # Volume confirmation: current volume > 1.5 * 4-period average (4h * 4 = 16h)
-    volume_ma4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # Align monthly pivots to 6h timeframe
+    monthly_r1_6h = align_htf_to_ltf(prices, df_1d, monthly_r1_prev)
+    monthly_s1_6h = align_htf_to_ltf(prices, df_1d, monthly_s1_prev)
+    monthly_r2_6h = align_htf_to_ltf(prices, df_1d, monthly_r2_prev)
+    monthly_s2_6h = align_htf_to_ltf(prices, df_1d, monthly_s2_prev)
+    
+    # Volume confirmation: current volume > 2.0 * 6-period average (6h * 6 = 36h)
+    volume_ma6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     
     # ATR filter to avoid low volatility environments
     tr1 = high - low
@@ -67,61 +65,61 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 14  # Need ATR and ATR MA10
+    start_idx = 20  # Need 20-day lookback and ATR MA10
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(volume_ma4[i]) or 
+        if (np.isnan(volume_ma6[i]) or 
             np.isnan(atr[i]) or 
             np.isnan(atr_ma10[i]) or 
-            np.isnan(r1_4h[i]) or 
-            np.isnan(s1_4h[i]) or
-            np.isnan(r3_4h[i]) or 
-            np.isnan(s3_4h[i])):
+            np.isnan(monthly_r1_6h[i]) or 
+            np.isnan(monthly_s1_6h[i]) or
+            np.isnan(monthly_r2_6h[i]) or 
+            np.isnan(monthly_s2_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 4-period average
-        volume_filter = volume[i] > (1.5 * volume_ma4[i])
+        # Volume filter: current volume > 2.0x 6-period average
+        volume_filter = volume[i] > (2.0 * volume_ma6[i])
         # Volatility filter: ATR > ATR MA10 (avoid low volatility)
         volatility_filter = atr[i] > atr_ma10[i]
         
         if position == 0:
-            # Long: price breaks above R3 with volume and volatility (strong breakout)
-            if close[i] > r3_4h[i] and volume_filter and volatility_filter:
-                signals[i] = 0.30
+            # Long: price breaks above monthly R2 with volume and volatility (strong breakout)
+            if close[i] > monthly_r2_6h[i] and volume_filter and volatility_filter:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 with volume and volatility (strong breakdown)
-            elif close[i] < s3_4h[i] and volume_filter and volatility_filter:
-                signals[i] = -0.30
+            # Short: price breaks below monthly S2 with volume and volatility (strong breakdown)
+            elif close[i] < monthly_s2_6h[i] and volume_filter and volatility_filter:
+                signals[i] = -0.25
                 position = -1
-            # Long reversal: price rejects S1 and moves back above it (bullish rejection)
-            elif close[i] > s1_4h[i] and low[i] < s1_4h[i] and volume_filter and volatility_filter:
-                signals[i] = 0.30
+            # Long reversal: price rejects monthly S1 and moves back above it (bullish rejection)
+            elif close[i] > monthly_s1_6h[i] and low[i] < monthly_s1_6h[i] and volume_filter and volatility_filter:
+                signals[i] = 0.25
                 position = 1
-            # Short reversal: price rejects R1 and moves back below it (bearish rejection)
-            elif close[i] < r1_4h[i] and high[i] > r1_4h[i] and volume_filter and volatility_filter:
-                signals[i] = -0.30
+            # Short reversal: price rejects monthly R1 and moves back below it (bearish rejection)
+            elif close[i] < monthly_r1_6h[i] and high[i] > monthly_r1_6h[i] and volume_filter and volatility_filter:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns below R1 or volatility drops
-            if close[i] < r1_4h[i] or not volatility_filter:
+            # Exit long: price returns below monthly R1 or volatility drops
+            if close[i] < monthly_r1_6h[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns above S1 or volatility drops
-            if close[i] > s1_4h[i] or not volatility_filter:
+            # Exit short: price returns above monthly S1 or volatility drops
+            if close[i] > monthly_s1_6h[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_Pivot_R3_S3_Breakout_Rejection_Vol"
-timeframe = "4h"
+name = "6h_MonthlyPivot_R2_S2_Breakout_Rejection_Vol"
+timeframe = "6h"
 leverage = 1.0
