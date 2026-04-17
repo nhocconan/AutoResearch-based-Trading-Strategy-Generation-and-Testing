@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,70 +13,97 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Donchian Channels (20-period) ===
+    # === 1d Weekly Donchian Channel (20-period) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Donchian channels
-    upper_1d = np.full_like(high_1d, np.nan)
-    lower_1d = np.full_like(low_1d, np.nan)
+    # Calculate 20-period highest high and lowest low
+    highest_high = np.full_like(high_1d, np.nan)
+    lowest_low = np.full_like(low_1d, np.nan)
     period = 20
     for i in range(len(high_1d)):
         if i >= period - 1:
-            upper_1d[i] = np.max(high_1d[i-(period-1):i+1])
-            lower_1d[i] = np.min(low_1d[i-(period-1):i+1])
-        elif i > 0:
-            upper_1d[i] = np.max(high_1d[0:i+1])
-            lower_1d[i] = np.min(low_1d[0:i+1])
+            highest_high[i] = np.max(high_1d[i-(period-1):i+1])
+            lowest_low[i] = np.min(low_1d[i-(period-1):i+1])
         else:
-            upper_1d[i] = high_1d[0]
-            lower_1d[i] = low_1d[0]
+            highest_high[i] = np.max(high_1d[0:i+1]) if i >= 0 else high_1d[0]
+            lowest_low[i] = np.min(low_1d[0:i+1]) if i >= 0 else low_1d[0]
     
-    # === 1d EMA(34) for trend filter ===
-    ema_34 = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 34:
-        ema_34[33] = np.mean(close_1d[:34])
-        alpha = 2 / (34 + 1)
-        for i in range(34, len(close_1d)):
-            ema_34[i] = alpha * close_1d[i] + (1 - alpha) * ema_34[i-1]
+    # === 1d RSI (14-period) ===
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing
+    avg_gain = np.full_like(gain, np.nan)
+    avg_loss = np.full_like(loss, np.nan)
+    rsi_period = 14
+    for i in range(len(gain)):
+        if i < rsi_period:
+            if i == 0:
+                avg_gain[i] = gain[i]
+                avg_loss[i] = loss[i]
+            else:
+                avg_gain[i] = (avg_gain[i-1] * (i-1) + gain[i]) / i if i > 0 else gain[i]
+                avg_loss[i] = (avg_loss[i-1] * (i-1) + loss[i]) / i if i > 0 else loss[i]
+        else:
+            avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
+            avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.where(avg_loss == 0, 100, rsi)
+    rsi = np.where(avg_gain == 0, 0, rsi)
+    
+    # === 1d EMA(20) for trend filter ===
+    ema_20 = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 20:
+        ema_20[19] = np.mean(close_1d[:20])  # seed
+        alpha = 2 / (20 + 1)
+        for i in range(20, len(close_1d)):
+            ema_20[i] = alpha * close_1d[i] + (1 - alpha) * ema_20[i-1]
     else:
         for i in range(len(close_1d)):
-            ema_34[i] = np.mean(close_1d[:i+1]) if i >= 0 else close_1d[0]
+            ema_20[i] = np.mean(close_1d[:i+1]) if i >= 0 else close_1d[0]
     
-    # === 12h Volume confirmation ===
-    # Calculate 20-period average volume
-    vol_ma_20 = np.full_like(volume, np.nan)
-    for i in range(len(volume)):
+    # === Align indicators to 1d timeframe (same timeframe, no alignment needed) ===
+    # Since we're using 1d data on 1d timeframe, we can use the values directly
+    highest_high_aligned = highest_high
+    lowest_low_aligned = lowest_low
+    rsi_aligned = rsi
+    ema_20_aligned = ema_20
+    
+    # === Volume confirmation (using 1d volume) ===
+    vol_ma_20 = np.full_like(df_1d['volume'].values, np.nan)
+    vol_1d = df_1d['volume'].values
+    for i in range(len(vol_1d)):
         if i >= 19:
-            vol_ma_20[i] = np.mean(volume[i-19:i+1])
-        elif i > 0:
-            vol_ma_20[i] = np.mean(volume[max(0, i-9):i+1])
+            vol_ma_20[i] = np.mean(vol_1d[i-19:i+1])
         else:
-            vol_ma_20[i] = volume[0]
+            vol_ma_20[i] = np.mean(vol_1d[0:i+1]) if i >= 0 else vol_1d[0]
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_confirm = volume > vol_ma_20 * 1.5
+    # Align volume MA to 1d timeframe
+    vol_ma_20_aligned = vol_ma_20
     
-    # === Align indicators to 12h timeframe ===
-    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
-    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Volume confirmation: current volume > 1.3x 20-period average
+    vol_confirm = vol_1d > vol_ma_20_aligned * 1.3
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 200
+    warmup = 50
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_1d_aligned[i]) or 
-            np.isnan(lower_1d_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or 
+        if (np.isnan(highest_high_aligned[i]) or 
+            np.isnan(lowest_low_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or 
+            np.isnan(ema_20_aligned[i]) or 
             np.isnan(vol_confirm[i])):
             signals[i] = 0.0
             position = 0
@@ -84,25 +111,25 @@ def generate_signals(prices):
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price breaks above 1d Donchian upper band AND price above 1d EMA34
-            if close[i] > upper_1d_aligned[i] and close[i] > ema_34_aligned[i]:
-                # Additional volume confirmation
-                if vol_confirm[i]:
-                    signals[i] = 0.25
-                    position = 1
-                    continue
-            # Short: price breaks below 1d Donchian lower band AND price below 1d EMA34
-            elif close[i] < lower_1d_aligned[i] and close[i] < ema_34_aligned[i]:
-                # Additional volume confirmation
-                if vol_confirm[i]:
-                    signals[i] = -0.25
-                    position = -1
-                    continue
+            # Long: Close breaks above 20-day high AND RSI > 50 AND volume confirmation
+            if (close[i] > highest_high_aligned[i] and 
+                rsi_aligned[i] > 50 and 
+                vol_confirm[i]):
+                signals[i] = 0.25
+                position = 1
+                continue
+            # Short: Close breaks below 20-day low AND RSI < 50 AND volume confirmation
+            elif (close[i] < lowest_low_aligned[i] and 
+                  rsi_aligned[i] < 50 and 
+                  vol_confirm[i]):
+                signals[i] = -0.25
+                position = -1
+                continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price closes below 1d EMA34
-            if close[i] < ema_34_aligned[i]:
+            # Exit long: Close crosses below 20-day EMA OR RSI < 40
+            if (close[i] < ema_20_aligned[i]) or (rsi_aligned[i] < 40):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -110,8 +137,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price closes above 1d EMA34
-            if close[i] > ema_34_aligned[i]:
+            # Exit short: Close crosses above 20-day EMA OR RSI > 60
+            if (close[i] > ema_20_aligned[i]) or (rsi_aligned[i] > 60):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -120,6 +147,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_EMA34_VolumeFilter_V1"
-timeframe = "12h"
+name = "1d_WeeklyDonchian20_RSI50_EMA20_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
