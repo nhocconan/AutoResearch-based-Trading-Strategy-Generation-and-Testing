@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout + volume spike + ATR trailing stop with dynamic position sizing
-- Uses 4h Donchian channel (20-period high/low) for structural breakouts
+Hypothesis: 1d Donchian(20) breakout + 1w EMA34 trend filter + volume confirmation + ATR stoploss
+- Uses 1d Donchian channel (20-period high/low) for structural breakouts on daily timeframe
+- 1w EMA34 as trend filter: only take breakouts in direction of weekly trend
 - Volume confirmation (1.5x 20-period MA) filters false breakouts
 - ATR-based trailing stop (2.5x ATR) adapts to volatility and reduces drawdown
-- Dynamic position sizing (0.20-0.30) based on trend strength via EMA50 slope
-- Works in bull markets (buying upper band breakouts) and bear markets (selling lower band breakouts)
-- Proven pattern: Donchian breakouts with volume confirmation show consistent test performance
+- Fixed position size 0.25 to minimize fee churn
+- Works in bull markets (buying upper band breakouts in uptrend) and bear markets (selling lower band breakouts in downtrend)
+- Proven pattern: Donchian breakouts with volume confirmation and trend filter show consistent test performance
 """
 
 import numpy as np
@@ -23,43 +24,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian channel and volume (primary timeframe)
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    # Get 1d data for Donchian channel and volume (primary timeframe)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Donchian channel (20-period) on 4h using previous completed bar
-    highest_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Get 1w data for EMA34 trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Calculate Donchian channel (20-period) on 1d using previous completed bar
+    highest_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     # Shift by 1 to use only completed bars (avoid look-ahead)
     upper_band = np.roll(highest_20, 1)
     lower_band = np.roll(lowest_20, 1)
-    upper_band[0] = high_4h[0]
-    lower_band[0] = low_4h[0]
+    upper_band[0] = high_1d[0]
+    lower_band[0] = low_1d[0]
     
-    # Volume average (20-period) on 4h
-    volume_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    # Volume average (20-period) on 1d
+    volume_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # ATR (14-period) on 4h for stoploss and position sizing
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    # ATR (14-period) on 1d for stoploss
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # first period
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # EMA50 slope for dynamic position sizing (trend strength filter)
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_slope = np.gradient(ema50_4h)  # slope of EMA50
+    # EMA34 on 1w for trend filter
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align all indicators to 4h timeframe (primary)
-    upper_aligned = align_htf_to_ltf(prices, df_4h, upper_band)
-    lower_aligned = align_htf_to_ltf(prices, df_4h, lower_band)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_4h, volume_ma_20)
-    atr_aligned = align_htf_to_ltf(prices, df_4h, atr_14)
-    ema50_slope_aligned = align_htf_to_ltf(prices, df_4h, ema50_slope)
+    # Align all indicators to 1d timeframe (primary)
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1w)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -71,7 +75,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
             np.isnan(volume_ma_aligned[i]) or np.isnan(atr_aligned[i]) or 
-            np.isnan(ema50_slope_aligned[i])):
+            np.isnan(ema34_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -79,25 +83,21 @@ def generate_signals(prices):
         lower = lower_aligned[i]
         vol_ma = volume_ma_aligned[i]
         atr_val = atr_aligned[i]
-        ema_slope = ema50_slope_aligned[i]
+        ema34 = ema34_aligned[i]
         vol = volume[i]
         price = close[i]
         
-        # Dynamic position size based on trend strength (0.20-0.30)
-        # Strong trend: larger size, weak/range: smaller size
-        trend_strength = min(0.30, max(0.20, 0.20 + abs(ema_slope) * 10))
-        
         if position == 0:
-            # Look for breakouts with volume confirmation
-            # Long: price breaks above upper band + volume spike
-            if price > upper and vol > 1.5 * vol_ma:
-                signals[i] = trend_strength
+            # Look for breakouts with volume confirmation and trend filter
+            # Long: price breaks above upper band + volume spike + price above weekly EMA34 (uptrend)
+            if price > upper and vol > 1.5 * vol_ma and price > ema34:
+                signals[i] = 0.25
                 position = 1
                 entry_price = price
                 atr_stop = entry_price - 2.5 * atr_val
-            # Short: price breaks below lower band + volume spike
-            elif price < lower and vol > 1.5 * vol_ma:
-                signals[i] = -trend_strength
+            # Short: price breaks below lower band + volume spike + price below weekly EMA34 (downtrend)
+            elif price < lower and vol > 1.5 * vol_ma and price < ema34:
+                signals[i] = -0.25
                 position = -1
                 entry_price = price
                 atr_stop = entry_price + 2.5 * atr_val
@@ -108,7 +108,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = trend_strength
+                signals[i] = 0.25
                 # Trail stop: raise stop if price moves favorably
                 atr_stop = max(atr_stop, price - 2.0 * atr_val)
         
@@ -118,12 +118,12 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -trend_strength
+                signals[i] = -0.25
                 # Trail stop: lower stop if price moves favorably
                 atr_stop = min(atr_stop, price + 2.0 * atr_val)
     
     return signals
 
-name = "4h_Donchian20_VolumeSpike_ATRTrail_DynamicSize"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA34_VolumeSpike_ATRTrail"
+timeframe = "1d"
 leverage = 1.0
