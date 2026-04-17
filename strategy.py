@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,92 +13,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR-based volatility filter
+    # Get daily data for pivot points and EMA trend
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily ATR(14) for volatility regime filter
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_1h = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Calculate daily pivot points (classic)
+    daily_pivot = (high_1d + low_1d + close_1d) / 3.0
+    daily_r1 = 2 * daily_pivot - low_1d
+    daily_s1 = 2 * daily_pivot - high_1d
+    daily_r2 = daily_pivot + (high_1d - low_1d)
+    daily_s2 = daily_pivot - (high_1d - low_1d)
     
-    # Calculate 4-period ATR for breakout sensitivity
-    tr_l = np.abs(high - low)
-    tr_h = np.abs(high - np.concatenate([[np.nan], close[:-1]]))
-    tr_lc = np.abs(low - np.concatenate([[np.nan], close[:-1]]))
-    tr_l = np.concatenate([[np.nan], tr_l[1:]])
-    tr_h = np.concatenate([[np.nan], tr_h[1:]])
-    tr_lc = np.concatenate([[np.nan], tr_lc[1:]])
-    tr_combined = np.maximum(tr_l, np.maximum(tr_h, tr_lc))
-    atr_4 = pd.Series(tr_combined).rolling(window=4, min_periods=4).mean().values
+    # Align daily pivot levels to 6h timeframe
+    daily_pivot_6h = align_htf_to_ltf(prices, df_1d, daily_pivot)
+    daily_r1_6h = align_htf_to_ltf(prices, df_1d, daily_r1)
+    daily_s1_6h = align_htf_to_ltf(prices, df_1d, daily_s1)
+    daily_r2_6h = align_htf_to_ltf(prices, df_1d, daily_r2)
+    daily_s2_6h = align_htf_to_ltf(prices, df_1d, daily_s2)
     
-    # Get weekly data for structural trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1h = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate daily EMA34 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_6h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume filter: current volume > 1.5 * 20-period average
+    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # Need weekly EMA50, daily ATR14
+    start_idx = 34  # Need daily EMA34, volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(atr_14_1h[i]) or 
-            np.isnan(atr_4[i]) or 
-            np.isnan(ema50_1h[i])):
+        if (np.isnan(daily_pivot_6h[i]) or 
+            np.isnan(daily_r1_6h[i]) or 
+            np.isnan(daily_s1_6h[i]) or
+            np.isnan(daily_r2_6h[i]) or
+            np.isnan(daily_s2_6h[i]) or
+            np.isnan(ema34_6h[i]) or
+            np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when volatility is elevated (ATR14 > 50th percentile of last 50 periods)
-        if i >= 50:
-            vol_window = atr_14_1h[i-50:i]
-            vol_median = np.nanmedian(vol_window)
-            vol_filter = atr_14_1h[i] > vol_median
-        else:
-            vol_filter = False
+        # Volume filter
+        volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
-        # Breakout condition: price moves more than 0.5 * ATR(4) from open
-        breakout_up = (close[i] - prices['open'].values[i]) > (0.5 * atr_4[i])
-        breakout_down = (prices['open'].values[i] - close[i]) > (0.5 * atr_4[i])
+        # Trend filter: price above/below daily EMA34
+        price_above_ema = close[i] > ema34_6h[i]
+        price_below_ema = close[i] < ema34_6h[i]
         
-        # Trend filter: weekly EMA50 direction
-        if i >= 1:
-            ema_prev = ema50_1h[i-1]
-            ema_curr = ema50_1h[i]
-            trend_up = ema_curr > ema_prev
-            trend_down = ema_curr < ema_prev
-        else:
-            trend_up = False
-            trend_down = False
+        # Price relative to daily pivot levels
+        price_above_r1 = close[i] > daily_r1_6h[i]
+        price_below_s1 = close[i] < daily_s1_6h[i]
+        price_above_r2 = close[i] > daily_r2_6h[i]
+        price_below_s2 = close[i] < daily_s2_6h[i]
         
         if position == 0:
-            # Long: upward breakout during up-trend with elevated volatility
-            if (breakout_up and trend_up and vol_filter):
+            # Long: Price breaks above daily R2 with volume and above daily EMA34 (strong breakout)
+            if (price_above_r2 and price_above_ema and volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: downward breakout during down-trend with elevated volatility
-            elif (breakout_down and trend_down and vol_filter):
+            # Short: Price breaks below daily S2 with volume and below daily EMA34 (strong breakdown)
+            elif (price_below_s2 and price_below_ema and volume_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: downward breakout or trend change
-            if (breakout_down or not trend_up):
+            # Exit long: Price crosses below daily R1 OR below daily EMA34
+            if (close[i] < daily_r1_6h[i]) or (close[i] < ema34_6h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: upward breakout or trend change
-            if (breakout_up or not trend_down):
+            # Exit short: Price crosses above daily S1 OR above daily EMA34
+            if (close[i] > daily_s1_6h[i]) or (close[i] > ema34_6h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Volatility_Breakout_EMA50_Trend"
-timeframe = "4h"
+name = "6h_DailyPivot_R2S2_Breakout_EMA34_Volume"
+timeframe = "6h"
 leverage = 1.0
