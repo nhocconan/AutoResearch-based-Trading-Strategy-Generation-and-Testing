@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction and volume confirmation.
-# Uses Donchian breakouts for momentum, weekly pivot (PP) for trend filter, volume spike for confirmation.
-# Designed to work in bull (breakouts above weekly PP) and bear (breakouts below weekly PP).
+# Hypothesis: 12h Williams Alligator + Elder Ray with volume confirmation.
+# Uses Williams Alligator (Jaw/Teeth/Lips) for trend direction, Elder Ray (Bull/Bear Power) for momentum,
+# and volume spike for confirmation. Designed to capture trends in bull markets and reversals in bear markets.
 # Target: 15-30 trades/year to avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,71 +18,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot point (PP)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get daily data for Williams Alligator and Elder Ray
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot point: PP = (high + low + close) / 3
-    weekly_pp = (high_1w + low_1w + close_1w) / 3.0
+    # Williams Alligator: SMA of median price (HL/2) with specific periods
+    median_price_1d = (high_1d + low_1d) / 2
+    jaw_period = 13
+    teeth_period = 8
+    lips_period = 5
     
-    # Calculate Donchian(20) channels on 6h data
-    high_max20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    jaw = pd.Series(median_price_1d).rolling(window=jaw_period, min_periods=jaw_period).mean().values
+    teeth = pd.Series(median_price_1d).rolling(window=teeth_period, min_periods=teeth_period).mean().values
+    lips = pd.Series(median_price_1d).rolling(window=lips_period, min_periods=lips_period).mean().values
     
-    # Align weekly PP to 6h
-    weekly_pp_6h = align_htf_to_ltf(prices, df_1w, weekly_pp)
+    # Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high_1d - ema13_1d
+    bear_power = low_1d - ema13_1d
     
-    # Volume filter: current volume > 1.5 * 50-period average (reduces trades)
-    volume_ma50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Align Williams Alligator and Elder Ray to 12h
+    jaw_12h = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_12h = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_12h = align_htf_to_ltf(prices, df_1d, lips)
+    bull_power_12h = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_12h = align_htf_to_ltf(prices, df_1d, bear_power)
+    
+    # Volume filter: current volume > 1.5 * 20-period average
+    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # Need volume MA50 and Donchian(20)
+    start_idx = 20  # Need volume MA20 and Elder Ray components
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(weekly_pp_6h[i]) or 
-            np.isnan(high_max20[i]) or 
-            np.isnan(low_min20[i]) or 
-            np.isnan(volume_ma50[i])):
+        if (np.isnan(jaw_12h[i]) or 
+            np.isnan(teeth_12h[i]) or 
+            np.isnan(lips_12h[i]) or 
+            np.isnan(bull_power_12h[i]) or 
+            np.isnan(bear_power_12h[i]) or 
+            np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: spike > 1.5x average (moderate to balance trades)
-        volume_filter = volume[i] > (1.5 * volume_ma50[i])
+        # Volume filter: spike > 1.5x average
+        volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
-        # Donchian breakout conditions
-        breakout_up = high[i] > high_max20[i-1]  # Use previous bar's high_max20
-        breakout_down = low[i] < low_min20[i-1]  # Use previous bar's low_min20
+        # Williams Alligator trend: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
+        lips_above_teeth = lips_12h[i] > teeth_12h[i]
+        teeth_above_jaw = teeth_12h[i] > jaw_12h[i]
+        lips_below_teeth = lips_12h[i] < teeth_12h[i]
+        teeth_below_jaw = teeth_12h[i] < jaw_12h[i]
         
-        # Price relative to weekly pivot point
-        price_above_pp = close[i] > weekly_pp_6h[i]
-        price_below_pp = close[i] < weekly_pp_6h[i]
+        # Elder Ray momentum: Bull Power > 0 and rising, Bear Power < 0 and falling
+        bull_power_positive = bull_power_12h[i] > 0
+        bear_power_negative = bear_power_12h[i] < 0
         
         if position == 0:
-            # Long: Price breaks above Donchian high with volume and above weekly PP
-            if (breakout_up and price_above_pp and volume_filter):
+            # Long: Lips > Teeth > Jaw (uptrend) AND Bull Power > 0 AND volume spike
+            if (lips_above_teeth and teeth_above_jaw and bull_power_positive and volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian low with volume and below weekly PP
-            elif (breakout_down and price_below_pp and volume_filter):
+            # Short: Lips < Teeth < Jaw (downtrend) AND Bear Power < 0 AND volume spike
+            elif (lips_below_teeth and teeth_below_jaw and bear_power_negative and volume_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price breaks below Donchian low OR below weekly PP
-            if (low[i] < low_min20[i]) or (close[i] < weekly_pp_6h[i]):
+            # Exit long: Lips < Teeth (loss of uptrend momentum) OR Bear Power > 0 (bullish momentum fading)
+            if (lips_12h[i] < teeth_12h[i]) or (bear_power_12h[i] > 0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price breaks above Donchian high OR above weekly PP
-            if (high[i] > high_max20[i]) or (close[i] > weekly_pp_6h[i]):
+            # Exit short: Lips > Teeth (loss of downtrend momentum) OR Bull Power < 0 (bearish momentum fading)
+            if (lips_12h[i] > teeth_12h[i]) or (bull_power_12h[i] < 0):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_WeeklyPP_Volume"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_ElderRay_Volume"
+timeframe = "12h"
 leverage = 1.0
