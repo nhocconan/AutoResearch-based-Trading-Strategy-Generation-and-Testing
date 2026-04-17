@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) Breakout with 1d EMA200 Trend Filter and Volume Spike Confirmation
-- Donchian breakout captures momentum in trending markets
-- 1d EMA200 filter ensures we only trade in the direction of the long-term trend
-- Volume spike (2.0x 20-period average) confirms breakout validity
-- ATR-based stoploss (2.5x ATR) manages risk
-- Target: 12-37 trades/year per symbol (~50-150 total over 4 years)
+Hypothesis: 4h Donchian(20) breakout + 12h EMA34 trend filter + volume confirmation + ATR stoploss
+- Donchian breakout provides clear entry/exit levels
+- 12h EMA34 filters for higher timeframe trend alignment (avoids counter-trend trades)
+- Volume spike (>2.0x 20-period average) confirms breakout strength
+- ATR-based stoploss (2.5 * ATR) manages risk
+- Target: 20-50 trades/year per symbol (~80-200 total over 4 years)
 - Position sizing: 0.25 (discrete levels to minimize fee churn)
+- Works in both bull and bear markets: breakouts capture strong moves, trend filter avoids whipsaws in ranging/ bear conditions
 """
 
 import numpy as np
@@ -15,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,29 +24,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for primary calculations (Donchian, ATR)
+    # Get 4h data for primary calculations (Donchian, volume, ATR)
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
+    
+    # Get 12h data for trend filter (HTF)
     df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     
-    # Get 1d data for HTF trend filter (EMA200)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    
-    # Calculate Donchian channels (20-period) on 12h
+    # Calculate Donchian channels (20-period) on 4h
     def calculate_donchian(high_arr, low_arr, window):
+        """Donchian Channel: upper = rolling max(high), lower = rolling min(low)"""
         upper = pd.Series(high_arr).rolling(window=window, min_periods=window).max().values
         lower = pd.Series(low_arr).rolling(window=window, min_periods=window).min().values
         return upper, lower
     
-    donchian_upper_12h, donchian_lower_12h = calculate_donchian(high_12h, low_12h, 20)
+    donch_upper, donch_lower = calculate_donchian(high_4h, low_4h, 20)
     
-    # Calculate 1d EMA200 for trend filter
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate EMA34 on 12h for trend filter
+    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate ATR (14-period) for stoploss on 12h
+    # Volume average (20-period) on 4h
+    volume_4h_series = pd.Series(volume_4h)
+    volume_ma_4h = volume_4h_series.rolling(window=20, min_periods=20).mean().values
+    
+    # ATR (14-period) for stoploss on 4h
     def calculate_atr(high_arr, low_arr, close_arr, window):
+        """Average True Range"""
         tr1 = high_arr - low_arr
         tr2 = np.abs(high_arr - np.roll(close_arr, 1))
         tr3 = np.abs(low_arr - np.roll(close_arr, 1))
@@ -54,48 +62,45 @@ def generate_signals(prices):
         atr = pd.Series(tr).ewm(span=window, adjust=False, min_periods=window).mean().values
         return atr
     
-    atr_12h = calculate_atr(high_12h, low_12h, close_12h, 14)
+    atr_4h = calculate_atr(high_4h, low_4h, close_4h, 14)
     
-    # Volume average (20-period) on 12h
-    volume_12h = df_12h['volume'].values
-    volume_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all indicators to 12h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper_12h)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower_12h)
-    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    atr_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_12h)
+    # Align all indicators to 4h timeframe
+    donch_upper_aligned = align_htf_to_ltf(prices, df_4h, donch_upper)
+    donch_lower_aligned = align_htf_to_ltf(prices, df_4h, donch_lower)
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    volume_ma_aligned = align_htf_to_ltf(prices, df_4h, volume_ma_4h)
+    atr_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     entry_price = 0.0
     
-    start_idx = 200  # warmup for EMA200 and other indicators
+    start_idx = 100  # warmup for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(ema200_aligned[i]) or np.isnan(atr_aligned[i]) or np.isnan(volume_ma_aligned[i])):
+        if (np.isnan(donch_upper_aligned[i]) or np.isnan(donch_lower_aligned[i]) or 
+            np.isnan(ema34_12h_aligned[i]) or np.isnan(volume_ma_aligned[i]) or np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             continue
         
-        upper = donchian_upper_aligned[i]
-        lower = donchian_lower_aligned[i]
-        ema200 = ema200_aligned[i]
-        atr_val = atr_aligned[i]
+        upper = donch_upper_aligned[i]
+        lower = donch_lower_aligned[i]
+        ema_trend = ema34_12h_aligned[i]
         vol_ma = volume_ma_aligned[i]
+        atr_val = atr_aligned[i]
         vol = volume[i]
         price = close[i]
         
         if position == 0:
-            # Long: Price breaks above Donchian upper + above 1d EMA200 + volume spike
-            if price > upper and price > ema200 and vol > 2.0 * vol_ma:
+            # Look for breakouts with volume confirmation and trend alignment
+            # Long: price breaks above upper Donchian + volume spike + price > 12h EMA34 (uptrend)
+            if price > upper and vol > 2.0 * vol_ma and price > ema_trend:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: Price breaks below Donchian lower + below 1d EMA200 + volume spike
-            elif price < lower and price < ema200 and vol > 2.0 * vol_ma:
+            # Short: price breaks below lower Donchian + volume spike + price < 12h EMA34 (downtrend)
+            elif price < lower and vol > 2.0 * vol_ma and price < ema_trend:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -104,8 +109,9 @@ def generate_signals(prices):
             # Exit conditions for long
             exit_signal = False
             
-            # Exit 1: Price closes below Donchian lower (breakdown)
-            if price < lower:
+            # Exit 1: Price retrace to middle of Donchian channel (mean reversion)
+            mid_channel = (upper + lower) / 2
+            if price < mid_channel:
                 exit_signal = True
             
             # Exit 2: ATR-based stoploss (2.5 * ATR below entry)
@@ -122,8 +128,9 @@ def generate_signals(prices):
             # Exit conditions for short
             exit_signal = False
             
-            # Exit 1: Price closes above Donchian upper (breakout)
-            if price > upper:
+            # Exit 1: Price retrace to middle of Donchian channel (mean reversion)
+            mid_channel = (upper + lower) / 2
+            if price > mid_channel:
                 exit_signal = True
             
             # Exit 2: ATR-based stoploss (2.5 * ATR above entry)
@@ -138,6 +145,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dEMA200_VolumeSpike_ATRStop"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA34_VolumeSpike_ATRStop"
+timeframe = "4h"
 leverage = 1.0
