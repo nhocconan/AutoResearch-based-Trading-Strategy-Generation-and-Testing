@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla H3/L3 breakout with 12h EMA34 trend filter and volume confirmation
-- Uses 12h EMA34 slope for trend bias (long when rising, short when falling)
-- Breakout triggers when price closes beyond H3 (long) or L3 (short) with volume > 1.8x 20-period MA
-- Fixed position size 0.25 to limit fee churn and manage drawdown
+Hypothesis: 1h Camarilla H3/L3 breakout with 4h EMA50 trend filter and volume confirmation
+- Uses 4h EMA50 slope for trend bias (long when rising, short when falling)
+- Breakout triggers when price closes beyond H3 (long) or L3 (short) with volume > 2.0x 20-period MA
+- Fixed position size 0.20 to limit fee churn and manage drawdown
 - ATR-based trailing stop (2.0x ATR) to lock in profits and reduce losses
+- Session filter: only trade between 08:00-20:00 UTC to avoid low-liquidity hours
 - Works in bull markets (buying H3 breakouts in uptrends) and bear markets (selling L3 breakdowns in downtrends)
+- Target: 15-37 trades/year (60-150 over 4 years) to minimize fee drag
 """
 
 import numpy as np
@@ -21,14 +23,18 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Get 12h data for EMA34 trend filter (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Pre-compute hour for session filter (08:00-20:00 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
     
-    # Calculate 12h EMA34 and its slope
-    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_slope = np.gradient(ema34_12h)  # slope of EMA34
+    # Get 4h data for EMA50 trend filter (HTF)
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    
+    # Calculate 4h EMA50 and its slope
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_slope = np.gradient(ema50_4h)  # slope of EMA50
     
     # Get 1d data for Camarilla pivot levels (HTF)
     df_1d = get_htf_data(prices, '1d')
@@ -46,30 +52,21 @@ def generate_signals(prices):
     h3_prev[0] = h3[0]
     l3_prev[0] = l3[0]
     
-    # Get 4h data for volume confirmation and ATR (primary timeframe)
-    df_4h = get_htf_data(prices, '4h')
-    volume_4h = df_4h['volume'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Align all indicators to 1h timeframe (primary)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3_prev)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3_prev)
+    ema50_slope_aligned = align_htf_to_ltf(prices, df_4h, ema50_slope)
     
-    # Volume average (20-period) on 4h
-    volume_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    # Volume average (20-period) on 1h
+    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR (14-period) on 4h for stoploss
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    # ATR (14-period) on 1h for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # first period
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Align all indicators to 4h timeframe (primary)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3_prev)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3_prev)
-    ema34_slope_aligned = align_htf_to_ltf(prices, df_12h, ema34_slope)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_4h, volume_ma_20)
-    atr_aligned = align_htf_to_ltf(prices, df_4h, atr_14)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -79,31 +76,37 @@ def generate_signals(prices):
     start_idx = 100  # warmup
     
     for i in range(start_idx, n):
+        # Session filter: only trade 08:00-20:00 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            signals[i] = 0.0
+            continue
+        
         if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(ema34_slope_aligned[i]) or np.isnan(volume_ma_aligned[i]) or 
-            np.isnan(atr_aligned[i])):
+            np.isnan(ema50_slope_aligned[i]) or np.isnan(volume_ma_20[i]) or 
+            np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
         h3_val = h3_aligned[i]
         l3_val = l3_aligned[i]
-        ema_slope = ema34_slope_aligned[i]
-        vol_ma = volume_ma_aligned[i]
-        atr_val = atr_aligned[i]
+        ema_slope = ema50_slope_aligned[i]
+        vol_ma = volume_ma_20[i]
+        atr_val = atr_14[i]
         vol = volume[i]
         price = close[i]
         
         if position == 0:
             # Look for breakouts with volume confirmation and trend filter
-            # Long: price closes above H3 + volume spike + EMA34 rising
-            if price > h3_val and vol > 1.8 * vol_ma and ema_slope > 0:
-                signals[i] = 0.25
+            # Long: price closes above H3 + volume spike + EMA50 rising
+            if price > h3_val and vol > 2.0 * vol_ma and ema_slope > 0:
+                signals[i] = 0.20
                 position = 1
                 entry_price = price
                 atr_stop = entry_price - 2.0 * atr_val
-            # Short: price closes below L3 + volume spike + EMA34 falling
-            elif price < l3_val and vol > 1.8 * vol_ma and ema_slope < 0:
-                signals[i] = -0.25
+            # Short: price closes below L3 + volume spike + EMA50 falling
+            elif price < l3_val and vol > 2.0 * vol_ma and ema_slope < 0:
+                signals[i] = -0.20
                 position = -1
                 entry_price = price
                 atr_stop = entry_price + 2.0 * atr_val
@@ -114,7 +117,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 # Trail stop: raise stop if price moves favorably
                 atr_stop = max(atr_stop, price - 1.5 * atr_val)
         
@@ -124,12 +127,12 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 # Trail stop: lower stop if price moves favorably
                 atr_stop = min(atr_stop, price + 1.5 * atr_val)
     
     return signals
 
-name = "4h_Camarilla_H3L3_12hEMA34_VolumeSpike_ATRTrail"
-timeframe = "4h"
+name = "1h_Camarilla_H3L3_4hEMA50_VolumeSpike_ATRTrail"
+timeframe = "1h"
 leverage = 1.0
