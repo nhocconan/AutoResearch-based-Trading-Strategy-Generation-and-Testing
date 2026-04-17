@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h strategy using Williams Alligator (Jaw/Teeth/Lips) for trend direction,
-combined with 1d volume spike confirmation and ATR-based trailing stop.
-- Long when Alligator lines are bullish (Lips > Teeth > Jaw) + volume > 2.0x 20-period 1d volume MA
-- Short when Alligator lines are bearish (Lips < Teeth < Jaw) + volume > 2.0x 20-period 1d volume MA
+Hypothesis: 12h strategy using Camarilla pivot levels (H3/L3) from 1d with volume confirmation and ATR trailing stop.
+- Long when price closes above 1d Camarilla H3 level + volume > 1.8x 20-period 12h volume MA
+- Short when price closes below 1d Camarilla L3 level + volume > 1.8x 20-period 12h volume MA
 - Fixed position size 0.25 to limit fee churn and manage drawdown
-- ATR-based trailing stop (2.5x ATR) to lock in profits
-- Designed for low trade frequency (<100 trades over 4 years) to avoid fee drag
-- Works in bull markets (catching trends) and bear markets (shorting breakdowns)
+- ATR(10) trailing stop (2.0x ATR) to lock in profits
+- Designed for very low trade frequency (target: 50-150 trades over 4 years) to avoid fee drag
+- Works in bull markets (buying breakouts above H3) and bear markets (selling breakdowns below L3)
 """
 
 import numpy as np
@@ -24,48 +23,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Alligator (primary timeframe)
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Williams Alligator: Smoothed Moving Average (SMA) with specific periods
-    # Jaw: 13-period SMMA, shifted 8 bars forward
-    # Teeth: 8-period SMMA, shifted 5 bars forward  
-    # Lips: 5-period SMMA, shifted 3 bars forward
-    jaw = pd.Series(close_4h).rolling(window=13, min_periods=13).mean()
-    jaw = jaw.shift(8)  # shift forward 8 bars
-    teeth = pd.Series(close_4h).rolling(window=8, min_periods=8).mean()
-    teeth = teeth.shift(5)  # shift forward 5 bars
-    lips = pd.Series(close_4h).rolling(window=5, min_periods=5).mean()
-    lips = lips.shift(3)  # shift forward 3 bars
-    
-    jaw_vals = jaw.values
-    teeth_vals = teeth.values
-    lips_vals = lips.values
-    
-    # Get 1d data for volume confirmation (HTF)
+    # Get 1d data for Camarilla pivot calculation (HTF)
     df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 20-period volume moving average on 1d
-    volume_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d Camarilla pivot levels (H3, L3)
+    # Camarilla: H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
+    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 4
+    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 4
     
-    # ATR (14-period) on 4h for stoploss
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    # Get 12h data for volume confirmation and ATR (primary timeframe)
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
+    
+    # Volume average (20-period) on 12h for confirmation
+    volume_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR (10-period) on 12h for stoploss
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # first period
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # Align all indicators to 4h timeframe (primary)
-    jaw_aligned = align_htf_to_ltf(prices, df_4h, jaw_vals)
-    teeth_aligned = align_htf_to_ltf(prices, df_4h, teeth_vals)
-    lips_aligned = align_htf_to_ltf(prices, df_4h, lips_vals)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20)
-    atr_aligned = align_htf_to_ltf(prices, df_4h, atr_14)
+    # Align all indicators to 12h timeframe (primary)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    volume_ma_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_20)
+    atr_aligned = align_htf_to_ltf(prices, df_12h, atr_10)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -75,39 +66,32 @@ def generate_signals(prices):
     start_idx = 100  # warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(volume_ma_aligned[i]) or 
-            np.isnan(atr_aligned[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(volume_ma_aligned[i]) or np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             continue
         
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
+        h3_val = camarilla_h3_aligned[i]
+        l3_val = camarilla_l3_aligned[i]
         vol_ma = volume_ma_aligned[i]
         atr_val = atr_aligned[i]
         vol = volume[i]
         price = close[i]
         
-        # Bullish Alligator: Lips > Teeth > Jaw
-        bullish = lips_val > teeth_val and teeth_val > jaw_val
-        # Bearish Alligator: Lips < Teeth < Jaw
-        bearish = lips_val < teeth_val and teeth_val < jaw_val
-        
         if position == 0:
-            # Look for Alligator alignment with volume confirmation
-            # Long: Bullish Alligator + volume spike
-            if bullish and vol > 2.0 * vol_ma:
+            # Look for breakouts with volume confirmation
+            # Long: price closes above H3 + volume spike
+            if price > h3_val and vol > 1.8 * vol_ma:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-                atr_stop = entry_price - 2.5 * atr_val
-            # Short: Bearish Alligator + volume spike
-            elif bearish and vol > 2.0 * vol_ma:
+                atr_stop = entry_price - 2.0 * atr_val
+            # Short: price closes below L3 + volume spike
+            elif price < l3_val and vol > 1.8 * vol_ma:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
-                atr_stop = entry_price + 2.5 * atr_val
+                atr_stop = entry_price + 2.0 * atr_val
         
         elif position == 1:
             # Check stoploss
@@ -117,7 +101,7 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
                 # Trail stop: raise stop if price moves favorably
-                atr_stop = max(atr_stop, price - 2.0 * atr_val)
+                atr_stop = max(atr_stop, price - 1.5 * atr_val)
         
         elif position == -1:
             # Check stoploss
@@ -127,10 +111,10 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
                 # Trail stop: lower stop if price moves favorably
-                atr_stop = min(atr_stop, price + 2.0 * atr_val)
+                atr_stop = min(atr_stop, price + 1.5 * atr_val)
     
     return signals
 
-name = "4h_WilliamsAlligator_1dVolumeSpike_ATRTrail"
-timeframe = "4h"
+name = "12h_Camarilla_H3L3_VolumeSpike_ATRTrail"
+timeframe = "12h"
 leverage = 1.0
