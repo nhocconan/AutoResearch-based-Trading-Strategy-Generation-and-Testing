@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h strategy using Bollinger Bands squeeze breakout with volume confirmation and trend filter.
-- Enter long when price breaks above upper BB(20,2) + volume > 1.5x 20-period volume MA + price above 200 EMA
-- Enter short when price breaks below lower BB(20,2) + volume > 1.5x 20-period volume MA + price below 200 EMA
-- Exit when price crosses back inside Bollinger Bands
+Hypothesis: 1d strategy using weekly Donchian breakout with volume confirmation and trend filter.
+- Enter long when price breaks above weekly Donchian high + volume > 1.5x 20-period volume MA + price above daily EMA50
+- Enter short when price breaks below weekly Donchian low + volume > 1.5x 20-period volume MA + price below daily EMA50
+- Exit when price crosses back inside weekly Donchian channel
 - Fixed position size 0.25 to manage drawdown
-- Uses volatility contraction/expansion principle: squeeze precedes breakout
-- Designed for 4h timeframe with strict entry conditions to limit trades to 75-200 total over 4 years
-- Bollinger Bands capture volatility regimes, effective in both accumulation and distribution phases
+- Designed for 1d timeframe with strict entry conditions to limit trades to 30-100 total over 4 years
+- Uses weekly structure for direction and daily timeframe for entry timing and volume confirmation
 """
 
 import numpy as np
@@ -24,49 +23,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2)
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean()
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std()
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
+    # Weekly Donchian channel (20 periods)
+    df_weekly = get_htf_data(prices, '1w')
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    
+    donchian_high = pd.Series(high_weekly).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_weekly).rolling(window=20, min_periods=20).min().values
+    
+    # Align weekly Donchian levels to daily timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_weekly, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_weekly, donchian_low)
     
     # Volume confirmation: 20-period volume MA
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
-    # Trend filter: 200 EMA
-    ema_200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean()
+    # Trend filter: daily EMA50
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean()
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 200  # warmup for 200 EMA
+    start_idx = 50  # warmup for EMA50
     
     for i in range(start_idx, n):
-        if (np.isnan(sma_20.iloc[i]) or np.isnan(std_20.iloc[i]) or 
-            np.isnan(volume_ma_20.iloc[i]) or np.isnan(ema_200.iloc[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(volume_ma_20.iloc[i]) or np.isnan(ema_50.iloc[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = volume_ma_20.iloc[i]
-        upper = upper_bb.iloc[i]
-        lower = lower_bb.iloc[i]
-        ema_val = ema_200.iloc[i]
+        upper = donchian_high_aligned[i]
+        lower = donchian_low_aligned[i]
+        ema_val = ema_50.iloc[i]
         
         if position == 0:
-            # Look for Bollinger Band breakouts with volume confirmation and trend filter
-            # Long: price breaks above upper BB + volume spike + price above 200 EMA
+            # Look for weekly Donchian breakouts with volume confirmation and trend filter
+            # Long: price breaks above weekly Donchian high + volume spike + price above EMA50
             if price > upper and vol > 1.5 * vol_ma and price > ema_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower BB + volume spike + price below 200 EMA
+            # Short: price breaks below weekly Donchian low + volume spike + price below EMA50
             elif price < lower and vol > 1.5 * vol_ma and price < ema_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when price crosses back inside Bollinger Bands (mean reversion)
+            # Exit when price crosses back inside weekly Donchian channel
             if price < upper and price > lower:
                 signals[i] = 0.0
                 position = 0
@@ -74,7 +79,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price crosses back inside Bollinger Bands (mean reversion)
+            # Exit when price crosses back inside weekly Donchian channel
             if price < upper and price > lower:
                 signals[i] = 0.0
                 position = 0
@@ -83,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_BollingerSqueezeBreakout_VolumeTrend"
-timeframe = "4h"
+name = "1d_WeeklyDonchianBreakout_VolumeTrend"
+timeframe = "1d"
 leverage = 1.0
