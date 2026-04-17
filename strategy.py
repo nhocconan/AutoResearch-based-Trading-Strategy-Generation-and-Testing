@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V2
-Hypothesis: On 12h timeframe, buy when price breaks above daily Camarilla R1 with volume spike (>1.5x median volume) and ATR expansion (ATR > 1.2x median ATR), sell when breaks below daily S1. Uses volume and volatility filters to avoid false breakouts. Target: 15-25 trades/year for low fee drag. This version fixes the volume spike calculation by using the correct aligned volume data.
+4h_12h_Camarilla_R1S1_Breakout_Volume_ATRFilter
+Hypothesis: On 4h timeframe, buy when price breaks above 12h Camarilla R1 with volume spike (>1.5x median volume) and ATR expansion (ATR > 1.2x median ATR), sell when breaks below 12h S1. Uses volume and volatility filters to avoid false breakouts. Target: 20-30 trades/year for low fee drag.
 """
 
 import numpy as np
@@ -46,32 +46,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Daily Data (HTF for Camarilla levels, volume, ATR) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # === 12h Data (HTF for Camarilla levels, volume, ATR) ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Daily ATR (14-period)
-    atr_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # 12h ATR (14-period)
+    atr_12h = calculate_atr(high_12h, low_12h, close_12h, 14)
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
     
-    # Daily median ATR (50-period) for expansion filter
-    atr_median_1d = pd.Series(atr_1d).rolling(window=50, min_periods=50).median().values
-    atr_median_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_median_1d)
+    # 12h median ATR (50-period) for expansion filter
+    atr_median_12h = pd.Series(atr_12h).rolling(window=50, min_periods=50).median().values
+    atr_median_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_median_12h)
     
-    # Daily Camarilla levels (R1, S1)
-    r1_1d, s1_1d = calculate_camarilla(high_1d, low_1d, close_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # 12h Camarilla levels (R1, S1)
+    r1_12h, s1_12h = calculate_camarilla(high_12h, low_12h, close_12h)
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
     
-    # Daily median volume (50-period) for volume spike filter
-    vol_median_1d = pd.Series(volume_1d).rolling(window=50, min_periods=50).median().values
-    vol_median_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_median_1d)
-    
-    # Daily volume aligned for current volume check
-    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+    # 12h median volume (50-period) for volume spike filter
+    vol_median_12h = pd.Series(volume_12h).rolling(window=50, min_periods=50).median().values
+    vol_median_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_median_12h)
     
     signals = np.zeros(n)
     
@@ -83,35 +80,34 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(atr_median_1d_aligned[i]) or
-            np.isnan(r1_1d_aligned[i]) or
-            np.isnan(s1_1d_aligned[i]) or
-            np.isnan(vol_median_1d_aligned[i]) or
-            np.isnan(volume_1d_aligned[i])):
+        if (np.isnan(atr_12h_aligned[i]) or 
+            np.isnan(atr_median_12h_aligned[i]) or
+            np.isnan(r1_12h_aligned[i]) or
+            np.isnan(s1_12h_aligned[i]) or
+            np.isnan(vol_median_12h_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Get current daily bar's volume and ATR for confirmation
-        vol_1d_current = volume_1d_aligned[i]
-        atr_1d_current = atr_1d_aligned[i]
+        # Get current 12h bar's volume and ATR for confirmation
+        vol_12h_current = align_htf_to_ltf(prices, df_12h, volume_12h)[i]
+        atr_12h_current = atr_12h_aligned[i]
         
         # Volume spike: current volume > 1.5x median volume
-        vol_spike = vol_1d_current > 1.5 * vol_median_1d_aligned[i]
+        vol_spike = vol_12h_current > 1.5 * vol_median_12h_aligned[i]
         
         # ATR expansion: current ATR > 1.2x median ATR
-        atr_expansion = atr_1d_current > 1.2 * atr_median_1d_aligned[i]
+        atr_expansion = atr_12h_current > 1.2 * atr_median_12h_aligned[i]
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price breaks above daily R1 with volume spike and ATR expansion
-            if close[i] > r1_1d_aligned[i] and vol_spike and atr_expansion:
+            # Long: price breaks above 12h R1 with volume spike and ATR expansion
+            if close[i] > r1_12h_aligned[i] and vol_spike and atr_expansion:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price breaks below daily S1 with volume spike and ATR expansion
-            elif close[i] < s1_1d_aligned[i] and vol_spike and atr_expansion:
+            # Short: price breaks below 12h S1 with volume spike and ATR expansion
+            elif close[i] < s1_12h_aligned[i] and vol_spike and atr_expansion:
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -119,7 +115,7 @@ def generate_signals(prices):
         # Exit logic
         elif position == 1:
             # Exit when price breaks below S1 (opposite breakout)
-            if close[i] < s1_1d_aligned[i]:
+            if close[i] < s1_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -128,7 +124,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit when price breaks above R1 (opposite breakout)
-            if close[i] > r1_1d_aligned[i]:
+            if close[i] > r1_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -137,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V2"
-timeframe = "12h"
+name = "4h_12h_Camarilla_R1S1_Breakout_Volume_ATRFilter"
+timeframe = "4h"
 leverage = 1.0
