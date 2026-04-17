@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Camarilla pivot breakout with 1-day volume spike and ADX trend filter
-# Camarilla levels provide precise support/resistance; volume confirms conviction; ADX>25 filters chop.
-# Designed for 12h timeframe to achieve 12-37 trades/year with low fee decay.
-# Works in both bull and bear markets by trading reversals at key levels in trending regimes.
+# Hypothesis: 6-hour Williams %R reversal with 1-day ADX trend filter and volume confirmation
+# Williams %R identifies overbought/oversold conditions; ADX>25 filters chop; volume spike confirms momentum.
+# Designed for 6h timeframe to achieve 12-37 trades/year with low fee decay.
+# Works in both bull and bear markets by trading reversals at extremes in trending regimes.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,36 +18,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h OHLC for Camarilla calculation ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # === 1-day Camarilla Pivot Levels (R1, S1) ===
+    # === 1-day Williams %R (14-period) for mean reversion signals ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's values for pivot calculation (avoid look-ahead)
-    prev_high = np.concatenate([[high_1d[0]], high_1d[:-1]])
-    prev_low = np.concatenate([[low_1d[0]], low_1d[:-1]])
-    prev_close = np.concatenate([[close_1d[0]], close_1d[:-1]])
+    # Highest high and lowest low over lookback period
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
-    r1 = pivot + (range_val * 1.1 / 12)
-    s1 = pivot - (range_val * 1.1 / 12)
+    # Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
     
-    # Align Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # === 1-day Volume Spike (vs 20-period average) ===
-    volume_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Align Williams %R to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
     # === 1-day ADX (14-period) for trend filter ===
     # True Range
@@ -76,6 +61,11 @@ def generate_signals(prices):
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
+    # === 1-day Volume Spike (vs 20-period average) ===
+    volume_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    
     signals = np.zeros(n)
     
     # Warmup
@@ -86,43 +76,41 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(adx_aligned[i]) or
+            np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Get current 12h price and volume
-        close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
+        # Get current 1d volume
         volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
         
-        # Volume spike: current 1d volume > 1.6x 20-period average
-        vol_spike = volume_1d_aligned[i] > vol_ma_20_1d_aligned[i] * 1.6
+        # Volume spike: current 1d volume > 1.5x 20-period average
+        vol_spike = volume_1d_aligned[i] > vol_ma_20_1d_aligned[i] * 1.5
         
-        # Trend filter: ADX > 22
-        trend_filter = adx_aligned[i] > 22
+        # Trend filter: ADX > 25
+        trend_filter = adx_aligned[i] > 25
         
-        # Camarilla breakout signals
-        breakout_up = close_12h_aligned[i] > r1_aligned[i]
-        breakout_down = close_12h_aligned[i] < s1_aligned[i]
+        # Williams %R reversal signals
+        oversold = williams_r_aligned[i] < -80  # Oversold condition
+        overbought = williams_r_aligned[i] > -20  # Overbought condition
         
         # Entry logic: only enter when flat
         if position == 0:
             if vol_spike and trend_filter:
-                if breakout_up:
+                if oversold:
                     signals[i] = 0.25
                     position = 1
                     continue
-                elif breakout_down:
+                elif overbought:
                     signals[i] = -0.25
                     position = -1
                     continue
         
-        # Exit logic: exit when price returns to pivot or conditions fail
+        # Exit logic: exit when Williams %R returns to neutral zone or conditions fail
         elif position == 1:
-            # Exit long if price returns to pivot or conditions fail
-            pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-            if close_12h_aligned[i] < pivot_aligned[i] or not vol_spike or not trend_filter:
+            # Exit long if Williams %R returns above -50 or conditions fail
+            if williams_r_aligned[i] > -50 or not vol_spike or not trend_filter:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -130,9 +118,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short if price returns to pivot or conditions fail
-            pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-            if close_12h_aligned[i] > pivot_aligned[i] or not vol_spike or not trend_filter:
+            # Exit short if Williams %R returns below -50 or conditions fail
+            if williams_r_aligned[i] < -50 or not vol_spike or not trend_filter:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -141,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_1dVolume1.6x_ADX22"
-timeframe = "12h"
+name = "6h_WilliamsR_1dADX25_Volume1.5x"
+timeframe = "6h"
 leverage = 1.0
