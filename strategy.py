@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_RSI20_TrendFilter_V1
-RSI(20) on 6h with 1d trend filter: price above/below 1d EMA200.
-Long when RSI crosses above 30 (from oversold) and price > 1d EMA200.
-Short when RSI crosses below 70 (from overbought) and price < 1d EMA200.
-Exit when RSI crosses 50 (mean reversion) or trend fails.
-Designed to capture mean reversion in trending markets.
-Target: 50-150 total trades over 4 years (12-37/year).
+12h_WAVES_1W_Volume_Signal_v1
+Hypothesis: Use weekly price waves (distance from weekly high/low) + volume confirmation.
+In bull markets, buy near weekly lows; in bear markets, sell near weekly highs.
+Volume filter ensures participation. Weekly timeframe reduces noise and overtrading.
+Target: 12-37 trades/year (50-150 total over 4 years).
 """
 
 import numpy as np
@@ -18,58 +16,69 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # === RSI(20) ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=20, min_periods=20).mean().values
-    avg_loss = pd.Series(loss).rolling(window=20, min_periods=20).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # === Weekly high/low for wave calculation ===
+    df_1w = get_htf_data(prices, '1w')
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # === 1d EMA200 for trend filter ===
-    df_1d = get_htf_data(prices, '1d')
-    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Align weekly data to 12h timeframe
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
+    weekly_close_aligned = align_htf_to_ltf(prices, df_1w, weekly_close)
+    
+    # Calculate position within weekly range (0 = at low, 1 = at high)
+    weekly_range = weekly_high_aligned - weekly_low_aligned
+    # Avoid division by zero
+    weekly_range = np.where(weekly_range == 0, 1e-10, weekly_range)
+    wave_position = (close - weekly_low_aligned) / weekly_range
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ok = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 200
+    warmup = 50
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi[i]) or 
-            np.isnan(ema_200_1d_aligned[i])):
+        if (np.isnan(wave_position[i]) or 
+            np.isnan(weekly_close_aligned[i]) or
+            np.isnan(volume_ok[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: RSI crosses above 30 and price above 1d EMA200
-            if (rsi[i] > 30 and rsi[i-1] <= 30 and 
-                close[i] > ema_200_1d_aligned[i]):
+            # Long: near weekly low (wave < 0.3) and volume confirmation
+            if (wave_position[i] < 0.3 and 
+                volume_ok[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: RSI crosses below 70 and price below 1d EMA200
-            elif (rsi[i] < 70 and rsi[i-1] >= 70 and 
-                  close[i] < ema_200_1d_aligned[i]):
+            # Short: near weekly high (wave > 0.7) and volume confirmation
+            elif (wave_position[i] > 0.7 and 
+                  volume_ok[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: RSI crosses below 50 OR price below 1d EMA200
-            if (rsi[i] < 50 and rsi[i-1] >= 50 or 
-                close[i] < ema_200_1d_aligned[i]):
+            # Exit long: price crosses weekly close OR wave > 0.8
+            if (close[i] > weekly_close_aligned[i] or 
+                wave_position[i] > 0.8):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -77,9 +86,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI crosses above 50 OR price above 1d EMA200
-            if (rsi[i] > 50 and rsi[i-1] <= 50 or 
-                close[i] > ema_200_1d_aligned[i]):
+            # Exit short: price crosses weekly close OR wave < 0.2
+            if (close[i] < weekly_close_aligned[i] or 
+                wave_position[i] < 0.2):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -88,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_RSI20_TrendFilter_V1"
-timeframe = "6h"
+name = "12h_WAVES_1W_Volume_Signal_v1"
+timeframe = "12h"
 leverage = 1.0
