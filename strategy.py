@@ -1,41 +1,72 @@
 #!/usr/bin/env python3
 """
-4h_1D_Pivot_R1_S1_Breakout_Volume_Trend
-Hypothesis: On 4h timeframe, buy when price breaks above 1D Camarilla R1 with volume spike (>1.5x median volume) and trend alignment (price > 4h EMA50), sell when breaks below 1D S1. Uses volume and trend filters to avoid false breakouts. Target: 20-30 trades/year for low fee drag. Works in bull/bear via trend filter.
+4h_1d_RSI_Divergence_Volume_Strict
+Hypothesis: On 4h timeframe, identify bullish/bearish RSI divergences with volume confirmation.
+Bullish: price makes lower low, RSI makes higher low, volume increases on up days.
+Bearish: price makes higher high, RSI makes lower high, volume decreases on down days.
+Uses 1d RSI divergence for higher timeframe confirmation and volume spike for entry timing.
+Targets 20-40 trades/year with strict conditions to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_atr(high, low, close, period=14):
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
+def calculate_rsi(close, period=14):
+    """Calculate RSI with proper Wilder smoothing"""
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    def smooth_wilder(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        result[period-1] = np.nansum(arr[1:period])
-        for i in range(period, len(arr)):
-            if not np.isnan(arr[i]) and not np.isnan(result[i-1]):
-                result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
     
-    return smooth_wilder(tr, period)
+    # Wilder's smoothing
+    avg_gain[period] = np.mean(gain[:period])
+    avg_loss[period] = np.mean(loss[:period])
+    
+    for i in range(period + 1, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    # Set first period values to NaN
+    rsi[:period] = np.nan
+    return rsi
 
-def calculate_camarilla(high, low, close):
-    range_hl = high - low
-    r1 = close + range_hl * 1.1 / 12
-    s1 = close - range_hl * 1.1 / 12
-    return r1, s1
+def find_divergences(price, indicator, lookback=10):
+    """
+    Find bullish and bearish divergences
+    Returns arrays: bullish_div (True when bullish div), bearish_div (True when bearish div)
+    """
+    n = len(price)
+    bullish_div = np.zeros(n, dtype=bool)
+    bearish_div = np.zeros(n, dtype=bool)
+    
+    for i in range(lookback, n):
+        # Look for bullish divergence: price lower low, indicator higher low
+        price_low = np.argmin(price[i-lookback:i+1]) + i - lookback
+        ind_low = np.argmin(indicator[i-lookback:i+1]) + i - lookback
+        
+        if price_low != ind_low and price[price_low] < price[i-lookback] and indicator[ind_low] > indicator[i-lookback]:
+            # Check if this is a valid divergence point
+            if price_low == i-lookback or ind_low == i-lookback:
+                bullish_div[i] = True
+        
+        # Look for bearish divergence: price higher high, indicator lower high
+        price_high = np.argmax(price[i-lookback:i+1]) + i - lookback
+        ind_high = np.argmax(indicator[i-lookback:i+1]) + i - lookback
+        
+        if price_high != ind_high and price[price_high] > price[i-lookback] and indicator[ind_high] < indicator[i-lookback]:
+            if price_high == i-lookback or ind_high == i-lookback:
+                bearish_div[i] = True
+    
+    return bullish_div, bearish_div
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -43,33 +74,25 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1D Data (HTF for Camarilla levels, volume) ===
+    # === 1d Data (HTF for RSI divergence) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # 1D ATR (14-period) for trend filter (optional)
-    atr_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # 1d RSI (14-period)
+    rsi_1d = calculate_rsi(close_1d, 14)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # 1D median ATR (50-period) for expansion filter
-    atr_median_1d = pd.Series(atr_1d).rolling(window=50, min_periods=50).median().values
-    atr_median_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_median_1d)
+    # Find divergences on 1d data
+    bullish_div_1d, bearish_div_1d = find_divergences(close_1d, rsi_1d, lookback=10)
+    bullish_div_1d_aligned = align_htf_to_ltf(prices, df_1d, bullish_div_1d.astype(float))
+    bearish_div_1d_aligned = align_htf_to_ltf(prices, df_1d, bearish_div_1d.astype(float))
     
-    # 1D Camarilla levels (R1, S1)
-    r1_1d, s1_1d = calculate_camarilla(high_1d, low_1d, close_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # 1D median volume (50-period) for volume spike filter
-    vol_median_1d = pd.Series(volume_1d).rolling(window=50, min_periods=50).median().values
-    vol_median_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_median_1d)
-    
-    # 4h EMA50 for trend filter
-    close_series = pd.Series(close)
-    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).values
+    # 4h volume spike detection (20-period median)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).median().values
+    volume_spike = volume > 1.8 * volume_ma  # Volume spike threshold
     
     signals = np.zeros(n)
     
@@ -81,43 +104,37 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(atr_median_1d_aligned[i]) or
-            np.isnan(r1_1d_aligned[i]) or
-            np.isnan(s1_1d_aligned[i]) or
-            np.isnan(vol_median_1d_aligned[i]) or
-            np.isnan(ema50[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(bullish_div_1d_aligned[i]) or
+            np.isnan(bearish_div_1d_aligned[i]) or
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Get current 1D bar's volume for confirmation
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
-        
-        # Volume spike: current volume > 1.5x median volume
-        vol_spike = vol_1d_current > 1.5 * vol_median_1d_aligned[i]
-        
-        # Trend filter: price > 4h EMA50 for long, price < 4h EMA50 for short
-        trend_up = close[i] > ema50[i]
-        trend_down = close[i] < ema50[i]
-        
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price breaks above 1D R1 with volume spike and uptrend
-            if close[i] > r1_1d_aligned[i] and vol_spike and trend_up:
+            # Bullish entry: 1d bullish divergence + 4h volume spike + price above 20-period EMA
+            ema_20 = pd.Series(close).ewm(span=20, adjust=False).mean().values
+            if (bullish_div_1d_aligned[i] > 0.5 and 
+                volume_spike[i] and 
+                close[i] > ema_20[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price breaks below 1D S1 with volume spike and downtrend
-            elif close[i] < s1_1d_aligned[i] and vol_spike and trend_down:
+            # Bearish entry: 1d bearish divergence + 4h volume spike + price below 20-period EMA
+            elif (bearish_div_1d_aligned[i] > 0.5 and 
+                  volume_spike[i] and 
+                  close[i] < ema_20[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit when price breaks below S1 (opposite breakout)
-            if close[i] < s1_1d_aligned[i]:
+            # Exit on bearish divergence or price below EMA
+            ema_20 = pd.Series(close).ewm(span=20, adjust=False).mean().values
+            if bearish_div_1d_aligned[i] > 0.5 or close[i] < ema_20[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -125,8 +142,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price breaks above R1 (opposite breakout)
-            if close[i] > r1_1d_aligned[i]:
+            # Exit on bullish divergence or price above EMA
+            ema_20 = pd.Series(close).ewm(span=20, adjust=False).mean().values
+            if bullish_div_1d_aligned[i] > 0.5 or close[i] > ema_20[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -135,6 +153,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1D_Pivot_R1_S1_Breakout_Volume_Trend"
+name = "4h_1d_RSI_Divergence_Volume_Strict"
 timeframe = "4h"
 leverage = 1.0
