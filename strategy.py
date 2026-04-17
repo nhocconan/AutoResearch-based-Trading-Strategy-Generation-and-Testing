@@ -1,6 +1,9 @@
-# 6h_OrderBlock_Retest_LiquidityImbalance
-# Hypothesis: Institutional order blocks form at key support/resistance levels. Price retesting these blocks with liquidity imbalance (volume spike + price rejection) provides high-probability entries. Works in both bull/bear as it identifies institutional participation.
-# Uses 1d order blocks identified by volume profile + price action. Entry on 6h retest with volume confirmation. Stop via signal reversal.
+# 4h_12h_HighLowBreakout_VolumeConfirmation
+# Hypothesis: Breakouts above recent 12h high/low with volume confirmation and alignment with 12h trend capture strong moves in both bull and bear markets.
+# Long when price > 12h high (lookback 24) + volume > 1.5x 10-period average + 12h close > 12h EMA34.
+# Short when price < 12h low (lookback 24) + volume > 1.5x 10-period average + 12h close < 12h EMA34.
+# Exit on opposite signal or trend reversal. Position size: ±0.25.
+# Uses 4h for entry/exit and 12h for trend filter and breakout levels.
 
 import numpy as np
 import pandas as pd
@@ -8,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -16,104 +19,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d order blocks using volume profile and price action
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Volume confirmation (10-period MA on 4h)
+    volume_ma10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     
-    # Identify 1d order blocks: high volume nodes with strong close
-    vol_1d = df_1d['volume'].values
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Get 12h data for trend filter and breakout levels
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Volume-weighted average price approximation for each day
-    vwap_1d = (high_1d + low_1d + close_1d) / 3
+    # Calculate 12h EMA34 for trend filter
+    close_series_12h = pd.Series(close_12h)
+    ema34_12h = close_series_12h.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Identify high volume areas (top 30% volume days)
-    vol_threshold = np.percentile(vol_1d, 70)
-    high_vol_mask = vol_1d >= vol_threshold
+    # Align 12h EMA to 4h timeframe
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
-    # Bullish OB: high volume day with close > vwap
-    # Bearish OB: high volume day with close < vwap
-    bullish_ob = high_vol_mask & (close_1d > vwap_1d)
-    bearish_ob = high_vol_mask & (close_1d < vwap_1d)
+    # Calculate 12h rolling high (24 periods) and low (24 periods)
+    high_12h_series = pd.Series(high_12h)
+    low_12h_series = pd.Series(low_12h)
+    high_24_12h = high_12h_series.rolling(window=24, min_periods=24).max().values
+    low_24_12h = low_12h_series.rolling(window=24, min_periods=24).min().values
     
-    # Create OB levels (using the vwap of those days)
-    bullish_ob_levels = np.where(bullish_ob, vwap_1d, np.nan)
-    bearish_ob_levels = np.where(bearish_ob, vwap_1d, np.nan)
-    
-    # Forward fill to get active OB levels
-    bullish_ob_series = pd.Series(bullish_ob_levels)
-    bearish_ob_series = pd.Series(bearish_ob_levels)
-    bullish_ob_filled = bullish_ob_series.ffill().bfill().values
-    bearish_ob_filled = bearish_ob_series.ffill().bfill().values
-    
-    # Align OB levels to 6h timeframe
-    bullish_ob_aligned = align_htf_to_ltf(prices, df_1d, bullish_ob_filled)
-    bearish_ob_aligned = align_htf_to_ltf(prices, df_1d, bearish_ob_filled)
-    
-    # Volume spike detector (20-period average)
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Price action rejection signals
-    # Bullish rejection: long lower wick, close near high
-    lower_wick = close - low
-    upper_wick = high - close
-    body = np.abs(close - open_) if 'open' in prices.columns else np.abs(close - np.roll(close, 1))
-    open_ = np.roll(close, 1)
-    open_[0] = close[0]
-    body = np.abs(close - open_)
-    body = np.where(body == 0, 0.001, body)  # avoid division by zero
-    
-    bullish_rejection = (lower_wick > 2 * body) & (close > (high - 0.3 * (high - low)))
-    bearish_rejection = (upper_wick > 2 * body) & (close < (low + 0.3 * (high - low)))
+    # Align 12h high/low to 4h timeframe
+    high_24_12h_aligned = align_htf_to_ltf(prices, df_12h, high_24_12h)
+    low_24_12h_aligned = align_htf_to_ltf(prices, df_12h, low_24_12h)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = max(20, 20)  # volume MA20, need price data
+    start_idx = max(10, 24, 34)  # volume MA10, 12h high/low lookback, EMA34
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(bullish_ob_aligned[i]) or 
-            np.isnan(bearish_ob_aligned[i]) or 
-            np.isnan(volume_ma20[i])):
+        if (np.isnan(volume_ma10[i]) or 
+            np.isnan(high_24_12h_aligned[i]) or 
+            np.isnan(low_24_12h_aligned[i]) or 
+            np.isnan(ema34_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2x 20-period average
-        volume_filter = volume[i] > (2.0 * volume_ma20[i])
-        
-        # Distance to OB levels (avoid division by zero)
-        dist_to_bull_ob = np.abs(close[i] - bullish_ob_aligned[i]) / close[i] if not np.isnan(bullish_ob_aligned[i]) else 1.0
-        dist_to_bear_ob = np.abs(close[i] - bearish_ob_aligned[i]) / close[i] if not np.isnan(bearish_ob_aligned[i]) else 1.0
-        
-        # Near OB level (within 0.5%)
-        near_bull_ob = dist_to_bull_ob < 0.005
-        near_bear_ob = dist_to_bear_ob < 0.005
+        # Volume filter: current volume > 1.5x 10-period average
+        volume_filter = volume[i] > (1.5 * volume_ma10[i])
         
         if position == 0:
-            # Long: near bullish OB + bullish rejection + volume spike
-            if near_bull_ob and bullish_rejection[i] and volume_filter:
+            # Long: price > 12h high (24) + volume filter + 12h uptrend
+            if close[i] > high_24_12h_aligned[i] and volume_filter and close[i] > ema34_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: near bearish OB + bearish rejection + volume spike
-            elif near_bear_ob and bearish_rejection[i] and volume_filter:
+            # Short: price < 12h low (24) + volume filter + 12h downtrend
+            elif close[i] < low_24_12h_aligned[i] and volume_filter and close[i] < ema34_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: near bearish OB with bearish rejection OR opposite signal
-            if near_bear_ob and bearish_rejection[i] and volume_filter:
+            # Exit long: price < 12h low (24) or 12h trend turns down
+            if close[i] < low_24_12h_aligned[i] or close[i] < ema34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: near bullish OB with bullish rejection OR opposite signal
-            if near_bull_ob and bullish_rejection[i] and volume_filter:
+            # Exit short: price > 12h high (24) or 12h trend turns up
+            if close[i] > high_24_12h_aligned[i] or close[i] > ema34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -121,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_OrderBlock_Retest_LiquidityImbalance"
-timeframe = "6h"
+name = "4h_12h_HighLowBreakout_VolumeConfirmation"
+timeframe = "4h"
 leverage = 1.0
