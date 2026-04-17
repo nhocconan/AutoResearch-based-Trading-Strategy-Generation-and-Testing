@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour True Strength Index (TSI) with daily volume confirmation and 1-day ADX trend filter
-# TSI captures momentum with reduced whipsaw vs RSI/MACD. Long when TSI > 25 and rising, short when TSI < -25 and falling.
-# Uses 1-day ADX > 25 to filter for trending conditions only, avoiding range-bound whipsaw.
-# Volume confirmation (1-day volume > 1.5x 20-day average) ensures institutional participation.
-# Designed for low trade frequency (~20-30/year) to minimize fee drag while capturing strong trends.
-# Works in both bull (TSI > 25) and bear (TSI < -25) markets via symmetric long/short logic.
+# Hypothesis: 12-hour 1-week Pivot Point (R1/S1) breakout with volume confirmation and ADX trend filter
+# In trending markets (ADX > 25), trade breakouts of weekly pivot levels with volume confirmation
+# In ranging markets (ADX < 20), trade mean reversion at weekly pivot levels with volume confirmation
+# Weekly pivot levels provide strong support/resistance; volume confirms conviction; ADX filters regime
+# Target: 15-30 trades/year to minimize fee decay while capturing high-probability moves
 
 def generate_signals(prices):
     n = len(prices)
@@ -16,30 +15,31 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === 1-day TSI (True Strength Index) ===
+    # === Weekly Pivot Points (R1, S1, Pivot) ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate pivot points: P = (H + L + C)/3, R1 = 2*P - L, S1 = 2*P - H
+    pivot = (high_1w + low_1w + close_1w) / 3.0
+    r1 = 2 * pivot - low_1w
+    s1 = 2 * pivot - high_1w
+    
+    # Align weekly pivot levels to 12h timeframe (wait for weekly close)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    
+    # === Daily ADX (14-period) for trend/range regime ===
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    
-    # Price change and absolute price change
-    pc = close_1d - np.concatenate([[close_1d[0]], close_1d[:-1]])
-    apc = np.abs(pc)
-    
-    # Double smoothed PC and APC
-    pc_sm1 = pd.Series(pc).ewm(span=25, adjust=False).mean()
-    pc_sm2 = pc_sm1.ewm(span=13, adjust=False).mean()
-    apc_sm1 = pd.Series(apc).ewm(span=25, adjust=False).mean()
-    apc_sm2 = apc_sm1.ewm(span=13, adjust=False).mean()
-    
-    # TSI = 100 * (double smoothed PC / double smoothed APC)
-    tsi_raw = 100 * (pc_sm2.values / apc_sm2.values)
-    tsi_raw = np.where(apc_sm2.values == 0, 0, tsi_raw)  # avoid division by zero
-    
-    tsi_1d_aligned = align_htf_to_ltf(prices, df_1d, tsi_raw)
-    
-    # === 1-day ADX (14-period) for trend strength ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range
     tr1 = high_1d - low_1d
@@ -50,26 +50,26 @@ def generate_signals(prices):
     # Directional Movement
     up_move = high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])
     down_move = np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d
+    
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Smoothed TR, +DM, -DM
-    tr_sum = pd.Series(tr).ewm(span=14, adjust=False).mean()
-    plus_dm_sum = pd.Series(plus_dm).ewm(span=14, adjust=False).mean()
-    minus_dm_sum = pd.Series(minus_dm).ewm(span=14, adjust=False).mean()
+    # Smoothed values
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
+    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
     
     # Directional Indicators
-    plus_di = 100 * plus_dm_sum / tr_sum
-    minus_di = 100 * minus_dm_sum / tr_sum
+    plus_di = 100 * plus_dm_14 / tr_14
+    minus_di = 100 * minus_dm_14 / tr_14
     
     # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    dx = np.where((plus_di + minus_di) == 0, 0, dx)
-    adx = pd.Series(dx).ewm(span=14, adjust=False).mean().values
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # === 1-day Volume Confirmation ===
+    # === Daily Volume Spike (vs 20-period average) ===
     volume_1d = df_1d['volume'].values
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
@@ -84,51 +84,92 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(tsi_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(adx_aligned[i]) or
             np.isnan(vol_ma_20_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Trend and volume filters
-        is_trending = adx_1d_aligned[i] > 25
-        vol_confirmed = volume_1d[i] > vol_ma_20_aligned[i] * 1.5  # use current day's volume
+        # Get current 12h volume (avoid calling get_htf_data in loop)
+        volume_12h_aligned = align_htf_to_ltf(prices, volume)
+        
+        # Volume spike: current 12h volume > 1.5x 20-period average
+        vol_spike = volume_12h_aligned[i] > vol_ma_20_aligned[i] * 1.5
+        
+        # Regime filters
+        is_trending = adx_aligned[i] > 25   # Trending market
+        is_ranging = adx_aligned[i] < 20    # Ranging market
         
         # Entry logic: only enter when flat
         if position == 0:
-            if is_trending and vol_confirmed:
-                # Long: TSI > 25 and rising (current > previous)
-                if tsi_1d_aligned[i] > 25 and tsi_1d_aligned[i] > tsi_1d_aligned[i-1]:
+            # In trending markets: trade breakouts of weekly pivot levels with volume confirmation
+            if is_trending:
+                breakout_up = close[i] > r1_aligned[i-1]  # Break above R1
+                breakout_down = close[i] < s1_aligned[i-1]  # Break below S1
+                
+                if breakout_up and vol_spike:
                     signals[i] = 0.25
                     position = 1
                     continue
-                # Short: TSI < -25 and falling (current < previous)
-                elif tsi_1d_aligned[i] < -25 and tsi_1d_aligned[i] < tsi_1d_aligned[i-1]:
+                elif breakout_down and vol_spike:
                     signals[i] = -0.25
+                    position = -1
+                    continue
+            
+            # In ranging markets: trade mean reversion at weekly pivot levels with volume confirmation
+            elif is_ranging:
+                # Mean reversion: price touches S1 (support) or R1 (resistance) with volume spike
+                if close[i] <= s1_aligned[i] and vol_spike:
+                    signals[i] = 0.25  # Buy at S1 (support)
+                    position = 1
+                    continue
+                elif close[i] >= r1_aligned[i] and vol_spike:
+                    signals[i] = -0.25  # Sell at R1 (resistance)
                     position = -1
                     continue
         
         # Exit logic
         elif position == 1:
-            # Exit long when TSI drops below 0 (momentum fade)
-            if tsi_1d_aligned[i] < 0:
-                signals[i] = 0.0
-                position = 0
-                continue
-            else:
-                signals[i] = 0.25
+            # Exit long based on regime
+            if is_trending:
+                # In trending market: exit when price returns to weekly pivot
+                if close[i] < pivot_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    continue
+                else:
+                    signals[i] = 0.25
+            else:  # ranging market
+                # In ranging market: exit when price returns to weekly pivot
+                if close[i] >= pivot_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    continue
+                else:
+                    signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when TSI rises above 0 (momentum fade)
-            if tsi_1d_aligned[i] > 0:
-                signals[i] = 0.0
-                position = 0
-                continue
-            else:
-                signals[i] = -0.25
+            # Exit short based on regime
+            if is_trending:
+                # In trending market: exit when price returns to weekly pivot
+                if close[i] > pivot_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    continue
+                else:
+                    signals[i] = -0.25
+            else:  # ranging market
+                # In ranging market: exit when price returns to weekly pivot
+                if close[i] <= pivot_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    continue
+                else:
+                    signals[i] = -0.25
     
     return signals
 
-name = "4h_TSI_ADX_Volume_Trend_Filter"
-timeframe = "4h"
+name = "12h_WeeklyPivot_R1S1_ADXVolBreakout"
+timeframe = "12h"
 leverage = 1.0
