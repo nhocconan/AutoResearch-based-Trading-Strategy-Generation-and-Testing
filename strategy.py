@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h CCI(20) Mean Reversion with Volume Spike Filter
-Long: CCI < -100 + volume > 1.5 x 4h volume MA(20)
-Short: CCI > +100 + volume > 1.5 x 4h volume MA(20)
-Exit: CCI crosses back above -50 (long) or below +50 (short)
-Uses mean reversion in oversold/overbought conditions with volume confirmation.
-Target: 30-50 trades/year per symbol (120-200 total over 4 years)
+1h Volume-Weighted MACD with 4h Trend Filter
+Long: MACD histogram crosses above zero AND price above 4h EMA(20) AND volume > 1.5x 1h volume SMA(20)
+Short: MACD histogram crosses below zero AND price below 4h EMA(20) AND volume > 1.5x 1h volume SMA(20)
+Exit: MACD histogram crosses back to opposite side of zero
+Uses 4h EMA for trend direction, MACD for momentum, volume for confirmation
+Target: 15-30 trades/year per symbol (60-120 total over 4 years)
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,61 +22,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # CCI(20) calculation
-    typical_price = (high + low + close) / 3.0
-    tp_ma = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
-    tp_std = pd.Series(typical_price).rolling(window=20, min_periods=20).std().values
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
     
-    # Avoid division by zero
-    cci = np.zeros_like(typical_price, dtype=float)
-    mask = tp_std != 0
-    cci[mask] = (typical_price[mask] - tp_ma[mask]) / (0.015 * tp_std[mask])
+    # Calculate 4h EMA(20) for trend direction
+    ema_20_4h = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
-    # 4h volume moving average (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate MACD (12,26,9) on 1h data
+    ema_fast = pd.Series(close).ewm(span=12, adjust=False).mean().values
+    ema_slow = pd.Series(close).ewm(span=26, adjust=False).mean().values
+    macd_line = ema_fast - ema_slow
+    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False).mean().values
+    macd_hist = macd_line - signal_line
+    
+    # Calculate 1h volume SMA(20) for volume filter
+    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 40  # wait for CCI and volume MA
+    start_idx = max(30, 26 + 9)  # MACD needs 26+9 bars for signal line
     
     for i in range(start_idx, n):
-        if np.isnan(cci[i]) or np.isnan(vol_ma[i]):
+        if (np.isnan(ema_20_4h_aligned[i]) or np.isnan(macd_hist[i]) or 
+            np.isnan(macd_hist[i-1]) or np.isnan(vol_sma[i])):
             signals[i] = 0.0
             continue
         
-        cci_val = cci[i]
+        price = close[i]
         vol = volume[i]
-        vol_ma_val = vol_ma[i]
+        vol_sma_val = vol_sma[i]
+        ema_4h_val = ema_20_4h_aligned[i]
+        macd_h = macd_hist[i]
+        macd_h_prev = macd_hist[i-1]
         
         if position == 0:
-            # Long: CCI < -100 (oversold) + volume spike
-            if cci_val < -100.0 and vol > 1.5 * vol_ma_val:
-                signals[i] = 0.25
+            # Long: MACD hist crosses above zero + price above 4h EMA + volume > 1.5x SMA
+            if macd_h_prev <= 0 and macd_h > 0 and price > ema_4h_val and vol > 1.5 * vol_sma_val:
+                signals[i] = 0.20
                 position = 1
-            # Short: CCI > +100 (overbought) + volume spike
-            elif cci_val > 100.0 and vol > 1.5 * vol_ma_val:
-                signals[i] = -0.25
+            # Short: MACD hist crosses below zero + price below 4h EMA + volume > 1.5x SMA
+            elif macd_h_prev >= 0 and macd_h < 0 and price < ema_4h_val and vol > 1.5 * vol_sma_val:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: CCI crosses back above -50
-            if cci_val > -50.0:
+            # Long exit: MACD hist crosses below zero
+            if macd_h_prev >= 0 and macd_h < 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: CCI crosses back below +50
-            if cci_val < 50.0:
+            # Short exit: MACD hist crosses above zero
+            if macd_h_prev <= 0 and macd_h > 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_CCI20_MeanReversion_VolumeSpike"
-timeframe = "4h"
+name = "1h_VolWeighted_MACD_4hEMA20"
+timeframe = "1h"
 leverage = 1.0
