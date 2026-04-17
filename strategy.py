@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_Volume_Regime_v1
-Hypothesis: Use daily Camarilla pivot levels (R1, S1) as key support/resistance with volume confirmation and chop regime filter.
-Long when price breaks above R1 with volume > 1.5x average and chop < 61.8 (trending).
-Short when price breaks below S1 with volume > 1.5x average and chop < 61.8.
-Exit when price returns to the daily pivot (PP) or chop > 61.8 (choppy).
-Targets 20-40 trades/year to avoid fee drag. Works in bull/bear via regime filter.
+4h_Volume_Spike_Reversion_v1
+Buying volume spikes during mean reversion in weak trends.
+- Long: Volume spike > 2.0x 30-period average AND price < BB(20,2.5) lower band AND ADX < 25
+- Short: Volume spike > 2.0x 30-period average AND price > BB(20,2.5) upper band AND ADX < 25
+- Exit: ADX > 30 (trend strength) OR price reverts to VWAP(20)
+Uses 1d trend filter: only trade long when price > 1d EMA50, short when price < 1d EMA50.
+Designed to capture mean reversion bursts during low volatility periods.
+Target: 80-160 total trades over 4 years (20-40/year).
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_hlf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,99 +24,89 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Daily Camarilla pivot levels ===
-    df_1d = get_htf_data(prices, '1d')
-    # Typical price for pivot calculation
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    # Calculate pivot (PP), support/resistance levels
-    pp = typical_price.values
-    r1 = pp + 1.1 * (df_1d['high'].values - df_1d['low'].values) / 12
-    s1 = pp - 1.1 * (df_1d['high'].values - df_1d['low'].values) / 12
+    # === Bollinger Bands (20, 2.5) ===
+    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper = sma20 + 2.5 * std20
+    bb_lower = sma20 - 2.5 * std20
     
-    # Align to 4h timeframe (wait for daily close)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # === Volume spike detection ===
+    vol_ma30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    vol_spike = volume > 2.0 * vol_ma30
     
-    # === Chop index (ETF-style) for regime filter ===
-    def true_range(high, low, close_prev):
-        return np.maximum(high - low, np.maximum(np.abs(high - close_prev), np.abs(low - close_prev)))
-    
+    # === ADX(14) for trend strength ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    
     atr14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr14 + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr14 + 1e-10)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Chop = 100 * log10(sum(TR14) / (max(high14) - min(low14))) / log10(14)
-    def rolling_max(arr, window):
-        return pd.Series(arr).rolling(window=window, min_periods=window).max().values
+    # === VWAP(20) for exit ===
+    typical_price = (high + low + close) / 3.0
+    vwap_num = pd.Series(typical_price * volume).rolling(window=20, min_periods=20).sum().values
+    vwap_den = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
+    vwap = np.where(vwap_den != 0, vwap_num / vwap_den, typical_price)
     
-    def rolling_min(arr, window):
-        return pd.Series(arr).rolling(window=window, min_periods=window).min().values
-    
-    sum_tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    max_high14 = rolling_max(high, 14)
-    min_low14 = rolling_min(low, 14)
-    
-    # Avoid division by zero
-    range14 = max_high14 - min_low14
-    range14 = np.where(range14 == 0, 1e-10, range14)
-    
-    chop = 100 * np.log10(sum_tr14 / range14) / np.log10(14)
-    
-    # === Volume confirmation ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # === 1d EMA50 for higher timeframe trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 100
+    warmup = 50
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(pp_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(chop[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(sma20[i]) or 
+            np.isnan(std20[i]) or 
+            np.isnan(vol_ma30[i]) or 
+            np.isnan(adx[i]) or 
+            np.isnan(vwap[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
-        
-        # Regime filter: chop < 61.8 = trending (good for breakouts)
-        trending_regime = chop[i] < 61.8
-        
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price breaks above R1, volume confirmed, trending regime
-            if (close[i] > r1_aligned[i] and 
-                vol_confirmed and 
-                trending_regime):
+            # Long: volume spike + price below BB lower + weak trend (ADX < 25) + price above 1d EMA50
+            if (vol_spike[i] and 
+                close[i] < bb_lower[i] and 
+                adx[i] < 25 and 
+                close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price breaks below S1, volume confirmed, trending regime
-            elif (close[i] < s1_aligned[i] and 
-                  vol_confirmed and 
-                  trending_regime):
+            # Short: volume spike + price above BB upper + weak trend (ADX < 25) + price below 1d EMA50
+            elif (vol_spike[i] and 
+                  close[i] > bb_upper[i] and 
+                  adx[i] < 25 and 
+                  close[i] < ema_50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic: return to pivot or choppy regime
+        # Exit logic: trend strengthens OR price reverts to VWAP
         elif position == 1:
-            # Exit long: price returns to PP OR chop > 61.8 (choppy)
-            if (close[i] < pp_aligned[i] or 
-                chop[i] > 61.8):
+            # Exit long: ADX > 30 OR price crosses above VWAP
+            if (adx[i] > 30 or 
+                close[i] > vwap[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -122,9 +114,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to PP OR chop > 61.8 (choppy)
-            if (close[i] > pp_aligned[i] or 
-                chop[i] > 61.8):
+            # Exit short: ADX > 30 OR price crosses below VWAP
+            if (adx[i] > 30 or 
+                close[i] < vwap[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -133,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_Volume_Regime_v1"
+name = "4h_Volume_Spike_Reversion_v1"
 timeframe = "4h"
 leverage = 1.0
