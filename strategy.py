@@ -1,31 +1,18 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h strategy using Williams Alligator (3 SMAs) with Elder Ray power and volume spike.
-- Williams Alligator: Jaw (13-period SMMA), Teeth (8-period SMMA), Lips (5-period SMMA)
-- Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low
-- Enter long when Lips > Teeth > Jaw (bullish alignment) + Bull Power > 0 + volume > 1.5x 20-period volume MA
-- Enter short when Lips < Teeth < Jaw (bearish alignment) + Bear Power > 0 + volume > 1.5x 20-period volume MA
-- Exit when Alligator alignment reverses (Lips crosses Teeth)
+Hypothesis: 4h strategy using 12h EMA trend filter with Bollinger Band mean reversion.
+- Calculate Bollinger Bands (20, 2.0) on 4h close
+- Enter long when price touches lower BB AND closes above it AND price > 12h EMA34 (uptrend filter)
+- Enter short when price touches upper BB AND closes below it AND price < 12h EMA34 (downtrend filter)
+- Exit when price crosses the 20-period SMA (middle band)
 - Fixed position size 0.25 to manage drawdown
-- Uses Elder Ray for trend confirmation and volume for momentum confirmation
+- Uses Bollinger Band squeeze (bandwidth < 50th percentile) to avoid choppy markets
 - Designed for 4h timeframe with strict entry conditions to limit trades to 75-200 total over 4 years
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def smma(series, period):
-    """Smoothed Moving Average (SMMA)"""
-    if len(series) < period:
-        return np.full_like(series, np.nan, dtype=float)
-    result = np.full_like(series, np.nan, dtype=float)
-    # First value is simple average
-    result[period-1] = np.mean(series[:period])
-    # Subsequent values: (prev * (period-1) + current) / period
-    for i in range(period, len(series)):
-        result[i] = (result[i-1] * (period-1) + series[i]) / period
-    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -37,84 +24,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for indicator calculations
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 12-hour data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    # Calculate 12h EMA34 for trend filter
+    ema_34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Williams Alligator: Jaw (13), Teeth (8), Lips (5) - all SMMA
-    jaw = smma(close_4h, 13)
-    teeth = smma(close_4h, 8)
-    lips = smma(close_4h, 5)
+    # Bollinger Bands (20, 2.0) on 4h data
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean()
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std()
+    upper_band = sma_20 + 2.0 * std_20
+    lower_band = sma_20 - 2.0 * std_20
+    middle_band = sma_20  # 20-period SMA
     
-    # Elder Ray: EMA13 for Bull/Bear Power
-    ema_13 = pd.Series(close_4h).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high_4h - ema_13
-    bear_power = ema_13 - low_4h
-    
-    # Align all indicators to 4h timeframe (they're already on 4h, but align for consistency)
-    jaw_aligned = align_htf_to_ltf(prices, df_4h, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_4h, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_4h, lips)
-    bull_power_aligned = align_htf_to_ltf(prices, df_4h, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_4h, bear_power)
-    
-    # Volume confirmation: 20-period volume MA on 4h
-    volume_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean()
-    volume_ma_aligned = align_htf_to_ltf(prices, df_4h, volume_ma_20.values)
+    # Bollinger Band width for squeeze filter (avoid chop)
+    bb_width = (upper_band - lower_band) / middle_band
+    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=20).rank(pct=True)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 20  # warmup for volume MA and indicators
+    start_idx = 50  # warmup for BB width percentile
     
     for i in range(start_idx, n):
-        if (np.isnan(volume_ma_aligned[i]) or 
-            np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i])):
+        if (np.isnan(ema_34_aligned[i]) or 
+            np.isnan(upper_band.iloc[i]) or np.isnan(lower_band.iloc[i]) or 
+            np.isnan(middle_band.iloc[i]) or np.isnan(bb_width_percentile.iloc[i])):
             signals[i] = 0.0
             continue
         
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
-        bull_power_val = bull_power_aligned[i]
-        bear_power_val = bear_power_aligned[i]
-        vol_ma = volume_ma_aligned[i]
-        vol = volume_4h[i] if i < len(volume_4h) else volume_ma_aligned[i]  # fallback
+        price = close[i]
+        upper = upper_band.iloc[i]
+        lower = lower_band.iloc[i]
+        middle = middle_band.iloc[i]
+        bb_width_pct = bb_width_percentile.iloc[i]
+        ema_val = ema_34_aligned[i]
         
-        # Bullish alignment: Lips > Teeth > Jaw
-        bullish_alignment = lips_val > teeth_val > jaw_val
-        # Bearish alignment: Lips < Teeth < Jaw
-        bearish_alignment = lips_val < teeth_val < jaw_val
+        # Only trade when Bollinger Bands are not squeezed (avoid chop)
+        # Trade when bandwidth is above 30th percentile (not too tight)
+        if bb_width_pct < 0.30:
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+            continue
         
         if position == 0:
-            # Look for entry signals
-            # Long: bullish alignment + bull power positive + volume spike
-            if bullish_alignment and bull_power_val > 0 and vol > 1.5 * vol_ma:
+            # Look for mean reversion at Bollinger Bands with trend filter
+            # Long: price touches lower BB AND closes above it AND price > 12h EMA34
+            if low[i] <= lower and close[i] > lower and price > ema_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish alignment + bear power positive + volume spike
-            elif bearish_alignment and bear_power_val > 0 and vol > 1.5 * vol_ma:
+            # Short: price touches upper BB AND closes below it AND price < 12h EMA34
+            elif high[i] >= upper and close[i] < upper and price < ema_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long position: exit when bullish alignment breaks (lips crosses below teeth)
-            if lips_val <= teeth_val:
+            # Exit when price crosses above middle band (mean reversion complete)
+            if close[i] > middle:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short position: exit when bearish alignment breaks (lips crosses above teeth)
-            if lips_val >= teeth_val:
+            # Exit when price crosses below middle band (mean reversion complete)
+            if close[i] < middle:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -122,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsAlligator_ElderRay_Volume"
+name = "4h_BollingerMeanReversion_12hEMA34"
 timeframe = "4h"
 leverage = 1.0
