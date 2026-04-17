@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-12h Daily Range Breakout with Volume and Trend Filter
-Long: Price breaks above prior day's high + volume > 1.8x 12h volume MA + price > daily EMA34
-Short: Price breaks below prior day's low + volume > 1.8x 12h volume MA + price < daily EMA34
-Exit: Opposite break of prior day's level
-Uses daily EMA34 for trend alignment, volume spike for confirmation, and targets 12-25 trades/year
+1D Price Action + Volume + 1W Trend Filter
+Long: Price > 1D VWAP + volume > 1.5x 1D volume MA(20) + price > 1W EMA50
+Short: Price < 1D VWAP + volume > 1.5x 1D volume MA(20) + price < 1W EMA50
+Exit: Price crosses back through 1D VWAP
+Uses 1W EMA50 to align with longer-term trend and reduce false signals in chop
+Target: 15-25 trades/year per symbol
 """
 
 import numpy as np
@@ -13,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,67 +22,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for prior high/low and trend filter
+    # Get 1D data for VWAP and volume MA
     df_1d = get_htf_data(prices, '1d')
-    prior_1d_high = df_1d['high'].shift(1)  # Prior day's high
-    prior_1d_low = df_1d['low'].shift(1)    # Prior day's low
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    vwap = (typical_price * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    volume_ma_20 = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean()
     
-    prior_1d_high_aligned = align_htf_to_ltf(prices, df_1d, prior_1d_high.values)
-    prior_1d_low_aligned = align_htf_to_ltf(prices, df_1d, prior_1d_low.values)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap.values)
+    volume_ma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20.values)
     
-    # 12h volume moving average (3-period for confirmation)
-    df_12h = get_htf_data(prices, '12h')
-    volume_ma_3 = pd.Series(df_12h['volume']).rolling(window=3, min_periods=3).mean()
-    volume_ma_3_12h = align_htf_to_ltf(prices, df_12h, volume_ma_3.values)
+    # Get 1W EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
-    entry_price = 0.0
     
-    start_idx = 60  # warmup
+    start_idx = 50  # warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(prior_1d_high_aligned[i]) or np.isnan(prior_1d_low_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma_3_12h[i])):
+        if (np.isnan(vwap_aligned[i]) or np.isnan(volume_ma_20_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = volume_ma_3_12h[i]
+        vwap_val = vwap_aligned[i]
+        vol_ma = volume_ma_20_aligned[i]
+        ema_50 = ema_50_1w_aligned[i]
         
         if position == 0:
-            # Long: break above prior 1D high + volume + 1D trend
-            if price > prior_1d_high_aligned[i] and vol > 1.8 * vol_ma and price > ema_34_1d_aligned[i]:
-                signals[i] = 0.28
+            # Long: price above VWAP + volume confirmation + 1W uptrend
+            if price > vwap_val and vol > 1.5 * vol_ma and price > ema_50:
+                signals[i] = 0.25
                 position = 1
-                entry_price = price
-            # Short: break below prior 1D low + volume + 1D trend
-            elif price < prior_1d_low_aligned[i] and vol > 1.8 * vol_ma and price < ema_34_1d_aligned[i]:
-                signals[i] = -0.28
+            # Short: price below VWAP + volume confirmation + 1W downtrend
+            elif price < vwap_val and vol > 1.5 * vol_ma and price < ema_50:
+                signals[i] = -0.25
                 position = -1
-                entry_price = price
         
         elif position == 1:
-            # Long exit: break below prior 1D low
-            if price < prior_1d_low_aligned[i]:
+            # Long exit: price crosses below VWAP
+            if price < vwap_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.28
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: break above prior 1D high
-            if price > prior_1d_high_aligned[i]:
+            # Short exit: price crosses above VWAP
+            if price > vwap_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.28
+                signals[i] = -0.25
     
     return signals
 
-name = "12h_Prior1D_HL_Breakout_Volume_Trend"
-timeframe = "12h"
+name = "1D_VWAP_Volume_1WTrend"
+timeframe = "1d"
 leverage = 1.0
