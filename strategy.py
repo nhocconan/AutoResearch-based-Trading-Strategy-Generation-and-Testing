@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla R4/S4 breakout with 1d volume spike and 1d ADX trend filter.
-Long when price breaks above R4 with volume > 1.8x 20-period 1d average volume AND 1d ADX > 25.
-Short when price breaks below S4 with volume > 1.8x 20-period 1d average volume AND 1d ADX > 25.
-Exit when price touches the opposite Camarilla level (S4 for long, R4 for short).
-Uses 1d for volume, Camarilla, and ADX. Designed for low-frequency, high-conviction trades.
+Hypothesis: 12h Williams Alligator + 1d volume spike + 1d ADX trend filter.
+Long when price > Alligator Jaw (13-period SMA shifted 8 bars) with volume > 2.0x 20-period 1d avg volume AND 1d ADX > 25.
+Short when price < Alligator Jaw with same conditions.
+Exit on opposite Jaw touch or ADX < 20 (trend weakening).
+Designed for low-frequency, high-conviction trades in both bull and bear markets.
 Target: 12-25 trades/year per symbol (50-100 total over 4 years).
 """
 
@@ -22,7 +22,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume MA, Camarilla, and ADX
+    # Get 1d data for volume MA, Alligator, and ADX
     df_1d = get_htf_data(prices, '1d')
     volume_1d = df_1d['volume'].values
     high_1d = df_1d['high'].values
@@ -32,6 +32,19 @@ def generate_signals(prices):
     # 20-period volume moving average
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    
+    # Williams Alligator: Jaw (13-period SMA shifted 8), Teeth (8-period SMA shifted 5), Lips (5-period SMA shifted 3)
+    def calculate_alligator(high, low, close):
+        typical_price = (high + low + close) / 3
+        jaw = pd.Series(typical_price).rolling(window=13, min_periods=13).mean().shift(8).values
+        teeth = pd.Series(typical_price).rolling(window=8, min_periods=8).mean().shift(5).values
+        lips = pd.Series(typical_price).rolling(window=5, min_periods=5).mean().shift(3).values
+        return jaw, teeth, lips
+    
+    jaw_1d, teeth_1d, lips_1d = calculate_alligator(high_1d, low_1d, close_1d)
+    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
+    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
+    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
     
     # ADX calculation (14-period)
     def calculate_adx(high, low, close, period=14):
@@ -74,59 +87,39 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(vol_ma_20_aligned[i]) or 
+            np.isnan(jaw_1d_aligned[i]) or 
             np.isnan(adx_14_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.8x 20-period 1d average volume
-        volume_confirmed = volume[i] > 1.8 * vol_ma_20_aligned[i]
-        
-        # Get the most recent completed 1d bar's OHLC for Camarilla
-        high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
-        low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
-        close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
-        
-        period_high = high_1d_aligned[i]
-        period_low = low_1d_aligned[i]
-        period_close = close_1d_aligned[i]
-        
-        range_val = period_high - period_low
-        if range_val <= 0:
-            signals[i] = 0.0
-            continue
-            
-        # Camarilla levels (using R4/S4 for stronger breakouts)
-        R4 = period_close + range_val * 1.1 / 2
-        S4 = period_close - range_val * 1.1 / 2
-        
-        # Breakout conditions
-        breakout_R4 = close[i] > R4
-        breakout_S4 = close[i] < S4
+        # Volume confirmation: current volume > 2.0x 20-period 1d average volume
+        volume_confirmed = volume[i] > 2.0 * vol_ma_20_aligned[i]
         
         # Trend filter: ADX > 25 indicates strong trend
         trending = adx_14_aligned[i] > 25
+        trend_weakening = adx_14_aligned[i] < 20  # exit condition
         
         if position == 0:
-            # Long: break above R4 with volume confirmation and trending market
-            if (breakout_R4 and volume_confirmed and trending):
+            # Long: price > Jaw with volume confirmation and trending market
+            if (close[i] > jaw_1d_aligned[i] and volume_confirmed and trending):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S4 with volume confirmation and trending market
-            elif (breakout_S4 and volume_confirmed and trending):
+            # Short: price < Jaw with volume confirmation and trending market
+            elif (close[i] < jaw_1d_aligned[i] and volume_confirmed and trending):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price touches S4
-            if close[i] <= S4:
+            # Exit long: price touches Jaw OR trend weakening
+            if (close[i] <= jaw_1d_aligned[i]) or trend_weakening:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price touches R4
-            if close[i] >= R4:
+            # Exit short: price touches Jaw OR trend weakening
+            if (close[i] >= jaw_1d_aligned[i]) or trend_weakening:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -134,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R4S4_Volume_1dADX25_Trend"
+name = "12h_WilliamsAlligator_Volume_1dADX25_Trend"
 timeframe = "12h"
 leverage = 1.0
