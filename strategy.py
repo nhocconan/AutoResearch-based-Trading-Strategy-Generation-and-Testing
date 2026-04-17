@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Volume_Spike_Reversion_v1
-Buying volume spikes during mean reversion in weak trends.
-- Long: Volume spike > 2.0x 30-period average AND price < BB(20,2.5) lower band AND ADX < 25
-- Short: Volume spike > 2.0x 30-period average AND price > BB(20,2.5) upper band AND ADX < 25
-- Exit: ADX > 30 (trend strength) OR price reverts to VWAP(20)
-Uses 1d trend filter: only trade long when price > 1d EMA50, short when price < 1d EMA50.
-Designed to capture mean reversion bursts during low volatility periods.
-Target: 80-160 total trades over 4 years (20-40/year).
+1d_Price_Channel_Breakout_v1
+1d channel breakout with volume and ADX filter for trend strength.
+Exit when price reverses through 10-day SMA or volatility filter.
+Designed for low-frequency, high-conviction trades with minimal churn.
+Target: 30-80 total trades over 4 years (7-20/year).
 """
 
 import numpy as np
@@ -16,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,15 +21,9 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Bollinger Bands (20, 2.5) ===
-    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = sma20 + 2.5 * std20
-    bb_lower = sma20 - 2.5 * std20
-    
-    # === Volume spike detection ===
-    vol_ma30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    vol_spike = volume > 2.0 * vol_ma30
+    # === 20-day high/low for breakout ===
+    high20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # === ADX(14) for trend strength ===
     tr1 = high - low
@@ -52,61 +43,64 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
     adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # === VWAP(20) for exit ===
-    typical_price = (high + low + close) / 3.0
-    vwap_num = pd.Series(typical_price * volume).rolling(window=20, min_periods=20).sum().values
-    vwap_den = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
-    vwap = np.where(vwap_den != 0, vwap_num / vwap_den, typical_price)
+    # === Volume average for confirmation ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === 1d EMA50 for higher timeframe trend filter ===
-    df_1d = get_htf_data(prices, '1d')
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # === 10-day SMA for exit signal ===
+    sma10 = pd.Series(close).rolling(window=10, min_periods=10).mean().values
+    
+    # === 1-week EMA10 for higher timeframe trend filter ===
+    df_1w = get_htf_data(prices, '1w')
+    ema10_1w = pd.Series(df_1w['close'].values).ewm(span=10, adjust=False, min_periods=10).mean().values
+    ema10_1w_aligned = align_htf_to_ltf(prices, df_1w, ema10_1w)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 50
+    warmup = 100
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(sma20[i]) or 
-            np.isnan(std20[i]) or 
-            np.isnan(vol_ma30[i]) or 
+        if (np.isnan(high20[i]) or 
+            np.isnan(low20[i]) or 
             np.isnan(adx[i]) or 
-            np.isnan(vwap[i]) or 
-            np.isnan(ema_50_1d_aligned[i])):
+            np.isnan(vol_ma[i]) or 
+            np.isnan(sma10[i]) or 
+            np.isnan(ema10_1w_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
+        # Volume confirmation: current volume > 1.5x 20-day average
+        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
+        
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: volume spike + price below BB lower + weak trend (ADX < 25) + price above 1d EMA50
-            if (vol_spike[i] and 
-                close[i] < bb_lower[i] and 
-                adx[i] < 25 and 
-                close[i] > ema_50_1d_aligned[i]):
+            # Long: price breaks above 20-day high, ADX > 25, volume confirmed, price above 1w EMA10
+            if (close[i] > high20[i] and 
+                adx[i] > 25 and 
+                vol_confirmed and 
+                close[i] > ema10_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: volume spike + price above BB upper + weak trend (ADX < 25) + price below 1d EMA50
-            elif (vol_spike[i] and 
-                  close[i] > bb_upper[i] and 
-                  adx[i] < 25 and 
-                  close[i] < ema_50_1d_aligned[i]):
+            # Short: price breaks below 20-day low, ADX > 25, volume confirmed, price below 1w EMA10
+            elif (close[i] < low20[i] and 
+                  adx[i] > 25 and 
+                  vol_confirmed and 
+                  close[i] < ema10_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic: trend strengthens OR price reverts to VWAP
+        # Exit logic: trend weakening or reversal
         elif position == 1:
-            # Exit long: ADX > 30 OR price crosses above VWAP
-            if (adx[i] > 30 or 
-                close[i] > vwap[i]):
+            # Exit long: ADX < 20 OR price crosses below SMA10
+            if (adx[i] < 20 or 
+                close[i] < sma10[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -114,9 +108,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: ADX > 30 OR price crosses below VWAP
-            if (adx[i] > 30 or 
-                close[i] < vwap[i]):
+            # Exit short: ADX < 20 OR price crosses above SMA10
+            if (adx[i] < 20 or 
+                close[i] > sma10[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -125,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Volume_Spike_Reversion_v1"
-timeframe = "4h"
+name = "1d_Price_Channel_Breakout_v1"
+timeframe = "1d"
 leverage = 1.0
