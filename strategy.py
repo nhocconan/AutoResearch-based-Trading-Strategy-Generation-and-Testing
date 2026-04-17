@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,20 +13,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d EMA (34-period) for trend direction ===
+    # === 12h Donchian(20) for structure ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    # Upper/lower bands
+    upper_20 = np.full_like(high_12h, np.nan)
+    lower_20 = np.full_like(low_12h, np.nan)
+    for i in range(len(high_12h)):
+        if i >= 19:
+            upper_20[i] = np.max(high_12h[i-19:i+1])
+            lower_20[i] = np.min(low_12h[i-19:i+1])
+        else:
+            upper_20[i] = np.max(high_12h[0:i+1]) if i > 0 else high_12h[0]
+            lower_20[i] = np.min(low_12h[0:i+1]) if i > 0 else low_12h[0]
+    
+    upper_aligned = align_htf_to_ltf(prices, df_12h, upper_20)
+    lower_aligned = align_htf_to_ltf(prices, df_12h, lower_20)
+    
+    # === 1d ATR(14) for volatility filter ===
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    
-    # Calculate EMA with proper Wilder's smoothing (alpha = 1/period)
-    alpha = 1.0 / 34
-    ema_34 = np.full_like(close_1d, np.nan)
-    ema_34[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        ema_34[i] = alpha * close_1d[i] + (1 - alpha) * ema_34[i-1]
-    
-    # === 1d ATR (14-period) for volatility filter ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range
     tr1 = high_1d - low_1d
@@ -37,100 +47,65 @@ def generate_signals(prices):
     tr3[0] = np.abs(low_1d[0] - close_1d[0])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Wilder's smoothing for ATR
+    # Wilder's smoothing
     atr_14 = np.full_like(tr, np.nan)
     if len(tr) >= 14:
         atr_14[13] = np.mean(tr[:14])
         for i in range(14, len(tr)):
             atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
     
-    # Align all indicators to 4h timeframe
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # === 12h Volume profile for regime filter ===
-    df_12h = get_htf_data(prices, '12h')
-    volume_12h = df_12h['volume'].values
-    
-    # Calculate 12-period average volume on 12h timeframe
-    vol_ma_12 = np.full_like(volume_12h, np.nan)
-    for i in range(len(volume_12h)):
-        if i >= 11:
-            vol_ma_12[i] = np.mean(volume_12h[i-11:i+1])
-        elif i > 0:
-            vol_ma_12[i] = np.mean(volume_12h[max(0, i-5):i+1])
+    # === 4h Volume spike confirmation ===
+    vol_ma_20 = np.zeros_like(volume)
+    for i in range(len(volume)):
+        if i >= 19:
+            vol_ma_20[i] = np.mean(volume[i-19:i+1])
         else:
-            vol_ma_12[i] = volume_12h[0]
-    
-    # Volume regime: high volume when current > 1.5x average
-    vol_regime_12h = volume_12h > vol_ma_12 * 1.5
-    vol_regime_aligned = align_htf_to_ltf(prices, df_12h, vol_regime_12h.astype(float))
+            vol_ma_20[i] = np.mean(volume[max(0, i-9):i+1]) if i > 0 else volume[0]
+    vol_spike = volume > vol_ma_20 * 1.5
     
     signals = np.zeros(n)
-    
-    # Warmup period
-    warmup = 100
-    
-    # Track position state
-    position = 0  # 0: flat, 1: long, -1: short
+    warmup = 50
+    position = 0
     
     for i in range(warmup, n):
-        # Skip if any required data is NaN
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
-            np.isnan(vol_regime_aligned[i])):
+        if np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(atr_14_aligned[i]):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Volume confirmation: current 4h volume > 1.3x 20-period average
-        vol_ma_20 = np.zeros_like(volume)
-        for j in range(len(volume)):
-            if j >= 19:
-                vol_ma_20[j] = np.mean(volume[j-19:j+1])
-            else:
-                vol_ma_20[j] = np.mean(volume[max(0, j-9):j+1]) if j > 0 else volume[0]
-        vol_confirm = volume[i] > vol_ma_20[i] * 1.3
+        # Volatility filter: ATR > 0.5% of price
+        vol_filter = atr_14_aligned[i] > 0.005 * close[i]
         
-        # Entry logic: only enter when flat AND in high volume regime (12h)
         if position == 0:
-            # Long: price above EMA34 + volatility filter + volume confirmation + high vol regime
-            if (close[i] > ema_34_aligned[i] and 
-                atr_14_aligned[i] > 0.005 * close[i] and  # volatility filter
-                vol_confirm and
-                vol_regime_aligned[i] > 0.5):  # high volume regime
+            # Long: break above upper band with volume spike
+            if close[i] > upper_aligned[i] and vol_spike[i] and vol_filter:
                 signals[i] = 0.25
                 position = 1
-                continue
-            # Short: price below EMA34 + volatility filter + volume confirmation + high vol regime
-            elif (close[i] < ema_34_aligned[i] and 
-                  atr_14_aligned[i] > 0.005 * close[i] and  # volatility filter
-                  vol_confirm and
-                  vol_regime_aligned[i] > 0.5):  # high volume regime
+            # Short: break below lower band with volume spike
+            elif close[i] < lower_aligned[i] and vol_spike[i] and vol_filter:
                 signals[i] = -0.25
                 position = -1
-                continue
-        
-        # Exit logic
+            else:
+                signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below EMA34
-            if close[i] < ema_34_aligned[i]:
+            # Exit long: close below lower band
+            if close[i] < lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-                continue
             else:
                 signals[i] = 0.25
-        
         elif position == -1:
-            # Exit short: price crosses above EMA34
-            if close[i] > ema_34_aligned[i]:
+            # Exit short: close above upper band
+            if close[i] > upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-                continue
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "EMA34_ATR_Volume_Regime_Filter_v1"
+name = "Donchian12_VolumeSpike_ATRFilter_v1"
 timeframe = "4h"
 leverage = 1.0
