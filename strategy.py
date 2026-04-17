@@ -19,30 +19,23 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily Camarilla pivot levels (using previous day's data)
+    # Calculate Camarilla pivot levels for previous day
     # Pivot = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    # R4 = C + (H - L) * 1.1 / 2
+    # S4 = C - (H - L) * 1.1 / 2
     pivot = (high_1d + low_1d + close_1d) / 3
-    range_hl = high_1d - low_1d
+    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    r4 = close_1d + (high_1d - low_1d) * 1.1 / 2
+    s4 = close_1d - (high_1d - low_1d) * 1.1 / 2
     
-    # Resistance and Support levels
-    r1 = pivot + (range_hl * 1.1 / 12)
-    r2 = pivot + (range_hl * 1.1 / 6)
-    r3 = pivot + (range_hl * 1.1 / 4)
-    r4 = pivot + (range_hl * 1.1 / 2)
-    
-    s1 = pivot - (range_hl * 1.1 / 12)
-    s2 = pivot - (range_hl * 1.1 / 6)
-    s3 = pivot - (range_hl * 1.1 / 4)
-    s4 = pivot - (range_hl * 1.1 / 2)
-    
-    # Align daily Camarilla levels to 6h
+    # Align Camarilla levels to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Volume confirmation: current volume > 1.5 * 20-period average
@@ -51,14 +44,15 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 30  # Need daily Camarilla, volume MA
+    start_idx = 20  # Need volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or
-            np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+        if (np.isnan(pivot_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or 
             np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
@@ -67,26 +61,26 @@ def generate_signals(prices):
         volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
         if position == 0:
-            # Long: break above R4 with volume (continuation)
-            if (close[i] > r4_aligned[i] and volume_filter):
+            # Long: price touches S1 level with volume confirmation
+            if (low[i] <= s1_aligned[i] and volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S4 with volume (continuation)
-            elif (close[i] < s4_aligned[i] and volume_filter):
+            # Short: price touches R1 level with volume confirmation
+            elif (high[i] >= r1_aligned[i] and volume_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to R1 (mean reversion within range)
-            if close[i] < r1_aligned[i]:
+            # Exit long: price reaches R4 level or closes below pivot
+            if (high[i] >= r4_aligned[i] or close[i] < pivot_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to S1 (mean reversion within range)
-            if close[i] > s1_aligned[i]:
+            # Exit short: price reaches S4 level or closes above pivot
+            if (low[i] <= s4_aligned[i] or close[i] > pivot_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R4_S4_Breakout_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Touch_Volume"
+timeframe = "12h"
 leverage = 1.0
