@@ -3,13 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h price reverses at 4h/1d pivot levels with volume confirmation.
-# Uses 4h trend filter (EMA34) to avoid counter-trend trades. Session filter (08-20 UTC) reduces noise.
-# Works in bull/bear by fading extremes at key levels with trend alignment.
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,83 +13,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour
-    session_mask = (hours >= 8) & (hours <= 20)
+    # Get weekly data for bias
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Get 4h data for trend filter and pivot calculation
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate weekly SMA 8 and SMA 21
+    sma8_1w = pd.Series(close_1w).rolling(window=8, min_periods=8).mean().values
+    sma21_1w = pd.Series(close_1w).rolling(window=21, min_periods=21).mean().values
     
-    # 4h EMA34 for trend filter
-    close_4h_series = pd.Series(close_4h)
-    ema34_4h = close_4h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
+    # Align weekly SMAs to 6h timeframe
+    sma8_1w_aligned = align_htf_to_ltf(prices, df_1w, sma8_1w)
+    sma21_1w_aligned = align_htf_to_ltf(prices, df_1w, sma21_1w)
     
-    # Daily pivot points from previous day
+    # Weekly trend: bullish if SMA8 > SMA21, bearish if SMA8 < SMA21
+    weekly_bullish = sma8_1w_aligned > sma21_1w_aligned
+    weekly_bearish = sma8_1w_aligned < sma21_1w_aligned
+    
+    # Get daily data for ATR
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Standard pivot calculation
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
+    # Calculate daily True Range and ATR(14)
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr2 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, tr2)
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Align daily pivots to 1h (use previous day's levels)
-    pivot_1h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1h = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # Volume filter: current volume > 1.3 * 20-period average
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate daily range for dynamic thresholds
+    daily_range = high_1d - low_1d
+    range_ma10 = pd.Series(daily_range).rolling(window=10, min_periods=10).mean().values
+    range_ma10_aligned = align_htf_to_ltf(prices, df_1d, range_ma10)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 35  # Need EMA34 and volume MA
+    start_idx = 30  # Need sufficient data for weekly and daily calculations
     
     for i in range(start_idx, n):
-        # Skip if outside session or missing data
-        if not session_mask[i] or np.isnan(ema34_4h_aligned[i]) or np.isnan(pivot_1h[i]) or \
-           np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or np.isnan(volume_ma20[i]):
+        # Skip if any required data is not available
+        if (np.isnan(sma8_1w_aligned[i]) or np.isnan(sma21_1w_aligned[i]) or
+            np.isnan(atr_1d_aligned[i]) or np.isnan(range_ma10_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter
-        volume_filter = volume[i] > (1.3 * volume_ma20[i])
+        # Dynamic threshold based on volatility
+        vol_threshold = 0.5 * range_ma10_aligned[i]
         
         if position == 0:
-            # Long: price crosses above S1 with volume, above 4h EMA34 (uptrend bias)
-            if close[i] > s1_1h[i] and volume_filter and close[i] > ema34_4h_aligned[i]:
-                signals[i] = 0.20
+            # Long entry: weekly bullish + price above weekly SMA8 + volatility filter
+            if (weekly_bullish[i] and 
+                close[i] > sma8_1w_aligned[i] + vol_threshold):
+                signals[i] = 0.25
                 position = 1
-            # Short: price crosses below R1 with volume, below 4h EMA34 (downtrend bias)
-            elif close[i] < r1_1h[i] and volume_filter and close[i] < ema34_4h_aligned[i]:
-                signals[i] = -0.20
+            # Short entry: weekly bearish + price below weekly SMA21 + volatility filter
+            elif (weekly_bearish[i] and 
+                  close[i] < sma21_1w_aligned[i] - vol_threshold):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below pivot or reverses at R1
-            if close[i] < pivot_1h[i] or close[i] > r1_1h[i]:
+            # Exit long: price crosses below weekly SMA21 or weekly trend turns bearish
+            if (close[i] < sma21_1w_aligned[i] or 
+                weekly_bearish[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above pivot or reverses at S1
-            if close[i] > pivot_1h[i] or close[i] < s1_1h[i]:
+            # Exit short: price crosses above weekly SMA8 or weekly trend turns bullish
+            if (close[i] > sma8_1w_aligned[i] or 
+                weekly_bullish[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Pivot_Reversal_Volume_EMA34"
-timeframe = "1h"
+name = "6s_WeeklySMA_Trend_Follow"
+timeframe = "6h"
 leverage = 1.0
