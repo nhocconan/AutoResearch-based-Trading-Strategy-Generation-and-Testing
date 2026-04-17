@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-Long when price breaks above 20-period Donchian high AND close > 1d EMA50 AND volume > 1.5x 20-period average.
-Short when price breaks below 20-period Donchian low AND close < 1d EMA50 AND volume > 1.5x 20-period average.
-Exit when price crosses the opposite Donchian level (mean reversion) OR ATR-based stoploss hit (2.0 * ATR).
-Uses 1d HTF for trend filter to improve robustness in both bull and bear markets.
-Target: 12-37 trades/year per symbol (50-150 total over 4 years) to minimize fee drag while maintaining edge.
+Hypothesis: 12h Williams Alligator + 1d Elder Ray + volume spike + ATR stoploss.
+Long when Alligator bullish (jaw < teeth < lips) AND Elder Bull Power > 0 AND volume > 2.0x 20-period average.
+Short when Alligator bearish (jaw > teeth > lips) AND Elder Bear Power < 0 AND volume > 2.0x 20-period average.
+Exit when Alligator reverses OR ATR-based stoploss hit (2.5 * ATR).
+Uses 1w HTF for regime filter (only trade in bull regime when price > 1w EMA50, bear regime when price < 1w EMA50).
+Target: 12-30 trades/year per symbol to minimize fee drag while maintaining edge in both bull and bear markets.
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,21 +22,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 6h data for Donchian calculation (primary timeframe)
-    df_6h = get_htf_data(prices, '6h')
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
-    volume_6h = df_6h['volume'].values
+    # Get 12h data for Williams Alligator (primary timeframe)
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Donchian channels (20-period) on 6h
-    def calculate_donchian(high_arr, low_arr, window):
-        """Donchian channels: upper = rolling max(high), lower = rolling min(low)"""
-        upper = pd.Series(high_arr).rolling(window=window, min_periods=window).max().values
-        lower = pd.Series(low_arr).rolling(window=window, min_periods=window).min().values
-        return upper, lower
+    # Calculate Williams Alligator (jaw=13, teeth=8, lips=5 SMAs with offsets)
+    def calculate_alligator(high_arr, low_arr, close_arr):
+        """Williams Alligator: jaw(13,8), teeth(8,5), lips(5,3)"""
+        # Typical price
+        tp = (high_arr + low_arr + close_arr) / 3.0
+        
+        # Jaw: 13-period SMMA smoothed 8 bars ahead
+        jaw = pd.Series(tp).rolling(window=13, min_periods=13).mean()
+        jaw = jaw.shift(8)  # offset 8 bars
+        
+        # Teeth: 8-period SMMA smoothed 5 bars ahead
+        teeth = pd.Series(tp).rolling(window=8, min_periods=8).mean()
+        teeth = teeth.shift(5)  # offset 5 bars
+        
+        # Lips: 5-period SMMA smoothed 3 bars ahead
+        lips = pd.Series(tp).rolling(window=5, min_periods=5).mean()
+        lips = lips.shift(3)  # offset 3 bars
+        
+        return jaw.values, teeth.values, lips.values
     
-    # Calculate ATR (14-period) for stoploss on 6h
+    # Get 1d data for Elder Ray Index
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Elder Ray Index (Bull Power = High - EMA13, Bear Power = Low - EMA13)
+    def calculate_elder_ray(high_arr, low_arr, close_arr, ema_period=13):
+        """Elder Ray Index"""
+        ema = pd.Series(close_arr).ewm(span=ema_period, adjust=False, min_periods=ema_period).mean().values
+        bull_power = high_arr - ema
+        bear_power = low_arr - ema
+        return bull_power, bear_power
+    
+    # Get 1w data for regime filter (only trade with higher timeframe trend)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Calculate indicators
+    jaw, teeth, lips = calculate_alligator(high_12h, low_12h, close_12h)
+    bull_power, bear_power = calculate_elder_ray(high_1d, low_1d, close_1d)
+    
+    # Volume average (20-period) on 12h
+    volume_12h = df_12h['volume'].values
+    volume_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR (14-period) for stoploss on 12h
     def calculate_atr(high_arr, low_arr, close_arr, window):
         """Average True Range"""
         tr1 = high_arr - low_arr
@@ -47,59 +86,61 @@ def generate_signals(prices):
         atr = pd.Series(tr).ewm(span=window, adjust=False, min_periods=window).mean().values
         return atr
     
-    # Get Donchian channels
-    upper, lower = calculate_donchian(high_6h, low_6h, 20)
+    atr = calculate_atr(high_12h, low_12h, close_12h, 14)
     
-    # Get 1d data for EMA50 trend filter (higher timeframe)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    
-    # Calculate EMA50 on 1d
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Calculate volume average (20-period) on 6h
-    volume_6h_series = pd.Series(volume_6h)
-    volume_ma_6h = volume_6h_series.rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate ATR (14-period) for stoploss on 6h
-    atr = calculate_atr(high_6h, low_6h, close_6h, 14)
-    
-    # Align all indicators to 6h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_6h, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_6h, lower)
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_6h, volume_ma_6h)
-    atr_aligned = align_htf_to_ltf(prices, df_6h, atr)
+    # Align all indicators to 12h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    volume_ma_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_12h)
+    atr_aligned = align_htf_to_ltf(prices, df_12h, atr)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     entry_price = 0.0
     
-    start_idx = 50  # warmup for EMA50 and Donchian
+    start_idx = 60  # warmup for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(ema50_aligned[i]) or np.isnan(volume_ma_aligned[i]) or np.isnan(atr_aligned[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
+            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(volume_ma_aligned[i]) or np.isnan(atr_aligned[i]) or np.isnan(ema50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        up = upper_aligned[i]
-        low = lower_aligned[i]
-        ema50 = ema50_aligned[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        bull_power_val = bull_power_aligned[i]
+        bear_power_val = bear_power_aligned[i]
         vol_ma = volume_ma_aligned[i]
         atr_val = atr_aligned[i]
+        ema50_1w = ema50_1w_aligned[i]
         vol = volume[i]
         price = close[i]
         
+        # Regime filter: only trade in direction of 1w trend
+        bull_regime = price > ema50_1w
+        bear_regime = price < ema50_1w
+        
         if position == 0:
-            # Long: Breakout above upper Donchian + price > 1d EMA50 + volume spike
-            if price > up and price > ema50 and vol > 1.5 * vol_ma:
+            # Long conditions: Alligator bullish + Elder Bull Power > 0 + volume spike + bull regime
+            if (jaw_val < teeth_val < lips_val and  # Alligator bullish (jaw < teeth < lips)
+                bull_power_val > 0 and 
+                vol > 2.0 * vol_ma and
+                bull_regime):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: Breakout below lower Donchian + price < 1d EMA50 + volume spike
-            elif price < low and price < ema50 and vol > 1.5 * vol_ma:
+            # Short conditions: Alligator bearish + Elder Bear Power < 0 + volume spike + bear regime
+            elif (jaw_val > teeth_val > lips_val and  # Alligator bearish (jaw > teeth > lips)
+                  bear_power_val < 0 and 
+                  vol > 2.0 * vol_ma and
+                  bear_regime):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -108,12 +149,12 @@ def generate_signals(prices):
             # Exit conditions for long
             exit_signal = False
             
-            # Exit 1: Price crosses below lower Donchian (mean reversion to lower level)
-            if price < low:
+            # Exit 1: Alligator reverses (jaw > teeth)
+            if jaw_val > teeth_val:
                 exit_signal = True
             
-            # Exit 2: ATR-based stoploss (2.0 * ATR below entry)
-            elif price < entry_price - 2.0 * atr_val:
+            # Exit 2: ATR-based stoploss (2.5 * ATR below entry)
+            elif price < entry_price - 2.5 * atr_val:
                 exit_signal = True
             
             if exit_signal:
@@ -126,12 +167,12 @@ def generate_signals(prices):
             # Exit conditions for short
             exit_signal = False
             
-            # Exit 1: Price crosses above upper Donchian (mean reversion to upper level)
-            if price > up:
+            # Exit 1: Alligator reverses (jaw < teeth)
+            if jaw_val < teeth_val:
                 exit_signal = True
             
-            # Exit 2: ATR-based stoploss (2.0 * ATR above entry)
-            elif price > entry_price + 2.0 * atr_val:
+            # Exit 2: ATR-based stoploss (2.5 * ATR above entry)
+            elif price > entry_price + 2.5 * atr_val:
                 exit_signal = True
             
             if exit_signal:
@@ -142,6 +183,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_1dEMA50_VolumeSpike_ATRStop"
-timeframe = "6h"
+name = "12h_Alligator_ElderRay_VolumeSpike_ATRStop_1wRegime"
+timeframe = "12h"
 leverage = 1.0
