@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_WPivot_R1S1_Breakout_Volume_Filter
-Strategy: 12h Camarilla pivot R1/S1 breakout + volume confirmation (1.5x 20-bar avg) + 1d Chop regime filter (>61.8 = range).
-Long: Price breaks above R1 + volume filter + 1d Chop > 61.8
-Short: Price breaks below S1 + volume filter + 1d Chop > 61.8
-Exit: Price crosses back through pivot point (mean reversion in chop)
+1d_WeeklyKeltner_SqueezeBreakout
+Strategy: Daily price breaks out of Keltner Channel (20, 2) after weekly Bollinger Band squeeze (BBW < 50th percentile).
+Long: Close > KC upper + weekly BBW < 50th percentile
+Short: Close < KC lower + weekly BBW < 50th percentile
+Exit: Close crosses back through 20-day EMA
 Position size: 0.25
-Uses 12h for structure, volume for confirmation, 1d Chop for regime filter to avoid trending chop failures.
-Designed to work in both bull and bear markets by filtering for range-bound conditions.
+Uses weekly volatility contraction (squeeze) to anticipate expansion, KC breakout for direction.
+Works in bull/bear: Squeeze filters low-volatility environments, breakout captures resulting volatility expansion.
 """
 
 import numpy as np
@@ -22,103 +22,75 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 12h data for Camarilla pivots
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Get weekly data for Bollinger Band width (squeeze detection)
+    df_weekly = get_htf_data(prices, '1w')
+    close_weekly = df_weekly['close'].values
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
     
-    # Calculate Camarilla pivot levels (R1, S1, pivot) on 12h
-    # Pivot = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pivot_12h = (high_12h + low_12h + close_12h) / 3
-    r1_12h = close_12h + (high_12h - low_12h) * 1.1 / 12
-    s1_12h = close_12h - (high_12h - low_12h) * 1.1 / 12
+    # Calculate Bollinger Bands (20, 2) on weekly
+    basis_weekly = pd.Series(close_weekly).rolling(window=20, min_periods=20).mean().values
+    dev_weekly = 2 * pd.Series(close_weekly).rolling(window=20, min_periods=20).std().values
+    upper_weekly = basis_weekly + dev_weekly
+    lower_weekly = basis_weekly - dev_weekly
+    bb_width_weekly = ((upper_weekly - lower_weekly) / basis_weekly) * 100
     
-    # Align 12h pivots to main timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
-    r1_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
-    s1_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    # Calculate 50th percentile of BB width (median over lookback)
+    bb_width_median = pd.Series(bb_width_weekly).rolling(window=50, min_periods=50).median().values
+    squeeze_condition = bb_width_weekly < bb_width_median  # BBW below median = squeeze
     
-    # Get 12h volume for confirmation
-    volume_12h = df_12h['volume'].values
-    volume_ma20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    volume_ma20_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_ma20_12h)
+    # Align squeeze to daily
+    squeeze_aligned = align_htf_to_ltf(prices, df_weekly, squeeze_condition)
     
-    # Get 1d data for Chop regime filter
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Keltner Channel (20, 2) on daily
+    # Typical price = (H + L + C) / 3
+    typical_price = (high + low + close) / 3
+    kc_basis = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
+    atr = pd.Series(np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1)))).rolling(window=20, min_periods=20).mean().values
+    atr[0] = high[0] - low[0]  # first value
+    kc_upper = kc_basis + 2 * atr
+    kc_lower = kc_basis - 2 * atr
     
-    # Calculate Chop(14) on 1d: 100 * log10(sum(ATR(1)) / (max(high)-min(low))) / log10(14)
-    atr_1 = np.maximum(np.maximum(high_1d - low_1d, np.abs(high_1d - np.roll(close_1d, 1))), np.abs(low_1d - np.roll(close_1d, 1)))
-    atr_1[0] = high_1d[0] - low_1d[0]  # first value
-    sum_atr = pd.Series(atr_1).rolling(window=14, min_periods=14).sum().values
-    roll_max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    roll_min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    range_14 = roll_max_high - roll_min_low
-    chop_1d = 100 * (np.log10(sum_atr) - np.log10(range_14)) / np.log10(14)
-    chop_1d = np.where(range_14 > 0, chop_1d, 50)  # avoid division by zero
-    
-    # Align 1d Chop to main timeframe
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # Calculate 20-day EMA for exit
+    ema_20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Precompute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    
-    for i in range(20, n):  # warmup for 20-bar volume MA
-        # Session filter: 08-20 UTC
-        if not (8 <= hours[i] <= 20):
-            signals[i] = 0.0
-            continue
-        
+    # Precompute for efficiency
+    for i in range(20, n):  # warmup for KC(20)
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(chop_1d_aligned[i]) or 
-            np.isnan(volume_ma20_12h_aligned[i])):
+        if (np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or 
+            np.isnan(ema_20[i]) or np.isnan(squeeze_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Current 12h volume aligned to main timeframe
-        vol_12h_current = align_htf_to_ltf(prices, df_12h, volume_12h)[i]
-        volume_filter = vol_12h_current > (1.5 * volume_ma20_12h_aligned[i])
-        chop_filter = chop_1d_aligned[i] > 61.8  # range regime on 1d
-        
-        # Breakout conditions
-        breakout_up = close[i] > r1_aligned[i]
-        breakout_down = close[i] < s1_aligned[i]
-        # Exit conditions: price crosses back through pivot point
-        exit_long = close[i] < pivot_aligned[i]
-        exit_short = close[i] > pivot_aligned[i]
+        # Entry conditions: KC breakout + weekly squeeze
+        breakout_up = close[i] > kc_upper[i]
+        breakout_down = close[i] < kc_lower[i]
         
         if position == 0:
-            # Long: breakout above R1 + volume + chop (range)
-            if breakout_up and volume_filter and chop_filter:
+            # Long: breakout up + weekly squeeze
+            if breakout_up and squeeze_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below S1 + volume + chop (range)
-            elif breakout_down and volume_filter and chop_filter:
+            # Short: breakout down + weekly squeeze
+            elif breakout_down and squeeze_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below pivot
-            if exit_long:
+            # Exit long: price crosses below 20-day EMA
+            if close[i] < ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above pivot
-            if exit_short:
+            # Exit short: price crosses above 20-day EMA
+            if close[i] > ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -126,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WPivot_R1S1_Breakout_Volume_Filter"
-timeframe = "12h"
+name = "1d_WeeklyKeltner_SqueezeBreakout"
+timeframe = "1d"
 leverage = 1.0
