@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Stochastic_Ichimoku_Bounce_v1
-Stochastic RSI + Ichimoku Cloud Bounce on 12h timeframe.
-Uses daily Ichimoku cloud color for trend alignment (bullish/bearish cloud),
-Stochastic RSI for mean reversion entries at extreme levels,
-and volume confirmation for entry quality.
-Designed to work in both bull and bear markets by combining trend following
-with mean reversion at extreme Stochastic RSI levels during pullbacks.
-Target: 50-150 total trades over 4 years (12-37/year).
+4h_RVOL_Breakout_Trend_v1
+Relative Volume breakout with trend filter on 4h timeframe.
+Buys when price breaks above 20-period high with 2x average volume and price above 50 EMA.
+Sells when price breaks below 20-period low with 2x average volume and price below 50 EMA.
+Uses 1d ADX > 20 to filter for trending markets only.
+Designed to capture breakouts in both bull and bear markets with volume confirmation.
+Target: 20-50 total trades over 4 years (5-12/year).
 """
 
 import numpy as np
@@ -24,120 +23,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Ichimoku Cloud ===
+    # === 4h indicators ===
+    # 20-period high/low for breakout
+    high_20 = np.full(n, np.nan)
+    low_20 = np.full(n, np.nan)
+    for i in range(n):
+        if i >= 19:
+            high_20[i] = np.max(high[i-19:i+1])
+            low_20[i] = np.min(low[i-19:i+1])
+    
+    # 50 EMA for trend filter
+    ema_50 = np.full(n, np.nan)
+    if n >= 50:
+        ema_50[49] = np.mean(close[:50])
+        for i in range(50, n):
+            ema_50[i] = close[i] * 0.04 + ema_50[i-1] * 0.96  # alpha = 2/(50+1)
+    
+    # Volume average (20-period)
+    vol_avg_20 = np.full(n, np.nan)
+    for i in range(n):
+        if i >= 19:
+            vol_avg_20[i] = np.mean(volume[i-19:i+1])
+    
+    # === 1d ADX for regime filter ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = np.full_like(high_1d, np.nan)
-    period9_low = np.full_like(low_1d, np.nan)
-    for i in range(len(high_1d)):
-        if i >= 8:
-            period9_high[i] = np.max(high_1d[i-8:i+1])
-            period9_low[i] = np.min(low_1d[i-8:i+1])
-        elif i > 0:
-            start = max(0, i-8)
-            period9_high[i] = np.max(high_1d[start:i+1])
-            period9_low[i] = np.min(low_1d[start:i+1])
-        else:
-            period9_high[i] = high_1d[0]
-            period9_low[i] = low_1d[0]
-    tenkan = (period9_high + period9_low) / 2
+    # True Range
+    tr = np.maximum(
+        high_1d[1:] - low_1d[1:],
+        np.maximum(
+            np.abs(high_1d[1:] - close_1d[:-1]),
+            np.abs(low_1d[1:] - close_1d[:-1])
+        )
+    )
+    tr = np.concatenate([[np.nan], tr])
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = np.full_like(high_1d, np.nan)
-    period26_low = np.full_like(low_1d, np.nan)
-    for i in range(len(high_1d)):
-        if i >= 25:
-            period26_high[i] = np.max(high_1d[i-25:i+1])
-            period26_low[i] = np.min(low_1d[i-25:i+1])
-        elif i > 0:
-            start = max(0, i-25)
-            period26_high[i] = np.max(high_1d[start:i+1])
-            period26_low[i] = np.min(low_1d[start:i+1])
-        else:
-            period26_high[i] = high_1d[0]
-            period26_low[i] = low_1d[0]
-    kijun = (period26_high + period26_low) / 2
+    # Directional Movement
+    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
+    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = np.full_like(high_1d, np.nan)
-    period52_low = np.full_like(low_1d, np.nan)
-    for i in range(len(high_1d)):
-        if i >= 51:
-            period52_high[i] = np.max(high_1d[i-51:i+1])
-            period52_low[i] = np.min(low_1d[i-51:i+1])
-        elif i > 0:
-            start = max(0, i-51)
-            period52_high[i] = np.max(high_1d[start:i+1])
-            period52_low[i] = np.min(low_1d[start:i+1])
-        else:
-            period52_high[i] = high_1d[0]
-            period52_low[i] = low_1d[0]
-    senkou_b = (period52_high + period52_low) / 2
+    # Smooth TR, +DM, -DM (14-period Wilder's smoothing)
+    def wilders_smooth(arr, period):
+        smoothed = np.full_like(arr, np.nan)
+        if len(arr) >= period:
+            smoothed[period-1] = np.nansum(arr[1:period+1])
+            for i in range(period, len(arr)):
+                if not np.isnan(smoothed[i-1]) and not np.isnan(arr[i]):
+                    smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + arr[i]
+        return smoothed
     
-    # Bullish cloud: Senkou Span A > Senkou Span B
-    bullish_cloud = senkou_a > senkou_b
+    tr14 = wilders_smooth(tr, 14)
+    plus_dm14 = wilders_smooth(plus_dm, 14)
+    minus_dm14 = wilders_smooth(minus_dm, 14)
     
-    # === 12h Stochastic RSI (14,14,3,3) ===
-    # RSI first
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # DI+ and DI-
+    plus_di14 = np.where(tr14 != 0, 100 * plus_dm14 / tr14, 0)
+    minus_di14 = np.where(tr14 != 0, 100 * minus_dm14 / tr14, 0)
     
-    avg_gain = np.full_like(close, np.nan)
-    avg_loss = np.full_like(close, np.nan)
-    for i in range(len(close)):
-        if i >= 14:
-            if i == 14:
-                avg_gain[i] = np.mean(gain[1:15])
-                avg_loss[i] = np.mean(loss[1:15])
-            else:
-                avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-                avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-        else:
-            avg_gain[i] = np.nan
-            avg_loss[i] = np.nan
+    # DX and ADX
+    dx = np.where((plus_di14 + minus_di14) != 0, 
+                  100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14), 0)
+    adx = wilders_smooth(dx, 14)
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Stochastic of RSI
-    rsi_high = np.full_like(rsi, np.nan)
-    rsi_low = np.full_like(rsi, np.nan)
-    for i in range(len(rsi)):
-        if i >= 14:
-            rsi_high[i] = np.max(rsi[i-14:i+1])
-            rsi_low[i] = np.min(rsi[i-14:i+1])
-        elif i > 0:
-            start = max(0, i-14)
-            rsi_high[i] = np.max(rsi[start:i+1])
-            rsi_low[i] = np.min(rsi[start:i+1])
-        else:
-            rsi_high[i] = rsi[0]
-            rsi_low[i] = rsi[0]
-    
-    stoch_rsi = np.where((rsi_high - rsi_low) != 0, (rsi - rsi_low) / (rsi_high - rsi_low) * 100, 50)
-    
-    # === 12h Volume confirmation (20-period average) ===
-    vol_ma_20 = np.full_like(volume, np.nan)
-    for i in range(len(volume)):
-        if i >= 20:
-            vol_ma_20[i] = np.mean(volume[i-19:i+1])
-        elif i > 0:
-            vol_ma_20[i] = np.mean(volume[max(0, i-9):i+1])
-        else:
-            vol_ma_20[i] = volume[0]
-    
-    vol_confirm = volume > vol_ma_20 * 1.5  # volume spike: 1.5x average
-    
-    # === Align 1d Ichimoku cloud to 12h timeframe ===
-    bullish_cloud_aligned = align_htf_to_ltf(prices, df_1d, bullish_cloud.astype(float))
+    # Align 1d ADX to 4h
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     
@@ -149,35 +106,40 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(bullish_cloud_aligned[i]) or 
-            np.isnan(stoch_rsi[i]) or 
-            np.isnan(vol_confirm[i])):
+        if (np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or 
+            np.isnan(ema_50[i]) or 
+            np.isnan(vol_avg_20[i]) or 
+            np.isnan(volume[i]) or 
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: bullish cloud (bullish trend) AND Stochastic RSI oversold (<20) AND volume confirmation
-            if (bullish_cloud_aligned[i] > 0.5 and 
-                stoch_rsi[i] < 20 and 
-                vol_confirm[i]):
+            # Long breakout: price > 20-period high AND volume > 2x average AND price > EMA50 AND ADX > 20
+            if (close[i] > high_20[i] and 
+                volume[i] > vol_avg_20[i] * 2 and 
+                close[i] > ema_50[i] and 
+                adx_aligned[i] > 20):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: bearish cloud (bearish trend) AND Stochastic RSI overbought (>80) AND volume confirmation
-            elif (bullish_cloud_aligned[i] <= 0.5 and 
-                  stoch_rsi[i] > 80 and 
-                  vol_confirm[i]):
+            # Short breakout: price < 20-period low AND volume > 2x average AND price < EMA50 AND ADX > 20
+            elif (close[i] < low_20[i] and 
+                  volume[i] > vol_avg_20[i] * 2 and 
+                  close[i] < ema_50[i] and 
+                  adx_aligned[i] > 20):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: Stochastic RSI overbought (>80) OR cloud turns bearish
-            if (stoch_rsi[i] > 80 or 
-                bullish_cloud_aligned[i] <= 0.5):
+            # Exit long: price breaks below 20-period low OR price < EMA50
+            if (close[i] < low_20[i] or 
+                close[i] < ema_50[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -185,9 +147,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Stochastic RSI oversold (<20) OR cloud turns bullish
-            if (stoch_rsi[i] < 20 or 
-                bullish_cloud_aligned[i] > 0.5):
+            # Exit short: price breaks above 20-period high OR price > EMA50
+            if (close[i] > high_20[i] or 
+                close[i] > ema_50[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -196,6 +158,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Stochastic_Ichimoku_Bounce_v1"
-timeframe = "12h"
+name = "4h_RVOL_Breakout_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
