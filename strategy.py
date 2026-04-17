@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,76 +13,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend direction (1w)
+    # Get weekly data for pivot points (1w)
     df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    # Calculate weekly EMA34 for trend
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    # Align weekly EMA to 6h timeframe
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Get daily data for pivot points (1d)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly pivot points (standard formula)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
     
-    # Calculate daily pivot points (Camarilla formula)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r3_1d = close_1d + ((high_1d - low_1d) * 1.1 / 2)
-    s3_1d = close_1d - ((high_1d - low_1d) * 1.1 / 2)
-    r4_1d = close_1d + ((high_1d - low_1d) * 1.1)
-    s4_1d = close_1d - ((high_1d - low_1d) * 1.1)
-    
-    # Align daily Camarilla levels to 6h timeframe
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r4_6h = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_6h = align_htf_to_ltf(prices, df_1d, s4_1d)
+    # Align weekly pivot levels to daily timeframe (use previous week's levels)
+    pivot_daily = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_daily = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_daily = align_htf_to_ltf(prices, df_1w, s1_1w)
     
     # Volume filter: current volume > 1.5 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Choppiness index filter (trending market filter)
+    atr_period = 14
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]  # First TR
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    
+    # Avoid division by zero
+    atr_safe = np.where(atr == 0, 1e-10, atr)
+    chop = 100 * np.log10((highest_high - lowest_low) / (atr_safe * 14)) / np.log10(14)
+    
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # Need sufficient data for EMA and volume MA
+    start_idx = 20  # Need sufficient data for volume MA and chop
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or
-            np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or np.isnan(volume_ma20[i])):
+        if (np.isnan(pivot_daily[i]) or np.isnan(r1_daily[i]) or np.isnan(s1_daily[i]) or
+            np.isnan(volume_ma20[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter
         volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
-        # Trend filter: price above/below weekly EMA34
-        price_above_weekly_ema = close[i] > ema_34_1w_aligned[i]
-        price_below_weekly_ema = close[i] < ema_34_1w_aligned[i]
+        # Choppiness filter: only trade in trending markets (CHOP < 38.2)
+        trend_filter = chop[i] < 38.2
         
         if position == 0:
-            # Long: break above R4 with volume and uptrend
-            if close[i] > r4_6h[i] and volume_filter and price_above_weekly_ema:
+            # Long breakout: price breaks above R1 with volume and trend filter
+            if close[i] > r1_daily[i] and volume_filter and trend_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S4 with volume and downtrend
-            elif close[i] < s4_6h[i] and volume_filter and price_below_weekly_ema:
+            # Short breakdown: price breaks below S1 with volume and trend filter
+            elif close[i] < s1_daily[i] and volume_filter and trend_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls below R3
-            if close[i] < r3_6h[i]:
+            # Exit long: price falls below S1
+            if close[i] < s1_daily[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises above S3
-            if close[i] > s3_6h[i]:
+            # Exit short: price rises above R1
+            if close[i] > r1_daily[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S4_Breakout_WeeklyEMA_Trend"
-timeframe = "6h"
+name = "1d_WeeklyPivot_Breakout_Volume_TrendFilter"
+timeframe = "1d"
 leverage = 1.0
