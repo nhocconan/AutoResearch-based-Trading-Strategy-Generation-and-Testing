@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h timeframe with 1d Williams %R and volume confirmation. 
-Williams %R identifies overbought/oversold conditions on the daily chart.
-Enter long when Williams %R crosses above -80 from below (oversold bounce) 
-with volume > 1.5x 20-period average. Enter short when Williams %R crosses 
-below -20 from above (overbought rejection) with volume confirmation.
-Use 1d ADX > 20 to filter for trending markets and avoid ranging whipsaws.
+Hypothesis: 4h timeframe with 1d Williams %R + volume spike + ADX regime filter.
+Williams %R identifies overbought/oversold conditions on higher timeframe.
+Volume spike confirms institutional interest at turning points.
+ADX > 25 filters for trending markets to avoid false reversals in chop.
+Long when Williams %R < -80 (oversold) + volume spike + ADX > 25.
+Short when Williams %R > -20 (overbought) + volume spike + ADX > 25.
 Position sizing: 0.25 for entries, 0 for exits.
 Target: 75-200 total trades over 4 years (19-50/year).
-Williams %R provides reliable reversal signals in both bull and bear markets.
+Williams %R is a proven momentum oscillator that works in both bull and bear markets by identifying exhaustion points.
 """
 
 import numpy as np
@@ -32,6 +32,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate 1d Williams %R (14)
+    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
     highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
     lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low + 1e-10)
@@ -55,13 +56,14 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
+    # Calculate volume spike (1d volume > 1.5x 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma * 1.5)
+    
     # Align all to 4h
     williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume confirmation: 4h volume > 1.5x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.5)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -70,40 +72,38 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(vol_spike_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Williams %R signals
-        wr = williams_r_aligned[i]
-        wr_prev = williams_r_aligned[i-1] if i > 0 else -100
-        
-        # Long signal: Williams %R crosses above -80 from below (oversold bounce)
-        long_signal = (wr > -80) and (wr_prev <= -80)
-        # Short signal: Williams %R crosses below -20 from above (overbought rejection)
-        short_signal = (wr < -20) and (wr_prev >= -20)
-        
         if position == 0:
-            # Long: oversold bounce + volume confirmation + ADX filter
-            if long_signal and volume_confirm[i] and (adx_aligned[i] > 20):
+            # Long: Williams %R < -80 (oversold) + volume spike + ADX > 25
+            if (williams_r_aligned[i] < -80 and 
+                vol_spike_aligned[i] and 
+                adx_aligned[i] > 25):
                 signals[i] = 0.25
                 position = 1
-            # Short: overbought rejection + volume confirmation + ADX filter
-            elif short_signal and volume_confirm[i] and (adx_aligned[i] > 20):
+            # Short: Williams %R > -20 (overbought) + volume spike + ADX > 25
+            elif (williams_r_aligned[i] > -20 and 
+                  vol_spike_aligned[i] and 
+                  adx_aligned[i] > 25):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Williams %R rises above -20 (overbought) or ADX weakens
-            if (wr >= -20) or (adx_aligned[i] < 15):
+            # Exit long: Williams %R > -50 (recovering) or ADX < 20 (trend weakening)
+            if (williams_r_aligned[i] > -50 or 
+                adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Williams %R falls below -80 (oversold) or ADX weakens
-            if (wr <= -80) or (adx_aligned[i] < 15):
+            # Exit short: Williams %R < -50 (declining) or ADX < 20 (trend weakening)
+            if (williams_r_aligned[i] < -50 or 
+                adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -111,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dWilliamsR_Volume_ADX"
+name = "4h_1dWilliamsR_VolumeSpike_ADX"
 timeframe = "4h"
 leverage = 1.0
