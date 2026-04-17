@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_Volume_Confirmation
-Strategy: 12h Camarilla R1/S1 breakout with volume confirmation and 1d EMA34 trend filter.
-Long: Close breaks above R1 + volume > 1.5x average + close above 1d EMA34
-Short: Close breaks below S1 + volume > 1.5x average + close below 1d EMA34
-Exit: Close crosses back below R1 (long) or above S1 (short)
+1d_WeeklyDonchian20_Breakout_Volume_Spike
+Strategy: 1d Donchian breakout with weekly trend filter and volume spike.
+Long: Price breaks above 20-day high + weekly close above weekly open + volume > 2x 20-day average
+Short: Price breaks below 20-day low + weekly close below weekly open + volume > 2x 20-day average
+Exit: Price crosses back to 20-day moving average
 Position size: 0.25
-Designed to capture intraday breakouts aligned with daily trend.
-Timeframe: 12h
+Designed to capture breakouts aligned with weekly trend in both bull and bear markets.
+Timeframe: 1d
 """
 
 import numpy as np
@@ -24,75 +24,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily pivot points (using previous day's HLC)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 20-day Donchian channels
+    high_max20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate pivot point and support/resistance levels
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
+    # Calculate 20-day moving average for exit
+    ma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate EMA34 for trend filter
-    close_series_1d = pd.Series(close_1d)
-    ema34_1d = close_series_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 20-day volume average for spike detection
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align 1d indicators to 12h timeframe
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
-    ema34_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    weekly_close = df_1w['close'].values
+    weekly_open = df_1w['open'].values
     
-    # Volume confirmation (20-period MA on 12h)
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Weekly trend: bullish if close > open, bearish if close < open
+    weekly_bullish = weekly_close > weekly_open
+    weekly_bearish = weekly_close < weekly_open
+    
+    # Align weekly trend to daily timeframe
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # EMA34 and volume MA20
+    start_idx = 20  # Need 20 days for calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_12h[i]) or 
-            np.isnan(s1_12h[i]) or 
-            np.isnan(ema34_12h[i]) or 
-            np.isnan(volume_ma20[i])):
+        if (np.isnan(high_max20[i]) or 
+            np.isnan(low_min20[i]) or 
+            np.isnan(ma20[i]) or 
+            np.isnan(vol_ma20[i]) or
+            np.isnan(weekly_bullish_aligned[i]) or
+            np.isnan(weekly_bearish_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
-        
-        # Trend filter: price above/below 1d EMA34
-        price_above_ema = close[i] > ema34_12h[i]
-        price_below_ema = close[i] < ema34_12h[i]
-        
-        # Breakout conditions
-        breakout_above_r1 = close[i] > r1_12h[i]
-        breakdown_below_s1 = close[i] < s1_12h[i]
+        # Volume spike: current volume > 2x 20-day average
+        volume_spike = volume[i] > (2.0 * vol_ma20[i])
         
         if position == 0:
-            # Long: Close breaks above R1 + volume filter + price above EMA
-            if breakout_above_r1 and volume_filter and price_above_ema:
+            # Long: Breakout above 20-day high + weekly bullish + volume spike
+            if (close[i] > high_max20[i] and 
+                weekly_bullish_aligned[i] > 0.5 and 
+                volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below S1 + volume filter + price below EMA
-            elif breakdown_below_s1 and volume_filter and price_below_ema:
+            # Short: Breakdown below 20-day low + weekly bearish + volume spike
+            elif (close[i] < low_min20[i] and 
+                  weekly_bearish_aligned[i] > 0.5 and 
+                  volume_spike):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Close crosses back below R1
-            if close[i] < r1_12h[i]:
+            # Exit long: Price falls back to 20-day MA
+            if close[i] < ma20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Close crosses back above S1
-            if close[i] > s1_12h[i]:
+            # Exit short: Price rises back to 20-day MA
+            if close[i] > ma20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_Volume_Confirmation"
-timeframe = "12h"
+name = "1d_WeeklyDonchian20_Breakout_Volume_Spike"
+timeframe = "1d"
 leverage = 1.0
