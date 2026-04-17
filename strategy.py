@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h strategy using Donchian(20) breakout with volume confirmation and 1d EMA50 trend filter.
-- Long when price closes above 20-period 12h Donchian upper band + volume > 1.5x 20-period 12h volume MA + price above 1d EMA50
-- Short when price closes below 20-period 12h Donchian lower band + volume > 1.5x 20-period 12h volume MA + price below 1d EMA50
+Hypothesis: 4h strategy using Donchian(20) breakout with volume confirmation and 1d EMA50 trend filter.
+- Long when price closes above 20-period 4h Donchian upper band + volume > 1.5x 20-period 4h volume MA + price above 1d EMA50
+- Short when price closes below 20-period 4h Donchian lower band + volume > 1.5x 20-period 4h volume MA + price below 1d EMA50
 - Fixed position size 0.25 to limit fee churn and manage drawdown
 - ATR-based trailing stop (2.0x ATR) to lock in profits
-- Designed for very low trade frequency (target: 50-150 trades over 4 years) to avoid fee drag
+- Designed for low trade frequency (target: 75-200 trades over 4 years) to avoid fee drag
 - Works in bull markets (buying breakouts above 1d EMA50) and bear markets (selling breakdowns below 1d EMA50)
 """
 
@@ -31,33 +31,33 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Get 12h data for Donchian bands, volume confirmation, and ATR (primary timeframe)
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    # Get 4h data for Donchian bands, volume confirmation, and ATR (primary timeframe)
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
     
-    # Donchian(20) bands on 12h
-    upper_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Donchian(20) bands on 4h
+    upper_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Volume average (20-period) on 12h for confirmation
-    volume_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    # Volume average (20-period) on 4h for confirmation
+    volume_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     
-    # ATR (10-period) on 12h for stoploss
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    # ATR (10-period) on 4h for stoploss
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # first period
     atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # Align all indicators to 12h timeframe (primary)
-    upper_aligned = align_htf_to_ltf(prices, df_12h, upper_20)
-    lower_aligned = align_htf_to_ltf(prices, df_12h, lower_20)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_20)
-    atr_aligned = align_htf_to_ltf(prices, df_12h, atr_10)
+    # Align all indicators to 4h timeframe (primary)
+    upper_aligned = align_htf_to_ltf(prices, df_4h, upper_20)
+    lower_aligned = align_htf_to_ltf(prices, df_4h, lower_20)
+    volume_ma_aligned = align_htf_to_ltf(prices, df_4h, volume_ma_20)
+    atr_aligned = align_htf_to_ltf(prices, df_4h, atr_10)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -118,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dEMA50_VolumeSpike_ATRTrail"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA50_VolumeSpike_ATRTrail"
+timeframe = "4h"
 leverage = 1.0
