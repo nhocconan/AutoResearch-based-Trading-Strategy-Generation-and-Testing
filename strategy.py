@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_Volume
-Strategy: 12h Camarilla pivot breakout with volume confirmation.
-Long: Close breaks above R1 level + volume > 1.5x 20-period average
-Short: Close breaks below S1 level + volume > 1.5x 20-period average
-Exit: Close crosses back to pivot point (PP)
-Position size: 0.25
-Designed to capture intraday breakouts with institutional volume confirmation.
-Timeframe: 12h
+4h_PriceChannel_VolumeTrend
+Strategy: 4-hour price channel breakout with volume confirmation and 1d trend filter.
+Long: Price breaks above 4h Donchian high(20) + volume > 1.5x average + price above 1d EMA34
+Short: Price breaks below 4h Donchian low(20) + volume > 1.5x average + price below 1d EMA34
+Exit: Price returns to 4h Donchian midpoint
+Position size: 0.30
+Designed to capture breakouts aligned with daily trend in both bull and bear markets.
+Timeframe: 4h
 """
 
 import numpy as np
@@ -24,36 +24,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily Camarilla pivot levels
+    # Calculate Donchian channels (20-period)
+    high_rolling = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_rolling = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (high_rolling + low_rolling) / 2
+    
+    # Calculate daily EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot point
-    pp = (high_1d + low_1d + close_1d) / 3
-    # Calculate R1 and S1 levels
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    close_series_1d = pd.Series(close_1d)
+    ema34_1d = close_series_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d levels to 12h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align 1d EMA to 4h timeframe
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume confirmation (20-period MA on 12h)
+    # Volume confirmation (20-period MA on 4h)
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # for volume MA
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pp_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
+        if (np.isnan(high_rolling[i]) or 
+            np.isnan(low_rolling[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or 
             np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
@@ -61,34 +59,45 @@ def generate_signals(prices):
         # Volume filter: current volume > 1.5x 20-period average
         volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
+        # Trend filter: price above/below 1d EMA34
+        price_above_ema = close[i] > ema34_1d_aligned[i]
+        price_below_ema = close[i] < ema34_1d_aligned[i]
+        
+        # Breakout conditions
+        breakout_up = close[i] > high_rolling[i-1]  # break above previous period high
+        breakout_down = close[i] < low_rolling[i-1]  # break below previous period low
+        
+        # Reversion to midpoint
+        return_to_mid = abs(close[i] - donchian_mid[i]) < 0.1 * (high_rolling[i] - low_rolling[i])
+        
         if position == 0:
-            # Long: Close breaks above R1 + volume filter
-            if close[i] > r1_aligned[i] and volume_filter:
-                signals[i] = 0.25
+            # Long: breakout up + volume filter + price above EMA
+            if breakout_up and volume_filter and price_above_ema:
+                signals[i] = 0.30
                 position = 1
-            # Short: Close breaks below S1 + volume filter
-            elif close[i] < s1_aligned[i] and volume_filter:
-                signals[i] = -0.25
+            # Short: breakout down + volume filter + price below EMA
+            elif breakout_down and volume_filter and price_below_ema:
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
-            # Exit long: Close crosses back to pivot point
-            if close[i] < pp_aligned[i]:
+            # Exit long: return to midpoint or break down
+            if return_to_mid or breakout_down:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Exit short: Close crosses back to pivot point
-            if close[i] > pp_aligned[i]:
+            # Exit short: return to midpoint or break up
+            if return_to_mid or breakout_up:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_Volume"
-timeframe = "12h"
+name = "4h_PriceChannel_VolumeTrend"
+timeframe = "4h"
 leverage = 1.0
