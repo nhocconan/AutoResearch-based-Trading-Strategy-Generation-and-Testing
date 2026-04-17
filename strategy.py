@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,107 +13,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for primary trend
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Get weekly data for trend direction (1w)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 4h EMA200 for trend filter
-    close_4h_series = pd.Series(close_4h)
-    ema200_4h = close_4h_series.ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
+    # Calculate weekly EMA34 for trend
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Calculate 4h ATR(14) for volatility filter
-    tr4h = np.maximum(high_4h - low_4h, np.maximum(np.abs(high_4h - np.roll(close_4h, 1)), np.abs(low_4h - np.roll(close_4h, 1))))
-    tr4h[0] = high_4h[0] - low_4h[0]
-    atr4h = pd.Series(tr4h).rolling(window=14, min_periods=14).mean().values
-    atr4h_aligned = align_htf_to_ltf(prices, df_4h, atr4h)
+    # Get daily data for pivot points (1d)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Get 1h ATR(14) for entry conditions
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate daily pivot points (standard formula)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = 2 * pivot_1d - low_1d
+    s1_1d = 2 * pivot_1d - high_1d
     
-    # Calculate 1h RSI(7) for mean reversion entries
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/7, adjust=False, min_periods=7).mean()
-    avg_loss = loss.ewm(alpha=1/7, adjust=False, min_periods=7).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    # Align daily pivot levels to 6h timeframe (use previous day's levels)
+    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_6h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_6h = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Calculate 1h Bollinger Bands for volatility breakout
-    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean()
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std()
-    upper_bb = sma20 + (2 * std20)
-    lower_bb = sma20 - (2 * std20)
-    
-    # Session filter: 8-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Volume filter: current volume > 1.5 * 20-period average
+    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = max(200, 20)  # Need EMA200 warmup
+    start_idx = 34  # Need sufficient data for EMA34 and volume MA
     
     for i in range(start_idx, n):
-        if not session_filter[i]:
-            signals[i] = 0.0
-            continue
-            
         # Skip if any required data is not available
-        if (np.isnan(ema200_4h_aligned[i]) or np.isnan(atr4h_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(upper_bb[i]) or np.isnan(lower_bb[i])):
+        if (np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 4h EMA200
-        uptrend = close[i] > ema200_4h_aligned[i]
-        downtrend = close[i] < ema200_4h_aligned[i]
+        # Volume filter
+        volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
-        # Volatility filter: current ATR > 0.5 * 4h ATR (avoid low volatility chop)
-        vol_filter = atr[i] > (0.5 * atr4h_aligned[i])
+        # Trend filter: price above/below weekly EMA34
+        trend_up = close[i] > ema34_1w_aligned[i]
+        trend_down = close[i] < ema34_1w_aligned[i]
         
         if position == 0:
-            # Long entry: pullback in uptrend (RSI < 30) OR breakout above upper BB with volume
-            if uptrend and vol_filter:
-                if rsi[i] < 30:  # Oversold pullback in uptrend
-                    signals[i] = 0.20
-                    position = 1
-                elif close[i] > upper_bb[i]:  # Breakout above BB
-                    signals[i] = 0.20
-                    position = 1
-            # Short entry: pullback in downtrend (RSI > 70) OR breakdown below lower BB
-            elif downtrend and vol_filter:
-                if rsi[i] > 70:  # Overbought pullback in downtrend
-                    signals[i] = -0.20
-                    position = -1
-                elif close[i] < lower_bb[i]:  # Breakdown below BB
-                    signals[i] = -0.20
-                    position = -1
+            # Long: price breaks above R1 with volume and uptrend
+            if close[i] > r1_6h[i] and volume_filter and trend_up:
+                signals[i] = 0.25
+                position = 1
+            # Short: price breaks below S1 with volume and downtrend
+            elif close[i] < s1_6h[i] and volume_filter and trend_down:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit long: RSI > 70 (overbought) or price < 4h EMA200 (trend change)
-            if rsi[i] > 70 or close[i] < ema200_4h_aligned[i]:
+            # Exit long: price falls below pivot OR trend turns down
+            if close[i] < pivot_6h[i] or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI < 30 (oversold) or price > 4h EMA200 (trend change)
-            if rsi[i] < 30 or close[i] > ema200_4h_aligned[i]:
+            # Exit short: price rises above pivot OR trend turns up
+            if close[i] > pivot_6h[i] or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_EMA200_RSI_BB_Pullback_Breakout"
-timeframe = "1h"
+name = "6h_WeeklyEMA34_DailyPivot_Breakout"
+timeframe = "6h"
 leverage = 1.0
