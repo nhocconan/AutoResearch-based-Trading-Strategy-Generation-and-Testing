@@ -13,32 +13,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Williams Alligator (Jaws, Teeth, Lips) ===
+    # === 1d Williams Alligator ===
     df_1d = get_htf_data(prices, '1d')
-    median_1d = (df_1d['high'].values + df_1d['low'].values) / 2
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    median_1d = (high_1d + low_1d) / 2
     
-    # Smoothed medians (SMMA)
-    def smma(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) >= period:
-            result[period-1] = np.mean(arr[:period])
-            for i in range(period, len(arr)):
-                result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Williams Alligator lines (13, 8, 5 SMAs with forward shift)
+    def sma(series, window, shift):
+        sma_vals = np.full_like(series, np.nan)
+        for i in range(len(series)):
+            if i >= window - 1:
+                sma_vals[i] = np.mean(series[i-window+1:i+1])
+        # Apply forward shift
+        shifted = np.full_like(sma_vals, np.nan)
+        if shift > 0:
+            shifted[shift:] = sma_vals[:-shift]
+        else:
+            shifted = sma_vals
+        return shifted
     
-    jaws = smma(median_1d, 13)  # 13-period
-    teeth = smma(median_1d, 8)  # 8-period
-    lips = smma(median_1d, 5)   # 5-period
+    jaw = sma(median_1d, 13, 8)   # Blue line: 13-period SMA, 8 bars forward
+    teeth = sma(median_1d, 8, 5)  # Red line: 8-period SMA, 5 bars forward
+    lips = sma(median_1d, 5, 3)   # Green line: 5-period SMA, 3 bars forward
     
     # Align to 4h
-    jaws_aligned = align_htf_to_ltf(prices, df_1d, jaws)
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
     teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
     lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
-    # === 4h Volume Spike (2x 20-period average) ===
+    # === 1d ADX (14-period) for trend strength ===
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close, 1)[:len(high_1d)])
+    tr3 = np.abs(low_1d - np.roll(close, 1)[:len(high_1d)])
+    tr1[0] = high_1d[0] - low_1d[0]
+    tr2[0] = np.abs(high_1d[0] - close[0]) if len(close) > 0 else 0
+    tr3[0] = np.abs(low_1d[0] - close[0]) if len(close) > 0 else 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed TR, +DM, -DM (Wilder's smoothing)
+    def wilders_smoothing(series, period):
+        smoothed = np.full_like(series, np.nan)
+        if len(series) >= period:
+            smoothed[period-1] = np.mean(series[:period])
+            for i in range(period, len(series)):
+                smoothed[i] = (smoothed[i-1] * (period-1) + series[i]) / period
+        return smoothed
+    
+    atr = wilders_smoothing(tr, 14)
+    plus_di = 100 * wilders_smoothing(plus_dm, 14) / atr
+    minus_di = 100 * wilders_smoothing(minus_dm, 14) / atr
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = wilders_smoothing(dx, 14)
+    
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # === 4h Volume confirmation ===
     df_4h = get_htf_data(prices, '4h')
     volume_4h = df_4h['volume'].values
     
+    # 20-period average volume
     vol_ma_20 = np.full_like(volume_4h, np.nan)
     for i in range(len(volume_4h)):
         if i >= 19:
@@ -48,61 +91,42 @@ def generate_signals(prices):
         else:
             vol_ma_20[i] = volume_4h[0]
     
-    volume_spike = volume_4h > (vol_ma_20 * 2.0)
-    
-    # === 4h ATR Filter (14-period) ===
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]
-    tr2[0] = np.abs(high[0] - close[0])
-    tr3[0] = np.abs(low[0] - close[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    atr_14 = np.full_like(tr, np.nan)
-    if len(tr) >= 14:
-        atr_14[13] = np.mean(tr[:14])
-        for i in range(14, len(tr)):
-            atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
+    vol_confirm = volume_4h > vol_ma_20 * 1.5
     
     signals = np.zeros(n)
     warmup = 100
-    
-    # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
-        # Skip if any data is NaN
-        if (np.isnan(jaws_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(volume_spike[i]) or 
-            np.isnan(atr_14[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(vol_confirm[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Entry conditions: Lips > Teeth > Jaws (bullish alignment) OR Lips < Teeth < Jaws (bearish)
-        bullish_alignment = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaws_aligned[i]
-        bearish_alignment = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaws_aligned[i]
-        
-        # Volume and volatility filters
-        vol_cond = volume_spike[i]
-        vol_filter = atr_14[i] > 0.005 * close[i]  # Minimum volatility
-        
+        # Alligator alignment: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
         if position == 0:
-            # Long entry: bullish alignment + volume spike + volatility
-            if bullish_alignment and vol_cond and vol_filter:
+            # Long: Alligator aligned up + ADX > 25 + volume confirmation
+            if (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i] and
+                adx_aligned[i] > 25 and
+                vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short entry: bearish alignment + volume spike + volatility
-            elif bearish_alignment and vol_cond and vol_filter:
+            # Short: Alligator aligned down + ADX > 25 + volume confirmation
+            elif (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i] and
+                  adx_aligned[i] > 25 and
+                  vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit conditions: alignment breaks
+        # Exit logic: Alligator lines cross (trend change)
         elif position == 1:
-            if not bullish_alignment:  # Bullish alignment broken
+            # Exit long: Lips crosses below Teeth or Teeth crosses below Jaw
+            if lips_aligned[i] < teeth_aligned[i] or teeth_aligned[i] < jaw_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -110,7 +134,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            if not bearish_alignment:  # Bearish alignment broken
+            # Exit short: Lips crosses above Teeth or Teeth crosses above Jaw
+            if lips_aligned[i] > teeth_aligned[i] or teeth_aligned[i] > jaw_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -119,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsAlligator_Alignment_VolumeSpike_v1"
+name = "4h_WilliamsAlligator_ADX_VolumeFilter_v1"
 timeframe = "4h"
 leverage = 1.0
