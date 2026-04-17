@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_DonchianBreakout_VolumeFilter_V1
-Hypothesis: Combine weekly pivot levels with 4-hour Donchian breakout and volume confirmation to capture institutional-level breakouts in both bull and bear markets.
-Weekly pivots provide strong support/resistance from longer-term structure, while 4h Donchian captures intermediate momentum.
-Volume filter ensures breakouts have participation. Target: 20-50 trades/year for low friction.
-Works in bull/bear: breakouts capture momentum; weekly pivot context prevents counter-trend entries.
+4h_Keltner_RSI_Trend_Follow
+Hypothesis: Use Keltner Channel breakouts with RSI trend filter and volume confirmation to capture strong trends while avoiding chop. 
+Keltner Channels adapt to volatility, reducing false breakouts in low-volatility environments. 
+RSI > 50 for longs, < 50 for shorts ensures trend alignment. Volume filter ensures participation. 
+Designed for low trade frequency (<30/year) to minimize fee drag and improve generalization across bull/bear markets.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,48 +21,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h data for Donchian channel ===
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # === 4h ATR for Keltner Channel ===
+    tr = np.maximum(high[1:] - low[1:], 
+                    np.maximum(np.abs(high[1:] - close[:-1]), 
+                               np.abs(low[1:] - close[:-1])))
+    tr = np.concatenate([[np.nan], tr])
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Donchian(20) on 4h: upper/lower bounds
-    donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # === 4h EMA(20) for Keltner middle line ===
+    ema20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
     
-    # Align Donchian levels to 6h
-    donch_high_6h = align_htf_to_ltf(prices, df_4h, donch_high)
-    donch_low_6h = align_htf_to_ltf(prices, df_4h, donch_low)
+    # Keltner Channels: upper = EMA + 2*ATR, lower = EMA - 2*ATR
+    keltner_upper = ema20 + 2.0 * atr
+    keltner_lower = ema20 - 2.0 * atr
     
-    # === Weekly data for pivot points ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === Daily RSI for trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Weekly pivot points (standard)
-    pp = (high_1w + low_1w + close_1w) / 3.0
-    range_hl = high_1w - low_1w
+    # RSI(14) calculation
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_1d = 100 - (100 / (1 + rs))
     
-    r1 = pp + (range_hl * 1.0 / 3.0)  # R1
-    s1 = pp - (range_hl * 1.0 / 3.0)  # S1
-    r2 = pp + range_hl                # R2
-    s2 = pp - range_hl                # S2
+    # Align daily RSI to 4h
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Align weekly pivots to 6h
-    pp_6h = align_htf_to_ltf(prices, df_1w, pp)
-    r1_6h = align_htf_to_ltf(prices, df_1w, r1)
-    s1_6h = align_htf_to_ltf(prices, df_1w, s1)
-    r2_6h = align_htf_to_ltf(prices, df_1w, r2)
-    s2_6h = align_htf_to_ltf(prices, df_1w, s2)
-    
-    # === Volume confirmation ===
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # === Daily volume average for confirmation ===
+    volume_1d = df_1d['volume'].values
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
     signals = np.zeros(n)
     
-    # Warmup: covers 20-period Donchian and volume average
+    # Warmup: covers 20-day volume average, 20-period ATR/EMA, 14-day RSI
     warmup = 50
     
     # Track position
@@ -70,33 +66,34 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(donch_high_6h[i]) or np.isnan(donch_low_6h[i]) or
-            np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or np.isnan(vol_avg_20_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Volume filter: current volume > 1.3x 20-period average
-        vol_filter = volume[i] > 1.3 * vol_avg_20[i]
+        # Get current daily volume
+        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
         
-        # Entry: only when flat
+        # Volume filter: current volume > 1.3x 20-day average
+        vol_filter = vol_1d_current > 1.3 * vol_avg_20_1d_aligned[i]
+        
+        # Entry conditions
         if position == 0:
-            # Long: break above Donchian high AND above weekly R1 with volume
-            if close[i] > donch_high_6h[i] and close[i] > r1_6h[i] and vol_filter:
+            # Long: price > Keltner upper + RSI > 50 + volume
+            if close[i] > keltner_upper[i] and rsi_1d_aligned[i] > 50 and vol_filter:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: break below Donchian low AND below weekly S1 with volume
-            elif close[i] < donch_low_6h[i] and close[i] < s1_6h[i] and vol_filter:
+            # Short: price < Keltner lower + RSI < 50 + volume
+            elif close[i] < keltner_lower[i] and rsi_1d_aligned[i] < 50 and vol_filter:
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit: reverse signal or opposite pivot breach
+        # Exit conditions: reverse signal
         elif position == 1:
-            # Exit long if price breaks below weekly S1 or Donchian low
-            if close[i] < s1_6h[i] or close[i] < donch_low_6h[i]:
+            if close[i] < keltner_lower[i]:  # break below lower channel = exit long
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -104,8 +101,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short if price breaks above weekly R1 or Donchian high
-            if close[i] > r1_6h[i] or close[i] > donch_high_6h[i]:
+            if close[i] > keltner_upper[i]:  # break above upper channel = exit short
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -114,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_DonchianBreakout_VolumeFilter_V1"
-timeframe = "6h"
+name = "4h_Keltner_RSI_Trend_Follow"
+timeframe = "4h"
 leverage = 1.0
