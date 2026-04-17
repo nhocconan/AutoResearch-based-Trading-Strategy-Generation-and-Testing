@@ -1,11 +1,9 @@
-#!/usr/bin/env python3
-"""
-Hypothesis: 6h timeframe with 1w Ichimoku cloud filter and 1d volume confirmation.
-Trade breakouts of 12-period Donchian channels aligned with weekly Ichimoku cloud direction.
-Use volume spike (>2x 24-period average) to confirm momentum.
-Designed to work in bull markets via trend-following breakouts and in bear via mean-reversion at cloud boundaries.
-Target: 50-150 total trades over 4 years (12-37/year).
-"""
+# 6h_1wIchimoku_Cloud_Donchian12_VolumeFilter
+# Hypothesis: 6h timeframe with 1w Ichimoku cloud filter and 1d volume confirmation.
+# Trade breakouts of 12-period Donchian channels aligned with weekly Ichimoku cloud direction.
+# Use volume spike (>2x 24-period average) to confirm momentum.
+# Designed to work in bull markets via trend-following breakouts and in bear via mean-reversion at cloud boundaries.
+# Target: 50-150 total trades over 4 years (12-37/year).
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
