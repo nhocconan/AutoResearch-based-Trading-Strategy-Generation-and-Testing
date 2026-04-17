@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h timeframe with daily Camarilla pivot breakout + volume confirmation + 1d ADX trend filter.
-Long when price breaks above daily R1 with volume > 1.5x 20-period average and ADX > 25.
-Short when price breaks below daily S1 with volume > 1.5x 20-period average and ADX > 25.
-Daily Camarilla pivots capture key intraday institutional levels; breakouts with volume and trend filter reduce false signals.
-Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag. Uses discrete sizing 0.25.
+Hypothesis: 4h timeframe with daily Williams Fractal breakout + volume confirmation + 1d ADX trend filter.
+Long when price breaks above the most recent bullish fractal (high) with volume > 1.3x 20-period average and ADX > 20.
+Short when price breaks below the most recent bearish fractal (low) with volume > 1.3x 20-period average and ADX > 20.
+Williams Fractals identify key swing points where price has shown rejection; breakouts with volume and trend filter reduce false signals.
+Target: 75-150 total trades over 4 years (19-37/year) to balance opportunity and fee drag. Uses discrete sizing 0.25.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,20 +21,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and ADX
+    # Get daily data for Williams Fractals and ADX
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate daily Camarilla levels (R1, S1)
-    # Pivot = (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    # R1 = Pivot + Range * 1.1 / 2
-    # S1 = Pivot - Range * 1.1 / 2
-    r1_1d = pivot_1d + range_1d * 0.55
-    s1_1d = pivot_1d - range_1d * 0.55
+    # Calculate Williams Fractals on daily data
+    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n-1] > high[n-3] and high[n-1] > high[n+1]
+    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n-1] < low[n-3] and low[n-1] < low[n+1]
+    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1d, low_1d)
+    
+    # For breakout signals, we need the most recent completed fractal levels
+    # Initialize arrays to hold the most recent fractal levels
+    recent_bearish = np.full_like(high_1d, np.nan)
+    recent_bullish = np.full_like(low_1d, np.nan)
+    
+    # Track the most recent completed fractal
+    last_bearish = np.nan
+    last_bullish = np.nan
+    
+    for i in range(len(bearish_fractal)):
+        if not np.isnan(bearish_fractal[i]):
+            last_bearish = bearish_fractal[i]
+        if not np.isnan(bullish_fractal[i]):
+            last_bullish = bullish_fractal[i]
+        recent_bearish[i] = last_bearish
+        recent_bullish[i] = last_bullish
     
     # Calculate daily ADX (14-period)
     # True Range
@@ -66,12 +80,11 @@ def generate_signals(prices):
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # Get 1d volume 20-period average
-    volume_1d = df_1d['volume'].values
     vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all to 12h
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align all to 4h
+    recent_bearish_aligned = align_htf_to_ltf(prices, df_1d, recent_bearish, additional_delay_bars=0)
+    recent_bullish_aligned = align_htf_to_ltf(prices, df_1d, recent_bullish, additional_delay_bars=0)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
@@ -83,49 +96,45 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+        if (np.isnan(recent_bearish_aligned[i]) or np.isnan(recent_bullish_aligned[i]) or 
             np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or 
             np.isnan(volume_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x 20-period average
-        volume_confirmed = volume_1d_aligned[i] > 1.5 * vol_ma_20_1d_aligned[i]
+        # Volume confirmation: current 1d volume > 1.3x 20-period average
+        volume_confirmed = volume_1d_aligned[i] > 1.3 * vol_ma_20_1d_aligned[i]
         
-        # Trend filter: ADX > 25 indicates strong trend
-        trend_filter = adx_aligned[i] > 25
+        # Trend filter: ADX > 20 indicates sufficient trend strength
+        trend_filter = adx_aligned[i] > 20
         
         if position == 0:
-            # Long: price breaks above daily R1 with volume and trend
-            if (close[i] > r1_1d_aligned[i] and 
+            # Long: price breaks above most recent bullish fractal with volume and trend
+            if (close[i] > recent_bullish_aligned[i] and 
                 volume_confirmed and 
                 trend_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below daily S1 with volume and trend
-            elif (close[i] < s1_1d_aligned[i] and 
+            # Short: price breaks below most recent bearish fractal with volume and trend
+            elif (close[i] < recent_bearish_aligned[i] and 
                   volume_confirmed and 
                   trend_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below daily pivot or trend weakens
-            pivot_1d = (high_1d + low_1d + close_1d) / 3
-            pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-            if (close[i] < pivot_1d_aligned[i] or 
-                adx_aligned[i] < 20):  # exit when trend weakens
+            # Exit long: price falls back below the most recent bullish fractal or trend weakens
+            if (close[i] < recent_bullish_aligned[i] or 
+                adx_aligned[i] < 15):  # exit when trend weakens significantly
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above daily pivot or trend weakens
-            pivot_1d = (high_1d + low_1d + close_1d) / 3
-            pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-            if (close[i] > pivot_1d_aligned[i] or 
-                adx_aligned[i] < 20):  # exit when trend weakens
+            # Exit short: price rises back above the most recent bearish fractal or trend weakens
+            if (close[i] > recent_bearish_aligned[i] or 
+                adx_aligned[i] < 15):  # exit when trend weakens significantly
                 signals[i] = 0.0
                 position = 0
             else:
@@ -133,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dCamarillaR1S1_Volume_ADX"
-timeframe = "12h"
+name = "4h_1dWilliamsFractal_Breakout_Volume_ADX"
+timeframe = "4h"
 leverage = 1.0
