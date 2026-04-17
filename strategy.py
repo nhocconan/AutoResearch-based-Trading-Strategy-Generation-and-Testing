@@ -1,12 +1,11 @@
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 6-hour 14-day RSI with 1-day ADX trend filter and volume confirmation
+# 6h 14-day RSI with 1-day ADX trend filter and volume confirmation
 # RSI identifies overbought/oversold conditions; ADX>25 filters chop; volume spike confirms momentum.
 # Designed for 6h timeframe to achieve 12-37 trades/year with low fee decay.
 # Works in both bull and bear markets by trading reversals at extremes in trending regimes.
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
