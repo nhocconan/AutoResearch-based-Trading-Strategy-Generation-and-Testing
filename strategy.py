@@ -13,77 +13,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR and price
+    # Get daily data for pivot points
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily ATR(14) for volatility
-    tr = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), np.abs(low_1d - np.roll(close_1d, 1))))
-    tr[0] = high_1d[0] - low_1d[0]
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate daily pivot points (standard formula)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = 2 * pivot_1d - low_1d
+    s1_1d = 2 * pivot_1d - high_1d
+    r2_1d = pivot_1d + (high_1d - low_1d)
+    s2_1d = pivot_1d - (high_1d - low_1d)
     
-    # Calculate 6-period EMA of close for trend
-    ema6 = pd.Series(close).ewm(span=6, adjust=False, min_periods=6).mean().values
+    # Align daily pivot levels to 4h timeframe (use previous day's levels)
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r2_4h = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s2_4h = align_htf_to_ltf(prices, df_1d, s2_1d)
     
-    # Align daily ATR and EMA to 6h timeframe
-    atr_6h = align_htf_to_ltf(prices, df_1d, atr_1d)
-    ema6_6h = align_htf_to_ltf(prices, df_1d, ema6)
+    # Volume filter: current volume > 1.5 * 20-period average
+    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 6h Bollinger Bands (20, 2) for mean reversion
-    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper = sma20 + 2 * std20
-    lower = sma20 - 2 * std20
+    # Choppiness index filter (trending market filter)
+    # CHOP > 61.8 = ranging, CHOP < 38.2 = trending
+    atr_period = 14
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]  # First TR
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    
+    # Avoid division by zero
+    atr_safe = np.where(atr == 0, 1e-10, atr)
+    chop = 100 * np.log10((highest_high - lowest_low) / (atr_safe * 14)) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 20
+    start_idx = 20  # Need sufficient data for volume MA and chop
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(atr_6h[i]) or np.isnan(ema6_6h[i]) or 
-            np.isnan(sma20[i]) or np.isnan(upper[i]) or np.isnan(lower[i])):
+        if (np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
+            np.isnan(r2_4h[i]) or np.isnan(s2_4h[i]) or np.isnan(volume_ma20[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when ATR is above its 50-period average
-        atr_ma50 = pd.Series(atr_6h).rolling(window=50, min_periods=50).mean().values
-        vol_filter = atr_6h[i] > atr_ma50[i] if not np.isnan(atr_ma50[i]) else False
+        # Volume filter
+        volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
-        # Trend filter: price above EMA6 = bullish, below = bearish
-        trend = close[i] > ema6_6h[i]
+        # Choppiness filter: only trade in trending markets (CHOP < 38.2)
+        trend_filter = chop[i] < 38.2
         
         if position == 0:
-            # Mean reversion long: price touches lower BB in uptrend
-            if close[i] <= lower[i] and trend and vol_filter:
-                signals[i] = 0.25
+            # Long breakout: price breaks above R1 with volume and trend filter
+            if close[i] > r1_4h[i] and volume_filter and trend_filter:
+                signals[i] = 0.30
                 position = 1
-            # Mean reversion short: price touches upper BB in downtrend
-            elif close[i] >= upper[i] and not trend and vol_filter:
-                signals[i] = -0.25
+            # Short breakdown: price breaks below S1 with volume and trend filter
+            elif close[i] < s1_4h[i] and volume_filter and trend_filter:
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses above EMA6 (trend change) or hits upper BB
-            if close[i] >= ema6_6h[i] or close[i] >= upper[i]:
+            # Exit long: price falls below S2 (deeper level) OR chop increases (range developing)
+            if close[i] < s2_4h[i] or chop[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Exit short: price crosses below EMA6 (trend change) or hits lower BB
-            if close[i] <= ema6_6h[i] or close[i] <= lower[i]:
+            # Exit short: price rises above R2 OR chop increases (range developing)
+            if close[i] > r2_4h[i] or chop[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "6h_BB_MeanReversion_EMA_Trend_VolFilter"
-timeframe = "6h"
+name = "4h_DailyPivot_Breakout_Volume_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
