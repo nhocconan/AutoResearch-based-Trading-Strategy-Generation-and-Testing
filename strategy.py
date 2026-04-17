@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h timeframe with 1d Bollinger Bands mean reversion and volume confirmation.
-Trade reversals at Bollinger Band extremes (2 std) with volume spike (>1.5x 20-period average).
-Use 1w ADX > 25 to filter for trending markets (avoid ranging whipsaws).
-In bull markets: buy dips to lower BB in uptrend; sell rallies to upper BB in uptrend.
-In bear markets: sell rallies to upper BB in downtrend; buy dips to lower BB in downtrend.
-Position sizing: 0.25 for entries, 0 for exits.
-Target: 50-150 total trades over 4 years (12-37/year).
+Hypothesis: 4h Donchian(20) breakout with volume confirmation and 12h EMA34 trend filter.
+Long when price breaks above Donchian upper channel with volume > 1.5x 20-period average and 12h EMA34 rising.
+Short when price breaks below Donchian lower channel with volume > 1.5x 20-period average and 12h EMA34 falling.
+Exit on opposite Donchian channel touch or volume drying up.
+Position sizing: 0.30 for entries, 0 for exits.
+Target: 75-200 total trades over 4 years (19-50/year).
+Works in bull markets by capturing breakouts and in bear markets by shorting breakdowns.
 """
 
 import numpy as np
@@ -23,55 +23,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Bollinger Bands
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
-    
-    # Calculate Bollinger Bands (20, 2)
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
-    
-    # Get 1w data for ADX filter
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate ADX (14)
-    plus_dm = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    minus_dm = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.concatenate([[close_1w[0]], close_1w[:-1]]))
-    tr3 = np.abs(low_1w - np.concatenate([[close_1w[0]], close_1w[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / atr
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume filter: 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align all to 12h
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
-    sma_20_aligned = align_htf_to_ltf(prices, df_1d, sma_20)
-    plus_di_aligned = align_htf_to_ltf(prices, df_1w, plus_di)
-    minus_di_aligned = align_htf_to_ltf(prices, df_1w, minus_di)
+    # Get 12h data for EMA34 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    
+    # Calculate EMA34 on 12h
+    ema_34 = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_rising = ema_34 > np.roll(ema_34, 1)
+    ema_34_falling = ema_34 < np.roll(ema_34, 1)
+    # Handle first value
+    ema_34_rising[0] = False
+    ema_34_falling[0] = False
+    
+    # Align all to 4h
+    highest_high_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high}), highest_high)
+    lowest_low_aligned = align_htf_to_ltf(prices, pd.DataFrame({'low': low}), lowest_low)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, pd.DataFrame({'volume': volume}), vol_ma_20)
+    ema_34_aligned = align_htf_to_ltf(prices, df_12h, ema_34)
+    ema_34_rising_aligned = align_htf_to_ltf(prices, df_12h, ema_34_rising)
+    ema_34_falling_aligned = align_htf_to_ltf(prices, df_12h, ema_34_falling)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -80,50 +57,46 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or
-            np.isnan(sma_20_aligned[i]) or np.isnan(plus_di_aligned[i]) or 
-            np.isnan(minus_di_aligned[i])):
+        if (np.isnan(highest_high_aligned[i]) or np.isnan(lowest_low_aligned[i]) or 
+            np.isnan(vol_ma_20_aligned[i]) or np.isnan(ema_34_aligned[i]) or
+            np.isnan(ema_34_rising_aligned[i]) or np.isnan(ema_34_falling_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend direction from ADX components
-        uptrend = plus_di_aligned[i] > minus_di_aligned[i]
-        downtrend = plus_di_aligned[i] < minus_di_aligned[i]
-        strong_trend = adx_aligned[i] > 25
-        
         if position == 0:
-            # Long: price at lower BB, volume spike, strong trend
-            if (close[i] <= lower_bb_aligned[i] and 
+            # Long: breakout above upper Donchian with volume spike and rising 12h EMA34
+            if (close[i] > highest_high_aligned[i] and 
                 volume[i] > vol_ma_20_aligned[i] * 1.5 and 
-                strong_trend and uptrend):
-                signals[i] = 0.25
+                ema_34_rising_aligned[i]):
+                signals[i] = 0.30
                 position = 1
-            # Short: price at upper BB, volume spike, strong trend
-            elif (close[i] >= upper_bb_aligned[i] and 
+            # Short: breakdown below lower Donchian with volume spike and falling 12h EMA34
+            elif (close[i] < lowest_low_aligned[i] and 
                   volume[i] > vol_ma_20_aligned[i] * 1.5 and 
-                  strong_trend and downtrend):
-                signals[i] = -0.25
+                  ema_34_falling_aligned[i]):
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses above SMA
-            if close[i] >= sma_20_aligned[i]:
+            # Exit long: price touches lower Donchian or volume dries up
+            if (close[i] < lowest_low_aligned[i] or 
+                volume[i] < vol_ma_20_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Exit short: price crosses below SMA
-            if close[i] <= sma_20_aligned[i]:
+            # Exit short: price touches upper Donchian or volume dries up
+            if (close[i] > highest_high_aligned[i] or 
+                volume[i] < vol_ma_20_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "12h_BBands20_2_TrendFilter_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_Volume_EMA34Trend"
+timeframe = "4h"
 leverage = 1.0
