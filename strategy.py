@@ -1,3 +1,9 @@
+# 12h_WeeklyEMA34_PivotBreakout_Volume
+# Hypothesis: Weekly EMA(34) defines long-term trend, weekly pivot R1/S1 provide breakout levels,
+# volume confirms breakout strength, and volatility filter avoids low-momentum periods.
+# Works in bull (trend-following breakouts) and bear (mean reversion at pivots with volume).
+# Target: 50-150 trades over 4 years (~12-37/year) to stay under fee drag threshold.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,17 +19,11 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
+    # Get weekly data for trend and pivot calculation
     df_1w = get_htf_data(prices, '1w')
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    
-    # Get daily data for pivot points
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
     # Weekly EMA(34) for trend filter
     ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
@@ -50,11 +50,11 @@ def generate_signals(prices):
     r2_1w_prev[0] = np.nan
     s2_1w_prev[0] = np.nan
     
-    # Align weekly pivot levels to 6h timeframe
-    r1_6h = align_htf_to_ltf(prices, df_1w, r1_1w_prev)
-    s1_6h = align_htf_to_ltf(prices, df_1w, s1_1w_prev)
-    r2_6h = align_htf_to_ltf(prices, df_1w, r2_1w_prev)
-    s2_6h = align_htf_to_ltf(prices, df_1w, s2_1w_prev)
+    # Align weekly pivot levels to 12h timeframe
+    r1_12h = align_htf_to_ltf(prices, df_1w, r1_1w_prev)
+    s1_12h = align_htf_to_ltf(prices, df_1w, s1_1w_prev)
+    r2_12h = align_htf_to_ltf(prices, df_1w, r2_1w_prev)
+    s2_12h = align_htf_to_ltf(prices, df_1w, s2_1w_prev)
     
     # Volume confirmation: current volume > 1.8 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -80,10 +80,10 @@ def generate_signals(prices):
         if (np.isnan(volume_ma20[i]) or 
             np.isnan(atr[i]) or 
             np.isnan(atr_ma10[i]) or 
-            np.isnan(r1_6h[i]) or 
-            np.isnan(s1_6h[i]) or
-            np.isnan(r2_6h[i]) or
-            np.isnan(s2_6h[i]) or
+            np.isnan(r1_12h[i]) or 
+            np.isnan(s1_12h[i]) or
+            np.isnan(r2_12h[i]) or
+            np.isnan(s2_12h[i]) or
             np.isnan(ema34_1w_aligned[i]) or
             np.isnan(std_1w_aligned[i])):
             signals[i] = 0.0
@@ -101,12 +101,12 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price breaks above R1 with volume, volatility AND weekly uptrend
-            if (close[i] > r1_6h[i] and volume_filter and volatility_filter and 
+            if (close[i] > r1_12h[i] and volume_filter and volatility_filter and 
                 trend_up and vol_filter):
                 signals[i] = 0.25
                 position = 1
             # Short: price breaks below S1 with volume, volatility AND weekly downtrend
-            elif (close[i] < s1_6h[i] and volume_filter and volatility_filter and 
+            elif (close[i] < s1_12h[i] and volume_filter and volatility_filter and 
                   trend_down and vol_filter):
                 signals[i] = -0.25
                 position = -1
@@ -129,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6d_WeeklyEMA34_PivotBreakout_Volume"
-timeframe = "6h"
+name = "12h_WeeklyEMA34_PivotBreakout_Volume"
+timeframe = "12h"
 leverage = 1.0
