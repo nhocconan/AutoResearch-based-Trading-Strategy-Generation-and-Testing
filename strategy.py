@@ -1,20 +1,50 @@
 #!/usr/bin/env python3
 """
-12h_1w_MultiTimeframe_PivotBreakout_V1
-Hypothesis: Combine 1w weekly pivots (CPR) with 1d trend filter and volume confirmation on 12h timeframe. 
-Buy when price breaks above weekly CPR pivot with 1d EMA200 uptrend and volume > 1.5x average. 
-Sell when breaks below weekly CPR with 1d EMA200 downtrend. 
-Exit on opposite CPR break or EMA200 trend reversal. 
-Designed for low frequency (<15 trades/year) to minimize fee decay and capture major trend shifts.
+4h_4h1d_WeeklyDonchian20_Breakout_VolumeConfirm_v1
+Hypothesis: On 4h timeframe, buy when price breaks above weekly Donchian high (20-period) with volume confirmation (>1.5x average volume), sell when breaks below weekly Donchian low. Use daily ADX > 25 as trend filter to avoid false breakouts in ranging markets. Exit when ADX < 20 (trend weakening) or opposite breakout occurs. Designed for low frequency (target 15-40 trades/year) to minimize fee drag and work in both bull and bear markets by capturing strong trends.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_adx(high, low, close, period=14):
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
+    
+    # Directional Movement
+    up_move = high[1:] - high[:-1]
+    down_move = low[:-1] - low[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
+    
+    # Wilder smoothing
+    def smooth_wilder(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        result[period-1] = np.nansum(arr[1:period])
+        for i in range(period, len(arr)):
+            if not np.isnan(arr[i]) and not np.isnan(result[i-1]):
+                result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
+    
+    atr = smooth_wilder(tr, period)
+    plus_di = 100 * smooth_wilder(plus_dm, period) / atr
+    minus_di = 100 * smooth_wilder(minus_dm, period) / atr
+    dx = np.where((plus_di + minus_di) > 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = smooth_wilder(dx, period)
+    return adx
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,72 +52,96 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Weekly Data (CPR calculation) ===
+    # === Weekly Data (HTF for trend and channels) ===
     df_1w = get_htf_data(prices, '1w')
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # Weekly Central Pivot Range (CPR)
-    pivot = (high_1w + low_1w + close_1w) / 3.0
-    bc = (high_1w + low_1w) / 2.0  # Bottom of CPR
-    tc = (pivot * 2) - bc          # Top of CPR
-    tc = np.maximum(tc, bc)        # Ensure TC >= BC
+    # Calculate weekly ADX (14-period)
+    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    bc_aligned = align_htf_to_ltf(prices, df_1w, bc)
-    tc_aligned = align_htf_to_ltf(prices, df_1w, tc)
+    # Weekly Donchian channels (20-period)
+    def rolling_max(arr, window):
+        result = np.full_like(arr, np.nan)
+        for i in range(len(arr)):
+            if i < window - 1:
+                continue
+            window_slice = arr[max(0, i-window+1):i+1]
+            if np.all(np.isnan(window_slice)):
+                result[i] = np.nan
+            else:
+                result[i] = np.nanmax(window_slice)
+        return result
     
-    # === Daily Data (Trend Filter) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    def rolling_min(arr, window):
+        result = np.full_like(arr, np.nan)
+        for i in range(len(arr)):
+            if i < window - 1:
+                continue
+            window_slice = arr[max(0, i-window+1):i+1]
+            if np.all(np.isnan(window_slice)):
+                result[i] = np.nan
+            else:
+                result[i] = np.nanmin(window_slice)
+        return result
     
-    # === Volume Confirmation (12h) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    high_20_1w = rolling_max(high_1w, 20)
+    low_20_1w = rolling_min(low_1w, 20)
+    high_20_1w_aligned = align_htf_to_ltf(prices, df_1w, high_20_1w)
+    low_20_1w_aligned = align_htf_to_ltf(prices, df_1w, low_20_1w)
+    
+    # Volume confirmation on weekly
+    vol_ma_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
     
     signals = np.zeros(n)
-    warmup = 50
+    
+    # Warmup period
+    warmup = 60
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or 
-            np.isnan(bc_aligned[i]) or
-            np.isnan(tc_aligned[i]) or
-            np.isnan(ema_200_1d_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(adx_1w_aligned[i]) or 
+            np.isnan(high_20_1w_aligned[i]) or
+            np.isnan(low_20_1w_aligned[i]) or
+            np.isnan(vol_ma_1w_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Volume confirmation: current volume > 1.5x average
-        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
+        # Get current weekly bar's volume for confirmation
+        vol_1w_current = align_htf_to_ltf(prices, df_1w, volume_1w)[i]
+        vol_confirmed = vol_1w_current > 1.5 * vol_ma_1w_aligned[i]
         
-        # Trend filter from daily EMA200
-        uptrend = close[i] > ema_200_1d_aligned[i]
-        downtrend = close[i] < ema_200_1d_aligned[i]
+        # Trend filter: only trade when ADX > 25 (strong trend)
+        strong_trend = adx_1w_aligned[i] > 25
+        
+        # Exit when trend weakens (ADX < 20)
+        weak_trend = adx_1w_aligned[i] < 20
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price above TC (top of CPR) with uptrend and volume
-            if close[i] > tc_aligned[i] and uptrend and vol_confirmed:
+            # Long: price breaks above 20-period weekly high with volume confirmation and strong trend
+            if close[i] > high_20_1w_aligned[i] and vol_confirmed and strong_trend:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price below BC (bottom of CPR) with downtrend and volume
-            elif close[i] < bc_aligned[i] and downtrend and vol_confirmed:
+            # Short: price breaks below 20-period weekly low with volume confirmation and strong trend
+            elif close[i] < low_20_1w_aligned[i] and vol_confirmed and strong_trend:
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit: price below BC (break CPR down) OR trend reversal
-            if close[i] < bc_aligned[i] or not uptrend:
+            # Exit conditions: trend weakening OR opposite breakout
+            if weak_trend or close[i] < low_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -95,8 +149,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price above TC (break CPR up) OR trend reversal
-            if close[i] > tc_aligned[i] or not downtrend:
+            # Exit conditions: trend weakening OR opposite breakout
+            if weak_trend or close[i] > high_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -105,6 +159,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w_MultiTimeframe_PivotBreakout_V1"
-timeframe = "12h"
+name = "4h_4h1d_WeeklyDonchian20_Breakout_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
