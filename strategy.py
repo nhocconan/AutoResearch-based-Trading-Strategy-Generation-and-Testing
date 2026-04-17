@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivot calculation (HTF: 1d for daily pivots)
+    # Get 1d data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -26,32 +26,26 @@ def generate_signals(prices):
     s1_1d = 2 * pivot_1d - high_1d
     r2_1d = pivot_1d + range_1d
     s2_1d = pivot_1d - range_1d
+    r3_1d = high_1d + 2 * (pivot_1d - low_1d)
+    s3_1d = low_1d - 2 * (high_1d - pivot_1d)
     
-    # Align 1d pivot levels to daily timeframe
+    # Align 1d pivot levels to 6h
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
     s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
-    # Get 1d EMA200 for long-term trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    
-    # Volume filter: current volume > 1.8x 20-period average (moderate to control trade frequency)
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.8)
+    volume_filter = volume > (vol_ma * 1.5)
     
-    # Volatility filter: avoid low volatility periods (ATR ratio)
-    tr1 = high - low
-    tr2 = np.abs(high - np.concatenate([[np.nan], closed]))
-    tr3 = np.abs(low - np.concatenate([[np.nan], closed]))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    atr10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
-    atr30 = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
-    atr_ratio = atr10 / atr30
-    vol_filter = atr_ratio > 0.3  # Only trade when volatility is not too low
+    # Trend filter: price > 1d EMA50
+    close_1d_series = pd.Series(close_1d)
+    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -61,32 +55,32 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
-            np.isnan(r2_1d_aligned[i]) or np.isnan(s2_1d_aligned[i]) or
-            np.isnan(ema200_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr_ratio[i])):
+            np.isnan(r2_1d_aligned[i]) or np.isnan(s2_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or
+            np.isnan(s3_1d_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with volume, above 1d EMA200 (bullish bias), and sufficient volatility
-            if close[i] > r1_1d_aligned[i] and volume_filter[i] and close[i] > ema200_1d_aligned[i] and vol_filter[i]:
+            # Long: price breaks above R2 with volume and above 1d EMA50
+            if close[i] > r2_1d_aligned[i] and volume_filter[i] and close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume, below 1d EMA200 (bearish bias), and sufficient volatility
-            elif close[i] < s1_1d_aligned[i] and volume_filter[i] and close[i] < ema200_1d_aligned[i] and vol_filter[i]:
+            # Short: price breaks below S2 with volume and below 1d EMA50
+            elif close[i] < s2_1d_aligned[i] and volume_filter[i] and close[i] < ema50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below S1 (conservative exit)
-            if close[i] < s1_1d_aligned[i]:
+            # Exit long: price breaks below R1 or above R3 (take profit)
+            if close[i] < r1_1d_aligned[i] or close[i] > r3_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above R1 (conservative exit)
-            if close[i] > r1_1d_aligned[i]:
+            # Exit short: price breaks above S1 or below S3 (take profit)
+            if close[i] > s1_1d_aligned[i] or close[i] < s3_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Pivot_R1S1_Volume_EMA200_VolFilter"
-timeframe = "1d"
+name = "6h_1dPivot_R2S2_R3S3_Breakout_Volume_EMA50"
+timeframe = "6h"
 leverage = 1.0
