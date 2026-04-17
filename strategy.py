@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_Pivot_R1_S1_Breakout_Volume_Confirm_v1
-Breakout above Camarilla R1 or below S1 on 4h with volume confirmation (1.5x avg volume).
-Trend filter: price above/below 12h EMA100 to avoid counter-trend trades.
-Exit when price returns to Camarilla Pivot point or volume drops below average.
-Designed to capture institutional breakouts with volume confirmation in both bull and bear markets.
-Target: 50-150 total trades over 4 years (12-37/year).
+1h_Aroon_Slope_Trend_v1
+Aroon(25) for trend strength: Aroon-Up > 60 for long, Aroon-Down > 60 for short.
+1d EMA50 filter: price above/below 1d EMA50 for trend alignment.
+Session filter: 08-20 UTC to avoid low-volume periods.
+Target: 60-150 total trades over 4 years (15-37/year).
 """
 
 import numpy as np
@@ -14,115 +13,101 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # === Camarilla Pivot Levels (using previous day's OHLC) ===
-    # For 4h chart, we need daily OHLC to calculate Camarilla levels
-    # We'll use 1d data to get proper daily OHLC
+    # === Aroon(25) ===
+    # Aroon-Up: ((25 - periods since 25-period high) / 25) * 100
+    # Aroon-Down: ((25 - periods since 25-period low) / 25) * 100
+    period = 25
+    aroon_up = np.full(n, np.nan)
+    aroon_down = np.full(n, np.nan)
+    
+    for i in range(period - 1, n):
+        # Find highest high in last 'period' bars
+        highest_high_idx = i - np.argmax(high[i - period + 1:i + 1][::-1])  # most recent
+        # Find lowest low in last 'period' bars
+        lowest_low_idx = i - np.argmin(low[i - period + 1:i + 1][::-1])    # most recent
+        
+        aroon_up[i] = ((period - (i - highest_high_idx)) / period) * 100
+        aroon_down[i] = ((period - (i - lowest_low_idx)) / period) * 100
+    
+    # === 1d EMA50 for trend filter ===
     df_1d = get_htf_data(prices, '1d')
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # Camarilla formulas:
-    # H = high, L = low, C = close of previous day
-    # R4 = C + (H-L)*1.1/2
-    # R3 = C + (H-L)*1.1/4
-    # R2 = C + (H-L)*1.1/6
-    # R1 = C + (H-L)*1.1/12
-    # PP = (H+L+C)/3
-    # S1 = C - (H-L)*1.1/12
-    # S2 = C - (H-L)*1.1/6
-    # S3 = C - (H-L)*1.1/4
-    # S4 = C - (H-L)*1.1/2
-    
-    # We need to align daily data to 4h bars
-    # Get daily OHLC values
-    daily_open = df_1d['open'].values
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
-    
-    # Calculate Camarilla levels for each day
-    camarilla_pp = (daily_high + daily_low + daily_close) / 3.0
-    camarilla_r1 = daily_close + (daily_high - daily_low) * 1.1 / 12.0
-    camarilla_s1 = daily_close - (daily_high - daily_low) * 1.1 / 12.0
-    
-    # Align daily Camarilla levels to 4h timeframe
-    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # === Volume Average (20-period) ===
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # === 12h EMA100 for trend filter ===
-    df_12h = get_htf_data(prices, '12h')
-    ema_100_12h = pd.Series(df_12h['close'].values).ewm(span=100, adjust=False, min_periods=100).mean().values
-    ema_100_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_100_12h)
+    # Pre-compute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 100
+    warmup = 60
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(vol_avg[i]) or 
-            np.isnan(ema_100_12h_aligned[i])):
+        if (np.isnan(aroon_up[i]) or 
+            np.isnan(aroon_down[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
+            signals[i] = 0.0
+            position = 0
+            continue
+        
+        # Session filter: only trade during 08-20 UTC
+        if not in_session[i]:
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price breaks above R1 with volume confirmation and above 12h EMA100
-            if (close[i] > camarilla_r1_aligned[i] and 
-                volume[i] > vol_avg[i] * 1.5 and 
-                close[i] > ema_100_12h_aligned[i]):
-                signals[i] = 0.25
+            # Long: Aroon-Up > 60, Aroon-Down < 40 (strong uptrend), price above 1d EMA50
+            if (aroon_up[i] > 60 and 
+                aroon_down[i] < 40 and 
+                close[i] > ema_50_1d_aligned[i]):
+                signals[i] = 0.20
                 position = 1
                 continue
-            # Short: price breaks below S1 with volume confirmation and below 12h EMA100
-            elif (close[i] < camarilla_s1_aligned[i] and 
-                  volume[i] > vol_avg[i] * 1.5 and 
-                  close[i] < ema_100_12h_aligned[i]):
-                signals[i] = -0.25
+            # Short: Aroon-Down > 60, Aroon-Up < 40 (strong downtrend), price below 1d EMA50
+            elif (aroon_down[i] > 60 and 
+                  aroon_up[i] < 40 and 
+                  close[i] < ema_50_1d_aligned[i]):
+                signals[i] = -0.20
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price returns to Pivot point OR volume drops below average
-            if (close[i] <= camarilla_pp_aligned[i] or 
-                volume[i] < vol_avg[i]):
+            # Exit long: Aroon-Down > 60 (downtrend emerging) OR Aroon-Up < 40 (weakening uptrend)
+            if (aroon_down[i] > 60 or 
+                aroon_up[i] < 40):
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: price returns to Pivot point OR volume drops below average
-            if (close[i] >= camarilla_pp_aligned[i] or 
-                volume[i] < vol_avg[i]):
+            # Exit short: Aroon-Up > 60 (uptrend emerging) OR Aroon-Down < 40 (weakening downtrend)
+            if (aroon_up[i] > 60 or 
+                aroon_down[i] < 40):
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Camarilla_Pivot_R1_S1_Breakout_Volume_Confirm_v1"
-timeframe = "4h"
+name = "1h_Aroon_Slope_Trend_v1"
+timeframe = "1h"
 leverage = 1.0
