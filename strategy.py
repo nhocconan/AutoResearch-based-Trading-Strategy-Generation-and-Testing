@@ -13,25 +13,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points (1d)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get weekly data for pivot points (1w)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate daily pivot points (standard formula)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
-    r2_1d = pivot_1d + (high_1d - low_1d)
-    s2_1d = pivot_1d - (high_1d - low_1d)
+    # Calculate weekly pivot points (standard formula)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    r2_1w = pivot_1w + (high_1w - low_1w)
+    s2_1w = pivot_1w - (high_1w - low_1w)
     
-    # Align daily pivot levels to 12h timeframe (use previous day's levels)
-    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_12h = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_12h = align_htf_to_ltf(prices, df_1d, s2_1d)
+    # Align weekly pivot levels to 4h timeframe (use previous week's levels)
+    pivot_4h = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_4h = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_4h = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r2_4h = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_4h = align_htf_to_ltf(prices, df_1w, s2_1w)
     
     # Volume filter: current volume > 1.5 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -57,8 +57,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or
-            np.isnan(r2_12h[i]) or np.isnan(s2_12h[i]) or np.isnan(volume_ma20[i]) or np.isnan(chop[i])):
+        if (np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
+            np.isnan(r2_4h[i]) or np.isnan(s2_4h[i]) or np.isnan(volume_ma20[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
@@ -70,17 +70,17 @@ def generate_signals(prices):
         
         if position == 0:
             # Long breakout: price breaks above R1 with volume and trend filter
-            if close[i] > r1_12h[i] and volume_filter and trend_filter:
+            if close[i] > r1_4h[i] and volume_filter and trend_filter:
                 signals[i] = 0.25
                 position = 1
             # Short breakdown: price breaks below S1 with volume and trend filter
-            elif close[i] < s1_12h[i] and volume_filter and trend_filter:
+            elif close[i] < s1_4h[i] and volume_filter and trend_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit long: price falls below S2 (deeper level) OR chop increases (range developing)
-            if close[i] < s2_12h[i] or chop[i] > 61.8:
+            if close[i] < s2_4h[i] or chop[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,7 +88,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit short: price rises above R2 OR chop increases (range developing)
-            if close[i] > r2_12h[i] or chop[i] > 61.8:
+            if close[i] > r2_4h[i] or chop[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_DailyPivot_Breakout_Volume_TrendFilter"
-timeframe = "12h"
+name = "4h_WeeklyPivot_Breakout_Volume_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
