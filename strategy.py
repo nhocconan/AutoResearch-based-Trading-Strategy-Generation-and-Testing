@@ -13,39 +13,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points
+    # Get daily data for 1d ATR and Donchian channels
     df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate 14-day ATR on daily data for volatility
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    tr = np.maximum(high_1d - low_1d, 
+                    np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
+                               np.abs(low_1d - np.roll(close_1d, 1))))
+    tr[0] = high_1d[0] - low_1d[0]
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate daily pivot points
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
-    r2_1d = pivot_1d + (high_1d - low_1d)
-    s2_1d = pivot_1d - (high_1d - low_1d)
+    # Calculate daily Donchian channels (20-day)
+    donch_high_20_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low_20_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donch_high_20_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_20_1d)
+    donch_low_20_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_20_1d)
     
-    # Align pivot levels to 6h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    
-    # Get weekly data for trend direction
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly EMA20 for trend
-    close_1w_series = pd.Series(close_1w)
-    ema20_1w = close_1w_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
-    
-    # Calculate 6h ATR for volatility filter
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate 4-hour volume SMA for volume confirmation
+    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -54,38 +43,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(r2_1d_aligned[i]) or 
-            np.isnan(s2_1d_aligned[i]) or np.isnan(ema20_1w_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(donch_high_20_1d_aligned[i]) or 
+            np.isnan(donch_low_20_1d_aligned[i]) or 
+            np.isnan(atr_14_1d_aligned[i]) or 
+            np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below weekly EMA20
-        uptrend = close[i] > ema20_1w_aligned[i]
-        downtrend = close[i] < ema20_1w_aligned[i]
+        # Volume filter: current volume > 1.5 * 20-period average
+        volume_filter = volume[i] > (1.5 * vol_sma_20[i])
         
         if position == 0:
-            # Long: price breaks above R1 with uptrend
-            if close[i] > r1_1d_aligned[i] and uptrend:
+            # Long: price breaks above daily Donchian high with volume
+            if close[i] > donch_high_20_1d_aligned[i] and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with downtrend
-            elif close[i] < s1_1d_aligned[i] and downtrend:
+            # Short: price breaks below daily Donchian low with volume
+            elif close[i] < donch_low_20_1d_aligned[i] and volume_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls below pivot or trend reverses
-            if close[i] < pivot_1d_aligned[i] or not uptrend:
+            # Exit long: price returns to midpoint of Donchian channel
+            midpoint = (donch_high_20_1d_aligned[i] + donch_low_20_1d_aligned[i]) / 2
+            if close[i] < midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises above pivot or trend reverses
-            if close[i] > pivot_1d_aligned[i] or not downtrend:
+            # Exit short: price returns to midpoint of Donchian channel
+            midpoint = (donch_high_20_1d_aligned[i] + donch_low_20_1d_aligned[i]) / 2
+            if close[i] > midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Pivot_R1_S1_Breakout_WeeklyTrend"
-timeframe = "6h"
+name = "4h_DailyDonchian20_Breakout_MidpointExit_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
