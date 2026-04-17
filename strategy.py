@@ -13,44 +13,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    
-    # 4h EMA50 for trend filter
-    close_4h_series = pd.Series(close_4h)
-    ema50_4h = close_4h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    
-    # Get daily data for ATR-based volatility filter
+    # Get daily data for 20-period EMA (trend filter)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Daily ATR(14) for volatility filter
-    high_low_1d = high_1d - low_1d
-    high_close_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    low_close_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(high_low_1d, np.maximum(high_close_1d, low_close_1d))
-    tr_1d[0] = high_low_1d[0]
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Daily EMA20 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
-    # 1h Bollinger Bands for entry timing
-    close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
+    # Get daily data for 14-period ATR (volatility filter)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_for_atr = df_1d['close'].values
+    
+    # Calculate ATR on daily timeframe
+    high_low = high_1d - low_1d
+    high_close = np.abs(high_1d - np.roll(close_1d_for_atr, 1))
+    low_close = np.abs(low_1d - np.roll(close_1d_for_atr, 1))
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    tr[0] = high_low[0]
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    
+    # Get 12h data for Donchian channel (price channel)
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    # 12h Donchian(20) channel
+    high_12h_series = pd.Series(high_12h)
+    low_12h_series = pd.Series(low_12h)
+    donch_high_20 = high_12h_series.rolling(window=20, min_periods=20).max().values
+    donch_low_20 = low_12h_series.rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian levels to 12h timeframe
+    donch_high_20_aligned = align_htf_to_ltf(prices, df_12h, donch_high_20)
+    donch_low_20_aligned = align_htf_to_ltf(prices, df_12h, donch_low_20)
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma * 1.5)
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -59,44 +62,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(vol_ma[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Apply session filter
-        if not session_filter[i]:
+        if (np.isnan(ema20_1d_aligned[i]) or np.isnan(donch_high_20_aligned[i]) or 
+            np.isnan(donch_low_20_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr_14_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price touches lower Bollinger Band in uptrend with volume
-            if close[i] <= bb_lower[i] and close[i] > ema50_4h_aligned[i] and volume_filter[i]:
-                signals[i] = 0.20
+            # Long: price breaks above 12h Donchian high with volume and above daily EMA20
+            if close[i] > donch_high_20_aligned[i] and volume_filter[i] and close[i] > ema20_1d_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price touches upper Bollinger Band in downtrend with volume
-            elif close[i] >= bb_upper[i] and close[i] < ema50_4h_aligned[i] and volume_filter[i]:
-                signals[i] = -0.20
+            # Short: price breaks below 12h Donchian low with volume and below daily EMA20
+            elif close[i] < donch_low_20_aligned[i] and volume_filter[i] and close[i] < ema20_1d_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price touches middle Bollinger Band or volatility filter fails
-            if close[i] >= bb_middle[i] or atr_1d_aligned[i] < (pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().iloc[i] * 0.5 if i >= 14 else 0):
+            # Exit long: price breaks below 12h Donchian low OR ATR-based stop
+            if close[i] < donch_low_20_aligned[i] or close[i] < (high[max(0, i-1)] - 1.5 * atr_14_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price touches middle Bollinger Band or volatility filter fails
-            if close[i] <= bb_middle[i] or atr_1d_aligned[i] < (pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().iloc[i] * 0.5 if i >= 14 else 0):
+            # Exit short: price breaks above 12h Donchian high OR ATR-based stop
+            if close[i] > donch_high_20_aligned[i] or close[i] > (low[max(0, i-1)] + 1.5 * atr_14_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_BollingerBandTouch_4hEMA50_Trend_Volume_Session"
-timeframe = "1h"
+name = "12h_Donchian20_12h_DailyEMA20_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
