@@ -1,10 +1,4 @@
-# 4h_KAMA_Trend_With_12h_Trend_Filter
-# Hypothesis: KAMA adapts to market efficiency, reducing whipsaw in chop and catching trends.
-# Long when KAMA slope turns up + price > KAMA + volume > 1.5x average + 12h close > 12h EMA34.
-# Short when KAMA slope turns down + price < KAMA + volume > 1.5x average + 12h close < 12h EMA34.
-# Exit on opposite signal. Position size: ±0.25. Uses 4h primary with 12h trend filter.
-# Designed to work in both bull (trend capture) and bear (avoids false signals via 12h filter).
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -19,84 +13,102 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average)
-    def kama(close, er_length=10, fast=2, slow=30):
-        change = np.abs(np.diff(close, prepend=close[0]))
-        volatility = np.abs(np.diff(close))
-        er = np.zeros_like(close)
-        for i in range(1, len(close)):
-            if volatility[i-er_length+1:i+1].sum() > 0:
-                er[i] = change[i-er_length+1:i+1].sum() / volatility[i-er_length+1:i+1].sum()
-            else:
-                er[i] = 0
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        kama = np.zeros_like(close)
-        kama[0] = close[0]
-        for i in range(1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
+    # Calculate ATR(14) for volatility
+    def calculate_atr(high, low, close, period=14):
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], 
+                             np.maximum(tr1, np.maximum(tr2, tr3))])
+        atr = np.zeros_like(close)
+        atr[period-1] = np.mean(tr[:period])
+        for i in range(period, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        return atr
     
-    kama_vals = kama(close, 10, 2, 30)
+    atr = calculate_atr(high, low, close, 14)
     
-    # Calculate KAMA slope (1-period change)
-    kama_slope = np.diff(kama_vals, prepend=0)
+    # Calculate daily Donchian(20) channels
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Volume confirmation (10-period MA on 4h)
-    volume_ma10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    # Calculate 20-period high and low
+    high_20 = np.full_like(high_1d, np.nan)
+    low_20 = np.full_like(low_1d, np.nan)
+    for i in range(20, len(high_1d)):
+        high_20[i] = np.max(high_1d[i-20:i])
+        low_20[i] = np.min(low_1d[i-20:i])
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Align Donchian channels to 6h timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     
-    # Calculate 12h EMA34 for trend filter
-    close_series_12h = pd.Series(close_12h)
-    ema34_12h = close_series_12h.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate daily ATR(14) for volatility filter
+    def calculate_atr_series(high, low, close, period=14):
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], 
+                             np.maximum(tr1, np.maximum(tr2, tr3))])
+        atr_series = np.zeros_like(close)
+        atr_series[period-1] = np.mean(tr[:period])
+        for i in range(period, len(tr)):
+            atr_series[i] = (atr_series[i-1] * (period-1) + tr[i]) / period
+        return atr_series
     
-    # Align 12h EMA to 4h timeframe
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    atr_1d = calculate_atr_series(high_1d, low_1d, df_1d['close'].values, 14)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # Volume filter: 20-period average
+    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = max(10, 10, 34)  # KAMA, volume MA10, EMA34
+    start_idx = max(20, 20, 20)  # Donchian channels and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(kama_vals[i]) or 
-            np.isnan(kama_slope[i]) or 
-            np.isnan(volume_ma10[i]) or 
-            np.isnan(ema34_12h_aligned[i])):
+        if (np.isnan(high_20_aligned[i]) or 
+            np.isnan(low_20_aligned[i]) or 
+            np.isnan(volume_ma20[i]) or 
+            np.isnan(atr[i]) or 
+            np.isnan(atr_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 10-period average
-        volume_filter = volume[i] > (1.5 * volume_ma10[i])
+        # Volatility filter: current ATR > 0.5 * daily ATR (avoid extremely low vol)
+        vol_filter = atr[i] > (0.5 * atr_1d_aligned[i])
         
-        # KAMA-based signals
-        kama_bullish = kama_slope[i] > 0 and close[i] > kama_vals[i]
-        kama_bearish = kama_slope[i] < 0 and close[i] < kama_vals[i]
+        # Volume filter: current volume > 1.5 * 20-period average
+        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        
+        # Donchian breakout conditions
+        breakout_up = close[i] > high_20_aligned[i]
+        breakout_down = close[i] < low_20_aligned[i]
         
         if position == 0:
-            # Long: KAMA bullish + volume filter + 12h uptrend
-            if kama_bullish and volume_filter and close[i] > ema34_12h_aligned[i]:
+            # Long: upward breakout + volume filter + volatility filter
+            if breakout_up and volume_filter and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA bearish + volume filter + 12h downtrend
-            elif kama_bearish and volume_filter and close[i] < ema34_12h_aligned[i]:
+            # Short: downward breakout + volume filter + volatility filter
+            elif breakout_down and volume_filter and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: KAMA turns bearish
-            if kama_bearish:
+            # Exit long: price closes below the lower Donchian band
+            if close[i] < low_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: KAMA turns bullish
-            if kama_bullish:
+            # Exit short: price closes above the upper Donchian band
+            if close[i] > high_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_Trend_With_12h_Trend_Filter"
-timeframe = "4h"
+name = "6h_Donchian20_Breakout_Volume_VolatilityFilter"
+timeframe = "6h"
 leverage = 1.0
