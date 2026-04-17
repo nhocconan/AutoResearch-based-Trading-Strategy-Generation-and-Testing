@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout + 1d EMA50 trend filter + volume spike confirmation + ATR stoploss.
-Long when price breaks above Donchian upper band AND close > 1d EMA50 AND volume > 2.0x 20-period average.
-Short when price breaks below Donchian lower band AND close < 1d EMA50 AND volume > 2.0x 20-period average.
-Exit when price crosses the Donchian middle band (20-period mean) OR ATR-based stoploss hit.
-Uses 1d HTF for trend filter to improve robustness in both bull and bear markets.
-Target: 20-50 trades/year per symbol to avoid fee drag.
+Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+Long when price breaks above Donchian upper band AND close > 1w EMA50 AND volume > 1.5x 20-period average.
+Short when price breaks below Donchian lower band AND close < 1w EMA50 AND volume > 1.5x 20-period average.
+Exit when price crosses the Donchian middle band (20-period mean).
+Uses 1w HTF for trend filter to improve robustness in both bull and bear markets.
+Target: 15-30 trades/year per symbol to avoid fee drag on daily timeframe.
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,12 +22,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian calculation (primary timeframe)
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    # Get 1d data for Donchian calculation (primary timeframe)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
     # Calculate Donchian channels (20-period)
     def rolling_max(arr, window):
@@ -51,52 +51,38 @@ def generate_signals(prices):
             result[i] = np.mean(arr[i-window+1:i+1])
         return result
     
-    upper_band = rolling_max(high_4h, 20)
-    lower_band = rolling_min(low_4h, 20)
-    middle_band = rolling_mean(close_4h, 20)
+    upper_band = rolling_max(high_1d, 20)
+    lower_band = rolling_min(low_1d, 20)
+    middle_band = rolling_mean(close_1d, 20)
     
-    # Get 1d data for EMA50 trend filter (higher timeframe)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get 1w data for EMA50 trend filter (higher timeframe)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate EMA50 on 1d
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA50 on 1w
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate volume average (20-period) on 4h
-    volume_4h_series = pd.Series(volume_4h)
-    volume_ma_4h = volume_4h_series.rolling(window=20, min_periods=20).mean().values
+    # Calculate volume average (20-period) on 1d
+    volume_1d_series = pd.Series(volume_1d)
+    volume_ma_1d = volume_1d_series.rolling(window=20, min_periods=20).mean().values
     
-    # Calculate ATR (14-period) for stoploss on 4h
-    def calculate_atr(high_arr, low_arr, close_arr, window):
-        """Average True Range"""
-        tr1 = high_arr - low_arr
-        tr2 = np.abs(high_arr - np.roll(close_arr, 1))
-        tr3 = np.abs(low_arr - np.roll(close_arr, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]  # First TR is just high-low
-        atr = pd.Series(tr).ewm(span=window, adjust=False, min_periods=window).mean().values
-        return atr
-    
-    atr = calculate_atr(high_4h, low_4h, close_4h, 14)
-    
-    # Align all indicators to 4h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_4h, upper_band)
-    lower_aligned = align_htf_to_ltf(prices, df_4h, lower_band)
-    middle_aligned = align_htf_to_ltf(prices, df_4h, middle_band)
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_4h, volume_ma_4h)
-    atr_aligned = align_htf_to_ltf(prices, df_4h, atr)
+    # Align all indicators to 1d timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
+    middle_aligned = align_htf_to_ltf(prices, df_1d, middle_band)
+    ema50_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     entry_price = 0.0
     
-    start_idx = 50  # warmup for indicators
+    start_idx = 60  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(middle_aligned[i]) or 
-            np.isnan(ema50_aligned[i]) or np.isnan(volume_ma_aligned[i]) or np.isnan(atr_aligned[i])):
+            np.isnan(ema50_aligned[i]) or np.isnan(volume_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -105,18 +91,17 @@ def generate_signals(prices):
         middle = middle_aligned[i]
         ema50 = ema50_aligned[i]
         vol_ma = volume_ma_aligned[i]
-        atr_val = atr_aligned[i]
         vol = volume[i]
         price = close[i]
         
         if position == 0:
-            # Long: Breakout above upper band + price > 1d EMA50 + volume spike
-            if price > upper and price > ema50 and vol > 2.0 * vol_ma:
+            # Long: Breakout above upper band + price > 1w EMA50 + volume confirmation
+            if price > upper and price > ema50 and vol > 1.5 * vol_ma:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: Breakout below lower band + price < 1d EMA50 + volume spike
-            elif price < lower and price < ema50 and vol > 2.0 * vol_ma:
+            # Short: Breakout below lower band + price < 1w EMA50 + volume confirmation
+            elif price < lower and price < ema50 and vol > 1.5 * vol_ma:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -125,12 +110,8 @@ def generate_signals(prices):
             # Exit conditions for long
             exit_signal = False
             
-            # Exit 1: Price crosses middle band (mean reversion)
+            # Exit: Price crosses middle band (mean reversion)
             if price < middle:
-                exit_signal = True
-            
-            # Exit 2: ATR-based stoploss (2.5 * ATR below entry)
-            elif price < entry_price - 2.5 * atr_val:
                 exit_signal = True
             
             if exit_signal:
@@ -143,12 +124,8 @@ def generate_signals(prices):
             # Exit conditions for short
             exit_signal = False
             
-            # Exit 1: Price crosses middle band (mean reversion)
+            # Exit: Price crosses middle band (mean reversion)
             if price > middle:
-                exit_signal = True
-            
-            # Exit 2: ATR-based stoploss (2.5 * ATR above entry)
-            elif price > entry_price + 2.5 * atr_val:
                 exit_signal = True
             
             if exit_signal:
@@ -159,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA50_VolumeSpike_ATRStop"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_VolumeConfirm"
+timeframe = "1d"
 leverage = 1.0
