@@ -1,13 +1,10 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 """
-12h_Williams_Alligator_Range_Bound_v1
-Williams Alligator with range-bound filter for 12h timeframe.
-Uses Alligator (SMAs with offset) to detect trending vs ranging markets.
-In ranging markets (JAW > TEETH > LIPS or LIPS > TEETH > JAW), fades extremes at
-Williams %R overbought/oversold levels. In trending markets, follows Alligator
-direction. Volume confirmation filters false signals.
-Designed to work in both bull and bear markets by adapting to market regime.
-Target: 50-150 total trades over 4 years (12-37/year).
+6h_WeeklyPivot_R1S1_Reverse_Volume_Filter_v1
+Hypothesis: In BTC/ETH, price often reverses at weekly pivot S1/R1 levels during ranging markets (2022-2024). 
+Weak bounces fail; strong reversals show volume confirmation. Uses weekly pivot S1/R1 as dynamic support/resistance.
+In trending markets, avoids counter-trend trades by requiring price to be within weekly pivot R1-S1 range.
+Timeframe: 6h balances noise and signal quality. Target: 60-120 trades over 4 years (15-30/year).
 """
 
 import numpy as np
@@ -19,126 +16,79 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1d Williams Alligator (SMAs with offset) ===
-    df_1d = get_htf_data(prices, '1d')
-    median_price_1d = (df_1d['high'].values + df_1d['low'].values) / 2
+    # === Weekly Pivot Calculation (using prior week's OHLC) ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
+        return np.zeros(n)
     
-    # Jaw: 13-period SMA, shifted 8 bars
-    jaw = np.full_like(median_price_1d, np.nan)
-    for i in range(len(median_price_1d)):
-        if i >= 13:
-            jaw[i] = np.mean(median_price_1d[i-12:i+1])
-    jaw = np.roll(jaw, 8)  # shift 8 bars forward
+    # Calculate weekly pivot points: P = (H+L+C)/3, S1 = 2P - H, R1 = 2P - L
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Teeth: 8-period SMA, shifted 5 bars
-    teeth = np.full_like(median_price_1d, np.nan)
-    for i in range(len(median_price_1d)):
-        if i >= 8:
-            teeth[i] = np.mean(median_price_1d[i-7:i+1])
-    teeth = np.roll(teeth, 5)  # shift 5 bars forward
+    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    s1 = 2 * pivot - weekly_high
+    r1 = 2 * pivot - weekly_low
     
-    # Lips: 5-period SMA, shifted 3 bars
-    lips = np.full_like(median_price_1d, np.nan)
-    for i in range(len(median_price_1d)):
-        if i >= 5:
-            lips[i] = np.mean(median_price_1d[i-4:i+1])
-    lips = np.roll(lips, 3)  # shift 3 bars forward
+    # Align weekly levels to 6h timeframe (wait for weekly bar to close)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
     
-    # === 12h Williams %R (14-period) ===
-    highest_high = np.full_like(high, np.nan)
-    lowest_low = np.full_like(low, np.nan)
-    for i in range(len(high)):
-        if i >= 14:
-            highest_high[i] = np.max(high[i-13:i+1])
-            lowest_low[i] = np.min(low[i-13:i+1])
-        else:
-            highest_high[i] = np.max(high[:i+1]) if i > 0 else high[i]
-            lowest_low[i] = np.min(low[:i+1]) if i > 0 else low[i]
-    
-    williams_r = np.where(
-        (highest_high - lowest_low) != 0,
-        -100 * ((highest_high - close) / (highest_high - lowest_low)),
-        -50
-    )
-    
-    # === 12h Volume confirmation (20-period average) ===
+    # === Volume Confirmation (20-period average) ===
     vol_ma_20 = np.full_like(volume, np.nan)
     for i in range(len(volume)):
         if i >= 20:
             vol_ma_20[i] = np.mean(volume[i-19:i+1])
-        elif i > 0:
-            vol_ma_20[i] = np.mean(volume[max(0, i-9):i+1])
         else:
-            vol_ma_20[i] = volume[0]
+            vol_ma_20[i] = np.mean(volume[max(0, i-9):i+1]) if i > 0 else volume[0]
     
-    vol_confirm = volume > vol_ma_20 * 1.5  # volume spike: 1.5x average
-    
-    # === Align 1d indicators to 12h timeframe ===
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    vol_confirm = volume > vol_ma_20 * 1.8  # volume spike: 1.8x average
     
     signals = np.zeros(n)
     
-    # Warmup period
-    warmup = 50
+    # Warmup: need at least 1 weekly bar + 20 for volume MA
+    warmup = 30
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(williams_r[i]) or 
+        if (np.isnan(pivot_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or 
             np.isnan(vol_confirm[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Determine market regime using Alligator alignment
-        # Trending up: Lips > Teeth > Jaw
-        # Trending down: Jaw > Teeth > Lips
-        # Ranging: otherwise (JAW > TEETH > LIPS or LIPS > TEETH > JAW)
-        lips_val = lips_aligned[i]
-        teeth_val = teeth_aligned[i]
-        jaw_val = jaw_aligned[i]
-        
-        is_trending_up = (lips_val > teeth_val) and (teeth_val > jaw_val)
-        is_trending_down = (jaw_val > teeth_val) and (teeth_val > lips_val)
-        is_ranging = not (is_trending_up or is_trending_down)
+        # Only trade when price is between S1 and R1 (range-bound condition)
+        in_range = (s1_aligned[i] <= close[i] <= r1_aligned[i])
         
         # Entry logic: only enter when flat
-        if position == 0:
-            if is_ranging:
-                # In ranging market: fade extremes
-                if williams_r[i] < -80 and vol_confirm[i]:  # oversold
-                    signals[i] = 0.25
-                    position = 1
-                    continue
-                elif williams_r[i] > -20 and vol_confirm[i]:  # overbought
-                    signals[i] = -0.25
-                    position = -1
-                    continue
-            else:
-                # In trending market: follow direction
-                if is_trending_up and vol_confirm[i]:
-                    signals[i] = 0.25
-                    position = 1
-                    continue
-                elif is_trending_down and vol_confirm[i]:
-                    signals[i] = -0.25
-                    position = -1
-                    continue
+        if position == 0 and in_range:
+            # Long: price at or below S1 with volume confirmation (bounce from support)
+            if close[i] <= s1_aligned[i] * 1.002 and vol_confirm[i]:  # 0.2% buffer
+                signals[i] = 0.25
+                position = 1
+                continue
+            # Short: price at or above R1 with volume confirmation (rejection at resistance)
+            elif close[i] >= r1_aligned[i] * 0.998 and vol_confirm[i]:  # 0.2% buffer
+                signals[i] = -0.25
+                position = -1
+                continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: Williams %R overbought OR Alligator signals trend change
-            if williams_r[i] > -20 or not is_trending_up:
+            # Exit long: price reaches pivot (take profit) OR closes below S1 (breakdown)
+            if (close[i] >= pivot_aligned[i] * 0.998 or  # near pivot
+                close[i] < s1_aligned[i] * 0.998):       # break below S1
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -146,8 +96,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Williams %R oversold OR Alligator signals trend change
-            if williams_r[i] < -80 or not is_trending_down:
+            # Exit short: price reaches pivot (take profit) OR closes above R1 (breakout)
+            if (close[i] <= pivot_aligned[i] * 1.002 or  # near pivot
+                close[i] > r1_aligned[i] * 1.002):       # break above R1
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -156,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Williams_Alligator_Range_Bound_v1"
-timeframe = "12h"
+name = "6h_WeeklyPivot_R1S1_Reverse_Volume_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
