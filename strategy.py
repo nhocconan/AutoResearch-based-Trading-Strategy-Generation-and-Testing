@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+"""
+12h Camarilla Pivot + 1d EMA200 Trend + Volume Spike + ATR Stop
+Hypothesis: Camarilla pivot levels from daily charts act as strong support/resistance.
+In trending markets (price above/below 1d EMA200), price often reacts at these levels.
+Volume spike confirms institutional interest. Works in both bull (buying dips at S1/S2) 
+and bear (selling rallies at R1/R2) markets. Low-frequency trading to avoid fee drag.
+"""
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -8,95 +15,103 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
-    
-    # Daily data for monthly pivot points
+    # Get 1d data for Camarilla pivot and EMA200
     df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 200:
+        return np.zeros(n)
+    
+    # Calculate Camarilla levels (using previous day's OHLC)
+    # Typical Camarilla: H4 = C + 1.1*(H-L), L4 = C - 1.1*(H-L)
+    #                    H3 = C + 1.1*(H-L)/2, L3 = C - 1.1*(H-L)/2
+    #                    H2 = C + 1.1*(H-L)/4, L2 = C - 1.1*(H-L)/4
+    #                    H1 = C + 1.1*(H-L)/6, L1 = C - 1.1*(H-L)/6
+    # We'll use H3, L3, H4, L4 as key levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Monthly pivot points (based on previous month)
-    # Using previous month's high, low, close
-    prev_month_high = np.roll(high_1d, 1)
-    prev_month_low = np.roll(low_1d, 1)
-    prev_month_close = np.roll(close_1d, 1)
-    prev_month_high[0] = high_1d[0]
-    prev_month_low[0] = low_1d[0]
-    prev_month_close[0] = close_1d[0]
+    # Calculate daily range
+    daily_range = high_1d - low_1d
     
-    pivot = (prev_month_high + prev_month_low + prev_month_close) / 3
-    r1 = 2 * pivot - prev_month_low
-    s1 = 2 * pivot - prev_month_high
-    r2 = pivot + (prev_month_high - prev_month_low)
-    s2 = pivot - (prev_month_high - prev_month_low)
-    r3 = prev_month_high + 2 * (pivot - prev_month_low)
-    s3 = prev_month_low - 2 * (prev_month_high - pivot)
+    # Camarilla levels (based on previous close)
+    H3 = close_1d + 1.1 * daily_range / 2
+    L3 = close_1d - 1.1 * daily_range / 2
+    H4 = close_1d + 1.1 * daily_range
+    L4 = close_1d - 1.1 * daily_range
     
-    # Align to 6h timeframe
-    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
-    r2_6h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_6h = align_htf_to_ltf(prices, df_1d, s2)
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    # Align to 12h timeframe (these levels are valid for the entire day)
+    H3_12h = align_htf_to_ltf(prices, df_1d, H3)
+    L3_12h = align_htf_to_ltf(prices, df_1d, L3)
+    H4_12h = align_htf_to_ltf(prices, df_1d, H4)
+    L4_12h = align_htf_to_ltf(prices, df_1d, L4)
     
-    # 6h RSI for momentum confirmation
-    delta = np.diff(close)
-    delta = np.insert(delta, 0, 0)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # 1d EMA200 for trend filter
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_12h = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean()
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    # Volume confirmation: 24-period volume MA on 12h (2 days)
+    volume_ma_24 = pd.Series(prices['volume'].values).rolling(window=24, min_periods=24).mean()
     
-    # Volume filter
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    # ATR for stop loss and position sizing
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 30  # warmup
+    # Start after warmup period
+    start_idx = 200  # enough for EMA200
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or
-            np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or np.isnan(r3_6h[i]) or
-            np.isnan(s3_6h[i]) or np.isnan(rsi[i]) or np.isnan(volume_ma.iloc[i])):
+        if (np.isnan(H3_12h[i]) or np.isnan(L3_12h[i]) or np.isnan(H4_12h[i]) or 
+            np.isnan(L4_12h[i]) or np.isnan(ema_200_12h[i]) or 
+            np.isnan(volume_ma_24.iloc[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol = volume[i]
-        vol_ma = volume_ma.iloc[i]
+        vol = prices['volume'].iloc[i]
+        vol_ma = volume_ma_24.iloc[i]
+        
+        # Volume spike filter: at least 1.5x average volume
+        volume_ok = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long: price above R1 with RSI > 50 and volume confirmation
-            if price > r1_6h[i] and rsi[i] > 50 and vol > 1.5 * vol_ma:
-                signals[i] = 0.25
-                position = 1
-            # Short: price below S1 with RSI < 50 and volume confirmation
-            elif price < s1_6h[i] and rsi[i] < 50 and vol > 1.5 * vol_ma:
-                signals[i] = -0.25
-                position = -1
+            # Long conditions: price near support levels in uptrend
+            # Uptrend: price above 1d EMA200
+            if price > ema_200_12h[i] and volume_ok:
+                # Buy near L3 or L4 with some tolerance
+                if abs(price - L3_12h[i]) / price < 0.005 or abs(price - L4_12h[i]) / price < 0.005:
+                    signals[i] = 0.25
+                    position = 1
+            
+            # Short conditions: price near resistance levels in downtrend
+            # Downtrend: price below 1d EMA200
+            elif price < ema_200_12h[i] and volume_ok:
+                # Sell near H3 or H4 with some tolerance
+                if abs(price - H3_12h[i]) / price < 0.005 or abs(price - H4_12h[i]) / price < 0.005:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Exit when price drops below pivot or RSI < 40
-            if price < pivot_6h[i] or rsi[i] < 40:
+            # Long exit: price reaches resistance or trend changes
+            if price >= H3_12h[i] or price < ema_200_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price rises above pivot or RSI > 60
-            if price > pivot_6h[i] or rsi[i] > 60:
+            # Short exit: price reaches support or trend changes
+            if price <= L3_12h[i] or price > ema_200_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_MonthlyPivot_R1S1_RSI_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_Pivot_EMA200_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
