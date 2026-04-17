@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour price crossing the 100-day EMA with volume confirmation and ATR-based stop.
-# The 100-day EMA provides a stronger trend filter that adapts to changing market conditions.
-# Price crossing above/below the 100-day EMA with volume confirmation captures momentum shifts.
-# ATR-based stops limit drawdowns during volatile periods. Target: 20-40 trades/year (80-160 total over 4 years).
+# Hypothesis: 4-hour price crossing the 200-day EMA with volume confirmation and ATR-based stop.
+# The 200-day EMA provides a strong trend filter that adapts to changing market conditions.
+# Price crossing above/below the 200-day EMA with volume confirmation captures momentum shifts.
+# ATR-based stops limit drawdowns during volatile periods. Target: 10-25 trades/year (40-100 total over 4 years).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,17 +18,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data for EMA100, ATR, and volume average ===
+    # === 1d data for EMA200, ATR, and volume average ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # EMA100 on daily data
+    # EMA200 on daily data
     close_1d_series = pd.Series(close_1d)
-    ema100_1d = close_1d_series.ewm(span=100, adjust=False, min_periods=100).mean().values
-    ema100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema100_1d)
+    ema200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
     # ATR calculation on daily data (14-period)
     def calculate_atr(high, low, close, period=14):
@@ -53,10 +53,10 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0
-    warmup = 100  # Sufficient for EMA100
+    warmup = 200  # Sufficient for EMA200
     
     for i in range(warmup, n):
-        if (np.isnan(ema100_1d_aligned[i]) or 
+        if (np.isnan(ema200_1d_aligned[i]) or 
             np.isnan(atr_1d_aligned[i]) or
             np.isnan(vol_avg20_1d_aligned[i])):
             signals[i] = 0.0
@@ -66,26 +66,26 @@ def generate_signals(prices):
         vol_filter = vol_1d_current > 1.5 * vol_avg20_1d_aligned[i]
         
         if position == 0:
-            # Long: price crosses above 100-day EMA + volume confirmation
-            if close[i] > ema100_1d_aligned[i] and vol_filter:
+            # Long: price crosses above 200-day EMA + volume confirmation
+            if close[i] > ema200_1d_aligned[i] and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below 100-day EMA + volume confirmation
-            elif close[i] < ema100_1d_aligned[i] and vol_filter:
+            # Short: price crosses below 200-day EMA + volume confirmation
+            elif close[i] < ema200_1d_aligned[i] and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below 100-day EMA
-            if close[i] < ema100_1d_aligned[i]:
+            # Exit long: price crosses below 200-day EMA
+            if close[i] < ema200_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above 100-day EMA
-            if close[i] > ema100_1d_aligned[i]:
+            # Exit short: price crosses above 200-day EMA
+            if close[i] > ema200_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA100_VolumeConfirmation"
+name = "4h_EMA200_VolumeConfirmation"
 timeframe = "4h"
 leverage = 1.0
