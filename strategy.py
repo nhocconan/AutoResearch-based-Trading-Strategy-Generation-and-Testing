@@ -13,16 +13,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d RSI (14-period) ===
+    # === 1w High-Low Range (weekly range) ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    weekly_range = high_1w - low_1w
+    
+    # === 1d EMA(34) for trend filter ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
+    ema_34 = np.full_like(close_1d, np.nan)
+    for i in range(len(close_1d)):
+        if i == 0:
+            ema_34[i] = close_1d[i]
+        else:
+            ema_34[i] = (close_1d[i] * 2 / (34 + 1)) + (ema_34[i-1] * (33 / (34 + 1)))
     
-    # Calculate RSI using Wilder's smoothing
-    delta = np.diff(close_1d, prepend=close_1d[0])
+    # === 6h Volume Spike Detector ===
+    vol_ma_20 = np.full_like(volume, np.nan)
+    vol_std_20 = np.full_like(volume, np.nan)
+    for i in range(len(volume)):
+        if i >= 19:
+            vol_ma_20[i] = np.mean(volume[i-19:i+1])
+            vol_std_20[i] = np.std(volume[i-19:i+1])
+        elif i > 0:
+            vol_ma_20[i] = np.mean(volume[max(0, i-9):i+1])
+            vol_std_20[i] = np.std(volume[max(0, i-9):i+1])
+        else:
+            vol_ma_20[i] = volume[i]
+            vol_std_20[i] = 0.0
+    
+    volume_spike = volume > (vol_ma_20 + 2.0 * vol_std_20)
+    
+    # === Align HTF indicators to 6h timeframe ===
+    weekly_range_aligned = align_htf_to_ltf(prices, df_1w, weekly_range)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # === 6h EMA(8) and EMA(21) for momentum ===
+    ema_8 = np.full_like(close, np.nan)
+    ema_21 = np.full_like(close, np.nan)
+    for i in range(len(close)):
+        if i == 0:
+            ema_8[i] = close[i]
+            ema_21[i] = close[i]
+        else:
+            ema_8[i] = (close[i] * 2 / (8 + 1)) + (ema_8[i-1] * (7 / (8 + 1)))
+            ema_21[i] = (close[i] * 2 / (21 + 1)) + (ema_21[i-1] * (20 / (21 + 1)))
+    
+    # === 6h RSI(14) for overbought/oversold ===
+    delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
-    # Wilder's smoothing with proper seeding
     avg_gain = np.full_like(gain, np.nan)
     avg_loss = np.full_like(loss, np.nan)
     period = 14
@@ -39,76 +81,8 @@ def generate_signals(prices):
             avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
     
     rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d[avg_loss == 0] = 100
-    
-    # === 1d Bollinger Bands (20,2) ===
-    # Calculate SMA20
-    sma_20 = np.full_like(close_1d, np.nan)
-    for i in range(len(close_1d)):
-        if i >= 19:
-            sma_20[i] = np.mean(close_1d[i-19:i+1])
-        elif i > 0:
-            sma_20[i] = np.mean(close_1d[max(0, i-9):i+1])
-        else:
-            sma_20[i] = close_1d[0]
-    
-    # Calculate standard deviation
-    std_20 = np.full_like(close_1d, np.nan)
-    for i in range(len(close_1d)):
-        if i >= 19:
-            std_20[i] = np.std(close_1d[i-19:i+1])
-        elif i > 0:
-            std_20[i] = np.std(close_1d[max(0, i-9):i+1])
-        else:
-            std_20[i] = 0.0
-    
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
-    
-    # === 1d Bollinger Band Width (for squeeze detection) ===
-    bb_width = (upper_bb - lower_bb) / sma_20
-    
-    # === 1d BB Width percentile (20-period) for regime detection ===
-    bb_width_percentile = np.full_like(bb_width, np.nan)
-    for i in range(len(bb_width)):
-        if i >= 19:
-            window = bb_width[i-19:i+1]
-            rank = np.sum(window <= bb_width[i]) / len(window)
-            bb_width_percentile[i] = rank * 100
-        elif i > 0:
-            window = bb_width[max(0, i-9):i+1]
-            rank = np.sum(window <= bb_width[i]) / len(window)
-            bb_width_percentile[i] = rank * 100
-        else:
-            bb_width_percentile[i] = 50.0
-    
-    # === Align indicators to 4h timeframe ===
-    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_1d, bb_width_percentile)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
-    
-    # === 4h Volume confirmation ===
-    df_4h = get_htf_data(prices, '4h')
-    volume_4h = df_4h['volume'].values
-    
-    # Calculate 20-period average volume on 4h timeframe
-    vol_ma_20 = np.full_like(volume_4h, np.nan)
-    for i in range(len(volume_4h)):
-        if i >= 19:
-            vol_ma_20[i] = np.mean(volume_4h[i-19:i+1])
-        elif i > 0:
-            vol_ma_20[i] = np.mean(volume_4h[max(0, i-9):i+1])
-        else:
-            vol_ma_20[i] = volume_4h[0]
-    
-    # Volume confirmation: current 4h volume > 1.3x 20-period average
-    vol_confirm = volume_4h > vol_ma_20 * 1.3
-    
-    # === 4h Session filter (08-20 UTC) ===
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[avg_loss == 0] = 100
     
     signals = np.zeros(n)
     
@@ -120,48 +94,48 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(bb_width_percentile_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(upper_bb_aligned[i]) or 
-            np.isnan(lower_bb_aligned[i]) or 
-            np.isnan(vol_confirm[i])):
+        if (np.isnan(weekly_range_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or 
+            np.isnan(ema_8[i]) or 
+            np.isnan(ema_21[i]) or 
+            np.isnan(rsi[i]) or 
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Skip if outside session
-        if not session_filter[i]:
-            signals[i] = 0.0
-            position = 0
-            continue
-        
-        # Market regime: low volatility squeeze (BB Width < 20th percentile)
-        is_squeeze = bb_width_percentile_aligned[i] < 20
-        
-        # Entry logic: only enter when flat AND volume confirmation
+        # Entry logic: only enter when flat
         if position == 0:
-            # Long: RSI < 30 (oversold) + BB squeeze + price near lower BB + volume confirmation
-            if (rsi_1d_aligned[i] < 30 and 
-                is_squeeze and 
-                close[i] <= lower_bb_aligned[i] * 1.02 and  # within 2% of lower BB
-                vol_confirm[i]):
+            # Long conditions:
+            # 1. Price above weekly range midpoint (bullish bias)
+            # 2. EMA8 > EMA21 (short-term momentum up)
+            # 3. RSI < 40 (not overbought, room to rise)
+            # 4. Volume spike (participation)
+            weekly_midpoint = (high_1w[i//28] + low_1w[i//28]) / 2 if i >= 28 else close[i]  # approximate weekly index
+            if (close[i] > weekly_midpoint and 
+                ema_8[i] > ema_21[i] and 
+                rsi[i] < 40 and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: RSI > 70 (overbought) + BB squeeze + price near upper BB + volume confirmation
-            elif (rsi_1d_aligned[i] > 70 and 
-                  is_squeeze and 
-                  close[i] >= upper_bb_aligned[i] * 0.98 and  # within 2% of upper BB
-                  vol_confirm[i]):
+            # Short conditions:
+            # 1. Price below weekly range midpoint (bearish bias)
+            # 2. EMA8 < EMA21 (short-term momentum down)
+            # 3. RSI > 60 (not oversold, room to fall)
+            # 4. Volume spike (participation)
+            elif (close[i] < weekly_midpoint and 
+                  ema_8[i] < ema_21[i] and 
+                  rsi[i] > 60 and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: RSI crosses above 50 OR price reaches middle BB
-            if (rsi_1d_aligned[i] > 50 or 
-                close[i] >= sma_20[-1] if len(sma_20) > 0 else False):  # simplified: use price > entry condition
+            # Exit long: EMA8 crosses below EMA21 OR RSI > 70 (overbought)
+            if ema_8[i] < ema_21[i] or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -169,9 +143,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI crosses below 50 OR price reaches middle BB
-            if (rsi_1d_aligned[i] < 50 or 
-                close[i] <= sma_20[-1] if len(sma_20) > 0 else False):
+            # Exit short: EMA8 crosses above EMA21 OR RSI < 30 (oversold)
+            if ema_8[i] > ema_21[i] or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -180,6 +153,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_BB_Squeeze_RSI_MeanReversion_VolumeFilter_v2"
-timeframe = "4h"
+name = "6h_EMA_RSI_VolumeSpike_WeeklyBias_v1"
+timeframe = "6h"
 leverage = 1.0
