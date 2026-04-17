@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyDonchian_Breakout_Volume_Regime_v1
-Breakout above/below weekly Donchian(20) with volume confirmation and daily chop filter.
-Long: price breaks above weekly Donchian high + volume > 1.5x average + chop < 61.8
-Short: price breaks below weekly Donchian low + volume > 1.5x average + chop < 61.8
-Exit when price crosses weekly Donchian midline or chop > 61.8 (range).
-Designed to capture strong trends in both bull and bear markets with low frequency.
-Target: 20-50 total trades over 4 years (5-12.5/year).
+6h_Stochastic_Signal_v1
+Stochastic %K(14,3,3) > 80 for short, < 20 for long with 1d trend filter.
+Trend filter: price above/below 1d EMA50.
+Exit when Stochastic crosses back to neutral zone (40-60).
+Designed to capture mean reversion in ranging markets with trend alignment.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -21,77 +20,54 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # === Weekly Donchian channels (20-period) ===
-    df_1w = get_htf_data(prices, '1w')
-    donch_high = pd.Series(df_1w['high'].values).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(df_1w['low'].values).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2.0
+    # === Stochastic Oscillator (14,3,3) ===
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    k_percent = 100 * (close - lowest_low) / (highest_high - lowest_low + 1e-10)
+    # Smooth %K to get %D (3-period SMA of %K)
+    d_percent = pd.Series(k_percent).rolling(window=3, min_periods=3).mean().values
     
-    # Align to daily timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_1w, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1w, donch_low)
-    donch_mid_aligned = align_htf_to_ltf(prices, df_1w, donch_mid)
-    
-    # === Volume confirmation: 20-day average volume ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # === Daily Choppiness Index (14-period) ===
-    atr1 = np.abs(high - low)
-    atr2 = np.abs(high - np.roll(close, 1))
-    atr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(atr1, np.maximum(atr2, atr3))
-    tr[0] = atr1[0]
-    
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / (hh - ll)) / np.log10(14)
-    # Handle division by zero or invalid cases
-    chop = np.where((hh - ll) == 0, 50.0, chop)
+    # === 1d EMA50 for trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 50
+    warmup = 30
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or 
-            np.isnan(donch_mid_aligned[i]) or 
-            np.isnan(vol_ma[i]) or 
-            np.isnan(chop[i])):
+        if (np.isnan(d_percent[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: breakout above weekly Donchian high + volume > 1.5x avg + chop < 61.8 (trending)
-            if (close[i] > donch_high_aligned[i] and 
-                volume[i] > 1.5 * vol_ma[i] and 
-                chop[i] < 61.8):
+            # Long: Stochastic < 20 (oversold) and price above 1d EMA50 (uptrend)
+            if (d_percent[i] < 20 and 
+                close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: breakout below weekly Donchian low + volume > 1.5x avg + chop < 61.8 (trending)
-            elif (close[i] < donch_low_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma[i] and 
-                  chop[i] < 61.8):
+            # Short: Stochastic > 80 (overbought) and price below 1d EMA50 (downtrend)
+            elif (d_percent[i] > 80 and 
+                  close[i] < ema_50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price crosses below weekly Donchian midline OR chop > 61.8 (range)
-            if (close[i] < donch_mid_aligned[i] or 
-                chop[i] > 61.8):
+            # Exit long: Stochastic > 40 (exit oversold zone)
+            if d_percent[i] > 40:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -99,9 +75,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above weekly Donchian midline OR chop > 61.8 (range)
-            if (close[i] > donch_mid_aligned[i] or 
-                chop[i] > 61.8):
+            # Exit short: Stochastic < 60 (exit overbought zone)
+            if d_percent[i] < 60:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -110,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyDonchian_Breakout_Volume_Regime_v1"
-timeframe = "1d"
+name = "6h_Stochastic_Signal_v1"
+timeframe = "6h"
 leverage = 1.0
