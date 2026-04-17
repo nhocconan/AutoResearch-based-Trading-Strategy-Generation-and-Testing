@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Bollinger Band breakout with volume confirmation and weekly ADX trend filter.
-Long when price breaks above upper Bollinger Band (20,2) AND volume > 1.5x average AND weekly ADX > 25.
-Short when price breaks below lower Bollinger Band AND volume > 1.5x average AND weekly ADX > 25.
-Exit when price reverts to Bollinger middle band OR weekly ADX < 20 (range market).
-Uses 1d for price/volume/BB, 1w for ADX filter to avoid whipsaw in ranging markets.
-Target: 30-100 total trades over 4 years (7-25/year). Bollinger Bands adapt to volatility,
-volume confirmation reduces fakeouts, weekly ADX ensures we only trade in strong trends.
-Works in bull markets (captures uptrends) and bear markets (captures downtrends).
+Hypothesis: 6h Camarilla pivot breakout with 12h EMA trend filter and volume confirmation.
+Long when price breaks above Camarilla R3 AND 12h EMA34 > EMA89 (uptrend) AND volume > 1.5x average.
+Short when price breaks below Camarilla S3 AND 12h EMA34 < EMA89 (downtrend) AND volume > 1.5x average.
+Exit when price reverts to Camarilla H3/L3 level OR 12h EMA crossover reverses.
+Uses 6h for price action/volume, 12h for EMA trend filter to avoid whipsaw.
+Target: 50-150 total trades over 4 years (12-37/year). Camarilla levels provide precise intraday pivot points,
+EMA filter ensures we trade with the higher timeframe trend, volume confirmation reduces fakeouts.
+Works in bull markets (captures uptrend breakouts) and bear markets (captures downtrend breakdowns).
 """
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,108 +24,119 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Bollinger Bands and volume
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Get 6h data for Camarilla pivot calculation
+    df_6h = get_htf_data(prices, '6h')
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    volume_6h = df_6h['volume'].values
     
-    # Calculate Bollinger Bands on 1d timeframe (20-period, 2 std)
-    close_series = pd.Series(close_1d)
-    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
+    # Calculate Camarilla pivot levels for 6h timeframe (based on previous 6h bar)
+    # Camarilla formulas:
+    # H4 = close + 1.1 * (high - low) / 2
+    # L4 = close - 1.1 * (high - low) / 2
+    # H3 = close + 1.1 * (high - low) / 4
+    # L3 = close - 1.1 * (high - low) / 4
+    # H2 = close + 1.1 * (high - low) / 6
+    # L2 = close - 1.1 * (high - low) / 6
+    # H1 = close + 1.1 * (high - low) / 12
+    # L1 = close - 1.1 * (high - low) / 12
+    # Pivot = (high + low + close) / 3
     
-    # Calculate volume average (20-period) on 1d
-    volume_series = pd.Series(volume_1d)
+    # Calculate for previous bar (to avoid look-ahead)
+    prev_high = np.roll(high_6h, 1)
+    prev_low = np.roll(low_6h, 1)
+    prev_close = np.roll(close_6h, 1)
+    
+    # First bar handling
+    prev_high[0] = high_6h[0]
+    prev_low[0] = low_6h[0]
+    prev_close[0] = close_6h[0]
+    
+    # Calculate Camarilla levels
+    camarilla_h4 = prev_close + 1.1 * (prev_high - prev_low) / 2
+    camarilla_l4 = prev_close - 1.1 * (prev_high - prev_low) / 2
+    camarilla_h3 = prev_close + 1.1 * (prev_high - prev_low) / 4
+    camarilla_l3 = prev_close - 1.1 * (prev_high - prev_low) / 4
+    camarilla_h2 = prev_close + 1.1 * (prev_high - prev_low) / 6
+    camarilla_l2 = prev_close - 1.1 * (prev_high - prev_low) / 6
+    camarilla_h1 = prev_close + 1.1 * (prev_high - prev_low) / 12
+    camarilla_l1 = prev_close - 1.1 * (prev_high - prev_low) / 12
+    camarilla_pivot = (prev_high + prev_low + prev_close) / 3
+    
+    # Calculate volume average (20-period) on 6h
+    volume_series = pd.Series(volume_6h)
     volume_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
-    # Get 1w data for ADX filter
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate ADX on 1w timeframe (14-period)
-    high_1w_series = pd.Series(high_1w)
-    low_1w_series = pd.Series(low_1w)
-    close_1w_series = pd.Series(close_1w)
+    # Calculate 12h EMAs (34 and 89)
+    close_12h_series = pd.Series(close_12h)
+    ema_34 = close_12h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_89 = close_12h_series.ewm(span=89, adjust=False, min_periods=89).mean().values
     
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
+    # Align all 6h data to lower timeframe (prices)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_6h, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_6h, camarilla_l3)
+    camarilla_h2_aligned = align_htf_to_ltf(prices, df_6h, camarilla_h2)
+    camarilla_l2_aligned = align_htf_to_ltf(prices, df_6h, camarilla_l2)
+    camarilla_h1_aligned = align_htf_to_ltf(prices, df_6h, camarilla_h1)
+    camarilla_l1_aligned = align_htf_to_ltf(prices, df_6h, camarilla_l1)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_6h, camarilla_pivot)
+    volume_ma_aligned = align_htf_to_ltf(prices, df_6h, volume_ma)
     
-    # Plus Directional Movement (+DM)
-    up_move = high_1w - np.roll(high_1w, 1)
-    down_move = np.roll(low_1w, 1) - low_1w
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smooth TR, +DM, -DM (14-period)
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate +DI and -DI
-    plus_di = 100 * (plus_dm_smooth / np.where(atr != 0, atr, np.inf))
-    minus_di = 100 * (minus_dm_smooth / np.where(atr != 0, atr, np.inf))
-    
-    # Calculate DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) != 0, (plus_di + minus_di), np.inf)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align 1d Bollinger Bands, volume MA, and 1w ADX to 1d timeframe
-    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
-    bb_middle_aligned = align_htf_to_ltf(prices, df_1d, bb_middle)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    # Align 12h EMA data to lower timeframe
+    ema_34_aligned = align_htf_to_ltf(prices, df_12h, ema_34)
+    ema_89_aligned = align_htf_to_ltf(prices, df_12h, ema_89)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # warmup for indicators
+    start_idx = 100  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or 
-            np.isnan(bb_middle_aligned[i]) or np.isnan(volume_ma_aligned[i]) or 
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(volume_ma_aligned[i]) or np.isnan(ema_34_aligned[i]) or np.isnan(ema_89_aligned[i])):
             signals[i] = 0.0
             continue
         
-        upper = bb_upper_aligned[i]
-        lower = bb_lower_aligned[i]
-        middle = bb_middle_aligned[i]
+        h3 = camarilla_h3_aligned[i]
+        l3 = camarilla_l3_aligned[i]
+        h2 = camarilla_h2_aligned[i]
+        l2 = camarilla_l2_aligned[i]
+        h1 = camarilla_h1_aligned[i]
+        l1 = camarilla_l1_aligned[i]
+        pivot = camarilla_pivot_aligned[i]
         vol_ma = volume_ma_aligned[i]
-        adx_val = adx_aligned[i]
+        ema_fast = ema_34_aligned[i]
+        ema_slow = ema_89_aligned[i]
         vol = volume[i]
         price = close[i]
         
         if position == 0:
-            # Long: price > BB upper AND volume > 1.5x avg AND weekly ADX > 25 (trending)
-            if price > upper and vol > 1.5 * vol_ma and adx_val > 25:
+            # Long: price > Camarilla H3 AND 12h EMA34 > EMA89 (uptrend) AND volume > 1.5x avg
+            if price > h3 and ema_fast > ema_slow and vol > 1.5 * vol_ma:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < BB lower AND volume > 1.5x avg AND weekly ADX > 25 (trending)
-            elif price < lower and vol > 1.5 * vol_ma and adx_val > 25:
+            # Short: price < Camarilla L3 AND 12h EMA34 < EMA89 (downtrend) AND volume > 1.5x avg
+            elif price < l3 and ema_fast < ema_slow and vol > 1.5 * vol_ma:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price < BB middle OR weekly ADX < 20 (range market)
-            if price < middle or adx_val < 20:
+            # Exit long: price < Camarilla H2 OR 12h EMA crossover reverses
+            if price < h2 or ema_fast < ema_slow:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price > BB middle OR weekly ADX < 20 (range market)
-            if price > middle or adx_val < 20:
+            # Exit short: price > Camarilla L2 OR 12h EMA crossover reverses
+            if price > l2 or ema_fast > ema_slow:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -133,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Bollinger20_2_Volume_1wADX_Filter"
-timeframe = "1d"
+name = "6h_Camarilla_H3L3_12hEMA_Volume_Filter"
+timeframe = "6h"
 leverage = 1.0
