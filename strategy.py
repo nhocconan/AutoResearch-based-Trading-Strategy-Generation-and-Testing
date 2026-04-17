@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h timeframe with 1w Camarilla pivot breakout + volume confirmation + 1d EMA trend filter.
-Long when price breaks above weekly R4 with volume > 1.5x 20-period 1d volume average and price > 1d EMA50.
-Short when price breaks below weekly S4 with volume > 1.5x 20-period 1d volume average and price < 1d EMA50.
-Weekly Camarilla pivots calculated from prior week's OHLC. Uses discrete position sizing 0.25.
-Targets 12-37 trades/year (50-150 over 4 years) by requiring confluence of weekly structure, volume, and trend.
-Works in bull markets (trend continuation via EMA filter) and bear markets (mean reversion at extreme weekly levels).
+Hypothesis: 12h timeframe with 1d Donchian(20) breakout + volume confirmation + ATR-based volatility filter.
+Long when price breaks above 1d Donchian high with volume > 1.3x 20-period average and current ATR < 1.5x 20-period ATR average (low volatility breakout).
+Short when price breaks below 1d Donchian low with volume > 1.3x 20-period average and current ATR < 1.5x 20-period ATR average.
+Uses discrete position sizing 0.25 to limit fee drag. Target: 75-200 total trades over 4 years.
+Volatility filter ensures breakouts occur during consolidation, reducing false signals in choppy markets.
+Works in bull markets (trend continuation) and bear markets (mean reversion after low volatility periods).
 """
 
 import numpy as np
@@ -22,82 +22,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivots (using prior week's OHLC)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly Camarilla levels (R3, R4, S3, S4) from prior week
-    # Camarilla formula: R4 = close + 1.1*(high-low)*1.1/2, R3 = close + 1.1*(high-low)*1.1/4
-    # S3 = close - 1.1*(high-low)*1.1/4, S4 = close - 1.1*(high-low)*1.1/2
-    weekly_range = high_1w - low_1w
-    r4 = close_1w + 1.1 * weekly_range * 1.1 / 2
-    r3 = close_1w + 1.1 * weekly_range * 1.1 / 4
-    s3 = close_1w - 1.1 * weekly_range * 1.1 / 4
-    s4 = close_1w - 1.1 * weekly_range * 1.1 / 2
-    
-    # Get daily data for EMA50 and volume
+    # Get daily data for Donchian channels, volume, and ATR
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d EMA50
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate daily Donchian channels (20-period)
+    high_series = pd.Series(high_1d)
+    low_series = pd.Series(low_1d)
+    upper_20 = high_series.rolling(window=20, min_periods=20).max().values
+    lower_20 = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1d volume 20-period average
+    # Calculate daily ATR (14-period) for volatility filter
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align length
+    
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_ma_20 = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
+    
+    # Get 1d volume 20-period average
     vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all to 6h
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Align all to 12h
+    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    atr_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20)
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 100  # need enough for EMA50 and volume MA
+    start_idx = 50  # need enough for ATR and Donchian
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or 
-            np.isnan(volume_1d_aligned[i])):
+        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
+            np.isnan(atr_aligned[i]) or np.isnan(atr_ma_20_1d_aligned[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(volume_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x 20-period average
-        volume_confirmed = volume_1d_aligned[i] > 1.5 * vol_ma_20_1d_aligned[i]
+        # Volume confirmation: current 1d volume > 1.3x 20-period average
+        volume_confirmed = volume_1d_aligned[i] > 1.3 * vol_ma_20_1d_aligned[i]
+        
+        # Volatility filter: current ATR < 1.5x 20-period ATR average (breakout from low volatility)
+        vol_filter = atr_aligned[i] < 1.5 * atr_ma_20_1d_aligned[i]
         
         if position == 0:
-            # Long: price breaks above weekly R4 with volume and above 1d EMA50 (bullish bias)
-            if (close[i] > r4_aligned[i] and 
+            # Long: price breaks above daily Donchian high with volume and low volatility
+            if (close[i] > upper_20_aligned[i] and 
                 volume_confirmed and 
-                close[i] > ema_50_aligned[i]):
+                vol_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly S4 with volume and below 1d EMA50 (bearish bias)
-            elif (close[i] < s4_aligned[i] and 
+            # Short: price breaks below daily Donchian low with volume and low volatility
+            elif (close[i] < lower_20_aligned[i] and 
                   volume_confirmed and 
-                  close[i] < ema_50_aligned[i]):
+                  vol_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below weekly R3 (take profit at first support)
-            if close[i] < r3_aligned[i]:
+            # Exit long: price falls back below daily Donchian midpoint
+            midpoint_20 = (upper_20 + lower_20) / 2
+            midpoint_20_aligned = align_htf_to_ltf(prices, df_1d, midpoint_20)
+            if close[i] < midpoint_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above weekly S3 (take profit at first resistance)
-            if close[i] > s3_aligned[i]:
+            # Exit short: price rises back above daily Donchian midpoint
+            midpoint_20 = (upper_20 + lower_20) / 2
+            midpoint_20_aligned = align_htf_to_ltf(prices, df_1d, midpoint_20)
+            if close[i] > midpoint_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1wCamarilla_R3R4_S3S4_Volume_EMA50"
-timeframe = "6h"
+name = "12h_1dDonchian20_Volume_VolatilityFilter"
+timeframe = "12h"
 leverage = 1.0
