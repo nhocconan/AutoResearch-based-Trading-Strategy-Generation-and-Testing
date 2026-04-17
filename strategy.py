@@ -1,12 +1,9 @@
-#!/usr/bin/env python3
-"""
-4h_RSI_Trend_With_4h_Trend_Filter
-Hypothesis: RSI combined with trend filter and volume confirmation provides high-probability entries in both bull and bear markets. 
-Long when RSI > 50 + price > EMA20 + volume > 1.5x average + 4h close > 4h EMA50.
-Short when RSI < 50 + price < EMA20 + volume > 1.5x average + 4h close < 4h EMA50.
-Exit on opposite RSI condition. Position size: ±0.25. Uses 4h timeframe with trend filter.
-Designed to capture trends while avoiding false signals via EMA50 filter.
-"""
+# 4h_KAMA_Trend_With_12h_Trend_Filter
+# Hypothesis: KAMA adapts to market efficiency, reducing whipsaw in chop and catching trends.
+# Long when KAMA slope turns up + price > KAMA + volume > 1.5x average + 12h close > 12h EMA34.
+# Short when KAMA slope turns down + price < KAMA + volume > 1.5x average + 12h close < 12h EMA34.
+# Exit on opposite signal. Position size: ±0.25. Uses 4h primary with 12h trend filter.
+# Designed to work in both bull (trend capture) and bear (avoids false signals via 12h filter).
 
 import numpy as np
 import pandas as pd
@@ -22,77 +19,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate EMA20 for price trend
-    close_series = pd.Series(close)
-    ema20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate KAMA (Kaufman Adaptive Moving Average)
+    def kama(close, er_length=10, fast=2, slow=30):
+        change = np.abs(np.diff(close, prepend=close[0]))
+        volatility = np.abs(np.diff(close))
+        er = np.zeros_like(close)
+        for i in range(1, len(close)):
+            if volatility[i-er_length+1:i+1].sum() > 0:
+                er[i] = change[i-er_length+1:i+1].sum() / volatility[i-er_length+1:i+1].sum()
+            else:
+                er[i] = 0
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        kama = np.zeros_like(close)
+        kama[0] = close[0]
+        for i in range(1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    # Calculate EMA50 for trend filter
-    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    kama_vals = kama(close, 10, 2, 30)
     
-    # Calculate RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate KAMA slope (1-period change)
+    kama_slope = np.diff(kama_vals, prepend=0)
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume confirmation (10-period MA)
+    # Volume confirmation (10-period MA on 4h)
     volume_ma10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    
+    # Calculate 12h EMA34 for trend filter
+    close_series_12h = pd.Series(close_12h)
+    ema34_12h = close_series_12h.ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align 12h EMA to 4h timeframe
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = max(20, 50, 14, 10)  # EMA20, EMA50, RSI, volume MA
+    start_idx = max(10, 10, 34)  # KAMA, volume MA10, EMA34
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema20[i]) or 
-            np.isnan(ema50[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(volume_ma10[i])):
+        if (np.isnan(kama_vals[i]) or 
+            np.isnan(kama_slope[i]) or 
+            np.isnan(volume_ma10[i]) or 
+            np.isnan(ema34_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter: current volume > 1.5x 10-period average
         volume_filter = volume[i] > (1.5 * volume_ma10[i])
         
-        # RSI-based conditions
-        rsi_bullish = rsi[i] > 50
-        rsi_bearish = rsi[i] < 50
-        
-        # Price relative to EMA20
-        price_above_ema20 = close[i] > ema20[i]
-        price_below_ema20 = close[i] < ema20[i]
-        
-        # Trend filter: 4h close relative to EMA50
-        uptrend = close[i] > ema50[i]
-        downtrend = close[i] < ema50[i]
+        # KAMA-based signals
+        kama_bullish = kama_slope[i] > 0 and close[i] > kama_vals[i]
+        kama_bearish = kama_slope[i] < 0 and close[i] < kama_vals[i]
         
         if position == 0:
-            # Long: RSI bullish + price above EMA20 + volume filter + uptrend
-            if rsi_bullish and price_above_ema20 and volume_filter and uptrend:
+            # Long: KAMA bullish + volume filter + 12h uptrend
+            if kama_bullish and volume_filter and close[i] > ema34_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI bearish + price below EMA20 + volume filter + downtrend
-            elif rsi_bearish and price_below_ema20 and volume_filter and downtrend:
+            # Short: KAMA bearish + volume filter + 12h downtrend
+            elif kama_bearish and volume_filter and close[i] < ema34_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI turns bearish (< 50)
-            if rsi_bearish:
+            # Exit long: KAMA turns bearish
+            if kama_bearish:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI turns bullish (> 50)
-            if rsi_bullish:
+            # Exit short: KAMA turns bullish
+            if kama_bullish:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI_Trend_With_4h_Trend_Filter"
+name = "4h_KAMA_Trend_With_12h_Trend_Filter"
 timeframe = "4h"
 leverage = 1.0
