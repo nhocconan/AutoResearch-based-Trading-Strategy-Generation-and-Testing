@@ -1,12 +1,6 @@
-#!/usr/bin/env python3
-"""
-12h_Pivot_R1_S1_Breakout_Volume_CamTrend_Filter
-Hypothesis: Camarilla pivot levels (R1, S1) act as strong support/resistance on 12h timeframe.
-Breakouts above R1 or below S1 with volume confirmation and 1-week trend filter capture
-institutional moves while avoiding false breakouts in chop. Works in bull (trend continuation)
-and bear (mean reversion at extremes) by filtering with 1w trend.
-Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag.
-"""
+# 6h_OrderBlock_Retest_LiquidityImbalance
+# Hypothesis: Institutional order blocks form at key support/resistance levels. Price retesting these blocks with liquidity imbalance (volume spike + price rejection) provides high-probability entries. Works in both bull/bear as it identifies institutional participation.
+# Uses 1d order blocks identified by volume profile + price action. Entry on 6h retest with volume confirmation. Stop via signal reversal.
 
 import numpy as np
 import pandas as pd
@@ -14,125 +8,112 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels for 12h (based on prior 12h bar)
-    # R1 = close + 1.1 * (high - low) / 12
-    # S1 = close - 1.1 * (high - low) / 12
-    # We need the prior 12h bar's OHLC
-    
-    # Get 12h data for pivot calculation and trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) == 0:
+    # Calculate 1d order blocks using volume profile and price action
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Identify 1d order blocks: high volume nodes with strong close
+    vol_1d = df_1d['volume'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate Camarilla levels using prior 12h bar (no look-ahead)
-    # R1 = prior_close + 1.1 * (prior_high - prior_low) / 12
-    # S1 = prior_close - 1.1 * (prior_high - prior_low) / 12
-    prior_high = np.roll(high_12h, 1)
-    prior_low = np.roll(low_12h, 1)
-    prior_close = np.roll(close_12h, 1)
-    # Set first value to NaN (no prior bar)
-    prior_high[0] = np.nan
-    prior_low[0] = np.nan
-    prior_close[0] = np.nan
+    # Volume-weighted average price approximation for each day
+    vwap_1d = (high_1d + low_1d + close_1d) / 3
     
-    rang = prior_high - prior_low
-    R1 = prior_close + 1.1 * rang / 12
-    S1 = prior_close - 1.1 * rang / 12
+    # Identify high volume areas (top 30% volume days)
+    vol_threshold = np.percentile(vol_1d, 70)
+    high_vol_mask = vol_1d >= vol_threshold
     
-    # Align 12h levels to 12h timeframe (already in 12h bars)
-    # We need to align to our trading timeframe (12h)
-    # Since we're trading on 12h timeframe, we can use the values directly
-    # but we need to expand to match the length of prices array
+    # Bullish OB: high volume day with close > vwap
+    # Bearish OB: high volume day with close < vwap
+    bullish_ob = high_vol_mask & (close_1d > vwap_1d)
+    bearish_ob = high_vol_mask & (close_1d < vwap_1d)
     
-    # For 12h timeframe, prices array IS the 12h data (each row is a 12h bar)
-    # So we can use R1 and S1 directly, but need to handle the roll
+    # Create OB levels (using the vwap of those days)
+    bullish_ob_levels = np.where(bullish_ob, vwap_1d, np.nan)
+    bearish_ob_levels = np.where(bearish_ob, vwap_1d, np.nan)
     
-    # Actually, since we're using 12h timeframe, prices IS the 12h data
-    # So we can simplify: use prior 12h bar's data from prices itself
-    high_12h = high  # already 12h data
-    low_12h = low
-    close_12h = close
+    # Forward fill to get active OB levels
+    bullish_ob_series = pd.Series(bullish_ob_levels)
+    bearish_ob_series = pd.Series(bearish_ob_levels)
+    bullish_ob_filled = bullish_ob_series.ffill().bfill().values
+    bearish_ob_filled = bearish_ob_series.ffill().bfill().values
     
-    prior_high = np.roll(high_12h, 1)
-    prior_low = np.roll(low_12h, 1)
-    prior_close = np.roll(close_12h, 1)
-    prior_high[0] = np.nan
-    prior_low[0] = np.nan
-    prior_close[0] = np.nan
+    # Align OB levels to 6h timeframe
+    bullish_ob_aligned = align_htf_to_ltf(prices, df_1d, bullish_ob_filled)
+    bearish_ob_aligned = align_htf_to_ltf(prices, df_1d, bearish_ob_filled)
     
-    rang = prior_high - prior_low
-    R1 = prior_close + 1.1 * rang / 12
-    S1 = prior_close - 1.1 * rang / 12
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume spike detector (20-period average)
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 1-week data for trend filter (major trend direction)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
-        # Fallback to 1d if 1w not available
-        df_1w = get_htf_data(prices, '1d')
-    close_1w = df_1w['close'].values
+    # Price action rejection signals
+    # Bullish rejection: long lower wick, close near high
+    lower_wick = close - low
+    upper_wick = high - close
+    body = np.abs(close - open_) if 'open' in prices.columns else np.abs(close - np.roll(close, 1))
+    open_ = np.roll(close, 1)
+    open_[0] = close[0]
+    body = np.abs(close - open_)
+    body = np.where(body == 0, 0.001, body)  # avoid division by zero
     
-    # Calculate 1-week EMA50 for trend filter
-    close_series_1w = pd.Series(close_1w)
-    ema50_1w = close_series_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 1-week EMA to 12h timeframe
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    bullish_rejection = (lower_wick > 2 * body) & (close > (high - 0.3 * (high - low)))
+    bearish_rejection = (upper_wick > 2 * body) & (close < (low + 0.3 * (high - low)))
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = max(20, 1)  # volume MA20, need at least 1 for prior bar
+    start_idx = max(20, 20)  # volume MA20, need price data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(R1[i]) or np.isnan(S1[i]) or 
-            np.isnan(volume_ma20[i]) or np.isnan(ema50_1w_aligned[i])):
+        if (np.isnan(bullish_ob_aligned[i]) or 
+            np.isnan(bearish_ob_aligned[i]) or 
+            np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        # Volume filter: current volume > 2x 20-period average
+        volume_filter = volume[i] > (2.0 * volume_ma20[i])
         
-        # Breakout conditions
-        breakout_long = close[i] > R1[i]  # Price breaks above R1
-        breakout_short = close[i] < S1[i]  # Price breaks below S1
+        # Distance to OB levels (avoid division by zero)
+        dist_to_bull_ob = np.abs(close[i] - bullish_ob_aligned[i]) / close[i] if not np.isnan(bullish_ob_aligned[i]) else 1.0
+        dist_to_bear_ob = np.abs(close[i] - bearish_ob_aligned[i]) / close[i] if not np.isnan(bearish_ob_aligned[i]) else 1.0
+        
+        # Near OB level (within 0.5%)
+        near_bull_ob = dist_to_bull_ob < 0.005
+        near_bear_ob = dist_to_bear_ob < 0.005
         
         if position == 0:
-            # Long: breakout above R1 + volume filter + 1w uptrend (price > EMA50)
-            if breakout_long and volume_filter and close[i] > ema50_1w_aligned[i]:
+            # Long: near bullish OB + bullish rejection + volume spike
+            if near_bull_ob and bullish_rejection[i] and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below S1 + volume filter + 1w downtrend (price < EMA50)
-            elif breakout_short and volume_filter and close[i] < ema50_1w_aligned[i]:
+            # Short: near bearish OB + bearish rejection + volume spike
+            elif near_bear_ob and bearish_rejection[i] and volume_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below S1 (mean reversion) or opposite breakout
-            if close[i] < S1[i]:
+            # Exit long: near bearish OB with bearish rejection OR opposite signal
+            if near_bear_ob and bearish_rejection[i] and volume_filter:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above R1 (mean reversion) or opposite breakout
-            if close[i] > R1[i]:
+            # Exit short: near bullish OB with bullish rejection OR opposite signal
+            if near_bull_ob and bullish_rejection[i] and volume_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -140,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_R1_S1_Breakout_Volume_CamTrend_Filter"
-timeframe = "12h"
+name = "6h_OrderBlock_Retest_LiquidityImbalance"
+timeframe = "6h"
 leverage = 1.0
