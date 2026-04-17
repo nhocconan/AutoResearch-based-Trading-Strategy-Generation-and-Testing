@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_WeeklyPivot_R1_S1_Breakout_VolumeFilter_v2
-Hypothesis: Weekly pivot points (R1/S1) act as strong support/resistance levels. Breakouts with volume confirmation and trend filter (1d EMA34) capture institutional participation. Reduces whipsaw by requiring price to close beyond the pivot level. Designed for ~20-40 trades/year to minimize fee drag and work in bull/bear regimes.
+4h_WeeklyPivot_R1_S1_Breakout_VolumeTrend_v3
+Hypothesis: Weekly pivot points (R1/S1) with volume confirmation and 1d EMA50 trend filter. Only takes long above R1 in uptrend (close>EMA50) and short below S1 in downtrend (close<EMA50). Reduces whipsaw by requiring trend alignment. Target: 20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -18,16 +18,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data for EMA34 trend filter and volume average ===
+    # === 1d data for EMA50 trend filter and volume average ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # 1d volume average (20-period) for confirmation
     vol_avg20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
@@ -53,8 +51,8 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Warmup: covers EMA34 and volume average
-    warmup = 34
+    # Warmup: covers EMA50 and volume average
+    warmup = 50
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
@@ -63,7 +61,7 @@ def generate_signals(prices):
         # Skip if any data is NaN
         if (np.isnan(R1_aligned[i]) or 
             np.isnan(S1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or 
             np.isnan(vol_avg20_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
@@ -75,15 +73,15 @@ def generate_signals(prices):
         # Volume filter: current volume > 1.5x 20-period average
         vol_filter = vol_1d_current > 1.5 * vol_avg20_1d_aligned[i]
         
-        # Entry conditions: require close beyond pivot level
+        # Entry conditions: require trend alignment and close beyond pivot level
         if position == 0:
-            # Long: price closes above weekly R1 + above 1d EMA34 + volume
-            if close[i] > R1_aligned[i] and close[i] > ema34_1d_aligned[i] and vol_filter:
+            # Long: price closes above weekly R1 + above 1d EMA50 + volume
+            if close[i] > R1_aligned[i] and close[i] > ema50_1d_aligned[i] and vol_filter:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price closes below weekly S1 + below 1d EMA34 + volume
-            elif close[i] < S1_aligned[i] and close[i] < ema34_1d_aligned[i] and vol_filter:
+            # Short: price closes below weekly S1 + below 1d EMA50 + volume
+            elif close[i] < S1_aligned[i] and close[i] < ema50_1d_aligned[i] and vol_filter:
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -107,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WeeklyPivot_R1_S1_Breakout_VolumeFilter_v2"
+name = "4h_WeeklyPivot_R1_S1_Breakout_VolumeTrend_v3"
 timeframe = "4h"
 leverage = 1.0
