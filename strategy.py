@@ -1,11 +1,3 @@
-# 6h_WeeklyPivot_Continuation_TrendFilter_v1
-# Weekly pivot levels with trend continuation on 6h timeframe
-# Uses weekly pivot points to identify institutional support/resistance
-# In uptrend: buy pullbacks to weekly S1/S2; in downtrend: sell rallies to weekly R1/R2
-# Trend filter uses 6h EMA50 to avoid counter-trend trades
-# Volume confirmation ensures institutional participation
-# Designed to work in both bull and bear markets by following the trend
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,86 +13,96 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Weekly high/low/close for pivot calculation ===
-    df_weekly = get_htf_data(prices, '1w')
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # === 1d Donchian Channels (20-period) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points: P = (H + L + C)/3
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    # Support and resistance levels
-    weekly_s1 = 2 * weekly_pivot - weekly_high
-    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
+    # Calculate Donchian channels
+    upper_1d = np.full_like(high_1d, np.nan)
+    lower_1d = np.full_like(low_1d, np.nan)
+    period = 20
+    for i in range(len(high_1d)):
+        if i >= period - 1:
+            upper_1d[i] = np.max(high_1d[i-(period-1):i+1])
+            lower_1d[i] = np.min(low_1d[i-(period-1):i+1])
+        elif i > 0:
+            upper_1d[i] = np.max(high_1d[0:i+1])
+            lower_1d[i] = np.min(low_1d[0:i+1])
+        else:
+            upper_1d[i] = high_1d[0]
+            lower_1d[i] = low_1d[0]
     
-    # === Align weekly pivot levels to 6h timeframe ===
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
-    weekly_s2_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s2)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
-    weekly_r2_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r2)
+    # === 1d EMA(34) for trend filter ===
+    ema_34 = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 34:
+        ema_34[33] = np.mean(close_1d[:34])
+        alpha = 2 / (34 + 1)
+        for i in range(34, len(close_1d)):
+            ema_34[i] = alpha * close_1d[i] + (1 - alpha) * ema_34[i-1]
+    else:
+        for i in range(len(close_1d)):
+            ema_34[i] = np.mean(close_1d[:i+1]) if i >= 0 else close_1d[0]
     
-    # === 6h EMA50 for trend filter ===
-    close_series = pd.Series(close)
-    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # === 12h Volume confirmation ===
+    # Calculate 20-period average volume
+    vol_ma_20 = np.full_like(volume, np.nan)
+    for i in range(len(volume)):
+        if i >= 19:
+            vol_ma_20[i] = np.mean(volume[i-19:i+1])
+        elif i > 0:
+            vol_ma_20[i] = np.mean(volume[max(0, i-9):i+1])
+        else:
+            vol_ma_20[i] = volume[0]
     
-    # === 6h Volume confirmation ===
-    volume_series = pd.Series(volume)
-    vol_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma_20 * 1.5)  # Volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_confirm = volume > vol_ma_20 * 1.5
+    
+    # === Align indicators to 12h timeframe ===
+    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
+    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 60
+    warmup = 200
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(weekly_pivot_aligned[i]) or 
-            np.isnan(weekly_s1_aligned[i]) or 
-            np.isnan(weekly_s2_aligned[i]) or 
-            np.isnan(weekly_r1_aligned[i]) or 
-            np.isnan(weekly_r2_aligned[i]) or 
-            np.isnan(ema_50[i]) or 
+        if (np.isnan(upper_1d_aligned[i]) or 
+            np.isnan(lower_1d_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or 
             np.isnan(vol_confirm[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Determine trend based on 6h EMA50
-        uptrend = close[i] > ema_50[i]
-        downtrend = close[i] < ema_50[i]
-        
         # Entry logic: only enter when flat
         if position == 0:
-            # Long in uptrend: price near weekly support with volume confirmation
-            if uptrend:
-                # Price within 0.5% of S1 or S2
-                near_s1 = abs(close[i] - weekly_s1_aligned[i]) / weekly_s1_aligned[i] < 0.005
-                near_s2 = abs(close[i] - weekly_s2_aligned[i]) / weekly_s2_aligned[i] < 0.005
-                if (near_s1 or near_s2) and vol_confirm[i]:
+            # Long: price breaks above 1d Donchian upper band AND price above 1d EMA34
+            if close[i] > upper_1d_aligned[i] and close[i] > ema_34_aligned[i]:
+                # Additional volume confirmation
+                if vol_confirm[i]:
                     signals[i] = 0.25
                     position = 1
                     continue
-            # Short in downtrend: price near weekly resistance with volume confirmation
-            elif downtrend:
-                # Price within 0.5% of R1 or R2
-                near_r1 = abs(close[i] - weekly_r1_aligned[i]) / weekly_r1_aligned[i] < 0.005
-                near_r2 = abs(close[i] - weekly_r2_aligned[i]) / weekly_r2_aligned[i] < 0.005
-                if (near_r1 or near_r2) and vol_confirm[i]:
+            # Short: price breaks below 1d Donchian lower band AND price below 1d EMA34
+            elif close[i] < lower_1d_aligned[i] and close[i] < ema_34_aligned[i]:
+                # Additional volume confirmation
+                if vol_confirm[i]:
                     signals[i] = -0.25
                     position = -1
                     continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price reaches weekly pivot or trend changes
-            if close[i] >= weekly_pivot_aligned[i] or close[i] < ema_50[i]:
+            # Exit long: price closes below 1d EMA34
+            if close[i] < ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -108,8 +110,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price reaches weekly pivot or trend changes
-            if close[i] <= weekly_pivot_aligned[i] or close[i] > ema_50[i]:
+            # Exit short: price closes above 1d EMA34
+            if close[i] > ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -118,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_Continuation_TrendFilter_v1"
-timeframe = "6h"
+name = "12h_Donchian20_EMA34_VolumeFilter_V1"
+timeframe = "12h"
 leverage = 1.0
