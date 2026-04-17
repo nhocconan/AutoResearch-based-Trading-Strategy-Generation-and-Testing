@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h timeframe with 12h Elder Ray (Bull/Bear Power) + 1d EMA200 trend filter + volume confirmation.
-Long when: Bull Power > 0, price > 1d EMA200, and volume > 1.5x 20-period average.
-Short when: Bear Power < 0, price < 1d EMA200, and volume > 1.5x 20-period average.
-Elder Ray measures bull/bear strength relative to EMA13. Combined with 1d EMA200 trend filter,
-this captures strong directional moves in both bull and bear markets while avoiding counter-trend trades.
-Volume confirmation ensures breakouts have conviction.
-Designed for low trade frequency (12-37/year) with high win rate in trending markets.
+Hypothesis: 4h timeframe with 1d Williams %R filter + 4h Donchian(20) breakout + volume confirmation.
+Long when price breaks above 20-period high with 1d Williams %R < -80 (oversold) and volume > 1.3x 20-period volume average.
+Short when price breaks below 20-period low with 1d Williams %R > -20 (overbought) and volume > 1.3x 20-period volume average.
+Williams %R on daily timeframe helps identify overextended moves, increasing probability of continuation breakouts.
+Designed to work in bull markets (breakout from oversold) and bear markets (breakdown from overbought).
+Target trades: 20-50/year to avoid fee drag.
 """
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,81 +22,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Elder Ray (EMA13, Bull/Bear Power)
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Get 1d data for EMA200 trend filter and volume average
+    # Get 1d data for Williams %R
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate EMA13 on 12h
-    def ema(values, span):
-        return pd.Series(values).ewm(span=span, adjust=False, min_periods=span).mean().values
+    # Calculate 1d Williams %R (14-period)
+    def williams_r(high_vals, low_vals, close_vals, window):
+        highest_high = pd.Series(high_vals).rolling(window=window, min_periods=window).max().values
+        lowest_low = pd.Series(low_vals).rolling(window=window, min_periods=window).min().values
+        wr = -100 * (highest_high - close_vals) / (highest_high - lowest_low)
+        # Handle division by zero when highest_high == lowest_low
+        wr = np.where((highest_high - lowest_low) == 0, -50, wr)
+        return wr
     
-    ema13_12h = ema(close_12h, 13)
+    wr_14_1d = williams_r(high_1d, low_1d, close_1d, 14)
     
-    # Calculate Bull Power (High - EMA13) and Bear Power (Low - EMA13)
-    bull_power_12h = high_12h - ema13_12h
-    bear_power_12h = low_12h - ema13_12h
+    # Calculate 4h Donchian(20) channels
+    def donchian_channel(high_vals, low_vals, window):
+        upper = pd.Series(high_vals).rolling(window=window, min_periods=window).max().values
+        lower = pd.Series(low_vals).rolling(window=window, min_periods=window).min().values
+        return upper, lower
     
-    # Calculate 1d EMA200
-    ema200_1d = ema(close_1d, 200)
+    donchian_upper, donchian_lower = donchian_channel(high, low, 20)
     
-    # Calculate 1d volume 20-period average
-    vol_ma_20_1d = ema(volume_1d, 20)  # Using EMA for smoother average
+    # Calculate 4h volume 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align all to primary timeframe (6h)
-    bull_power_12h_aligned = align_htf_to_ltf(prices, df_12h, bull_power_12h)
-    bear_power_12h_aligned = align_htf_to_ltf(prices, df_12h, bear_power_12h)
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Align all to primary timeframe (4h)
+    wr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, wr_14_1d)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)  # 1d -> 4h
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)  # 1d -> 4h
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)  # 1d -> 4h
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 200  # need enough for EMA200 and indicators
+    start_idx = 20  # need enough for Donchian and Williams %R
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(bull_power_12h_aligned[i]) or 
-            np.isnan(bear_power_12h_aligned[i]) or 
-            np.isnan(ema200_1d_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(wr_14_1d_aligned[i]) or 
+            np.isnan(donchian_upper_aligned[i]) or 
+            np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(vol_ma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 6h volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20_1d_aligned[i]
+        # Volume confirmation: current 4h volume > 1.3x 20-period average
+        volume_confirmed = volume[i] > 1.3 * vol_ma_20_aligned[i]
         
         if position == 0:
-            # Long: Bull Power positive, price above 1d EMA200, volume confirmed
-            if (bull_power_12h_aligned[i] > 0 and 
-                close[i] > ema200_1d_aligned[i] and 
+            # Long: price breaks above 20-period high with daily oversold and volume
+            if (close[i] > donchian_upper_aligned[i] and 
+                wr_14_1d_aligned[i] < -80 and 
                 volume_confirmed):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power negative, price below 1d EMA200, volume confirmed
-            elif (bear_power_12h_aligned[i] < 0 and 
-                  close[i] < ema200_1d_aligned[i] and 
+            # Short: price breaks below 20-period low with daily overbought and volume
+            elif (close[i] < donchian_lower_aligned[i] and 
+                  wr_14_1d_aligned[i] > -20 and 
                   volume_confirmed):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Bear Power turns negative (momentum shift)
-            if bear_power_12h_aligned[i] < 0:
+            # Exit long: price falls back below 20-period low (opposite side of channel)
+            if close[i] < donchian_lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Bull Power turns positive (momentum shift)
-            if bull_power_12h_aligned[i] > 0:
+            # Exit short: price rises back above 20-period high (opposite side of channel)
+            if close[i] > donchian_upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12hElderRay_1dEMA200_Volume_Confirm"
-timeframe = "6h"
+name = "4h_1dWilliamsR14_Donchian20_Breakout_Volume_Confirm"
+timeframe = "4h"
 leverage = 1.0
