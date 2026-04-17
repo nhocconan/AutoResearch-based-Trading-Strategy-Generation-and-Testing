@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d ADX trend filter.
-Long when price breaks above Donchian upper band AND volume > 1.5x average AND ADX > 25 (trending).
-Short when price breaks below Donchian lower band AND volume > 1.5x average AND ADX > 25.
-Exit when price reverts to Donchian middle (20-period mean) OR ADX < 20 (range market).
+Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d ADX trend filter, with refined entry/exit conditions to increase trade frequency while maintaining edge.
+Long when price breaks above Donchian upper band AND volume > 1.3x average AND ADX > 22 (trending).
+Short when price breaks below Donchian lower band AND volume > 1.3x average AND ADX > 22.
+Exit when price reverts to Donchian middle (20-period mean) OR ADX < 18 (range market).
 Uses 4h for Donchian calculation and 1d for ADX filter to reduce whipsaw.
 Target: 75-200 total trades over 4 years (19-50/year). Donchian breakouts capture trends,
 volume confirmation filters fakeouts, ADX filter avoids ranging markets.
@@ -109,26 +109,26 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price > Donchian upper AND volume > 1.5x avg AND ADX > 25 (trending)
-            if price > du and vol > 1.5 * vol_ma and adx_val > 25:
+            # Long: price > Donchian upper AND volume > 1.3x avg AND ADX > 22 (trending)
+            if price > du and vol > 1.3 * vol_ma and adx_val > 22:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < Donchian lower AND volume > 1.5x avg AND ADX > 25 (trending)
-            elif price < dl and vol > 1.5 * vol_ma and adx_val > 25:
+            # Short: price < Donchian lower AND volume > 1.3x avg AND ADX > 22 (trending)
+            elif price < dl and vol > 1.3 * vol_ma and adx_val > 22:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price < Donchian middle OR ADX < 20 (range market)
-            if price < dm or adx_val < 20:
+            # Exit long: price < Donchian middle OR ADX < 18 (range market)
+            if price < dm or adx_val < 18:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price > Donchian middle OR ADX < 20 (range market)
-            if price > dm or adx_val < 20:
+            # Exit short: price > Donchian middle OR ADX < 18 (range market)
+            if price > dm or adx_val < 18:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -136,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Volume_ADX_Filter"
+name = "4h_Donchian20_Volume_ADX_Filter_Relaxed"
 timeframe = "4h"
 leverage = 1.0
