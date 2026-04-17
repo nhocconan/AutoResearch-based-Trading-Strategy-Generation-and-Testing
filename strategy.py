@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-1h_4h1d_Trend_Follow_With_Volume_Filter_v1
-1-hour strategy using 4h trend and 1d volume confirmation for entry timing.
-Trades only during 08-20 UTC session to reduce noise.
-Target: 60-150 total trades over 4 years (15-37/year).
+6h_ElderRay_RayForce_V1
+6-hour strategy using Elder Ray power (Bull/Bear) with 1-week force index filter.
+Targets trend exhaustion points in both bull and bear markets via divergence between
+price and force. Low-frequency design aims for 50-150 total trades over 4 years.
 """
 
 import numpy as np
@@ -20,19 +20,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 4h EMA trend (21-period) ===
-    df_4h = get_htf_data(prices, '4h')
-    ema_4h = pd.Series(df_4h['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # === Weekly Force Index (13-period EMA of price change * volume) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # === 1d Volume confirmation (20-period average) ===
+    # Price change
+    price_change_1w = np.diff(close_1w, prepend=close_1w[0])
+    # Force Index = price change * volume
+    force_1w = price_change_1w * volume_1w
+    # EMA of Force Index (13-period)
+    ema_force_1w = pd.Series(force_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Align weekly force to 6h
+    force_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_force_1w)
+    
+    # === Daily Elder Ray Power (13-period EMA) ===
     df_1d = get_htf_data(prices, '1d')
-    vol_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    vol_1d_current = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === Session filter: 08-20 UTC ===
-    hours = prices.index.hour
+    # 13-period EMA
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Bull Power = High - EMA13
+    bull_power_1d = high_1d - ema_13_1d
+    # Bear Power = Low - EMA13
+    bear_power_1d = low_1d - ema_13_1d
+    
+    # Align to 6h
+    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    
+    # === 6h EMA for trend context ===
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     signals = np.zeros(n)
     
@@ -44,55 +65,56 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_4h_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or 
-            np.isnan(vol_1d_current[i])):
+        if (np.isnan(force_1w_aligned[i]) or 
+            np.isnan(bull_power_1d_aligned[i]) or 
+            np.isnan(bear_power_1d_aligned[i]) or 
+            np.isnan(ema_50[i])):
             signals[i] = 0.0
+            position = 0
             continue
-        
-        # Session filter
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
-        
-        # Volume confirmation: current daily volume > 1.3x 20-day average
-        vol_confirmed = vol_1d_current[i] > 1.3 * vol_ma_1d_aligned[i]
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price above 4h EMA with volume confirmation
-            if close[i] > ema_4h_aligned[i] and vol_confirmed:
-                signals[i] = 0.20
+            # Long: Bull Power rising AND weekly Force turning up from negative
+            if (bull_power_1d_aligned[i] > bull_power_1d_aligned[i-1] and 
+                force_1w_aligned[i] > 0 and 
+                force_1w_aligned[i-1] <= 0 and
+                close[i] > ema_50[i]):
+                signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price below 4h EMA with volume confirmation
-            elif close[i] < ema_4h_aligned[i] and vol_confirmed:
-                signals[i] = -0.20
+            # Short: Bear Power falling (more negative) AND weekly Force turning down from positive
+            elif (bear_power_1d_aligned[i] < bear_power_1d_aligned[i-1] and 
+                  force_1w_aligned[i] < 0 and 
+                  force_1w_aligned[i-1] >= 0 and
+                  close[i] < ema_50[i]):
+                signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic: trend reversal
+        # Exit logic: power divergence or force reversal
         elif position == 1:
-            # Exit long: price crosses below 4h EMA
-            if close[i] < ema_4h_aligned[i]:
+            # Exit long: Bear Power rising (less negative) OR weekly Force turning down
+            if (bear_power_1d_aligned[i] > bear_power_1d_aligned[i-1] or
+                force_1w_aligned[i] < 0 and force_1w_aligned[i-1] >= 0):
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above 4h EMA
-            if close[i] > ema_4h_aligned[i]:
+            # Exit short: Bull Power falling OR weekly Force turning up
+            if (bull_power_1d_aligned[i] < bull_power_1d_aligned[i-1] or
+                force_1w_aligned[i] > 0 and force_1w_aligned[i-1] <= 0):
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_4h1d_Trend_Follow_With_Volume_Filter_v1"
-timeframe = "1h"
+name = "6h_ElderRay_RayForce_V1"
+timeframe = "6h"
 leverage = 1.0
