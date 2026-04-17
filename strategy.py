@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-1D Keltner Channel Breakout with Volume Spike and Volatility Regime Filter
-Long when price closes above upper Keltner band with volume > 2x 20-day average
-and ATR(14) < 1.5x its 50-day average (low volatility regime).
-Short when price closes below lower Keltner band with volume spike and low volatility.
-Exit when price returns to middle band or volatility spikes (ATR > 2x 50-day avg).
-Designed for 1d timeframe to capture breakouts from low volatility regimes in both bull and bear markets.
+12h Alligator + Volume Spike + Trend Filter
+Long when Alligator jaws (blue line) crosses above teeth (red line) with volume > 1.5x 20-period average and price > 12h EMA34.
+Short when jaws crosses below teeth with volume > 1.5x average and price < EMA34.
+Exit on opposite crossover or when price crosses the lips (green line).
+Designed for 12h to capture trends with low trade frequency (~15-30/year) and avoid whipsaws in ranging markets.
 """
 
 import numpy as np
@@ -22,84 +21,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for volatility regime filter
-    df_1w = get_htf_data(prices, '1w')
+    # Get 12h data for Alligator calculation
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate ATR(14) for Keltner channels and volatility regime
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Alligator lines: SMAs of median price (hl2) with specific periods and shifts
+    hl2 = (df_12h['high'] + df_12h['low']) / 2
+    jaws = hl2.rolling(window=13, min_periods=13).mean().shift(8)   # Blue line
+    teeth = hl2.rolling(window=8, min_periods=8).mean().shift(5)    # Red line
+    lips = hl2.rolling(window=5, min_periods=5).mean().shift(3)     # Green line
     
-    # Calculate 20-period EMA for Keltner middle band
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Align to lower timeframe (12h -> 12h is identity, but we keep for consistency)
+    jaws_12h = align_htf_to_ltf(prices, df_12h, jaws.values)
+    teeth_12h = align_htf_to_ltf(prices, df_12h, teeth.values)
+    lips_12h = align_htf_to_ltf(prices, df_12h, lips.values)
     
-    # Keltner channels: ±2 * ATR around EMA20
-    keltner_upper = ema20 + 2 * atr
-    keltner_lower = ema20 - 2 * atr
+    # 12h EMA34 for trend filter
+    ema_34 = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h = align_htf_to_ltf(prices, df_12h, ema_34)
     
-    # Weekly ATR for volatility regime filter
-    tr1_w = df_1w['high'].values[1:] - df_1w['low'].values[1:]
-    tr2_w = np.abs(df_1w['high'].values[1:] - df_1w['close'].values[:-1])
-    tr3_w = np.abs(df_1w['low'].values[1:] - df_1w['close'].values[:-1])
-    tr_w = np.concatenate([[np.nan], np.maximum(tr1_w, np.maximum(tr2_w, tr3_w))])
-    atr_w = pd.Series(tr_w).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # 50-week ATR average for volatility regime
-    atr_w_ma50 = pd.Series(atr_w).rolling(window=50, min_periods=50).mean().values
-    
-    # Align weekly ATR and its MA to daily timeframe
-    atr_w_aligned = align_htf_to_ltf(prices, df_1w, atr_w)
-    atr_w_ma50_aligned = align_htf_to_ltf(prices, df_1w, atr_w_ma50)
-    
-    # Volume confirmation: 20-day volume average
+    # Volume confirmation: 20-period volume MA on 12h
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 60  # warmup for all indicators
+    start_idx = 60  # warmup for Alligator and EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or 
-            np.isnan(ema20[i]) or np.isnan(atr_w_aligned[i]) or 
-            np.isnan(atr_w_ma50_aligned[i]) or np.isnan(volume_ma_20.iloc[i])):
+        if (np.isnan(jaws_12h[i]) or np.isnan(teeth_12h[i]) or np.isnan(lips_12h[i]) or 
+            np.isnan(ema_34_12h[i]) or np.isnan(volume_ma_20.iloc[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = volume_ma_20.iloc[i]
-        atr_w_now = atr_w_aligned[i]
-        atr_w_ma = atr_w_ma50_aligned[i]
-        
-        # Low volatility regime: weekly ATR < 1.5x its 50-day average
-        low_vol = atr_w_now < 1.5 * atr_w_ma
-        # High volatility exit: weekly ATR > 2x its 50-day average
-        high_vol = atr_w_now > 2.0 * atr_w_ma
         
         if position == 0:
-            # Long: close above upper Keltner band with volume spike in low vol regime
-            if price > keltner_upper[i] and vol > 2.0 * vol_ma and low_vol:
+            # Long: jaws crosses above teeth with volume spike and price > EMA34
+            if jaws_12h[i] > teeth_12h[i] and jaws_12h[i-1] <= teeth_12h[i-1] and \
+               vol > 1.5 * vol_ma and price > ema_34_12h[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: close below lower Keltner band with volume spike in low vol regime
-            elif price < keltner_lower[i] and vol > 2.0 * vol_ma and low_vol:
+            # Short: jaws crosses below teeth with volume spike and price < EMA34
+            elif jaws_12h[i] < teeth_12h[i] and jaws_12h[i-1] >= teeth_12h[i-1] and \
+                 vol > 1.5 * vol_ma and price < ema_34_12h[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to middle band or volatility spikes
-            if price < ema20[i] or high_vol:
+            # Long exit: jaws crosses below teeth OR price crosses below lips
+            if jaws_12h[i] < teeth_12h[i] and jaws_12h[i-1] >= teeth_12h[i-1] or \
+               price < lips_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to middle band or volatility spikes
-            if price > ema20[i] or high_vol:
+            # Short exit: jaws crosses above teeth OR price crosses above lips
+            if jaws_12h[i] > teeth_12h[i] and jaws_12h[i-1] <= teeth_12h[i-1] or \
+               price > lips_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Keltner_Breakout_Volume_Volatility"
-timeframe = "1d"
+name = "12h_Alligator_Volume_EMA34"
+timeframe = "12h"
 leverage = 1.0
