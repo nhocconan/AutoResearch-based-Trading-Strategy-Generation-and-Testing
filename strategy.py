@@ -1,130 +1,108 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h strategy using Wilder's Parabolic SAR for trend detection with volume confirmation.
-- Parabolic SAR identifies trend direction and provides trailing stops
-- Enter long when price is above SAR, volume > 1.5x 20-period volume MA, and closing price > opening price (bullish candle)
-- Enter short when price is below SAR, volume > 1.5x 20-period volume MA, and closing price < opening price (bearish candle)
-- Exit when price crosses SAR (trend reversal)
+Hypothesis: 4h strategy using Donchian breakout with 1d volatility filter and volume confirmation.
+- Calculate Donchian channels (20-period high/low) on 4h data
+- Enter long when price breaks above upper band with volume > 1.5x 20-period volume MA and 1d ATR(14) > 1d ATR(50)
+- Enter short when price breaks below lower band with volume > 1.5x 20-period volume MA and 1d ATR(14) > 1d ATR(50)
+- Exit when price crosses back to the opposite band (lower band for longs, upper band for shorts)
 - Fixed position size 0.25 to manage drawdown
+- Uses 1d volatility regime filter (short-term ATR > long-term ATR) to capture trending markets
 - Designed for 4h timeframe with strict entry conditions to limit trades to 75-200 total over 4 years
 """
 
 import numpy as np
 import pandas as pd
-from math import exp, log
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    open_price = prices['open'].values
     volume = prices['volume'].values
     
-    # Parabolic SAR parameters
-    af_start = 0.02
-    af_increment = 0.02
-    af_max = 0.2
+    # Get 1-day data for ATR calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Initialize arrays
-    sar = np.zeros(n)
-    trend = np.zeros(n)  # 1 for uptrend, -1 for downtrend
-    ep = np.zeros(n)     # extreme point
-    af = np.zeros(n)     # acceleration factor
+    # Calculate 1d ATR(14) and ATR(50) for volatility regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Initialize first values
-    trend[0] = 1 if close[1] > close[0] else -1
-    sar[0] = low[0] if trend[0] == 1 else high[0]
-    ep[0] = high[0] if trend[0] == 1 else low[0]
-    af[0] = af_start
+    # True Range components
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]  # First period
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Calculate Parabolic SAR
-    for i in range(1, n):
-        # SAR calculation
-        sar[i] = sar[i-1] + af[i-1] * (ep[i-1] - sar[i-1])
-        
-        # Determine current trend
-        if trend[i-1] == 1:  # was uptrend
-            if low[i] <= sar[i]:  # trend reversal to downtrend
-                trend[i] = -1
-                sar[i] = ep[i-1]  # SAR becomes previous EP
-                ep[i] = low[i]
-                af[i] = af_start
-            else:  # continue uptrend
-                trend[i] = 1
-                if high[i] > ep[i-1]:
-                    ep[i] = high[i]
-                    af[i] = min(af[i-1] + af_increment, af_max)
-                else:
-                    ep[i] = ep[i-1]
-                    af[i] = af[i-1]
-        else:  # was downtrend
-            if high[i] >= sar[i]:  # trend reversal to uptrend
-                trend[i] = 1
-                sar[i] = ep[i-1]  # SAR becomes previous EP
-                ep[i] = high[i]
-                af[i] = af_start
-            else:  # continue downtrend
-                trend[i] = -1
-                if low[i] < ep[i-1]:
-                    ep[i] = low[i]
-                    af[i] = min(af[i-1] + af_increment, af_max)
-                else:
-                    ep[i] = ep[i-1]
-                    af[i] = af[i-1]
-        
-        # Ensure SAR doesn't penetrate the last two periods' low/high
-        if trend[i] == 1:  # uptrend
-            sar[i] = min(sar[i], low[i-1], low[i-2] if i >= 2 else low[i-1])
-        else:  # downtrend
-            sar[i] = max(sar[i], high[i-1], high[i-2] if i >= 2 else high[i-1])
+    # ATR calculations
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    
+    # Align ATR values to 4h timeframe
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    atr_50_aligned = align_htf_to_ltf(prices, df_1d, atr_50)
+    
+    # Calculate Donchian channels (20-period) on 4h data
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: 20-period volume MA
-    volume_series = pd.Series(volume)
-    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 20  # warmup for volume MA
+    start_idx = 50  # warmup for ATR and Donchian
     
     for i in range(start_idx, n):
-        if np.isnan(volume_ma_20[i]) or np.isnan(sar[i]):
+        if (np.isnan(volume_ma_20.iloc[i]) or 
+            np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(atr_14_aligned[i]) or np.isnan(atr_50_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = volume_ma_20[i]
-        sar_val = sar[i]
-        is_bullish_candle = close[i] > open_price[i]
-        is_bearish_candle = close[i] < open_price[i]
+        vol_ma = volume_ma_20.iloc[i]
+        upper = donch_high[i]
+        lower = donch_low[i]
+        atr14 = atr_14_aligned[i]
+        atr50 = atr_50_aligned[i]
+        
+        # Volatility regime: short-term ATR > long-term ATR (trending market)
+        vol_regime = atr14 > atr50
         
         if position == 0:
-            # Look for entries with volume confirmation and candle direction
-            # Long: price above SAR + volume spike + bullish candle
-            if price > sar_val and vol > 1.5 * vol_ma and is_bullish_candle:
+            # Look for Donchian breakouts with volume confirmation and volatility regime
+            # Long: price breaks above upper band + volume spike + trending market
+            if price > upper and vol > 1.5 * vol_ma and vol_regime:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below SAR + volume spike + bearish candle
-            elif price < sar_val and vol > 1.5 * vol_ma and is_bearish_candle:
+            # Short: price breaks below lower band + volume spike + trending market
+            elif price < lower and vol > 1.5 * vol_ma and vol_regime:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when price crosses below SAR (trend reversal)
-            if price < sar_val:
+            # Exit when price crosses below lower band (opposite band)
+            if price < lower:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price crosses above SAR (trend reversal)
-            if price > sar_val:
+            # Exit when price crosses above upper band (opposite band)
+            if price > upper:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -132,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_ParabolicSAR_Volume_Candle"
+name = "4h_DonchianBreakout_Volume_VolatilityRegime"
 timeframe = "4h"
 leverage = 1.0
