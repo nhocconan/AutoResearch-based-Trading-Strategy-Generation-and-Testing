@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """
-4h_12h_Camarilla_R1S1_Breakout_Volume_ATRFilter
-Hypothesis: On 4h timeframe, buy when price breaks above 12h Camarilla R1 with volume spike (>1.5x median volume) and ATR expansion (ATR > 1.2x median ATR), sell when breaks below 12h S1. Uses volume and volatility filters to avoid false breakouts. Target: 20-30 trades/year for low fee drag.
+4h_12h_MultiTimeframe_VolumeBreakout_RegimeFilter
+Hypothesis: Combines 12h volume surge (2x median) with 4h price breaking above 12h VWAP as momentum signal, filtered by 4h ADX>25 to avoid chop. Short when below VWAP with volume surge and ADX>25. Uses 1/3 position sizing to manage drawdown. Designed for low trade frequency (<30/year) to minimize fee drag in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_atr(high, low, close, period=14):
+def calculate_vwap(high, low, close, volume):
+    typical_price = (high + low + close) / 3
+    vwap = np.cumsum(typical_price * volume) / np.cumsum(volume)
+    return vwap
+
+def calculate_adx(high, low, close, period=14):
     # True Range
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
@@ -16,7 +21,13 @@ def calculate_atr(high, low, close, period=14):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
-    # Wilder smoothing
+    # Directional Movement
+    up_move = high[1:] - high[:-1]
+    down_move = low[:-1] - low[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smooth TR, +DM, -DM
     def smooth_wilder(arr, period):
         result = np.full_like(arr, np.nan)
         if len(arr) < period:
@@ -27,18 +38,23 @@ def calculate_atr(high, low, close, period=14):
                 result[i] = (result[i-1] * (period-1) + arr[i]) / period
         return result
     
-    return smooth_wilder(tr, period)
-
-def calculate_camarilla(high, low, close):
-    # Camarilla pivot levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    range_hl = high - low
-    r1 = close + range_hl * 1.1 / 12
-    s1 = close - range_hl * 1.1 / 12
-    return r1, s1
+    tr_smooth = smooth_wilder(tr, period)
+    plus_dm_smooth = smooth_wilder(plus_dm, period)
+    minus_dm_smooth = smooth_wilder(minus_dm, period)
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
+    
+    # ADX
+    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
+    dx = np.where((plus_di + minus_di) == 0, 0, dx)
+    adx = smooth_wilder(dx, period)
+    return adx
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -46,93 +62,84 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 12h Data (HTF for Camarilla levels, volume, ATR) ===
+    # === 12h Data (HTF for VWAP and volume) ===
     df_12h = get_htf_data(prices, '12h')
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     volume_12h = df_12h['volume'].values
     
-    # 12h ATR (14-period)
-    atr_12h = calculate_atr(high_12h, low_12h, close_12h, 14)
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
+    # 12h VWAP
+    vwap_12h = calculate_vwap(high_12h, low_12h, close_12h, volume_12h)
+    vwap_12h_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h)
     
-    # 12h median ATR (50-period) for expansion filter
-    atr_median_12h = pd.Series(atr_12h).rolling(window=50, min_periods=50).median().values
-    atr_median_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_median_12h)
-    
-    # 12h Camarilla levels (R1, S1)
-    r1_12h, s1_12h = calculate_camarilla(high_12h, low_12h, close_12h)
-    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
-    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
-    
-    # 12h median volume (50-period) for volume spike filter
+    # 12h median volume (50-period)
     vol_median_12h = pd.Series(volume_12h).rolling(window=50, min_periods=50).median().values
     vol_median_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_median_12h)
+    
+    # 4h ADX (14-period)
+    adx_4h = calculate_adx(high, low, close, 14)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 50
+    warmup = 100
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_12h_aligned[i]) or 
-            np.isnan(atr_median_12h_aligned[i]) or
-            np.isnan(r1_12h_aligned[i]) or
-            np.isnan(s1_12h_aligned[i]) or
-            np.isnan(vol_median_12h_aligned[i])):
+        if (np.isnan(vwap_12h_aligned[i]) or 
+            np.isnan(vol_median_12h_aligned[i]) or
+            np.isnan(adx_4h[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Get current 12h bar's volume and ATR for confirmation
+        # Get current 12h bar's volume for surge detection
         vol_12h_current = align_htf_to_ltf(prices, df_12h, volume_12h)[i]
-        atr_12h_current = atr_12h_aligned[i]
         
-        # Volume spike: current volume > 1.5x median volume
-        vol_spike = vol_12h_current > 1.5 * vol_median_12h_aligned[i]
+        # Volume surge: current volume > 2.0x median volume
+        vol_surge = vol_12h_current > 2.0 * vol_median_12h_aligned[i]
         
-        # ATR expansion: current ATR > 1.2x median ATR
-        atr_expansion = atr_12h_current > 1.2 * atr_median_12h_aligned[i]
+        # ADX filter: trending market (ADX > 25)
+        trending = adx_4h[i] > 25
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price breaks above 12h R1 with volume spike and ATR expansion
-            if close[i] > r1_12h_aligned[i] and vol_spike and atr_expansion:
-                signals[i] = 0.25
+            # Long: price above 12h VWAP with volume surge and trending market
+            if close[i] > vwap_12h_aligned[i] and vol_surge and trending:
+                signals[i] = 0.33
                 position = 1
                 continue
-            # Short: price breaks below 12h S1 with volume spike and ATR expansion
-            elif close[i] < s1_12h_aligned[i] and vol_spike and atr_expansion:
-                signals[i] = -0.25
+            # Short: price below 12h VWAP with volume surge and trending market
+            elif close[i] < vwap_12h_aligned[i] and vol_surge and trending:
+                signals[i] = -0.33
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit when price breaks below S1 (opposite breakout)
-            if close[i] < s1_12h_aligned[i]:
+            # Exit when price crosses below VWAP (momentum loss)
+            if close[i] < vwap_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = 0.25
+                signals[i] = 0.33
         
         elif position == -1:
-            # Exit when price breaks above R1 (opposite breakout)
-            if close[i] > r1_12h_aligned[i]:
+            # Exit when price crosses above VWAP (momentum loss)
+            if close[i] > vwap_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = -0.25
+                signals[i] = -0.33
     
     return signals
 
-name = "4h_12h_Camarilla_R1S1_Breakout_Volume_ATRFilter"
+name = "4h_12h_MultiTimeframe_VolumeBreakout_RegimeFilter"
 timeframe = "4h"
 leverage = 1.0
