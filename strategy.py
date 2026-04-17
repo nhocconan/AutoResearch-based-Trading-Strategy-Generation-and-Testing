@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Engulfing_Engulfing_VolumeFilter_V1
-Strategy: 4h bullish/bearish engulfing candle with volume confirmation.
-Long: Bullish engulfing pattern + volume > 1.5x 20-period average
-Short: Bearish engulfing pattern + volume > 1.5x 20-period average
-Exit: Opposite engulfing pattern or time-based (max 10 bars)
-Position size: 0.25
-Uses candlestick patterns for reversal signals, volume for confirmation.
-Designed to capture reversals in both trending and ranging markets.
+1h_4hDonchian20_1dEMA34_Trend
+Strategy: 1h trend following using 4h Donchian(20) breakout + 1d EMA(34) filter.
+Long: Price breaks above 4h Donchian upper + price > 1d EMA(34)
+Short: Price breaks below 4h Donchian lower + price < 1d EMA(34)
+Exit: Opposite Donchian break or EMA filter fails
+Position size: 0.20
+Uses 4h for trend direction/breakout, 1d for trend filter, 1h only for entry timing.
+Session filter 08-20 UTC to reduce noise. Target 20-40 trades/year.
 """
 
 import numpy as np
@@ -20,74 +20,91 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 4h data for Donchian breakout
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 4h Donchian channels (20-period)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Calculate 4h volume average (20-period)
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    
+    # Align to 1h
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    
+    # Get 1d data for EMA filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    
+    # Calculate 1d EMA(34)
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align to 1h
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Precompute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_in_trade = 0
     
-    for i in range(50, n):  # warmup for EMA
-        # Skip if EMA not available
-        if np.isnan(ema_34_1d_aligned[i]):
+    for i in range(50, n):
+        # Session filter: 08-20 UTC
+        if not (8 <= hours[i] <= 20):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        # Skip if any required data is not available
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema_34_aligned[i])):
+            signals[i] = 0.0
+            continue
         
-        # Engulfing patterns
-        bullish_engulfing = (close[i] > open_price[i-1]) and (open_price[i] < close[i-1])
-        bearish_engulfing = (open_price[i] > close[i-1]) and (close[i] < open_price[i-1])
+        # Trend direction from EMA
+        uptrend = close[i] > ema_34_aligned[i]
+        downtrend = close[i] < ema_34_aligned[i]
+        
+        # Breakout signals
+        breakout_up = close[i] > donchian_high_aligned[i]
+        breakout_down = close[i] < donchian_low_aligned[i]
         
         if position == 0:
-            # Long: Bullish engulfing + above EMA34 + volume filter
-            if bullish_engulfing and (close[i] > ema_34_1d_aligned[i]) and volume_filter:
-                signals[i] = 0.25
+            # Long: Breakout above Donchian high + uptrend
+            if breakout_up and uptrend:
+                signals[i] = 0.20
                 position = 1
-                bars_in_trade = 0
-            # Short: Bearish engulfing + below EMA34 + volume filter
-            elif bearish_engulfing and (close[i] < ema_34_1d_aligned[i]) and volume_filter:
-                signals[i] = -0.25
+            # Short: Breakdown below Donchian low + downtrend
+            elif breakout_down and downtrend:
+                signals[i] = -0.20
                 position = -1
-                bars_in_trade = 0
         
         elif position == 1:
-            bars_in_trade += 1
-            # Exit conditions: bearish engulfing OR max 10 bars
-            if bearish_engulfing or bars_in_trade >= 10:
+            # Exit long: Breakdown below Donchian low OR trend fails
+            if breakout_down or not uptrend:
                 signals[i] = 0.0
                 position = 0
-                bars_in_trade = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            bars_in_trade += 1
-            # Exit conditions: bullish engulfing OR max 10 bars
-            if bullish_engulfing or bars_in_trade >= 10:
+            # Exit short: Breakout above Donchian high OR trend fails
+            if breakout_up or not downtrend:
                 signals[i] = 0.0
                 position = 0
-                bars_in_trade = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Engulfing_Engulfing_VolumeFilter_V1"
-timeframe = "4h"
+name = "1h_4hDonchian20_1dEMA34_Trend"
+timeframe = "1h"
 leverage = 1.0
