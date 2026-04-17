@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_PriceChannel_VolumeTrend
-Strategy: 4-hour price channel breakout with volume confirmation and 1d trend filter.
-Long: Price breaks above 4h Donchian high(20) + volume > 1.5x average + price above 1d EMA34
-Short: Price breaks below 4h Donchian low(20) + volume > 1.5x average + price below 1d EMA34
-Exit: Price returns to 4h Donchian midpoint
-Position size: 0.30
-Designed to capture breakouts aligned with daily trend in both bull and bear markets.
-Timeframe: 4h
+1d_WeeklyDonchian20_Breakout_Volume_Spike
+Strategy: Daily breakout above weekly Donchian high/low with volume spike and 1w trend filter.
+Long: Price breaks above weekly Donchian high(20) + volume > 2x average + price above 1w EMA34
+Short: Price breaks below weekly Donchian low(20) + volume > 2x average + price below 1w EMA34
+Exit: Price returns to weekly Donchian midpoint
+Position size: 0.25
+Designed to capture major breakouts aligned with weekly trend in both bull and bear markets.
+Timeframe: 1d
 """
 
 import numpy as np
@@ -24,22 +24,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period)
-    high_rolling = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_rolling = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate weekly Donchian channels (20-period)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    high_rolling = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    low_rolling = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     donchian_mid = (high_rolling + low_rolling) / 2
     
-    # Calculate daily EMA34 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Calculate weekly EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    close_series_1w = pd.Series(close_1w)
+    ema34_1w = close_series_1w.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    close_series_1d = pd.Series(close_1d)
-    ema34_1d = close_series_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align weekly EMA to daily timeframe
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Align 1d EMA to 4h timeframe
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume confirmation (20-period MA on 4h)
+    # Volume confirmation (20-period MA on daily)
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -51,17 +53,17 @@ def generate_signals(prices):
         # Skip if any required data is not available
         if (np.isnan(high_rolling[i]) or 
             np.isnan(low_rolling[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(ema34_1w_aligned[i]) or 
             np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        # Volume filter: current volume > 2x 20-period average
+        volume_filter = volume[i] > (2.0 * volume_ma20[i])
         
-        # Trend filter: price above/below 1d EMA34
-        price_above_ema = close[i] > ema34_1d_aligned[i]
-        price_below_ema = close[i] < ema34_1d_aligned[i]
+        # Trend filter: price above/below weekly EMA34
+        price_above_ema = close[i] > ema34_1w_aligned[i]
+        price_below_ema = close[i] < ema34_1w_aligned[i]
         
         # Breakout conditions
         breakout_up = close[i] > high_rolling[i-1]  # break above previous period high
@@ -71,13 +73,13 @@ def generate_signals(prices):
         return_to_mid = abs(close[i] - donchian_mid[i]) < 0.1 * (high_rolling[i] - low_rolling[i])
         
         if position == 0:
-            # Long: breakout up + volume filter + price above EMA
+            # Long: breakout up + volume filter + price above weekly EMA
             if breakout_up and volume_filter and price_above_ema:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
-            # Short: breakout down + volume filter + price below EMA
+            # Short: breakout down + volume filter + price below weekly EMA
             elif breakout_down and volume_filter and price_below_ema:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
@@ -86,7 +88,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
             # Exit short: return to midpoint or break up
@@ -94,10 +96,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_PriceChannel_VolumeTrend"
-timeframe = "4h"
+name = "1d_WeeklyDonchian20_Breakout_Volume_Spike"
+timeframe = "1d"
 leverage = 1.0
