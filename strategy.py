@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_Pivot_R1_S1_Breakout_Volume_Regime_v1
-Camarilla Pivot R1/S1 breakout on 4h with volume confirmation and Choppiness regime filter.
-Enters long when price breaks above R1 with volume spike in low-chop regime (trending).
-Enters short when price breaks below S1 with volume spike in low-chop regime.
-Uses 1d Camarilla levels for stability and to reduce noise.
-Target: 20-50 trades per year (80-200 total over 4 years).
+6h_Ichimoku_Cloud_Breakout_v1
+Ichimoku Cloud (10,26,52) with price breakout above/below cloud on 6h timeframe.
+Uses daily close to confirm trend direction (above/below daily Kumo) for alignment.
+Designed to work in both bull and bear markets by trading cloud breakouts with
+trend alignment, reducing false reversals.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -14,111 +14,130 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 52:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # === 1d OHLC for Camarilla calculation ===
+    # === 6h Ichimoku Cloud ===
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = np.full(n, np.nan)
+    period9_low = np.full(n, np.nan)
+    for i in range(n):
+        if i >= 8:
+            period9_high[i] = np.max(high[i-8:i+1])
+            period9_low[i] = np.min(low[i-8:i+1])
+    tenkan = (period9_high + period9_low) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = np.full(n, np.nan)
+    period26_low = np.full(n, np.nan)
+    for i in range(n):
+        if i >= 25:
+            period26_high[i] = np.max(high[i-25:i+1])
+            period26_low[i] = np.min(low[i-25:i+1])
+    kijun = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = np.full(n, np.nan)
+    period52_low = np.full(n, np.nan)
+    for i in range(n):
+        if i >= 51:
+            period52_high[i] = np.max(high[i-51:i+1])
+            period52_low[i] = np.min(low[i-51:i+1])
+    senkou_b = (period52_high + period52_low) / 2
+    
+    # === 1d Ichimoku Cloud (for trend alignment) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    n_1d = len(high_1d)
     
-    # Calculate Camarilla levels (R1, S1) from previous day
-    # R1 = close + 1.1 * (high - low) / 12
-    # S1 = close - 1.1 * (high - low) / 12
-    camarilla_range = high_1d - low_1d
-    r1 = close_1d + 1.1 * camarilla_range / 12
-    s1 = close_1d - 1.1 * camarilla_range / 12
+    # Tenkan-sen 1d
+    period9_high_1d = np.full(n_1d, np.nan)
+    period9_low_1d = np.full(n_1d, np.nan)
+    for i in range(n_1d):
+        if i >= 8:
+            period9_high_1d[i] = np.max(high_1d[i-8:i+1])
+            period9_low_1d[i] = np.min(low_1d[i-8:i+1])
+    tenkan_1d = (period9_high_1d + period9_low_1d) / 2
     
-    # === 1d Choppiness Index (CHOP) for regime filter ===
-    # CHOP = 100 * log10(sum(ATR1) / (n * (max(high) - min(low)))) / log10(n)
-    # We'll use 14-period CHOP on daily data
-    atr_1d = np.zeros_like(close_1d)
-    tr_1d = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
-        if i == 0:
-            tr_1d[i] = high_1d[i] - low_1d[i]
-        else:
-            tr_1d[i] = max(high_1d[i] - low_1d[i], 
-                           abs(high_1d[i] - close_1d[i-1]), 
-                           abs(low_1d[i] - close_1d[i-1]))
-        atr_1d[i] = tr_1d[i]
+    # Kijun-sen 1d
+    period26_high_1d = np.full(n_1d, np.nan)
+    period26_low_1d = np.full(n_1d, np.nan)
+    for i in range(n_1d):
+        if i >= 25:
+            period26_high_1d[i] = np.max(high_1d[i-25:i+1])
+            period26_low_1d[i] = np.min(low_1d[i-25:i+1])
+    kijun_1d = (period26_high_1d + period26_low_1d) / 2
     
-    # Smooth ATR with Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    atr_smoothed = np.zeros_like(close_1d)
-    if len(close_1d) >= 14:
-        atr_smoothed[13] = np.mean(atr_1d[:14])
-        for i in range(14, len(close_1d)):
-            atr_smoothed[i] = (atr_smoothed[i-1] * 13 + atr_1d[i]) / 14
+    # Senkou Span A 1d
+    senkou_a_1d = (tenkan_1d + kijun_1d) / 2
     
-    # Calculate CHOP(14)
-    chop = np.full_like(close_1d, 50.0)  # default to neutral
-    for i in range(13, len(close_1d)):
-        sum_atr = np.sum(atr_smoothed[i-13:i+1])
-        max_high = np.max(high_1d[i-13:i+1])
-        min_low = np.min(low_1d[i-13:i+1])
-        if max_high > min_low and sum_atr > 0:
-            chop[i] = 100 * np.log10(sum_atr) / np.log10(14) / np.log10((max_high - min_low) * 14)
-        else:
-            chop[i] = 50.0
+    # Senkou Span B 1d
+    period52_high_1d = np.full(n_1d, np.nan)
+    period52_low_1d = np.full(n_1d, np.nan)
+    for i in range(n_1d):
+        if i >= 51:
+            period52_high_1d[i] = np.max(high_1d[i-51:i+1])
+            period52_low_1d[i] = np.min(low_1d[i-51:i+1])
+    senkou_b_1d = (period52_high_1d + period52_low_1d) / 2
     
-    # === 4h Volume confirmation (20-period average) ===
-    vol_ma_20 = np.full_like(volume, np.nan)
-    for i in range(len(volume)):
-        if i >= 20:
-            vol_ma_20[i] = np.mean(volume[i-19:i+1])
-        elif i > 0:
-            vol_ma_20[i] = np.mean(volume[max(0, i-9):i+1])
-        else:
-            vol_ma_20[i] = volume[0]
+    # Kumo (Cloud) top and bottom for 1d
+    kumo_top_1d = np.maximum(senkou_a_1d, senkou_b_1d)
+    kumo_bottom_1d = np.minimum(senkou_a_1d, senkou_b_1d)
     
-    vol_confirm = volume > vol_ma_20 * 1.5  # volume spike: 1.5x average
-    
-    # === Align 1d indicators to 4h timeframe ===
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Align 1d Kumo to 6h timeframe
+    kumo_top_aligned = align_htf_to_ltf(prices, df_1d, kumo_top_1d)
+    kumo_bottom_aligned = align_htf_to_ltf(prices, df_1d, kumo_bottom_1d)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 50
+    warmup = 52
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or 
-            np.isnan(vol_confirm[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
+            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or
+            np.isnan(kumo_top_aligned[i]) or np.isnan(kumo_bottom_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Entry logic: only enter when flat and in low-chop regime (trending)
-        if position == 0 and chop_aligned[i] < 38.2:  # trending regime
-            # Long: price breaks above R1 with volume confirmation
-            if close[i] > r1_aligned[i] and vol_confirm[i]:
+        # Determine cloud top and bottom for current 6h bar
+        cloud_top = max(senkou_a[i], senkou_b[i])
+        cloud_bottom = min(senkou_a[i], senkou_b[i])
+        
+        # Entry logic: only enter when flat
+        if position == 0:
+            # Long: price breaks above cloud AND price above 1d Kumo (bullish alignment)
+            if (close[i] > cloud_top and 
+                close[i] > kumo_top_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price breaks below S1 with volume confirmation
-            elif close[i] < s1_aligned[i] and vol_confirm[i]:
+            # Short: price breaks below cloud AND price below 1d Kumo (bearish alignment)
+            elif (close[i] < cloud_bottom and 
+                  close[i] < kumo_bottom_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price breaks below S1 (reversal signal) OR chop becomes high (range)
-            if close[i] < s1_aligned[i] or chop_aligned[i] > 61.8:
+            # Exit long: price falls below cloud OR Tenkan crosses below Kijun
+            if (close[i] < cloud_bottom or 
+                tenkan[i] < kijun[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -126,8 +145,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above R1 (reversal signal) OR chop becomes high (range)
-            if close[i] > r1_aligned[i] or chop_aligned[i] > 61.8:
+            # Exit short: price rises above cloud OR Tenkan crosses above Kijun
+            if (close[i] > cloud_top or 
+                tenkan[i] > kijun[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -136,6 +156,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_Pivot_R1_S1_Breakout_Volume_Regime_v1"
-timeframe = "4h"
+name = "6h_Ichimoku_Cloud_Breakout_v1"
+timeframe = "6h"
 leverage = 1.0
