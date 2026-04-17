@@ -30,15 +30,15 @@ def generate_signals(prices):
     weekly_r1 = 2 * weekly_pivot - low_5d
     weekly_s1 = 2 * weekly_pivot - high_5d
     
-    # Align weekly pivot levels to 6h timeframe
-    weekly_pivot_6h = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-    weekly_r1_6h = align_htf_to_ltf(prices, df_1d, weekly_r1)
-    weekly_s1_6h = align_htf_to_ltf(prices, df_1d, weekly_s1)
+    # Align weekly pivot levels to daily timeframe
+    weekly_pivot_1d = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    weekly_r1_1d = align_htf_to_ltf(prices, df_1d, weekly_r1)
+    weekly_s1_1d = align_htf_to_ltf(prices, df_1d, weekly_s1)
     
     # Get daily data for trend filter (EMA34)
     close_1d_series = pd.Series(close_1d)
     ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_6h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume filter: current volume > 1.5 * 30-period average
     volume_ma30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
@@ -50,10 +50,10 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(weekly_pivot_6h[i]) or 
-            np.isnan(weekly_r1_6h[i]) or 
-            np.isnan(weekly_s1_6h[i]) or 
-            np.isnan(ema34_6h[i]) or 
+        if (np.isnan(weekly_pivot_1d[i]) or 
+            np.isnan(weekly_r1_1d[i]) or 
+            np.isnan(weekly_s1_1d[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or 
             np.isnan(volume_ma30[i])):
             signals[i] = 0.0
             continue
@@ -62,12 +62,12 @@ def generate_signals(prices):
         volume_filter = volume[i] > (1.5 * volume_ma30[i])
         
         # Trend filter: price above/below daily EMA34
-        price_above_ema = close[i] > ema34_6h[i]
-        price_below_ema = close[i] < ema34_6h[i]
+        price_above_ema = close[i] > ema34_1d_aligned[i]
+        price_below_ema = close[i] < ema34_1d_aligned[i]
         
         # Price relative to weekly pivot levels
-        price_above_r1 = close[i] > weekly_r1_6h[i]
-        price_below_s1 = close[i] < weekly_s1_6h[i]
+        price_above_r1 = close[i] > weekly_r1_1d[i]
+        price_below_s1 = close[i] < weekly_s1_1d[i]
         
         if position == 0:
             # Long: Price breaks above weekly R1 with volume and above daily EMA34
@@ -81,7 +81,7 @@ def generate_signals(prices):
         
         elif position == 1:
             # Exit long: Price crosses below weekly pivot OR below daily EMA34
-            if (close[i] < weekly_pivot_6h[i]) or (close[i] < ema34_6h[i]):
+            if (close[i] < weekly_pivot_1d[i]) or (close[i] < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,7 +89,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit short: Price crosses above weekly pivot OR above daily EMA34
-            if (close[i] > weekly_pivot_6h[i]) or (close[i] > ema34_6h[i]):
+            if (close[i] > weekly_pivot_1d[i]) or (close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_Breakout_EMA34_Volume"
-timeframe = "6h"
+name = "1d_WeeklyPivot_Breakout_EMA34_Volume"
+timeframe = "1d"
 leverage = 1.0
