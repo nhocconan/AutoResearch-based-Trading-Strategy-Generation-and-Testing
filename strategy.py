@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot levels
+    # Get daily data for pivot levels and trend
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -25,7 +25,7 @@ def generate_signals(prices):
     r1_1d = pivot_1d + (range_1d * 1.0)
     s1_1d = pivot_1d - (range_1d * 1.0)
     
-    # Align pivot levels to 4h timeframe
+    # Align pivot levels to 12h timeframe
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
@@ -33,8 +33,8 @@ def generate_signals(prices):
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     close_1w_series = pd.Series(close_1w)
-    ema34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    ema20_1w = close_1w_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -48,17 +48,17 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with volume and above weekly EMA34
-            if close[i] > r1_1d_aligned[i] and volume_filter[i] and close[i] > ema34_1w_aligned[i]:
+            # Long: price breaks above R1 with volume and above weekly EMA20
+            if close[i] > r1_1d_aligned[i] and volume_filter[i] and close[i] > ema20_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume and below weekly EMA34
-            elif close[i] < s1_1d_aligned[i] and volume_filter[i] and close[i] < ema34_1w_aligned[i]:
+            # Short: price breaks below S1 with volume and below weekly EMA20
+            elif close[i] < s1_1d_aligned[i] and volume_filter[i] and close[i] < ema20_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
@@ -80,6 +80,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Pivot_R1S1_WeeklyTrend"
-timeframe = "4h"
+name = "12h_Pivot_R1S1_Breakout_Volume_WeeklyTrend"
+timeframe = "12h"
 leverage = 1.0
