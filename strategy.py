@@ -1,13 +1,14 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and ADX trend filter
-# Donchian breakout captures momentum in trending markets.
-# Volume spike confirms institutional interest.
-# ADX > 25 ensures we only trade in trending conditions, avoiding chop.
-# Works in bull/bear by taking breakouts in direction of 1d trend.
+# Hypothesis: 4h breakout with 1d volume spike and ADX trend filter
+# Breakouts capture momentum in trending markets.
+# Volume surge confirms institutional interest.
+# ADX > 25 filters chop, ensuring trades only in trending conditions.
+# Works in bull/bear by trading breakouts in direction of 1d trend.
 # Position size: 0.25 for balanced risk/return.
 
 def generate_signals(prices):
