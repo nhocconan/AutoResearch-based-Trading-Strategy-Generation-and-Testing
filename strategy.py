@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Chaikin_Money_Flow_Trend_Confirmation
-Hypothesis: Use daily Chaikin Money Flow (CMF) with 4h price action to capture institutional flow.
-Long when CMF > +0.15 and price above 20-period EMA.
-Short when CMF < -0.15 and price below 20-period EMA.
-Exit when CMF crosses zero or price crosses EMA in opposite direction.
-Designed for low trade frequency (<50/year) to capture sustained trends with volume confirmation.
-Works in both bull and bear markets by following institutional money flow.
+12h_1w_1d_Camarilla_R1S1_Breakout_Volume_Confirmation_V1
+Hypothesis: Use weekly and daily confluence on 12h timeframe. Enter long when price breaks above daily R1 AND weekly R1 with volume > 2.0x 20-day average volume. Enter short when price breaks below daily S1 AND weekly S1 with volume filter. Exit on opposite breakout. Weekly confluence filters false breaks, volume ensures momentum, reducing trades to target 50-150 over 4 years. Designed to work in both bull (breakouts) and bear (mean reversion at extremes) via strict entry.
 """
 
 import numpy as np
@@ -23,66 +18,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Daily Chaikin Money Flow ===
+    # === Daily data for Camarilla levels and volume ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
-    # Avoid division by zero
-    hl_range = high_1d - low_1d
-    hl_range = np.where(hl_range == 0, 1e-10, hl_range)
-    mfm = ((close_1d - low_1d) - (high_1d - close_1d)) / hl_range
+    # === Weekly data for confluence filter ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Money Flow Volume = Money Flow Multiplier * Volume
-    mfv = mfm * volume_1d
+    # Calculate daily Camarilla levels
+    pp_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r1_1d = pp_1d + (range_1d * 1.1 / 12.0)
+    s1_1d = pp_1d - (range_1d * 1.1 / 12.0)
     
-    # 20-period CMF = Sum(Money Flow Volume, 20) / Sum(Volume, 20)
-    mfv_sum = pd.Series(mfv).rolling(window=20, min_periods=20).sum().values
-    vol_sum = pd.Series(volume_1d).rolling(window=20, min_periods=20).sum().values
-    cmf = np.where(vol_sum != 0, mfv_sum / vol_sum, 0)
+    # Calculate weekly Camarilla levels
+    pp_1w = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
+    r1_1w = pp_1w + (range_1w * 1.1 / 12.0)
+    s1_1w = pp_1w - (range_1w * 1.1 / 12.0)
     
-    # Align CMF to 4h timeframe
-    cmf_aligned = align_htf_to_ltf(prices, df_1d, cmf)
+    # Align daily levels to 12h
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # === 4h EMA for trend filter ===
-    close_series = pd.Series(close)
-    ema_20 = close_series.ewm(span=20, min_periods=20, adjust=False).mean().values
+    # Align weekly levels to 12h
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    
+    # Daily volume average for confirmation (20-day)
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    
+    # Current daily volume aligned
+    vol_1d_current_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
     
     signals = np.zeros(n)
     
-    # Warmup period: enough for daily CMF and EMA calculations
-    warmup = 40  # Covers 20-day CMF + buffer
+    # Warmup: covers 20-day volume average
+    warmup = 30
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(cmf_aligned[i]) or np.isnan(ema_20[i])):
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or
+            np.isnan(vol_avg_20_1d_aligned[i]) or np.isnan(vol_1d_current_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
+        # Volume filter: current daily volume > 2.0x 20-day average
+        vol_filter = vol_1d_current_aligned[i] > 2.0 * vol_avg_20_1d_aligned[i]
+        
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: CMF bullish (> +0.15) and price above EMA
-            if cmf_aligned[i] > 0.15 and close[i] > ema_20[i]:
+            # Long: Price breaks above BOTH daily R1 and weekly R1 + volume filter
+            if (close[i] > r1_1d_aligned[i] and close[i] > r1_1w_aligned[i] and vol_filter):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: CMF bearish (< -0.15) and price below EMA
-            elif cmf_aligned[i] < -0.15 and close[i] < ema_20[i]:
+            # Short: Price breaks below BOTH daily S1 and weekly S1 + volume filter
+            elif (close[i] < s1_1d_aligned[i] and close[i] < s1_1w_aligned[i] and vol_filter):
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic
+        # Exit logic: reverse signal (break opposite level on either timeframe)
         elif position == 1:
-            # Exit when CMF turns bearish (< 0) or price crosses below EMA
-            if cmf_aligned[i] < 0 or close[i] < ema_20[i]:
+            # Exit when price breaks below either daily S1 or weekly S1
+            if close[i] < s1_1d_aligned[i] or close[i] < s1_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -90,8 +102,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when CMF turns bullish (> 0) or price crosses above EMA
-            if cmf_aligned[i] > 0 or close[i] > ema_20[i]:
+            # Exit when price breaks above either daily R1 or weekly R1
+            if close[i] > r1_1d_aligned[i] or close[i] > r1_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -100,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Chaikin_Money_Flow_Trend_Confirmation"
-timeframe = "4h"
+name = "12h_1w_1d_Camarilla_R1S1_Breakout_Volume_Confirmation_V1"
+timeframe = "12h"
 leverage = 1.0
