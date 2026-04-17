@@ -13,72 +13,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points and 10-day ATR
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # Calculate weekly EMA50 for trend direction
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # Calculate daily ATR(14) for volatility filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot points (standard formula)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
+    # True Range
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr2 = np.maximum(tr1, np.abs(low_1d[1:] - close_1d[:-1]))
+    tr = np.concatenate([[np.nan], tr2])
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr14_1d = align_htf_to_ltf(prices, df_1d, atr14)
     
-    # Calculate 10-day ATR for volatility filtering
-    tr_1d = np.maximum(high_1d - low_1d, 
-                       np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
-                                  np.abs(low_1d - np.roll(close_1d, 1))))
-    tr_1d[0] = high_1d[0] - low_1d[0]  # First TR
-    atr10_1d = pd.Series(tr_1d).rolling(window=10, min_periods=10).mean().values
+    # Calculate daily Bollinger Bands width for regime filter
+    sma20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma20 + 2 * std20
+    lower_bb = sma20 - 2 * std20
+    bb_width = (upper_bb - lower_bb) / sma20
+    bb_width_1d = align_htf_to_ltf(prices, df_1d, bb_width)
     
-    # Align daily pivot levels and ATR to 4h timeframe (use previous day's levels)
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
-    atr10_4h = align_htf_to_ltf(prices, df_1d, atr10_1d)
-    
-    # Volume filter: current volume > 1.3 * 20-period average (volume spike)
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Daily Donchian breakout levels (20-period)
+    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donch_high_1d = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_1d = align_htf_to_ltf(prices, df_1d, donch_low)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 20  # Need sufficient data for volume MA
+    start_idx = 50  # Need sufficient data for weekly EMA50
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
-            np.isnan(atr10_4h[i]) or np.isnan(volume_ma20[i])):
+        if (np.isnan(ema50_1d[i]) or np.isnan(atr14_1d[i]) or 
+            np.isnan(bb_width_1d[i]) or np.isnan(donch_high_1d[i]) or 
+            np.isnan(donch_low_1d[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: avoid low volatility periods (choppy markets)
-        volatility_filter = atr10_4h[i] > 0  # Always true if ATR calculated
+        # Regime filter: avoid extremely low volatility (choppy) markets
+        vol_filter = bb_width_1d[i] > 0.02  # Only trade when Bollinger width > 2%
         
-        # Volume filter: significant volume spike
-        volume_filter = volume[i] > (1.3 * volume_ma20[i])
+        # Trend filter: price relative to weekly EMA50
+        price_above_ema = close[i] > ema50_1d[i]
+        price_below_ema = close[i] < ema50_1d[i]
         
         if position == 0:
-            # Long breakout: price breaks above R1 with volume
-            if close[i] > r1_4h[i] and volume_filter:
+            # Long entry: price breaks above Donchian high with trend and volatility
+            if (close[i] > donch_high_1d[i] and price_above_ema and vol_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below S1 with volume
-            elif close[i] < s1_4h[i] and volume_filter:
+            # Short entry: price breaks below Donchian low with trend and volatility
+            elif (close[i] < donch_low_1d[i] and price_below_ema and vol_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls below pivot OR volatility drops significantly
-            if close[i] < pivot_4h[i] or atr10_4h[i] < (0.5 * atr10_4h[i-1]):
+            # Exit long: price falls below Donchian low or trend reverses
+            if close[i] < donch_low_1d[i] or close[i] < ema50_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises above pivot OR volatility drops significantly
-            if close[i] > pivot_4h[i] or atr10_4h[i] < (0.5 * atr10_4h[i-1]):
+            # Exit short: price rises above Donchian high or trend reverses
+            if close[i] > donch_high_1d[i] or close[i] > ema50_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -86,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyPivot_Breakout_Volume_ATRFilter"
-timeframe = "4h"
+name = "1d_WeeklyEMA50_Donchian20_VolFilter"
+timeframe = "1d"
 leverage = 1.0
