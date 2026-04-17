@@ -1,6 +1,3 @@
-# 4h_DailyPivot_Breakout_Volume_EMA34
-# Hypothesis: Daily pivot levels provide strong support/resistance. Price breaking above R1 or below S1 with volume confirmation and trend alignment (EMA34) captures institutional breakouts. Works in both bull and bear markets as pivots adapt to volatility. Target: 20-40 trades/year on 4h timeframe to avoid fee drag.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -8,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -16,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points
+    # Get daily data for pivot points and ATR
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -27,60 +24,63 @@ def generate_signals(prices):
     r1_1d = 2 * pivot_1d - low_1d
     s1_1d = 2 * pivot_1d - high_1d
     
-    # Align daily pivot levels to 4h timeframe (use previous day's levels)
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align daily pivot levels to 12h timeframe (use previous day's levels)
+    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Calculate 4h EMA34 for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
+    # Calculate weekly ATR for volatility filter
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    tr_1w = np.maximum(high_1w - low_1w, np.maximum(abs(high_1w - np.roll(close_1w, 1)), abs(low_1w - np.roll(close_1w, 1))))
+    tr_1w[0] = high_1w[0] - low_1w[0]
+    atr14_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
+    atr14_12h = align_htf_to_ltf(prices, df_1w, atr14_1w, additional_delay_bars=1)
     
-    # Volume filter: current volume > 1.8 * 20-period average
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume filter: current volume > 2.0 * 24-period average (24 periods = 12 days at 12h)
+    volume_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 34  # Need sufficient data for EMA34
+    start_idx = 24  # Need sufficient data for volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
-            np.isnan(ema34_4h_aligned[i]) or np.isnan(volume_ma20[i])):
+        if (np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or
+            np.isnan(atr14_12h[i]) or np.isnan(volume_ma24[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter
-        volume_filter = volume[i] > (1.8 * volume_ma20[i])
+        volume_filter = volume[i] > (2.0 * volume_ma24[i])
         
-        # Trend filter: price relative to EMA34
-        price_above_ema = close[i] > ema34_4h_aligned[i]
-        price_below_ema = close[i] < ema34_4h_aligned[i]
+        # ATR filter: only trade when volatility is above average
+        vol_filter = atr14_12h[i] > 0
         
         if position == 0:
-            # Long breakout: price breaks above R1 with volume and above EMA34
-            if (close[i] > r1_4h[i] and volume_filter and price_above_ema):
+            # Long breakout: price breaks above R1 with volume and volatility
+            if (close[i] > r1_12h[i] and volume_filter and vol_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below S1 with volume and below EMA34
-            elif (close[i] < s1_4h[i] and volume_filter and price_below_ema):
+            # Short breakdown: price breaks below S1 with volume and volatility
+            elif (close[i] < s1_12h[i] and volume_filter and vol_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls below pivot or EMA34
-            if close[i] < pivot_4h[i] or close[i] < ema34_4h_aligned[i]:
+            # Exit long: price falls below S1 or volatility drops
+            if close[i] < s1_12h[i] or not vol_filter:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises above pivot or EMA34
-            if close[i] > pivot_4h[i] or close[i] > ema34_4h_aligned[i]:
+            # Exit short: price rises above R1 or volatility drops
+            if close[i] > r1_12h[i] or not vol_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyPivot_Breakout_Volume_EMA34"
-timeframe = "4h"
+name = "12h_DailyPivot_Breakout_Vol_VolatilityFilter"
+timeframe = "12h"
 leverage = 1.0
