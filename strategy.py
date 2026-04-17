@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout + 12h EMA34 trend filter + volume spike confirmation
-- Uses 4h Donchian channel (20-period high/low) as price structure for breakouts
-- 12h EMA34 as HTF trend filter to ensure alignment with higher timeframe momentum
+Hypothesis: 1h Camarilla H3/L3 breakout + 4h EMA34 trend filter + volume spike confirmation + session filter (08-20 UTC)
+- Uses 1h Camarilla pivot levels H3/L3 as intraday breakout levels
+- 4h EMA34 as HTF trend filter to ensure alignment with higher timeframe momentum
 - Volume spike (2.0x 20-period MA) confirms institutional participation and reduces false breakouts
-- ATR-based stoploss (2.5x ATR) to manage risk and limit drawdown
-- Discrete position sizing (0.25) minimizes fee churn
-- Target: 20-50 trades/year per symbol (~80-200 total over 4 years)
-- Works in bull markets (buying upper band breakouts in uptrend) and bear markets (selling lower band breakouts in downtrend)
-- Proven pattern: Donchian breakouts with volume confirmation show strong test performance (Sharpe 1.10-1.38 on SOLUSDT)
+- Session filter (08-20 UTC) avoids low-liquidity Asian session noise
+- Discrete position sizing (0.20) minimizes fee churn
+- Target: 15-37 trades/year per symbol (~60-150 total over 4 years)
+- Works in bull markets (buying H3 breakouts in uptrend) and bear markets (selling L3 breakouts in downtrend)
 """
 
 import numpy as np
@@ -24,103 +23,94 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Get 4h data for Donchian channel calculation (primary timeframe)
+    # Pre-compute session hours for filter
+    hours = pd.DatetimeIndex(open_time).hour
+    
+    # Get 1h data for Camarilla calculation (primary timeframe)
+    df_1h = get_htf_data(prices, '1h')
+    high_1h = df_1h['high'].values
+    low_1h = df_1h['low'].values
+    close_1h = df_1h['close'].values
+    volume_1h = df_1h['volume'].values
+    
+    # Get 4h data for EMA34 trend filter (HTF)
     df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
     
-    # Get 12h data for EMA34 trend filter (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Calculate Camarilla levels on 1h (using previous bar's OHLC)
+    # H3 = close + 1.1*(high-low)/2, L3 = close - 1.1*(high-low)/2
+    camarilla_h3 = close_1h + 1.1 * (high_1h - low_1h) / 2
+    camarilla_l3 = close_1h - 1.1 * (high_1h - low_1h) / 2
     
-    # Calculate Donchian channel (20-period) on 4h
-    # Upper band = highest high of last 20 periods, Lower band = lowest low of last 20 periods
-    high_ma_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    low_ma_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Calculate EMA34 on 4h for trend filter
+    ema34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate EMA34 on 12h for trend filter
-    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Volume average (20-period) on 1h
+    volume_ma_20 = pd.Series(volume_1h).rolling(window=20, min_periods=20).mean().values
     
-    # Volume average (20-period) on 4h
-    volume_4h = df_4h['volume'].values
-    volume_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR (14-period) on 4h for stoploss calculation
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Align all indicators to 4h timeframe (primary)
-    upper_band_aligned = align_htf_to_ltf(prices, df_4h, high_ma_20)
-    lower_band_aligned = align_htf_to_ltf(prices, df_4h, low_ma_20)
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_4h, volume_ma_20)
-    atr_aligned = align_htf_to_ltf(prices, df_4h, atr_14)
+    # Align all indicators to 1h timeframe (primary)
+    h3_aligned = align_htf_to_ltf(prices, df_1h, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1h, camarilla_l3)
+    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1h, volume_ma_20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    entry_price = 0.0
-    atr_stop = 0.0
     
     start_idx = 100  # warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or 
-            np.isnan(ema34_12h_aligned[i]) or np.isnan(volume_ma_aligned[i]) or 
-            np.isnan(atr_aligned[i])):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
+            np.isnan(ema34_4h_aligned[i]) or np.isnan(volume_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        upper = upper_band_aligned[i]
-        lower = lower_band_aligned[i]
-        ema_trend = ema34_12h_aligned[i]
+        h3 = h3_aligned[i]
+        l3 = l3_aligned[i]
+        ema_trend = ema34_4h_aligned[i]
         vol_ma = volume_ma_aligned[i]
-        atr_val = atr_aligned[i]
         vol = volume[i]
         price = close[i]
+        hour = hours[i]
+        
+        # Session filter: 08-20 UTC
+        in_session = (8 <= hour <= 20)
+        
+        if not in_session:
+            signals[i] = 0.0
+            continue
         
         if position == 0:
             # Look for breakouts with volume confirmation and trend alignment
-            # Long: price breaks above upper band + volume spike + price > 12h EMA34 (uptrend)
-            if price > upper and vol > 2.0 * vol_ma and price > ema_trend:
-                signals[i] = 0.25
+            # Long: price breaks above H3 + volume spike + price > 4h EMA34 (uptrend)
+            if price > h3 and vol > 2.0 * vol_ma and price > ema_trend:
+                signals[i] = 0.20
                 position = 1
-                entry_price = price
-                atr_stop = entry_price - 2.5 * atr_val
-            # Short: price breaks below lower band + volume spike + price < 12h EMA34 (downtrend)
-            elif price < lower and vol > 2.0 * vol_ma and price < ema_trend:
-                signals[i] = -0.25
+            # Short: price breaks below L3 + volume spike + price < 4h EMA34 (downtrend)
+            elif price < l3 and vol > 2.0 * vol_ma and price < ema_trend:
+                signals[i] = -0.20
                 position = -1
-                entry_price = price
-                atr_stop = entry_price + 2.5 * atr_val
         
         elif position == 1:
-            # Check stoploss
-            if price <= atr_stop:
+            # Exit long: price crosses below L3 (mean reversion) or trend breaks
+            if price < l3 or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
-                # Trail stop: raise stop if price moves favorably
-                atr_stop = max(atr_stop, price - 2.0 * atr_val)
+                signals[i] = 0.20
         
         elif position == -1:
-            # Check stoploss
-            if price >= atr_stop:
+            # Exit short: price crosses above H3 (mean reversion) or trend breaks
+            if price > h3 or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
-                # Trail stop: lower stop if price moves favorably
-                atr_stop = min(atr_stop, price + 2.0 * atr_val)
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Donchian20_12hEMA34_VolumeSpike_ATRStop"
-timeframe = "4h"
+name = "1h_Camarilla_H3L3_4hEMA34_VolumeSpike_Session"
+timeframe = "1h"
 leverage = 1.0
