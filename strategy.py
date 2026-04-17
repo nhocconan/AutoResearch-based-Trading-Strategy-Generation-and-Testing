@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R with 1d ADX trend filter and volume confirmation.
-# Enters long when Williams %R crosses above -80 (oversold recovery) AND ADX > 20 (trend present).
-# Enters short when Williams %R crosses below -20 (overbought breakdown) AND ADX > 20.
-# Williams %R identifies reversal points; ADX filters for trending conditions to avoid whipsaws.
-# Volume confirmation adds conviction. Designed for low turnover (target: 15-35 trades/year).
-# Works in bull markets (buying dips) and bear markets (selling rallies).
+# Hypothesis: 1d Williams Alligator with 1w trend filter and volume confirmation.
+# Enters long when price > Alligator Jaw (blue line) AND Lips > Teeth > Jaw (bullish alignment) AND weekly trend up.
+# Enters short when price < Alligator Jaw AND Lips < Teeth < Jaw (bearish alignment) AND weekly trend down.
+# Uses smoothed SMAs (5,8,13) with specific offsets to avoid look-ahead. Designed for low turnover (target: 10-30 trades/year).
+# Works in bull markets (trend continuation) and bear markets (trend continuation down).
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,146 +19,120 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Williams %R calculation
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Get 1d data for ADX calculation
+    # Get 1d data for Alligator calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 12h Williams %R (14)
-    def calculate_williams_r(high, low, close, period=14):
-        highest_high = np.zeros_like(high)
-        lowest_low = np.zeros_like(high)
-        williams_r = np.full_like(high, -50.0, dtype=float)
-        
-        for i in range(len(high)):
-            if i < period - 1:
-                # Not enough data, keep previous value or default
-                if i > 0:
-                    williams_r[i] = williams_r[i-1]
-                continue
-            start_idx = i - period + 1
-            highest_high[i] = np.max(high[start_idx:i+1])
-            lowest_low[i] = np.min(low[start_idx:i+1])
-            if highest_high[i] - lowest_low[i] != 0:
-                williams_r[i] = -100 * (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i])
-            else:
-                williams_r[i] = williams_r[i-1] if i > 0 else -50.0
-        return williams_r
+    # Calculate Williams Alligator (13,8,5 SMAs with offsets)
+    # Jaw (Blue): 13-period SMMA, shifted 8 bars forward
+    # Teeth (Red): 8-period SMMA, shifted 5 bars forward  
+    # Lips (Green): 5-period SMMA, shifted 3 bars forward
+    def smma(series, period):
+        """Smoothed Moving Average (SMMA) - Wilder's smoothing"""
+        sma = np.full_like(series, np.nan)
+        if len(series) >= period:
+            sma[period-1] = np.mean(series[:period])
+            for i in range(period, len(series)):
+                sma[i] = (sma[i-1] * (period-1) + series[i]) / period
+        return sma
     
-    williams_r_12h = calculate_williams_r(high_12h, low_12h, close_12h, 14)
-    williams_r_12h_aligned = align_htf_to_ltf(prices, df_12h, williams_r_12h)
+    jaw_raw = smma(close_1d, 13)
+    teeth_raw = smma(close_1d, 8)
+    lips_raw = smma(close_1d, 5)
     
-    # Calculate 1d ADX (14)
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(0, high[i] - high[i-1])
-            minus_dm[i] = max(0, low[i-1] - low[i])
-            if plus_dm[i] < minus_dm[i]:
-                plus_dm[i] = 0
-            if minus_dm[i] < plus_dm[i]:
-                minus_dm[i] = 0
-            
-            tr[i] = max(
-                high[i] - low[i],
-                abs(high[i] - close[i-1]),
-                abs(low[i] - close[i-1])
-            )
-        
-        # Wilder's smoothing
-        atr = np.zeros_like(high)
-        atr[period] = np.mean(tr[1:period+1])
-        for i in range(period+1, len(high)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        
-        plus_dm_sm = np.zeros_like(high)
-        minus_dm_sm = np.zeros_like(high)
-        plus_dm_sm[period] = np.sum(plus_dm[1:period+1])
-        minus_dm_sm[period] = np.sum(minus_dm[1:period+1])
-        
-        for i in range(period+1, len(high)):
-            plus_dm_sm[i] = plus_dm_sm[i-1] - (plus_dm_sm[i-1] / period) + plus_dm[i]
-            minus_dm_sm[i] = minus_dm_sm[i-1] - (minus_dm_sm[i-1] / period) + minus_dm[i]
-        
-        plus_di = np.where(atr != 0, 100 * plus_dm_sm / atr, 0)
-        minus_di = np.where(atr != 0, 100 * minus_dm_sm / atr, 0)
-        
-        dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-        
-        adx = np.zeros_like(high)
-        adx[2*period-1] = np.mean(dx[period:2*period])
-        for i in range(2*period, len(high)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
+    # Apply shifts (offsets) to avoid look-ahead
+    jaw = np.full_like(jaw_raw, np.nan)
+    teeth = np.full_like(teeth_raw, np.nan)
+    lips = np.full_like(lips_raw, np.nan)
     
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Jaw shifted 8 bars forward
+    if len(jaw) > 8:
+        jaw[8:] = jaw_raw[:-8]
+    # Teeth shifted 5 bars forward
+    if len(teeth) > 5:
+        teeth[5:] = teeth_raw[:-5]
+    # Lips shifted 3 bars forward
+    if len(lips) > 3:
+        lips[3:] = lips_raw[:-3]
+    
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Calculate 1w EMA50 for trend filter
+    ema50_1w = np.full_like(close_1w, np.nan)
+    if len(close_1w) >= 50:
+        ema50_1w[49] = np.mean(close_1w[:50])
+        for i in range(50, len(close_1w)):
+            ema50_1w[i] = (close_1w[i] * 0.038) + (ema50_1w[i-1] * 0.962)  # alpha = 2/(50+1)
+    
+    # Align indicators to 1d timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     # Volume filter: current volume > 1.3 * 20-period average
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ma20 = np.full_like(volume, np.nan)
+    if len(volume) >= 20:
+        volume_ma20[19] = np.mean(volume[:20])
+        for i in range(20, len(volume)):
+            volume_ma20[i] = (volume[i] * 0.095) + (volume_ma20[i-1] * 0.905)  # alpha = 2/(20+1)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # Need sufficient data for Williams %R and ADX
+    start_idx = 50  # Need sufficient data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(williams_r_12h_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i]) or 
+        if (np.isnan(jaw_aligned[i]) or 
+            np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or 
             np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Williams %R signals: cross above -80 (long) or below -20 (short)
-        wr = williams_r_12h_aligned[i]
-        wr_prev = williams_r_12h_aligned[i-1] if i > 0 else wr
+        # Bullish alignment: Lips > Teeth > Jaw
+        bullish_alignment = (lips_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > jaw_aligned[i])
+        # Bearish alignment: Lips < Teeth < Jaw
+        bearish_alignment = (lips_aligned[i] < teeth_aligned[i]) and (teeth_aligned[i] < jaw_aligned[i])
         
-        wr_cross_above_80 = (wr_prev <= -80) and (wr > -80)
-        wr_cross_below_20 = (wr_prev >= -20) and (wr < -20)
+        # Price relative to Jaw
+        price_above_jaw = close[i] > jaw_aligned[i]
+        price_below_jaw = close[i] < jaw_aligned[i]
         
-        # Trend filter: ADX > 20 (trend present)
-        trend_present = adx_1d_aligned[i] > 20
+        # Weekly trend filter: price above/below weekly EMA50
+        weekly_uptrend = close[i] > ema50_1w_aligned[i]
+        weekly_downtrend = close[i] < ema50_1w_aligned[i]
         
         # Volume filter
         volume_filter = volume[i] > (1.3 * volume_ma20[i])
         
         if position == 0:
-            # Long: Williams %R crosses above -80 + trend present + volume
-            if wr_cross_above_80 and trend_present and volume_filter:
+            # Long: Bullish alignment + price above jaw + weekly uptrend + volume
+            if (bullish_alignment and price_above_jaw and weekly_uptrend and volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R crosses below -20 + trend present + volume
-            elif wr_cross_below_20 and trend_present and volume_filter:
+            # Short: Bearish alignment + price below jaw + weekly downtrend + volume
+            elif (bearish_alignment and price_below_jaw and weekly_downtrend and volume_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Williams %R crosses above -20 (overbought) OR trend weakens
-            wr_cross_above_20 = (wr_prev <= -20) and (wr > -20)
-            weak_trend = adx_1d_aligned[i] < 15
-            if wr_cross_above_20 or weak_trend:
+            # Exit long: Bearish alignment OR price crosses below jaw OR weekly trend turns down
+            if bearish_alignment or (close[i] < jaw_aligned[i]) or (close[i] < ema50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Williams %R crosses below -80 (oversold) OR trend weakens
-            wr_cross_below_80 = (wr_prev >= -80) and (wr < -80)
-            weak_trend = adx_1d_aligned[i] < 15
-            if wr_cross_below_80 or weak_trend:
+            # Exit short: Bullish alignment OR price crosses above jaw OR weekly trend turns up
+            if bullish_alignment or (close[i] > jaw_aligned[i]) or (close[i] > ema50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -167,6 +140,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsR_ADX20_Volume"
-timeframe = "12h"
+name = "1d_WilliamsAlligator_1wTrendFilter_Volume"
+timeframe = "1d"
 leverage = 1.0
