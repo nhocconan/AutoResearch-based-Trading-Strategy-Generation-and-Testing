@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Donchian_20_Breakout_With_Volume_Filter
-Long when price breaks above Donchian high(20) with volume > 1.5x median volume(20).
-Short when price breaks below Donchian low(20) with volume > 1.5x median volume(20).
-Exit when price re-enters the Donchian channel.
-Uses 1d ADX > 20 as trend filter to avoid whipsaws in ranging markets.
-Designed for 12h timeframe to capture medium-term trends with volume confirmation.
-Target: 50-150 total trades over 4 years (12-37/year).
+1h_Pivot_R1_S1_Breakout_Volume_ATRFilter_v1
+Breakout above/below daily Camarilla pivot resistance/support with volume confirmation and ATR filter.
+Uses 1d Camarilla pivots (R1/S1) for direction, 1h for entry timing, and ATR to avoid low-volatility whipsaws.
+Session filter (08-20 UTC) to focus on active hours. Fixed position size 0.20 to control risk.
+Target: 60-120 total trades over 4 years (15-30/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -23,101 +21,102 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Donchian Channel (20) ===
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # === Volume filter: volume > 1.5x median volume(20) ===
-    vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median().values
-    vol_filter = volume > (1.5 * vol_median)
-    
-    # === 1d ADX(14) for trend filter ===
+    # === Daily ATR(14) for volatility filter ===
     df_1d = get_htf_data(prices, '1d')
+    atr_1d = np.zeros(len(df_1d))
+    if len(df_1d) >= 14:
+        tr = np.maximum(df_1d['high'] - df_1d['low'],
+                        np.maximum(np.abs(df_1d['high'] - np.roll(df_1d['close'], 1)),
+                                   np.abs(df_1d['low'] - np.roll(df_1d['close'], 1))))
+        tr[0] = df_1d['high'].iloc[0] - df_1d['low'].iloc[0]
+        atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # === Daily Camarilla Pivots (R1, S1) ===
+    # Based on previous day's OHLC
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1d[0] = tr1[0]
+    # Pivot = (H + L + C) / 3
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    # R1 = C + (H - L) * 1.1 / 12
+    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    # S1 = C - (H - L) * 1.1 / 12
+    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
     
-    # Directional Movement
-    plus_dm_1d = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                          np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    minus_dm_1d = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                           np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    plus_dm_1d = np.concatenate([[0], plus_dm_1d])
-    minus_dm_1d = np.concatenate([[0], minus_dm_1d])
+    # Align to 1h (values become available after the daily candle closes)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # ADX calculation
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    plus_di_1d = 100 * pd.Series(plus_dm_1d).rolling(window=14, min_periods=14).sum().values / (atr_1d * 14)
-    minus_di_1d = 100 * pd.Series(minus_dm_1d).rolling(window=14, min_periods=14).sum().values / (atr_1d * 14)
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d + 1e-10)
-    adx_1d = pd.Series(dx_1d).rolling(window=14, min_periods=14).mean().values
+    # === Volume confirmation: current volume > 1.5x 20-period average ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align 1d ADX to 12h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # === Session filter: 08-20 UTC ===
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 50
+    warmup = 30
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(donch_high[i]) or 
-            np.isnan(donch_low[i]) or 
-            np.isnan(vol_filter[i]) or 
-            np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(pivot_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Entry logic: only enter when flat
-        if position == 0:
-            # Long: price breaks above Donchian high, volume filter, ADX > 20
-            if (close[i] > donch_high[i] and 
-                vol_filter[i] and 
-                adx_1d_aligned[i] > 20):
-                signals[i] = 0.25
+        # Session filter: only trade between 08:00-20:00 UTC
+        hour = hours[i]
+        in_session = 8 <= hour <= 20
+        
+        # Volatility filter: avoid extremely low volatility (ATR too small)
+        vol_filter = atr_1d_aligned[i] > 0
+        
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        
+        if position == 0 and in_session and vol_filter:
+            # Long: price breaks above R1 with volume confirmation
+            if close[i] > r1_aligned[i] and vol_confirm:
+                signals[i] = 0.20
                 position = 1
                 continue
-            # Short: price breaks below Donchian low, volume filter, ADX > 20
-            elif (close[i] < donch_low[i] and 
-                  vol_filter[i] and 
-                  adx_1d_aligned[i] > 20):
-                signals[i] = -0.25
+            # Short: price breaks below S1 with volume confirmation
+            elif close[i] < s1_aligned[i] and vol_confirm:
+                signals[i] = -0.20
                 position = -1
                 continue
         
-        # Exit logic
         elif position == 1:
-            # Exit long: price re-enters Donchian channel (below Donchian high)
-            if close[i] < donch_high[i]:
+            # Exit long: price returns below pivot (mean reversion) OR session end
+            if close[i] < pivot_aligned[i] or not in_session:
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: price re-enters Donchian channel (above Donchian low)
-            if close[i] > donch_low[i]:
+            # Exit short: price returns above pivot (mean reversion) OR session end
+            if close[i] > pivot_aligned[i] or not in_session:
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "12h_Donchian_20_Breakout_With_Volume_Filter"
-timeframe = "12h"
+name = "1h_Pivot_R1_S1_Breakout_Volume_ATRFilter_v1"
+timeframe = "1h"
 leverage = 1.0
