@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h EMA pullback strategy with 4h trend filter and 1d volatility regime.
-Long when: price > 4h EMA50 (uptrend) AND price pulls back to 1h EMA21 AND 1d ATR percentile < 30 (low volatility).
-Short when: price < 4h EMA50 (downtrend) AND price pulls back to 1h EMA21 AND 1d ATR percentile < 30 (low volatility).
-Exit when price crosses 1h EMA8 in opposite direction.
-Uses 4h for trend direction, 1h for entry timing and exit, 1d for volatility filter.
-Designed to capture trend continuation pulls backs in low volatility environments. Target: 15-30 trades/year per symbol.
+Hypothesis: 6h Williams %R Mean Reversion with 1w EMA Trend Filter and Volume Spike.
+Long when Williams %R(14) < -80 (oversold) AND price > 1w EMA34 (bullish trend) AND 6h volume > 2.0x 20-bar average.
+Short when Williams %R(14) > -20 (overbought) AND price < 1w EMA34 (bearish trend) AND 6h volume > 2.0x 20-bar average.
+Exit when Williams %R crosses back above -50 (for long) or below -50 (for short).
+Uses 1w for trend filter and 6h for execution and volume confirmation.
+Designed to capture mean-reversion bounces within the dominant weekly trend with volume confirmation.
+Target: 12-30 trades/year per symbol (50-120 over 4 years).
 """
 
 import numpy as np
@@ -20,41 +21,27 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Get 1w data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Get 1d data for volatility regime filter
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1w EMA34
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 4h EMA50 for trend
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate 6h Williams %R(14)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high - lowest_low) > 0, williams_r, -50.0)
     
-    # Calculate 1h EMAs for entry and exit
-    ema8 = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Calculate 6h volume MA for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d ATR(14) and its percentile rank (lookback 50 days)
-    tr1 = np.maximum(high_1d - low_1d, 
-                     np.absolute(high_1d - np.roll(close_1d, 1)), 
-                     np.absolute(low_1d - np.roll(close_1d, 1)))
-    tr1[0] = high_1d[0] - low_1d[0]
-    atr14 = pd.Series(tr1).ewm(span=14, adjust=False, min_periods=14).mean().values
-    # Calculate percentile rank of current ATR vs 50-day lookback
-    atr_percentile = np.full_like(atr14, 50.0)  # default to median
-    for i in range(50, len(atr14)):
-        lookback = atr14[i-50:i]
-        if len(lookback) > 0:
-            atr_percentile[i] = (np.sum(lookback <= atr14[i]) / len(lookback)) * 100
-    
-    # Align all indicators to 1h timeframe
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
+    # Align 1w EMA34 to 6h timeframe
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -63,52 +50,49 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema50_4h_aligned[i]) or 
-            np.isnan(atr_percentile_aligned[i]) or
-            np.isnan(ema8[i]) or
-            np.isnan(ema21[i])):
+        if (np.isnan(williams_r[i]) or 
+            np.isnan(ema34_1w_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: 4h EMA50 direction
-        uptrend = close[i] > ema50_4h_aligned[i]
-        downtrend = close[i] < ema50_4h_aligned[i]
+        # Volume confirmation: current 6h volume > 2.0x 20-bar average
+        volume_confirmed = volume[i] > 2.0 * vol_ma_20[i]
         
-        # Pullback condition: price near 1h EMA21 (within 0.5%)
-        near_ema21 = abs(close[i] - ema21[i]) < 0.005 * close[i]
+        # Williams %R conditions
+        oversold = williams_r[i] < -80
+        overbought = williams_r[i] > -20
+        exit_long = williams_r[i] > -50
+        exit_short = williams_r[i] < -50
         
-        # Volatility regime: low volatility (ATR percentile < 30)
-        low_volatility = atr_percentile_aligned[i] < 30
-        
-        # Entry conditions
         if position == 0:
-            # Long: uptrend + pullback to EMA21 + low volatility
-            if uptrend and near_ema21 and low_volatility:
-                signals[i] = 0.20
+            # Long: oversold + bullish trend + volume confirmation
+            if (oversold and close[i] > ema34_1w_aligned[i] and volume_confirmed):
+                signals[i] = 0.25
                 position = 1
-            # Short: downtrend + pullback to EMA21 + low volatility
-            elif downtrend and near_ema21 and low_volatility:
-                signals[i] = -0.20
+            # Short: overbought + bearish trend + volume confirmation
+            elif (overbought and close[i] < ema34_1w_aligned[i] and volume_confirmed):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below EMA8
-            if close[i] < ema8[i]:
+            # Exit long: Williams %R crosses back above -50
+            if exit_long:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above EMA8
-            if close[i] > ema8[i]:
+            # Exit short: Williams %R crosses back below -50
+            if exit_short:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_EMA_Pullback_Trend_VolatilityFilter"
-timeframe = "1h"
+name = "6h_WilliamsR_MeanReversion_1wEMA34_Volume"
+timeframe = "6h"
 leverage = 1.0
