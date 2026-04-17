@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_Pivot_R1_S1_Breakout_Volume_Filter_v1
-Camarilla pivot levels (R1, S1) from 1d + volume spike + 1w trend filter.
-Long when price breaks above R1 with volume confirmation and 1w uptrend.
-Short when price breaks below S1 with volume confirmation and 1w downtrend.
-Uses 1w EMA34 for trend filter to avoid counter-trend trades.
-Designed for low frequency (~10-30 trades/year) with high win rate.
+6h_AbnormalVolume_Momentum_Reversal_v1
+Detect momentum reversals after abnormal volume spikes on 6h timeframe.
+Uses volume spike (>2.5x 20-period average) combined with RSI divergence
+and price rejection at key levels. Works in both bull/bear markets by
+fading exhaustion moves after high-volume spikes.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -22,24 +22,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Camarilla Pivot Levels (using previous day's OHLC) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate pivots for each day (using previous day's data)
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r1 = close_1d + (range_1d * 1.1 / 12)
-    s1 = close_1d - (range_1d * 1.1 / 12)
-    
-    # === 1w EMA34 for trend filter ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # === Volume confirmation (20-period average) ===
+    # === Volume spike detection (20-period average) ===
     vol_ma_20 = np.full_like(volume, np.nan)
     for i in range(len(volume)):
         if i >= 20:
@@ -47,13 +30,62 @@ def generate_signals(prices):
         else:
             vol_ma_20[i] = np.mean(volume[max(0, i-9):i+1]) if i > 0 else volume[0]
     
-    vol_confirm = volume > vol_ma_20 * 1.5  # volume spike: 1.5x average
+    vol_spike = volume > vol_ma_20 * 2.5  # abnormal volume: 2.5x average
     
-    # === Align to 1d timeframe ===
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # === RSI (14-period) for momentum/divergence ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
+    for i in range(len(close)):
+        if i >= 14:
+            if i == 14:
+                avg_gain[i] = np.mean(gain[1:15])
+                avg_loss[i] = np.mean(loss[1:15])
+            else:
+                avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+                avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+        else:
+            avg_gain[i] = np.nan
+            avg_loss[i] = np.nan
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # === Price rejection detection ===
+    # Bullish rejection: long wick down, close near high
+    bullish_rejection = (close - low) > (high - close) * 1.5 and (close - low) > (high - low) * 0.6
+    # Bearish rejection: long wick up, close near low
+    bearish_rejection = (high - close) > (close - low) * 1.5 and (high - close) > (high - low) * 0.6
+    
+    # Vectorize the rejection conditions
+    bullish_rejection = np.where(
+        (close - low) > (high - close) * 1.5,
+        np.where((close - low) > (high - low) * 0.6, True, False),
+        False
+    )
+    bearish_rejection = np.where(
+        (high - close) > (close - low) * 1.5,
+        np.where((high - close) > (high - low) * 0.6, True, False),
+        False
+    )
+    
+    # === 12h trend filter (EMA34) for context ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_34_12h = np.full_like(close_12h, np.nan)
+    for i in range(len(close_12h)):
+        if i >= 34:
+            if i == 34:
+                ema_34_12h[i] = np.mean(close_12h[1:35])
+            else:
+                ema_34_12h[i] = (close_12h[i] * 2 + ema_34_12h[i-1] * 33) / 34
+        else:
+            ema_34_12h[i] = np.nan
+    
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
     signals = np.zeros(n)
     
@@ -65,37 +97,37 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(vol_confirm[i])):
+        if (np.isnan(rsi[i]) or 
+            np.isnan(ema_34_12h_aligned[i]) or 
+            np.isnan(vol_spike[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price breaks above R1 with volume confirmation and 1w uptrend
-            if (close[i] > r1_aligned[i] and 
-                vol_confirm[i] and 
-                close[i] > ema_34_1w_aligned[i]):
+            # Long: volume spike + bullish rejection + RSI not overbought + price above 12h EMA (uptrend filter)
+            if (vol_spike[i] and 
+                bullish_rejection[i] and 
+                rsi[i] < 70 and 
+                close[i] > ema_34_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price breaks below S1 with volume confirmation and 1w downtrend
-            elif (close[i] < s1_aligned[i] and 
-                  vol_confirm[i] and 
-                  close[i] < ema_34_1w_aligned[i]):
+            # Short: volume spike + bearish rejection + RSI not oversold + price below 12h EMA (downtrend filter)
+            elif (vol_spike[i] and 
+                  bearish_rejection[i] and 
+                  rsi[i] > 30 and 
+                  close[i] < ema_34_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price crosses below pivot OR RSI-like exhaustion (close < S1)
-            if (close[i] < pivot_aligned[i] or 
-                close[i] < s1_aligned[i]):
+            # Exit long: RSI overbought OR price closes below 12h EMA
+            if (rsi[i] > 70 or 
+                close[i] < ema_34_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -103,9 +135,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above pivot OR RSI-like exhaustion (close > R1)
-            if (close[i] > pivot_aligned[i] or 
-                close[i] > r1_aligned[i]):
+            # Exit short: RSI oversold OR price closes above 12h EMA
+            if (rsi[i] < 30 or 
+                close[i] > ema_34_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -114,6 +146,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_Pivot_R1_S1_Breakout_Volume_Filter_v1"
-timeframe = "1d"
+name = "6h_AbnormalVolume_Momentum_Reversal_v1"
+timeframe = "6h"
 leverage = 1.0
