@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Keltner_Breakout_Channel_v1
-Breakout above/below Keltner Channel (20, 2.0) with ADX(14) > 20 trend filter.
-Exit when price returns to middle line (EMA20).
-Uses 12h EMA50 for higher timeframe trend alignment.
-Designed to capture sustained moves with volatility-adjusted bands.
-Target: 50-150 total trades over 4 years (12-37/year).
+1h_Pivot_R1_S1_Breakout_Volume_Filter_v1
+1h strategy using daily Camarilla pivot points (R1/S1) breakouts with volume spike and ATR filter.
+Breakout above R1 with volume > 1.5x average and ATR > 0.5% of price -> long.
+Breakdown below S1 with volume > 1.5x average and ATR > 0.5% of price -> short.
+Exit when price returns to pivot point (PP).
+Uses 4h EMA50 for trend alignment.
+Target: 60-150 total trades over 4 years (15-37/year).
 """
 
 import numpy as np
@@ -14,102 +15,116 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # === EMA20 (middle line) ===
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # === Daily Pivot Points (using prior day's data) ===
+    # We'll calculate pivots from daily OHLC, but need to be careful about timing
+    # Use daily data from 1d timeframe
+    df_1d = get_htf_data(prices, '1d')
     
-    # === ATR(10) for Keltner width ===
+    # Calculate typical price for pivot
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    # Pivot point
+    pp = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    # Resistance and support levels
+    r1 = 2 * pp - df_1d['low']
+    s1 = 2 * pp - df_1d['high']
+    r2 = pp + (df_1d['high'] - df_1d['low'])
+    s2 = pp - (df_1d['high'] - df_1d['low'])
+    
+    # Align to 1h timeframe (will use previous day's values)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp.values)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
+    
+    # === ATR(14) for volatility filter ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # === Keltner Bands ===
-    keltner_upper = ema20 + 2.0 * atr
-    keltner_lower = ema20 - 2.0 * atr
+    # === Volume average (20-period) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === ADX(14) for trend strength ===
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    
-    atr14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr14 + 1e-10)
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr14 + 1e-10)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # === 12h EMA50 for trend filter ===
-    df_12h = get_htf_data(prices, '12h')
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # === 4h EMA50 for trend filter ===
+    df_4h = get_htf_data(prices, '4h')
+    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 50
+    warmup = 100
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema20[i]) or 
-            np.isnan(keltner_upper[i]) or 
-            np.isnan(keltner_lower[i]) or 
-            np.isnan(adx[i]) or 
-            np.isnan(ema_50_12h_aligned[i])):
+        if (np.isnan(pp_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(atr[i]) or 
+            np.isnan(vol_ma[i]) or 
+            np.isnan(ema_50_4h_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
+        # Calculate volume spike condition
+        vol_spike = volume[i] > 1.5 * vol_ma[i]
+        
+        # Calculate ATR filter (ATR > 0.5% of price)
+        atr_filter = atr[i] > 0.005 * close[i]
+        
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price breaks above upper band, ADX > 20, price above 12h EMA50
-            if (close[i] > keltner_upper[i] and 
-                adx[i] > 20 and 
-                close[i] > ema_50_12h_aligned[i]):
-                signals[i] = 0.25
+            # Long: price breaks above R1, volume spike, ATR filter, price above 4h EMA50
+            if (close[i] > r1_aligned[i] and 
+                vol_spike and 
+                atr_filter and 
+                close[i] > ema_50_4h_aligned[i]):
+                signals[i] = 0.20
                 position = 1
                 continue
-            # Short: price breaks below lower band, ADX > 20, price below 12h EMA50
-            elif (close[i] < keltner_lower[i] and 
-                  adx[i] > 20 and 
-                  close[i] < ema_50_12h_aligned[i]):
-                signals[i] = -0.25
+            # Short: price breaks below S1, volume spike, ATR filter, price below 4h EMA50
+            elif (close[i] < s1_aligned[i] and 
+                  vol_spike and 
+                  atr_filter and 
+                  close[i] < ema_50_4h_aligned[i]):
+                signals[i] = -0.20
                 position = -1
                 continue
         
-        # Exit logic: return to middle line (EMA20)
+        # Exit logic: return to pivot point (PP)
         elif position == 1:
-            # Exit long: price crosses below EMA20
-            if close[i] < ema20[i]:
+            # Exit long: price crosses below PP
+            if close[i] < pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: price crosses above EMA20
-            if close[i] > ema20[i]:
+            # Exit short: price crosses above PP
+            if close[i] > pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Keltner_Breakout_Channel_v1"
-timeframe = "4h"
+name = "1h_Pivot_R1_S1_Breakout_Volume_Filter_v1"
+timeframe = "1h"
 leverage = 1.0
