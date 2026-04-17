@@ -13,7 +13,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend direction
+    # Get daily data for pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate daily pivot points (classic)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = 2 * pivot_1d - low_1d
+    s1_1d = 2 * pivot_1d - high_1d
+    r2_1d = pivot_1d + (high_1d - low_1d)
+    s2_1d = pivot_1d - (high_1d - low_1d)
+    r3_1d = high_1d + 2 * (pivot_1d - low_1d)
+    s3_1d = low_1d - 2 * (high_1d - pivot_1d)
+    r4_1d = pivot_1d + 3 * (high_1d - low_1d)
+    s4_1d = pivot_1d - 3 * (high_1d - low_1d)
+    
+    # Align pivot levels to 6h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    
+    # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
@@ -22,64 +50,53 @@ def generate_signals(prices):
     ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Get daily data for volume filter
-    df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    volume_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma20_1d)
-    
-    # Calculate daily ATR for volatility filter
+    # Calculate 6h ATR for volatility filter
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 200-day SMA for long-term trend filter
-    sma200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
-    
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 200
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(volume_ma20_1d_aligned[i]) or
-            np.isnan(atr[i]) or np.isnan(sma200[i])):
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
+            np.isnan(r2_1d_aligned[i]) or np.isnan(s2_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or
+            np.isnan(s3_1d_aligned[i]) or np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2.0 * 20-day average volume (aligned)
-        volume_filter = volume[i] > (2.0 * volume_ma20_1d_aligned[i])
+        # Trend filter: price above weekly EMA50 for long, below for short
+        long_trend = close[i] > ema50_1w_aligned[i]
+        short_trend = close[i] < ema50_1w_aligned[i]
         
-        # Trend filter: price above 200-day SMA for long, below for short
-        long_trend = close[i] > sma200[i]
-        short_trend = close[i] < sma200[i]
-        
-        # Weekly trend filter: price above weekly EMA50 for long, below for short
-        weekly_trend_long = close[i] > ema50_1w_aligned[i]
-        weekly_trend_short = close[i] < ema50_1w_aligned[i]
+        # Volatility filter: avoid extremely low volatility periods
+        vol_filter = atr[i] > np.nanpercentile(atr[max(0, i-100):i+1], 20) if i >= 100 else True
         
         if position == 0:
-            # Long: price above both SMAs with volume confirmation
-            if long_trend and weekly_trend_long and volume_filter:
+            # Long: price breaks above S3 with trend alignment
+            if long_trend and vol_filter and close[i] > s3_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below both SMAs with volume confirmation
-            elif short_trend and weekly_trend_short and volume_filter:
+            # Short: price breaks below R3 with trend alignment
+            elif short_trend and vol_filter and close[i] < r3_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below 200-day SMA
-            if close[i] < sma200[i]:
+            # Exit long: price breaks below S2 or reverses at R4
+            if close[i] < s2_1d_aligned[i] or close[i] > r4_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above 200-day SMA
-            if close[i] > sma200[i]:
+            # Exit short: price breaks above R2 or reverses at S4
+            if close[i] > r2_1d_aligned[i] or close[i] < s4_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA50_SMA200_VolumeFilter"
-timeframe = "1d"
+name = "6h_Pivot_S3R3_Breakout_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
