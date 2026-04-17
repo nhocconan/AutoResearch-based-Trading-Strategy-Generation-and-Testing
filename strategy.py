@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,129 +13,97 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1w High-Low Range (weekly range) ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    weekly_range = high_1w - low_1w
-    
-    # === 1d EMA(34) for trend filter ===
+    # === 1d Donchian Channels (20-period) ===
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_34 = np.full_like(close_1d, np.nan)
-    for i in range(len(close_1d)):
-        if i == 0:
-            ema_34[i] = close_1d[i]
-        else:
-            ema_34[i] = (close_1d[i] * 2 / (34 + 1)) + (ema_34[i-1] * (33 / (34 + 1)))
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # === 6h Volume Spike Detector ===
-    vol_ma_20 = np.full_like(volume, np.nan)
-    vol_std_20 = np.full_like(volume, np.nan)
-    for i in range(len(volume)):
+    # Calculate upper and lower bands
+    upper_donchian = np.full_like(high_1d, np.nan)
+    lower_donchian = np.full_like(low_1d, np.nan)
+    
+    for i in range(len(high_1d)):
         if i >= 19:
-            vol_ma_20[i] = np.mean(volume[i-19:i+1])
-            vol_std_20[i] = np.std(volume[i-19:i+1])
-        elif i > 0:
-            vol_ma_20[i] = np.mean(volume[max(0, i-9):i+1])
-            vol_std_20[i] = np.std(volume[max(0, i-9):i+1])
+            upper_donchian[i] = np.max(high_1d[i-19:i+1])
+            lower_donchian[i] = np.min(low_1d[i-19:i+1])
         else:
-            vol_ma_20[i] = volume[i]
-            vol_std_20[i] = 0.0
+            upper_donchian[i] = np.nan
+            lower_donchian[i] = np.nan
     
-    volume_spike = volume > (vol_ma_20 + 2.0 * vol_std_20)
+    # === 1d ATR (14-period) for stop loss ===
+    tr = np.maximum(high_1d - low_1d,
+                    np.maximum(np.abs(high_1d - np.roll(close, 1)),
+                               np.abs(low_1d - np.roll(close, 1))))
+    tr[0] = high_1d[0] - low_1d[0]
     
-    # === Align HTF indicators to 6h timeframe ===
-    weekly_range_aligned = align_htf_to_ltf(prices, df_1w, weekly_range)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
-    
-    # === 6h EMA(8) and EMA(21) for momentum ===
-    ema_8 = np.full_like(close, np.nan)
-    ema_21 = np.full_like(close, np.nan)
-    for i in range(len(close)):
-        if i == 0:
-            ema_8[i] = close[i]
-            ema_21[i] = close[i]
-        else:
-            ema_8[i] = (close[i] * 2 / (8 + 1)) + (ema_8[i-1] * (7 / (8 + 1)))
-            ema_21[i] = (close[i] * 2 / (21 + 1)) + (ema_21[i-1] * (20 / (21 + 1)))
-    
-    # === 6h RSI(14) for overbought/oversold ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.full_like(gain, np.nan)
-    avg_loss = np.full_like(loss, np.nan)
-    period = 14
-    for i in range(len(gain)):
-        if i < period:
+    atr = np.full_like(tr, np.nan)
+    for i in range(len(tr)):
+        if i < 14:
             if i == 0:
-                avg_gain[i] = gain[i]
-                avg_loss[i] = loss[i]
+                atr[i] = tr[i]
             else:
-                avg_gain[i] = (avg_gain[i-1] * (i-1) + gain[i]) / i
-                avg_loss[i] = (avg_loss[i-1] * (i-1) + loss[i]) / i
+                atr[i] = np.mean(tr[:i+1])
         else:
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[avg_loss == 0] = 100
+    # === Align to 12h timeframe ===
+    upper_donchian_12h = align_htf_to_ltf(prices, df_1d, upper_donchian)
+    lower_donchian_12h = align_htf_to_ltf(prices, df_1d, lower_donchian)
+    atr_12h = align_htf_to_ltf(prices, df_1d, atr)
+    
+    # === 12h Volume confirmation ===
+    df_12h = get_htf_data(prices, '12h')
+    volume_12h = df_12h['volume'].values
+    
+    # Calculate 20-period average volume on 12h timeframe
+    vol_ma_20 = np.full_like(volume_12h, np.nan)
+    for i in range(len(volume_12h)):
+        if i >= 19:
+            vol_ma_20[i] = np.mean(volume_12h[i-19:i+1])
+        else:
+            vol_ma_20[i] = np.nan
+    
+    # Volume confirmation: current 12h volume > 1.5x 20-period average
+    vol_confirm = volume_12h > vol_ma_20 * 1.5
+    
+    # === Align volume confirmation to main timeframe ===
+    vol_confirm_aligned = align_htf_to_ltf(prices, df_12h, vol_confirm)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 100
+    warmup = 50
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(weekly_range_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or 
-            np.isnan(ema_8[i]) or 
-            np.isnan(ema_21[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(upper_donchian_12h[i]) or 
+            np.isnan(lower_donchian_12h[i]) or 
+            np.isnan(atr_12h[i]) or 
+            np.isnan(vol_confirm_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long conditions:
-            # 1. Price above weekly range midpoint (bullish bias)
-            # 2. EMA8 > EMA21 (short-term momentum up)
-            # 3. RSI < 40 (not overbought, room to rise)
-            # 4. Volume spike (participation)
-            weekly_midpoint = (high_1w[i//28] + low_1w[i//28]) / 2 if i >= 28 else close[i]  # approximate weekly index
-            if (close[i] > weekly_midpoint and 
-                ema_8[i] > ema_21[i] and 
-                rsi[i] < 40 and 
-                volume_spike[i]):
+            # Long: price breaks above upper Donchian + volume confirmation
+            if close[i] > upper_donchian_12h[i] and vol_confirm_aligned[i]:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short conditions:
-            # 1. Price below weekly range midpoint (bearish bias)
-            # 2. EMA8 < EMA21 (short-term momentum down)
-            # 3. RSI > 60 (not oversold, room to fall)
-            # 4. Volume spike (participation)
-            elif (close[i] < weekly_midpoint and 
-                  ema_8[i] < ema_21[i] and 
-                  rsi[i] > 60 and 
-                  volume_spike[i]):
+            # Short: price breaks below lower Donchian + volume confirmation
+            elif close[i] < lower_donchian_12h[i] and vol_confirm_aligned[i]:
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic
+        # Exit logic with ATR-based stop loss
         elif position == 1:
-            # Exit long: EMA8 crosses below EMA21 OR RSI > 70 (overbought)
-            if ema_8[i] < ema_21[i] or rsi[i] > 70:
+            # Exit long: price closes below lower Donchian OR stop loss hit
+            if close[i] < lower_donchian_12h[i] or close[i] < (high[i] - 2.0 * atr_12h[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -143,8 +111,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: EMA8 crosses above EMA21 OR RSI < 30 (oversold)
-            if ema_8[i] > ema_21[i] or rsi[i] < 30:
+            # Exit short: price closes above upper Donchian OR stop loss hit
+            if close[i] > upper_donchian_12h[i] or close[i] > (low[i] + 2.0 * atr_12h[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -153,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_EMA_RSI_VolumeSpike_WeeklyBias_v1"
-timeframe = "6h"
+name = "12h_Donchian_Breakout_Volume_ATR_Stop_v1"
+timeframe = "12h"
 leverage = 1.0
