@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray (Bull/Bear Power) + 12h EMA50 Regime Filter.
-Long when Bull Power > 0 AND price > 12h EMA50 (bullish regime).
-Short when Bear Power < 0 AND price < 12h EMA50 (bearish regime).
-Exit when opposing Elder Ray power becomes positive (Bull Power < 0 for longs, Bear Power > 0 for shorts) or regime flip.
-Uses 6h for Elder Ray calculation, 12h for EMA50 trend filter.
-Target: 50-150 total trades over 4 years (12-37/year). Elder Ray measures bull/bear strength via EMA13, 
-12h EMA50 filters for higher-timeframe trend alignment to reduce false signals in chop and align with major trends.
-Works in bull markets (captures strength) and bear markets (avoids longs in downtrend, takes shorts in downtrend strength).
+Hypothesis: 12h Williams %R Extreme + Daily Volume Spike + Choppiness Filter.
+Williams %R below -80 = oversold (long setup), above -20 = overbought (short setup).
+Require volume > 1.5x 20-period average for confirmation.
+Use daily choppiness index > 61.8 (range regime) for mean-reversion entries.
+Exit when Williams %R crosses -50 (mean reversion completion).
+Timeframe: 12h for swing trading, avoids 15m/1h overtrading, captures multi-day moves.
+Works in bull (buy dips) and bear (sell rallies) via mean reversion in ranging markets.
+Designed for low trade frequency (<40/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -16,79 +16,98 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 6h data for Elder Ray calculation
-    df_6h = get_htf_data(prices, '6h')
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
+    # Get 1d data for Williams %R and choppiness
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Elder Ray on 6h timeframe
-    # Bull Power = High - EMA13(Close)
-    # Bear Power = Low - EMA13(Close)
-    close_6h_series = pd.Series(close_6h)
-    ema13_6h = close_6h_series.ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high_6h - ema13_6h
-    bear_power = low_6h - ema13_6h
+    # Calculate Williams %R on 1d (14-period)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high_1d - close_1d) / (highest_high_1d - lowest_low_1d) * -100
+    # Handle division by zero
+    williams_r = np.where((highest_high_1d - lowest_low_1d) == 0, -50, williams_r)
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Calculate volume spike on 1d (> 1.5x 20-period average)
+    volume_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume_1d > (volume_ma_20 * 1.5)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h_series = pd.Series(close_12h)
-    ema50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Choppiness Index on 1d (14-period)
+    # Chop = 100 * log10(sum(ATR14) / (n * (HH14 - LL14))) / log10(n)
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0  # first period has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    hh14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop_raw = np.sum(pd.Series(tr).rolling(window=14, min_periods=14).sum().values) / (14 * (hh14 - ll14))
+    chop_raw = np.where((hh14 - ll14) == 0, 50, chop_raw)  # avoid division by zero
+    choppiness = 100 * np.log10(chop_raw) / np.log10(14)
+    # Simplified calculation: standard chop formula
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    chop = 100 * np.log10(atr_sum / (14 * (hh14 - ll14))) / np.log10(14)
+    chop = np.where((hh14 - ll14) == 0, 50, chop)
+    chop = np.where(np.isnan(chop), 50, chop)
     
-    # Align 6h Elder Ray to 6h timeframe (no alignment needed as we're already on 6h)
-    bull_power_aligned = bull_power  # Already on 6h timeframe
-    bear_power_aligned = bear_power  # Already on 6h timeframe
-    
-    # Align 12h EMA50 to 6h timeframe
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Align 1d indicators to 12h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
+    choppiness_aligned = align_htf_to_ltf(prices, df_1d, choppiness)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # warmup for indicators
+    start_idx = 100  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or np.isnan(ema50_12h_aligned[i]):
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(volume_spike_aligned[i]) or 
+            np.isnan(choppiness_aligned[i])):
             signals[i] = 0.0
             continue
         
-        bp = bull_power_aligned[i]
-        br = bear_power_aligned[i]
+        wr = williams_r_aligned[i]
+        vol_spike = bool(volume_spike_aligned[i])
+        chop = choppiness_aligned[i]
         price = close[i]
-        ema50 = ema50_12h_aligned[i]
         
         if position == 0:
-            # Long: Bull Power > 0 (bullish strength) AND price > 12h EMA50 (bullish regime)
-            if bp > 0 and price > ema50:
+            # Enter long: Oversold (WR < -80) + volume spike + choppy market (Chop > 61.8)
+            if wr < -80 and vol_spike and chop > 61.8:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 (bearish strength) AND price < 12h EMA50 (bearish regime)
-            elif br < 0 and price < ema50:
+            # Enter short: Overbought (WR > -20) + volume spike + choppy market (Chop > 61.8)
+            elif wr > -20 and vol_spike and chop > 61.8:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Bull Power < 0 (lost bullish strength) OR price < 12h EMA50 (regime flip to bearish)
-            if bp < 0 or price < ema50:
+            # Exit long: WR crosses above -50 (mean reversion) OR chop drops below 38.2 (trending)
+            if wr > -50 or chop < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Bear Power > 0 (lost bearish strength) OR price > 12h EMA50 (regime flip to bullish)
-            if br > 0 or price > ema50:
+            # Exit short: WR crosses below -50 (mean reversion) OR chop drops below 38.2 (trending)
+            if wr < -50 or chop < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_12hEMA50_Regime"
-timeframe = "6h"
+name = "12h_WilliamsR_VolumeSpike_ChopFilter"
+timeframe = "12h"
 leverage = 1.0
