@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_ParabolicSAR_Trend_Continuation
-Hypothesis: On 6h timeframe, enter long when Parabolic SAR flips below price with daily volume confirmation and bullish daily trend; short when SAR flips above price with volume and bearish daily trend. Parabolic SAR captures trend reversals effectively in trending markets, while volume and daily trend filters avoid whipsaws in ranging conditions. Designed for 50-150 total trades over 4 years to minimize fee drag and work in both bull/bear markets via trend alignment.
+6h_AdaptiveMFE_MAE_Regime
+Hypothesis: On 6h timeframe, enter long when price is above 20-period EMA, MFE (max favorable excursion) over last 3 bars exceeds MAE (max adverse excursion) by 1.5x, and 1d ATR ratio indicates low volatility regime (ATR(7)/ATR(30) < 0.8). Enter short when price below EMA, MAE exceeds MFE by 1.5x, and same low vol regime. Uses MFE/MAE to detect momentum persistence within low volatility regimes, which often precedes explosive moves. Designed for 50-150 total trades over 4 years to minimize fee drag and work in both bull/bear markets via volatility regime filtering.
 """
 
 import numpy as np
@@ -10,112 +10,109 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # === Daily data for volume and trend ===
+    # === 20-period EMA on 6h ===
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # === Daily ATR for volatility regime ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Parabolic SAR on 6h data
-    # Parameters: start=0.02, increment=0.02, maximum=0.2
-    sar = np.zeros(n)
-    trend = np.ones(n)  # 1 for uptrend, -1 for downtrend
-    af = 0.02  # acceleration factor
-    max_af = 0.2
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0  # first period has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Initialize
-    sar[0] = low[0]
-    trend[0] = 1
-    ep = high[0]  # extreme point
+    atr7 = pd.Series(tr).rolling(window=7, min_periods=7).mean().values
+    atr30 = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
+    atr_ratio = atr7 / atr30  # < 0.8 indicates low volatility regime
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    for i in range(1, n):
-        if trend[i-1] == 1:  # uptrend
-            sar[i] = sar[i-1] + af * (ep - sar[i-1])
-            # SAR cannot exceed the low of the past two periods
-            sar[i] = min(sar[i], low[i-1], low[i-2] if i>=2 else low[i-1])
-            if low[i] < sar[i]:  # trend reversal
-                trend[i] = -1
-                sar[i] = ep  # SAR becomes the prior EP
-                ep = low[i]  # reset EP to current low
-                af = 0.02
-            else:
-                trend[i] = 1
-                if high[i] > ep:
-                    ep = high[i]
-                    af = min(af + 0.02, max_af)
-        else:  # downtrend
-            sar[i] = sar[i-1] + af * (ep - sar[i-1])
-            # SAR cannot be below the high of the past two periods
-            sar[i] = max(sar[i], high[i-1], high[i-2] if i>=2 else high[i-1])
-            if high[i] > sar[i]:  # trend reversal
-                trend[i] = 1
-                sar[i] = ep  # SAR becomes the prior EP
-                ep = high[i]  # reset EP to current high
-                af = 0.02
-            else:
-                trend[i] = -1
-                if low[i] < ep:
-                    ep = low[i]
-                    af = min(af + 0.02, max_af)
+    # === MFE and MAE over last 3 bars ===
+    mfe = np.zeros(n)  # max favorable excursion
+    mae = np.zeros(n)  # max adverse excursion
     
-    # Daily 20-period average volume for confirmation
-    vol_avg20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg20_1d)
+    for i in range(2, n):
+        if close[i] >= close[i-1]:  # up or equal
+            # For long bias: favorable = upward movement, adverse = downward
+            mfe[i] = max(
+                high[i] - close[i-2],  # max favorable from 2 bars ago
+                high[i-1] - close[i-2],
+                0
+            )
+            mae[i] = max(
+                close[i-2] - low[i],
+                close[i-2] - low[i-1],
+                0
+            )
+        else:  # down
+            # For short bias: favorable = downward movement, adverse = upward
+            mfe[i] = max(
+                close[i-2] - low[i],
+                close[i-2] - low[i-1],
+                0
+            )
+            mae[i] = max(
+                high[i] - close[i-2],
+                high[i-1] - close[i-2],
+                0
+            )
     
-    # Daily 50-period SMA for trend filter
-    sma50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
-    sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
+    # Smooth MFE/MAE to reduce noise
+    mfe_smooth = pd.Series(mfe).ewm(span=3, adjust=False, min_periods=3).mean().values
+    mae_smooth = pd.Series(mae).ewm(span=3, adjust=False, min_periods=3).mean().values
     
     signals = np.zeros(n)
     
-    # Warmup: covers Parabolic SAR initialization and daily indicators
-    warmup = 50
+    # Warmup: covers EMA20, ATR, and MFE/MAE initialization
+    warmup = 30
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(vol_avg20_1d_aligned[i]) or np.isnan(sma50_1d_aligned[i])):
+        if (np.isnan(ema20[i]) or np.isnan(atr_ratio_aligned[i]) or 
+            np.isnan(mfe_smooth[i]) or np.isnan(mae_smooth[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Get current daily volume
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
+        # Low volatility regime filter
+        low_vol_regime = atr_ratio_aligned[i] < 0.8
         
-        # Volume filter: current volume > 1.5x 20-day average
-        vol_filter = vol_1d_current > 1.5 * vol_avg20_1d_aligned[i]
-        
-        # Trend filter: price above/below daily 50 SMA
-        above_trend = close[i] > sma50_1d_aligned[i]
-        below_trend = close[i] < sma50_1d_aligned[i]
+        # MFE/MAE ratio
+        mfe_mae_ratio = mfe_smooth[i] / (mae_smooth[i] + 1e-10)  # avoid division by zero
+        mae_mfe_ratio = mae_smooth[i] / (mfe_smooth[i] + 1e-10)
         
         # Entry conditions
-        if position == 0:
-            # Long: SAR below price + volume + above daily trend
-            if sar[i] < close[i] and vol_filter and above_trend:
+        if position == 0 and low_vol_regime:
+            # Long: price above EMA20, MFE > 1.5 * MAE
+            if close[i] > ema20[i] and mfe_mae_ratio > 1.5:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: SAR above price + volume + below daily trend
-            elif sar[i] > close[i] and vol_filter and below_trend:
+            # Short: price below EMA20, MAE > 1.5 * MFE
+            elif close[i] < ema20[i] and mae_mfe_ratio > 1.5:
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit conditions: reverse signal when SAR flips
+        # Exit conditions: reverse when price crosses EMA20
         elif position == 1:
-            if sar[i] > close[i]:  # SAR flips above price = exit long
+            if close[i] < ema20[i]:  # price crosses below EMA20
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -123,7 +120,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            if sar[i] < close[i]:  # SAR flips below price = exit short
+            if close[i] > ema20[i]:  # price crosses above EMA20
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -132,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ParabolicSAR_Trend_Continuation"
+name = "6h_AdaptiveMFE_MAE_Regime"
 timeframe = "6h"
 leverage = 1.0
