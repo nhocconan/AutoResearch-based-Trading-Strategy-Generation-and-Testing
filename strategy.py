@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d timeframe with 1-week RSI filter and volume confirmation.
-Trade pullbacks to the 21-period EMA in the direction of the weekly trend (RSI > 50 for long, RSI < 50 for short).
-Use volume spike (>1.5x 20-day average) to confirm momentum.
-Designed to work in bull markets via trend-following pullbacks and in bear via mean-reversion at EMA support/resistance.
-Target: 30-100 total trades over 4 years (7-25/year).
+Strategy: 4h Donchian(20) breakout with 1d ADX trend filter and volume confirmation
+Hypothesis: Breakouts of the 20-period Donchian channel capture strong trends.
+ADX > 25 filters for trending markets, avoiding whipsaws in ranging conditions.
+Volume > 1.5x 20-period average confirms institutional participation.
+Designed for fewer, high-quality trades to minimize fee drag and improve generalization.
+Works in bull via breakout longs and in bear via breakout shorts.
+Target: 20-50 trades per year (~80-200 over 4 years).
 """
 import numpy as np
 import pandas as pd
@@ -20,34 +22,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for RSI trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get 4h data for Donchian channels (20-period)
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Calculate 14-period RSI on weekly
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14 = 100 - (100 / (1 + rs))
+    high_max_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Get 1d data for EMA and volume
+    # Get 1d data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    # Calculate ADX (14-period)
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
+    
+    # Smoothed values
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Get 1d data for volume filter
     volume_1d = df_1d['volume'].values
-    
-    # Calculate 21-period EMA on daily
-    ema_21 = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Calculate 20-day average volume on daily
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all to daily
-    rsi_14_aligned = align_htf_to_ltf(prices, df_1w, rsi_14)
-    ema_21_aligned = align_htf_to_ltf(prices, df_1d, ema_21)
+    # Align all to 4h
+    high_max_20_aligned = align_htf_to_ltf(prices, df_4h, high_max_20)
+    low_min_20_aligned = align_htf_to_ltf(prices, df_4h, low_min_20)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    
+    # Volume filter: current volume > 1.5x 20-period average
+    volume_filter = volume > (vol_ma_20_aligned * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -56,39 +84,34 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(rsi_14_aligned[i]) or np.isnan(ema_21_aligned[i]) or 
-            np.isnan(vol_ma_20_aligned[i])):
+        if (np.isnan(high_max_20_aligned[i]) or np.isnan(low_min_20_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend from weekly RSI
-        bullish_trend = rsi_14_aligned[i] > 50
-        bearish_trend = rsi_14_aligned[i] < 50
-        
-        # Volume filter: current volume > 1.5x 20-day average
-        volume_filter = volume[i] > (vol_ma_20_aligned[i] * 1.5)
-        
         if position == 0:
-            # Long: pullback to EMA in bullish trend with volume
-            if (low[i] <= ema_21_aligned[i] <= high[i] and bullish_trend and volume_filter):
+            # Long: price breaks above Donchian high, ADX > 25 (trending), volume spike
+            if (close[i] > high_max_20_aligned[i] and adx_aligned[i] > 25 and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: pullback to EMA in bearish trend with volume
-            elif (low[i] <= ema_21_aligned[i] <= high[i] and bearish_trend and volume_filter):
+            # Short: price breaks below Donchian low, ADX > 25 (trending), volume spike
+            elif (close[i] < low_min_20_aligned[i] and adx_aligned[i] > 25 and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price closes above EMA or trend turns bearish
-            if close[i] > ema_21_aligned[i] or not bullish_trend:
+            # Exit long: price breaks below Donchian low or ADX < 20 (losing trend)
+            if close[i] < low_min_20_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price closes below EMA or trend turns bullish
-            if close[i] < ema_21_aligned[i] or not bearish_trend:
+            # Exit short: price breaks above Donchian high or ADX < 20 (losing trend)
+            if close[i] > high_max_20_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1wRSI_EMA21_Pullback_VolumeFilter"
-timeframe = "1d"
+name = "4h_Donchian20_ADX25_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
