@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Williams %R + 1d Volume Spike + Weekly Trend Filter.
-Long when Williams %R < -80 (oversold) AND 1d volume > 1.5x 20-period average AND price > 1w EMA50 (weekly uptrend).
-Short when Williams %R > -20 (overbought) AND 1d volume > 1.5x 20-period average AND price < 1w EMA50 (weekly downtrend).
-Exit when Williams %R reverses (> -50 for longs, < -50 for shorts) or weekly trend reverses.
-Uses 1d for volume spike detection, 1w for EMA50 trend filter, 6h for Williams %R timing.
-Target: 50-150 total trades over 4 years (12-37/year). Williams %R captures mean reversion extremes,
-volume spike confirms institutional participation, weekly EMA50 filters for higher-timeframe trend alignment.
+Hypothesis: 12h Camarilla Pivot R1/S1 Breakout with 1d Volume Spike and Chop Regime Filter.
+Long when price breaks above R1 with volume spike and chop > 61.8 (ranging market).
+Short when price breaks below S1 with volume spike and chop > 61.8.
+Exit when price reverts to pivot point (PP) or chop < 38.2 (trending market).
+Uses 1d for pivot calculation and ATR-based chop filter, 12h for execution.
+Target: 50-150 total trades over 4 years (12-37/year). Camarilla levels provide precise intraday support/resistance,
+volume spike confirms participation, chop filter avoids false breakouts in strong trends.
 """
 
 import numpy as np
@@ -15,79 +15,98 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for volume spike detection
+    # Get 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d volume spike: current volume > 1.5x 20-period average
-    volume_1d_series = pd.Series(volume_1d)
-    vol_ma_20 = volume_1d_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_1d > (1.5 * vol_ma_20)
+    # Calculate Camarilla pivot levels for 1d
+    # PP = (High + Low + Close) / 3
+    # R1 = PP + (High - Low) * 1.1 / 12
+    # S1 = PP - (High - Low) * 1.1 / 12
+    pp_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = pp_1d + (high_1d - low_1d) * 1.1 / 12.0
+    s1_1d = pp_1d - (high_1d - low_1d) * 1.1 / 12.0
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Align 1d Camarilla levels to 12h timeframe
+    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate ATR(20) for chop filter on 1d
+    high_low_1d = high_1d - low_1d
+    high_close_1d = np.abs(high_1d - np.roll(close_1d, 1))
+    low_close_1d = np.abs(low_1d - np.roll(close_1d, 1))
+    high_close_1d[0] = high_low_1d[0]
+    low_close_1d[0] = high_low_1d[0]
+    tr_1d = np.maximum(high_low_1d, np.maximum(high_close_1d, low_close_1d))
+    atr_1d = pd.Series(tr_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Williams %R on 6h timeframe: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    # Using 14-period lookback
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = ((highest_high - close) / (highest_high - lowest_low)) * -100
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate Chopiness Index: CHOP = 100 * log10(sum(TR(14)) / (ATR(14) * 14)) / log10(14)
+    sum_tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    atr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    chop_denominator = atr_14 * 14.0
+    chop_denominator = np.where(chop_denominator == 0, 1e-10, chop_denominator)
+    chop_ratio = sum_tr_14 / chop_denominator
+    chop_ratio = np.where(chop_ratio <= 0, 1e-10, chop_ratio)
+    chop_1d = 100.0 * np.log10(chop_ratio) / np.log10(14.0)
     
-    # Align 1d volume spike and 1w EMA50 to 6h timeframe
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Align 1d ATR and Chop to 12h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    
+    # Calculate volume spike: volume > 1.5 * volume MA(20)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 60  # warmup for indicators
+    start_idx = 100  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if np.isnan(volume_spike_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or np.isnan(williams_r[i]):
+        if np.isnan(pp_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        wr = williams_r[i]
-        vol_spike = volume_spike_aligned[i] > 0.5  # boolean check
         price = close[i]
-        ema50 = ema50_1w_aligned[i]
+        pp = pp_1d_aligned[i]
+        r1 = r1_1d_aligned[i]
+        s1 = s1_1d_aligned[i]
+        chop = chop_1d_aligned[i]
+        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: Williams %R < -80 (oversold) AND volume spike AND price > 1w EMA50 (weekly uptrend)
-            if wr < -80 and vol_spike and price > ema50:
+            # Long: price breaks above R1 with volume spike in choppy market (chop > 61.8 = ranging)
+            if price > r1 and vol_spike and chop > 61.8:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R > -20 (overbought) AND volume spike AND price < 1w EMA50 (weekly downtrend)
-            elif wr > -20 and vol_spike and price < ema50:
+            # Short: price breaks below S1 with volume spike in choppy market (chop > 61.8 = ranging)
+            elif price < s1 and vol_spike and chop > 61.8:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Williams %R > -50 (reversing from oversold) OR price < 1w EMA50 (trend reversal)
-            if wr > -50 or price < ema50:
+            # Exit long: price returns to pivot point OR market starts trending (chop < 38.2)
+            if price <= pp or chop < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Williams %R < -50 (reversing from overbought) OR price > 1w EMA50 (trend reversal)
-            if wr < -50 or price > ema50:
+            # Exit short: price returns to pivot point OR market starts trending (chop < 38.2)
+            if price >= pp or chop < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -95,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_VolumeSpike_WeeklyEMA50_Trend"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_VolumeSpike_ChopFilter"
+timeframe = "12h"
 leverage = 1.0
