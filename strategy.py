@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Camarilla pivot breakout with 1d trend filter and volume confirmation.
-Long when price breaks above R3 with 1d EMA50 uptrend and volume > 1.5x average.
-Short when price breaks below S3 with 1d EMA50 downtrend and volume > 1.5x average.
-Exit when price returns to the Camarilla H-L range (between H3 and L3) or volume drops.
-Uses proven Camarilla structure with 1d trend filter to avoid counter-trend trades.
-Designed for low trade frequency (12-37/year) on 6h timeframe to minimize fee drag.
-Works in bull markets via breakout continuation and bear markets via fade at extremes.
+Hypothesis: 12h Donchian breakout with 1w EMA trend filter and volume confirmation.
+Long when price breaks above Donchian(20) upper band AND 1w EMA50 is rising AND volume > 1.5x 20-period average.
+Short when price breaks below Donchian(20) lower band AND 1w EMA50 is falling AND volume > 1.5x 20-period average.
+Exit when price crosses Donchian middle band (mean of upper/lower) or volume drops below average.
+Uses proven Donchian breakout structure with multi-timeframe trend filter to work in both bull and bear markets.
+Designed for low trade frequency (12-37/year) on 12h timeframe to minimize fee drag.
 """
 
 import numpy as np
@@ -23,47 +22,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 6h data for Camarilla calculation (primary timeframe)
-    df_6h = get_htf_data(prices, '6h')
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
+    # Get 12h data for Donchian calculation (primary timeframe)
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Get 1d data for trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get 1w data for EMA trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla levels for 6h
-    # Based on previous 6h bar's OHLC
-    camarilla_high = np.roll(high_6h, 1)
-    camarilla_low = np.roll(low_6h, 1)
-    camarilla_close = np.roll(close_6h, 1)
-    camarilla_range = camarilla_high - camarilla_low
+    # Calculate Donchian channels (20-period) on 12h
+    def rolling_max(arr, window):
+        """Rolling maximum"""
+        result = np.full_like(arr, np.nan, dtype=float)
+        for i in range(window - 1, len(arr)):
+            result[i] = np.max(arr[i - window + 1:i + 1])
+        return result
     
-    # Camarilla levels
-    h5 = camarilla_close + camarilla_range * 1.1 / 2
-    h4 = camarilla_close + camarilla_range * 1.1 / 4
-    h3 = camarilla_close + camarilla_range * 1.1 / 6
-    l3 = camarilla_close - camarilla_range * 1.1 / 6
-    l4 = camarilla_close - camarilla_range * 1.1 / 4
-    l5 = camarilla_close - camarilla_range * 1.1 / 2
+    def rolling_min(arr, window):
+        """Rolling minimum"""
+        result = np.full_like(arr, np.nan, dtype=float)
+        for i in range(window - 1, len(arr)):
+            result[i] = np.min(arr[i - window + 1:i + 1])
+        return result
     
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    upper_12h = rolling_max(high_12h, 20)
+    lower_12h = rolling_min(low_12h, 20)
+    middle_12h = (upper_12h + lower_12h) / 2.0
     
-    # Volume average (24-period = 4 days on 6h)
-    volume_series = pd.Series(volume)
-    volume_ma = volume_series.rolling(window=24, min_periods=24).mean().values
+    # Calculate 1w EMA50 for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_rising = np.diff(ema50_1w, prepend=ema50_1w[0]) > 0  # True if rising
+    ema50_1w_falling = np.diff(ema50_1w, prepend=ema50_1w[0]) < 0  # True if falling
     
-    # Align all indicators to 6h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_6h, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_6h, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_6h, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_6h, l4)
-    h5_aligned = align_htf_to_ltf(prices, df_6h, h5)
-    l5_aligned = align_htf_to_ltf(prices, df_6h, l5)
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_6h, volume_ma)
+    # Calculate volume average (20-period) on 12h
+    volume_12h_series = pd.Series(volume_12h)
+    volume_ma_12h = volume_12h_series.rolling(window=20, min_periods=20).mean().values
+    
+    # Align all indicators to 12h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_12h, upper_12h)
+    lower_aligned = align_htf_to_ltf(prices, df_12h, lower_12h)
+    middle_aligned = align_htf_to_ltf(prices, df_12h, middle_12h)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    ema50_1w_rising_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w_rising.astype(float))
+    ema50_1w_falling_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w_falling.astype(float))
+    volume_ma_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_12h)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -72,49 +77,43 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(ema50_aligned[i]) or np.isnan(volume_ma_aligned[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(middle_aligned[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(ema50_1w_rising_aligned[i]) or np.isnan(ema50_1w_falling_aligned[i]) or 
+            np.isnan(volume_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        h3_val = h3_aligned[i]
-        l3_val = l3_aligned[i]
-        h4_val = h4_aligned[i]
-        l4_val = l4_aligned[i]
-        h5_val = h5_aligned[i]
-        l5_val = l5_aligned[i]
-        ema50 = ema50_aligned[i]
+        upper = upper_aligned[i]
+        lower = lower_aligned[i]
+        middle = middle_aligned[i]
+        ema_trend = ema50_1w_aligned[i]
+        ema_rising = bool(ema50_1w_rising_aligned[i])
+        ema_falling = bool(ema50_1w_falling_aligned[i])
         vol_ma = volume_ma_aligned[i]
         vol = volume[i]
         price = close[i]
         
         if position == 0:
-            # Long: price breaks above H3 with 1d uptrend and volume confirmation
-            if price > h3_val and close_6h[i] > ema50 and vol > 1.5 * vol_ma:
+            # Long: Price > upper band AND 1w EMA50 rising AND volume > 1.5x avg
+            if price > upper and ema_rising and vol > 1.5 * vol_ma:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below L3 with 1d downtrend and volume confirmation
-            elif price < l3_val and close_6h[i] < ema50 and vol > 1.5 * vol_ma:
+            # Short: Price < lower band AND 1w EMA50 falling AND volume > 1.5x avg
+            elif price < lower and ema_falling and vol > 1.5 * vol_ma:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to H-L range (between H4 and L4) OR volume drops
-            if price < h4_val and price > l4_val:
-                signals[i] = 0.0
-                position = 0
-            elif vol < vol_ma:
+            # Exit long: Price < middle band OR volume < average
+            if price < middle or vol < vol_ma:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to H-L range (between H4 and L4) OR volume drops
-            if price < h4_val and price > l4_val:
-                signals[i] = 0.0
-                position = 0
-            elif vol < vol_ma:
+            # Exit short: Price > middle band OR volume < average
+            if price > middle or vol < vol_ma:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -122,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_H3L3_Breakout_1dEMA50_Volume"
-timeframe = "6h"
+name = "12h_DonchianBreakout_1wEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
