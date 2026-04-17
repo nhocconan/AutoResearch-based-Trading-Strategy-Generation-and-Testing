@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation.
-Long when price breaks above 20-day high AND 1w EMA34 is rising AND volume > 1.5x 20-day average volume.
-Short when price breaks below 20-day low AND 1w EMA34 is falling AND volume > 1.5x 20-day average volume.
-Exit when price touches the opposite Donchian band or after 10 bars (time-based exit).
-Uses 1d for execution and Donchian bands, 1w for trend filter.
-Designed to capture medium-term trends with volume confirmation and trend filter to avoid whipsaws.
-Target: 15-25 trades/year per symbol.
+Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume spike confirmation.
+Long when price breaks above R3 (1d) AND close > 1d EMA50 (uptrend) AND 6h volume > 2.0x 20-bar average volume.
+Short when price breaks below S3 (1d) AND close < 1d EMA50 (downtrend) AND 6h volume > 2.0x 20-bar average volume.
+Exit when price touches the 1d pivot point (PP) or opposite Camarilla level (S3 for long, R3 for short).
+Uses 1d for Camarilla levels/EMA/trend, 6h for execution and volume confirmation.
+Designed to capture strong breakouts in trending markets with volume confirmation. Target: 12-30 trades/year per symbol.
 """
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,106 +22,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian bands and volume MA
+    # Get 1d data for Camarilla levels and EMA trend
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Donchian bands (20-period)
-    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d Camarilla levels
+    # R3 = Close + 1.1*(High-Low)
+    # S3 = Close - 1.1*(High-Low)
+    # PP = (High + Low + Close)/3
+    rng = high_1d - low_1d
+    r3 = close_1d + 1.1 * rng
+    s3 = close_1d - 1.1 * rng
+    pp = (high_1d + low_1d + close_1d) / 3
     
-    # Calculate 1d volume MA (20-period)
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Get 1w data for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Calculate 6h volume MA for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1w EMA34
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    # EMA34 slope: rising if current > previous, falling if current < previous
-    ema_34_rising = np.zeros_like(ema_34_1w, dtype=bool)
-    ema_34_falling = np.zeros_like(ema_34_1w, dtype=bool)
-    ema_34_rising[1:] = ema_34_1w[1:] > ema_34_1w[:-1]
-    ema_34_falling[1:] = ema_34_1w[1:] < ema_34_1w[:-1]
-    
-    # Align all indicators to 1d timeframe (primary timeframe)
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
-    ema_34_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_34_rising.astype(float))
-    ema_34_falling_aligned = align_htf_to_ltf(prices, df_1d, ema_34_falling.astype(float))
+    # Align all 1d indicators to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    bars_in_trade = 0  # time-based exit counter
     
-    start_idx = 50  # need enough for indicators to warm up
+    start_idx = 100  # need enough for indicators to warm up
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or
-            np.isnan(vol_ma_20_aligned[i]) or
-            np.isnan(ema_34_rising_aligned[i]) or
-            np.isnan(ema_34_falling_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or
+            np.isnan(pp_aligned[i]) or
+            np.isnan(ema50_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
-            bars_in_trade = 0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x 20-day average volume
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20_aligned[i]
-        
-        # Trend filter: EMA34 rising for long, falling for short
-        trend_long = ema_34_rising_aligned[i] > 0.5
-        trend_short = ema_34_falling_aligned[i] > 0.5
+        # Volume confirmation: current 6h volume > 2.0x 20-bar average
+        volume_confirmed = volume[i] > 2.0 * vol_ma_20[i]
         
         # Breakout conditions
-        breakout_up = close[i] > donch_high_aligned[i]
-        breakout_down = close[i] < donch_low_aligned[i]
+        breakout_r3 = close[i] > r3_aligned[i]
+        breakout_s3 = close[i] < s3_aligned[i]
         
-        # Exit conditions: touch opposite band or time-based exit (10 bars)
-        touch_opposite = (position == 1 and close[i] < donch_low_aligned[i]) or \
-                         (position == -1 and close[i] > donch_high_aligned[i])
-        time_exit = bars_in_trade >= 10
+        # Exit conditions: touch pivot or opposite level
+        touch_pp = abs(close[i] - pp_aligned[i]) < 0.001 * close[i]  # within 0.1%
+        touch_opposite = (position == 1 and close[i] < s3_aligned[i]) or \
+                         (position == -1 and close[i] > r3_aligned[i])
         
         if position == 0:
-            # Long: break above Donchian high with volume confirmation and rising EMA34
-            if (breakout_up and volume_confirmed and trend_long):
+            # Long: break above R3 with volume confirmation and uptrend (close > EMA50)
+            if (breakout_r3 and volume_confirmed and close[i] > ema50_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-                bars_in_trade = 0
-            # Short: break below Donchian low with volume confirmation and falling EMA34
-            elif (breakout_down and volume_confirmed and trend_short):
+            # Short: break below S3 with volume confirmation and downtrend (close < EMA50)
+            elif (breakout_s3 and volume_confirmed and close[i] < ema50_aligned[i]):
                 signals[i] = -0.25
                 position = -1
-                bars_in_trade = 0
         
         elif position == 1:
-            # Exit long: touch Donchian low or time-based exit
-            if (touch_opposite or time_exit):
+            # Exit long: touch pivot or break below S3
+            if (touch_pp or touch_opposite):
                 signals[i] = 0.0
                 position = 0
-                bars_in_trade = 0
             else:
                 signals[i] = 0.25
-                bars_in_trade += 1
         
         elif position == -1:
-            # Exit short: touch Donchian high or time-based exit
-            if (touch_opposite or time_exit):
+            # Exit short: touch pivot or break above R3
+            if (touch_pp or touch_opposite):
                 signals[i] = 0.0
                 position = 0
-                bars_in_trade = 0
             else:
                 signals[i] = -0.25
-                bars_in_trade += 1
     
     return signals
 
-name = "1d_Donchian20_1wEMA34_Volume_Trend"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_Volume_EMA50_Trend"
+timeframe = "6h"
 leverage = 1.0
