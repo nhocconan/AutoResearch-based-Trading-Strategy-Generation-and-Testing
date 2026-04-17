@@ -13,19 +13,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Donchian Channel (20 periods) ===
+    # === 1d VWAP (Volume Weighted Average Price) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    
-    donchian_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    donchian_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_1d)
-    donchian_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_1d)
-    
-    # === 1d Volume Spike (2.0x 20-period average) ===
+    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
+    
+    # Calculate typical price and VWAP
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
+    vwap_numerator = np.cumsum(typical_price_1d * volume_1d)
+    vwap_denominator = np.cumsum(volume_1d)
+    vwap_1d = np.divide(vwap_numerator, vwap_denominator, 
+                        out=np.full_like(vwap_numerator, np.nan), 
+                        where=vwap_denominator!=0)
+    
+    # === 1d VWAP Standard Deviation (20 periods) ===
+    # Calculate deviation from VWAP
+    dev_squared = (typical_price_1d - vwap_1d) ** 2
+    # Weighted variance using volume
+    vwap_var = np.divide(np.cumsum(dev_squared * volume_1d), 
+                         vwap_denominator,
+                         out=np.full_like(vwap_numerator, np.nan),
+                         where=vwap_denominator!=0)
+    vwap_std = np.sqrt(np.maximum(vwap_var, 0))
+    
+    # VWAP Bands (2 standard deviations)
+    vwap_upper = vwap_1d + 2.0 * vwap_std
+    vwap_lower = vwap_1d - 2.0 * vwap_std
+    
+    # Align to 4h timeframe
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    vwap_upper_aligned = align_htf_to_ltf(prices, df_1d, vwap_upper)
+    vwap_lower_aligned = align_htf_to_ltf(prices, df_1d, vwap_lower)
+    
+    # === 1d Volume Spike Detection ===
     vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
@@ -40,32 +62,37 @@ def generate_signals(prices):
         low_diff = low_1d[i-1] - low_1d[i]
         plus_dm[i] = max(high_diff, 0) if high_diff > low_diff else 0
         minus_dm[i] = max(low_diff, 0) if low_diff > high_diff else 0
-        tr[i] = max(high_1d[i] - low_1d[i], abs(high_1d[i] - high_1d[i-1]), abs(low_1d[i] - low_1d[i-1]))
+        tr[i] = max(high_1d[i] - low_1d[i], 
+                    abs(high_1d[i] - high_1d[i-1]), 
+                    abs(low_1d[i] - low_1d[i-1]))
     
-    # Smooth with Wilder's smoothing (alpha = 1/period)
+    # Wilder's smoothing (alpha = 1/period)
     atr_14 = np.zeros(len(tr))
     plus_di_14 = np.zeros(len(plus_dm))
     minus_di_14 = np.zeros(len(minus_dm))
     
+    # Initialize first values
     atr_14[0] = tr[0]
     plus_di_14[0] = plus_dm[0]
     minus_di_14[0] = minus_dm[0]
     
+    # Smooth subsequent values
     for i in range(1, len(tr)):
         atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
         plus_di_14[i] = (plus_di_14[i-1] * 13 + plus_dm[i]) / 14
         minus_di_14[i] = (minus_di_14[i-1] * 13 + minus_dm[i]) / 14
     
-    # Avoid division by zero
+    # Calculate DX
     dx = np.zeros(len(atr_14))
-    mask = atr_14 > 0
+    mask = (plus_di_14 + minus_di_14) > 0
     dx[mask] = 100 * np.abs(plus_di_14[mask] - minus_di_14[mask]) / (plus_di_14[mask] + minus_di_14[mask])
     
     # Calculate ADX (smoothed DX)
     adx_14 = np.zeros(len(dx))
-    adx_14[0] = dx[0]
-    for i in range(1, len(dx)):
-        adx_14[i] = (adx_14[i-1] * 13 + dx[i]) / 14
+    if len(dx) > 0:
+        adx_14[0] = dx[0]
+        for i in range(1, len(dx)):
+            adx_14[i] = (adx_14[i-1] * 13 + dx[i]) / 14
     
     adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
     
@@ -79,8 +106,9 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(donchian_high_1d_aligned[i]) or np.isnan(donchian_low_1d_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(adx_14_aligned[i])):
+        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(vwap_upper_aligned[i]) or 
+            np.isnan(vwap_lower_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or 
+            np.isnan(adx_14_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -94,21 +122,21 @@ def generate_signals(prices):
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price breaks above 1d Donchian high with volume confirmation and strong trend
-            if close[i] > donchian_high_1d_aligned[i] and vol_confirm and adx_strong:
+            # Long: price crosses above VWAP upper band with volume confirmation and strong trend
+            if close[i] > vwap_upper_aligned[i] and vol_confirm and adx_strong:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price breaks below 1d Donchian low with volume confirmation and strong trend
-            elif close[i] < donchian_low_1d_aligned[i] and vol_confirm and adx_strong:
+            # Short: price crosses below VWAP lower band with volume confirmation and strong trend
+            elif close[i] < vwap_lower_aligned[i] and vol_confirm and adx_strong:
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic: price returns to opposite Donchian level
+        # Exit logic: price returns to VWAP
         elif position == 1:
-            # Exit long: price crosses below 1d Donchian low
-            if close[i] < donchian_low_1d_aligned[i]:
+            # Exit long: price crosses below VWAP
+            if close[i] < vwap_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -116,8 +144,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above 1d Donchian high
-            if close[i] > donchian_high_1d_aligned[i]:
+            # Exit short: price crosses above VWAP
+            if close[i] > vwap_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -126,6 +154,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1dVolumeSpike_ADXFilter"
+name = "1d_VWAP_2Std_Dev_VolumeSpike_ADXFilter"
 timeframe = "4h"
 leverage = 1.0
