@@ -1,10 +1,12 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 """
-6h_WeeklyPivot_R1S1_Reverse_Volume_Filter_v1
-Hypothesis: In BTC/ETH, price often reverses at weekly pivot S1/R1 levels during ranging markets (2022-2024). 
-Weak bounces fail; strong reversals show volume confirmation. Uses weekly pivot S1/R1 as dynamic support/resistance.
-In trending markets, avoids counter-trend trades by requiring price to be within weekly pivot R1-S1 range.
-Timeframe: 6h balances noise and signal quality. Target: 60-120 trades over 4 years (15-30/year).
+4h_PriceChannel_Breakout_VolumeRegime_v1
+Breakout above/below 4h Donchian(20) channel with volume confirmation and 1d Choppiness regime filter.
+Long when price breaks above upper band + volume spike + chop>61.8 (range).
+Short when price breaks below lower band + volume spike + chop>61.8 (range).
+Exit on opposite band touch or chop<38.2 (trend).
+Designed for mean reversion in ranging markets, avoids whipsaw in strong trends.
+Target: 20-50 trades/year (80-200 total over 4 years).
 """
 
 import numpy as np
@@ -21,74 +23,108 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Weekly Pivot Calculation (using prior week's OHLC) ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
-        return np.zeros(n)
+    # === 4h Donchian Channel (20-period) ===
+    # Upper band: highest high of last 20 periods
+    highest_high = np.full(n, np.nan)
+    for i in range(n):
+        if i >= 19:
+            highest_high[i] = np.max(high[i-19:i+1])
     
-    # Calculate weekly pivot points: P = (H+L+C)/3, S1 = 2P - H, R1 = 2P - L
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Lower band: lowest low of last 20 periods
+    lowest_low = np.full(n, np.nan)
+    for i in range(n):
+        if i >= 19:
+            lowest_low[i] = np.min(low[i-19:i+1])
     
-    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    s1 = 2 * pivot - weekly_high
-    r1 = 2 * pivot - weekly_low
-    
-    # Align weekly levels to 6h timeframe (wait for weekly bar to close)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    
-    # === Volume Confirmation (20-period average) ===
-    vol_ma_20 = np.full_like(volume, np.nan)
-    for i in range(len(volume)):
-        if i >= 20:
-            vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    # === Volume confirmation (20-period average) ===
+    vol_ma = np.full(n, np.nan)
+    for i in range(n):
+        if i >= 19:
+            vol_ma[i] = np.mean(volume[i-19:i+1])
+        elif i > 0:
+            vol_ma[i] = np.mean(volume[max(0, i-9):i+1])
         else:
-            vol_ma_20[i] = np.mean(volume[max(0, i-9):i+1]) if i > 0 else volume[0]
+            vol_ma[i] = volume[0]
+    vol_spike = volume > vol_ma * 1.5  # 1.5x average volume
     
-    vol_confirm = volume > vol_ma_20 * 1.8  # volume spike: 1.8x average
+    # === 1d Choppiness Index (14-period) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range
+    tr = np.zeros_like(close_1d)
+    tr[0] = high_1d[0] - low_1d[0]
+    for i in range(1, len(close_1d)):
+        tr[i] = max(high_1d[i] - low_1d[i], 
+                    abs(high_1d[i] - close_1d[i-1]), 
+                    abs(low_1d[i] - close_1d[i-1]))
+    
+    # Sum of true range over 14 periods
+    tr_sum = np.full_like(close_1d, np.nan)
+    for i in range(len(tr_sum)):
+        if i >= 13:
+            tr_sum[i] = np.sum(tr[i-13:i+1])
+    
+    # Highest high and lowest low over 14 periods
+    hh_14 = np.full_like(close_1d, np.nan)
+    ll_14 = np.full_like(close_1d, np.nan)
+    for i in range(len(close_1d)):
+        if i >= 13:
+            hh_14[i] = np.max(high_1d[i-13:i+1])
+            ll_14[i] = np.min(low_1d[i-13:i+1])
+    
+    # Chop = 100 * log10(tr_sum / (hh_14 - ll_14)) / log10(14)
+    chop = np.full_like(close_1d, np.nan)
+    for i in range(len(chop)):
+        if i >= 13 and hh_14[i] > ll_14[i]:
+            chop[i] = 100 * np.log10(tr_sum[i] / (hh_14[i] - ll_14[i])) / np.log10(14)
+    
+    # Chop > 61.8 = ranging (good for mean reversion), Chop < 38.2 = trending
+    chop_ranging = chop > 61.8
+    chop_trending = chop < 38.2
+    
+    # Align chop to 4h timeframe
+    chop_ranging_aligned = align_htf_to_ltf(prices, df_1d, chop_ranging)
+    chop_trending_aligned = align_htf_to_ltf(prices, df_1d, chop_trending)
     
     signals = np.zeros(n)
-    
-    # Warmup: need at least 1 weekly bar + 20 for volume MA
-    warmup = 30
-    
-    # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(warmup, n):
+    for i in range(20, n):  # Start after Donchian warmup
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(vol_confirm[i])):
+        if (np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or 
+            np.isnan(vol_spike[i]) or 
+            np.isnan(chop_ranging_aligned[i]) or 
+            np.isnan(chop_trending_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Only trade when price is between S1 and R1 (range-bound condition)
-        in_range = (s1_aligned[i] <= close[i] <= r1_aligned[i])
-        
-        # Entry logic: only enter when flat
-        if position == 0 and in_range:
-            # Long: price at or below S1 with volume confirmation (bounce from support)
-            if close[i] <= s1_aligned[i] * 1.002 and vol_confirm[i]:  # 0.2% buffer
+        # Entry conditions: only when flat
+        if position == 0:
+            # Long: break above upper band + volume spike + chop ranging
+            if (close[i] > highest_high[i] and 
+                vol_spike[i] and 
+                chop_ranging_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price at or above R1 with volume confirmation (rejection at resistance)
-            elif close[i] >= r1_aligned[i] * 0.998 and vol_confirm[i]:  # 0.2% buffer
+            # Short: break below lower band + volume spike + chop ranging
+            elif (close[i] < lowest_low[i] and 
+                  vol_spike[i] and 
+                  chop_ranging_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic
+        # Exit conditions
         elif position == 1:
-            # Exit long: price reaches pivot (take profit) OR closes below S1 (breakdown)
-            if (close[i] >= pivot_aligned[i] * 0.998 or  # near pivot
-                close[i] < s1_aligned[i] * 0.998):       # break below S1
+            # Exit long: touch lower band OR chop becomes trending
+            if (close[i] < lowest_low[i] or 
+                chop_trending_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -96,9 +132,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price reaches pivot (take profit) OR closes above R1 (breakout)
-            if (close[i] <= pivot_aligned[i] * 1.002 or  # near pivot
-                close[i] > r1_aligned[i] * 1.002):       # break above R1
+            # Exit short: touch upper band OR chop becomes trending
+            if (close[i] > highest_high[i] or 
+                chop_trending_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -107,6 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R1S1_Reverse_Volume_Filter_v1"
-timeframe = "6h"
+name = "4h_PriceChannel_Breakout_VolumeRegime_v1"
+timeframe = "4h"
 leverage = 1.0
