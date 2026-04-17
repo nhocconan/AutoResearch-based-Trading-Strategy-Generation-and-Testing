@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
 Hypothesis:
-This strategy combines 6h Donchian breakouts with 1-day pivot direction and volume confirmation.
-In trending markets (ADX > 25), price tends to continue in the direction of breakouts from
-Donchian channels. The 1-day pivot provides institutional reference points: breaks above
-R1 suggest bullish continuation, breaks below S1 suggest bearish continuation. Volume
-confirmation ensures the breakout has conviction. Designed for 6h timeframe to achieve
-12-37 trades/year with low decay. Works in both bull and bear markets by filtering for
-trending regimes and using pivot levels as dynamic support/resistance.
+This strategy uses 6h Donchian breakouts (20-period) combined with 1-day volume spike (2x) and ADX trend filter (25).
+In trending markets, breakouts with volume and trend confirmation tend to continue. Volume spike ensures conviction,
+ADX > 25 filters for trending regimes, avoiding false breakouts in ranging markets.
+Designed for 6h timeframe to achieve 12-37 trades/year with low decay. Works in both bull and bear markets by
+filtering for trending regimes and using volume as confirmation of institutional interest.
 """
 
 import numpy as np
@@ -19,17 +17,6 @@ def calculate_donchian(high, low, window):
     upper = pd.Series(high).rolling(window=window, min_periods=window).max().values
     lower = pd.Series(low).rolling(window=window, min_periods=window).min().values
     return upper, lower
-
-def calculate_pivot_points(high, low, close):
-    """Calculate classic pivot points"""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
-    r3 = high + 2 * (pivot - low)
-    s3 = low - 2 * (high - pivot)
-    return pivot, r1, r2, r3, s1, s2, s3
 
 def generate_signals(prices):
     n = len(prices)
@@ -44,27 +31,12 @@ def generate_signals(prices):
     # === 6h Donchian Channel (20-period) ===
     donch_hi, donch_lo = calculate_donchian(high, low, 20)
     
-    # === 1-day Pivot Points (for direction) ===
+    # === 1-day Data ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate pivot points for each 1d bar
-    pivot_1d = np.full_like(close_1d, np.nan)
-    r1_1d = np.full_like(close_1d, np.nan)
-    s1_1d = np.full_like(close_1d, np.nan)
-    
-    for i in range(len(close_1d)):
-        p, r1, s1, _, _, _, _ = calculate_pivot_points(high_1d[i], low_1d[i], close_1d[i])
-        pivot_1d[i] = p
-        r1_1d[i] = r1
-        s1_1d[i] = s1
-    
-    # Align pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    volume_1d = df_1d['volume'].values
     
     # === 1-day ADX (14-period) for trend filter ===
     # True Range
@@ -94,9 +66,9 @@ def generate_signals(prices):
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # === 1-day Volume Spike (vs 20-period average) ===
-    volume_1d = df_1d['volume'].values
     vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
     
     signals = np.zeros(n)
     
@@ -109,18 +81,14 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # Skip if any data is NaN
         if (np.isnan(donch_hi[i]) or np.isnan(donch_lo[i]) or
-            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or np.isnan(adx_aligned[i]) or
-            np.isnan(vol_ma_20_1d_aligned[i])):
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or
+            np.isnan(volume_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Get current 1d volume
-        volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-        
-        # Volume spike: current 1d volume > 1.5x 20-period average
-        vol_spike = volume_1d_aligned[i] > vol_ma_20_1d_aligned[i] * 1.5
+        # Volume spike: current 1d volume > 2x 20-period average
+        vol_spike = volume_1d_aligned[i] > vol_ma_20_1d_aligned[i] * 2.0
         
         # Trend filter: ADX > 25
         trend_filter = adx_aligned[i] > 25
@@ -129,20 +97,16 @@ def generate_signals(prices):
         breakout_up = close[i] > donch_hi[i-1]  # Break above upper band
         breakout_down = close[i] < donch_lo[i-1]  # Break below lower band
         
-        # Pivot direction: price relative to R1/S1
-        above_r1 = close[i] > r1_aligned[i]
-        below_s1 = close[i] < s1_aligned[i]
-        
         # Entry logic: only enter when flat
         if position == 0:
             if vol_spike and trend_filter:
-                # Long: breakout up AND above R1 (bullish confluence)
-                if breakout_up and above_r1:
+                # Long: breakout up
+                if breakout_up:
                     signals[i] = 0.25
                     position = 1
                     continue
-                # Short: breakout down AND below S1 (bearish confluence)
-                elif breakout_down and below_s1:
+                # Short: breakout down
+                elif breakout_down:
                     signals[i] = -0.25
                     position = -1
                     continue
@@ -170,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_1dPivotR1S1_Volume1.5x_ADX25"
+name = "6h_Donchian20_1dVolume2x_ADX25"
 timeframe = "6h"
 leverage = 1.0
