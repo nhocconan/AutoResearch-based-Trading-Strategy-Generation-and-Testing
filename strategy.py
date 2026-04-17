@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h strategy using 1-day Donchian channel breakout with volume confirmation and 1-day EMA50 trend filter.
-- Long when price breaks above 1-day Donchian high (20-period) + volume > 1.8x 20-period 12h volume MA + price above 1-day EMA50
-- Short when price breaks below 1-day Donchian low (20-period) + volume > 1.8x 20-period 12h volume MA + price below 1-day EMA50
+Hypothesis: 4h strategy using Bollinger Bands squeeze breakout with volume confirmation and trend filter.
+- Enter long when price breaks above upper BB(20,2) + volume > 1.5x 20-period volume MA + price above 200 EMA
+- Enter short when price breaks below lower BB(20,2) + volume > 1.5x 20-period volume MA + price below 200 EMA
+- Exit when price crosses back inside Bollinger Bands
 - Fixed position size 0.25 to manage drawdown
-- Uses price channel breakout structure (works in ranging and trending markets) + volume confirmation + trend filter
-- Designed for 12h timeframe with strict entry conditions to limit trades to 50-150 total over 4 years
-- Donchian breakout captures volatility expansion, effective in both accumulation (bull) and distribution (bear) phases
+- Uses volatility contraction/expansion principle: squeeze precedes breakout
+- Designed for 4h timeframe with strict entry conditions to limit trades to 75-200 total over 4 years
+- Bollinger Bands capture volatility regimes, effective in both accumulation and distribution phases
 """
 
 import numpy as np
@@ -15,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,75 +24,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for volume MA
-    df_12h = get_htf_data(prices, '12h')
-    volume_12h = df_12h['volume'].values
+    # Bollinger Bands (20, 2)
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean()
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std()
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
     
-    # Volume average (20-period) on 12h for confirmation
-    volume_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: 20-period volume MA
+    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
-    # Get 1d data for Donchian, close, and EMA50 trend filter (HTF for structure)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1-day EMA50
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Calculate 1-day Donchian channel (20-period)
-    donchian_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Align all HTF indicators to primary timeframe (12h)
-    volume_ma_20_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_20_12h)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
+    # Trend filter: 200 EMA
+    ema_200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean()
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    entry_price = 0.0
     
-    start_idx = 100  # warmup
+    start_idx = 200  # warmup for 200 EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(volume_ma_20_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
-            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i])):
+        if (np.isnan(sma_20.iloc[i]) or np.isnan(std_20.iloc[i]) or 
+            np.isnan(volume_ma_20.iloc[i]) or np.isnan(ema_200.iloc[i])):
             signals[i] = 0.0
             continue
         
-        vol_ma = volume_ma_20_aligned[i]
-        ema_50_val = ema_50_aligned[i]
-        donchian_high = donchian_high_aligned[i]
-        donchian_low = donchian_low_aligned[i]
-        vol = volume[i]
         price = close[i]
+        vol = volume[i]
+        vol_ma = volume_ma_20.iloc[i]
+        upper = upper_bb.iloc[i]
+        lower = lower_bb.iloc[i]
+        ema_val = ema_200.iloc[i]
         
         if position == 0:
-            # Look for Donchian breakouts with volume confirmation and 1-day EMA50 trend filter
-            # Long: price breaks above 1-day Donchian high + volume spike + price above 1-day EMA50
-            if price > donchian_high and vol > 1.8 * vol_ma and price > ema_50_val:
+            # Look for Bollinger Band breakouts with volume confirmation and trend filter
+            # Long: price breaks above upper BB + volume spike + price above 200 EMA
+            if price > upper and vol > 1.5 * vol_ma and price > ema_val:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-            # Short: price breaks below 1-day Donchian low + volume spike + price below 1-day EMA50
-            elif price < donchian_low and vol > 1.8 * vol_ma and price < ema_50_val:
+            # Short: price breaks below lower BB + volume spike + price below 200 EMA
+            elif price < lower and vol > 1.5 * vol_ma and price < ema_val:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
         
         elif position == 1:
-            # Exit on close below 1-day EMA50 (trend change) or opposite Donchian level
-            if price < ema_50_val or price < donchian_low:
+            # Exit when price crosses back inside Bollinger Bands (mean reversion)
+            if price < upper and price > lower:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit on close above 1-day EMA50 (trend change) or opposite Donchian level
-            if price > ema_50_val or price > donchian_high:
+            # Exit when price crosses back inside Bollinger Bands (mean reversion)
+            if price < upper and price > lower:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_VolumeSpike_1dEMA50"
-timeframe = "12h"
+name = "4h_BollingerSqueezeBreakout_VolumeTrend"
+timeframe = "4h"
 leverage = 1.0
