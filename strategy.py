@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h timeframe with 1d Camarilla R1/S1 breakout + 1w ADX trend filter + volume confirmation.
-Long when price breaks above Camarilla R1 level with 1w ADX > 25 (trending) and volume > 1.5x 20-period average.
-Short when price breaks below Camarilla S1 level with 1w ADX > 25 and volume > 1.5x 20-period average.
-Uses discrete position sizing (0.25) to minimize fee churn. Designed to capture trending moves with volume confirmation
-while avoiding choppy markets via ADX filter. Works in both bull (breakouts above R1) and bear (breakdowns below S1).
+Hypothesis: 4h timeframe with 12h Supertrend(10,3) as trend filter + 4h Donchian(20) breakout + volume confirmation.
+Long when price breaks above 20-period high with 12h Supertrend bullish and volume > 1.5x 20-period volume average.
+Short when price breaks below 20-period low with 12h Supertrend bearish and volume > 1.5x 20-period volume average.
+Exit when price touches the opposite Donchian band or Supertrend flips.
+Designed to capture strong trends with volume confirmation while avoiding choppy markets via Supertrend filter.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,122 +21,120 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Get 12h data for Supertrend
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Get 1w data for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 12h Supertrend(10,3)
+    def atr(high_vals, low_vals, close_vals, window):
+        tr1 = pd.Series(high_vals).shift(1) - pd.Series(low_vals).shift(1)
+        tr2 = abs(pd.Series(high_vals).shift(1) - pd.Series(close_vals).shift(1))
+        tr3 = abs(pd.Series(low_vals).shift(1) - pd.Series(close_vals).shift(1))
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr_vals = pd.Series(tr).ewm(span=window, min_periods=window, adjust=False).mean().values
+        return atr_vals
     
-    # Calculate 1d typical price for Camarilla
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    
-    # Calculate Camarilla levels (R1, S1)
-    camarilla_r1 = typical_price_1d + (range_1d * 1.1 / 12)
-    camarilla_s1 = typical_price_1d - (range_1d * 1.1 / 12)
-    
-    # Calculate 1w ADX (14-period)
-    def calculate_adx(high_vals, low_vals, close_vals, window):
-        plus_dm = np.zeros_like(high_vals)
-        minus_dm = np.zeros_like(low_vals)
-        tr = np.zeros_like(high_vals)
+    def supertrend(high_vals, low_vals, close_vals, atr_period, multiplier):
+        atr_vals = atr(high_vals, low_vals, close_vals, atr_period)
+        hl2 = (high_vals + low_vals) / 2
+        upperband = hl2 + (multiplier * atr_vals)
+        lowerband = hl2 - (multiplier * atr_vals)
         
-        for i in range(1, len(high_vals)):
-            plus_dm[i] = max(0, high_vals[i] - high_vals[i-1])
-            minus_dm[i] = max(0, low_vals[i-1] - low_vals[i])
-            if plus_dm[i] == minus_dm[i]:
-                plus_dm[i] = 0
-                minus_dm[i] = 0
-            elif plus_dm[i] < minus_dm[i]:
-                plus_dm[i] = 0
+        supertrend_vals = np.full_like(close_vals, np.nan, dtype=float)
+        direction = np.full_like(close_vals, 1, dtype=int)  # 1 for uptrend, -1 for downtrend
+        
+        for i in range(1, len(close_vals)):
+            if np.isnan(atr_vals[i]) or np.isnan(upperband[i-1]) or np.isnan(lowerband[i-1]):
+                supertrend_vals[i] = np.nan
+                direction[i] = direction[i-1]
+                continue
+                
+            if close_vals[i] > upperband[i-1]:
+                direction[i] = 1
+            elif close_vals[i] < lowerband[i-1]:
+                direction[i] = -1
             else:
-                minus_dm[i] = 0
-            
-            tr[i] = max(
-                high_vals[i] - low_vals[i],
-                abs(high_vals[i] - close_vals[i-1]),
-                abs(low_vals[i] - close_vals[i-1])
-            )
-        
-        # Handle first bar
-        tr[0] = high_vals[0] - low_vals[0]
-        plus_dm[0] = 0
-        minus_dm[0] = 0
-        
-        # Smoothed values
-        atr = pd.Series(tr).ewm(span=window, adjust=False, min_periods=window).mean().values
-        plus_di = 100 * pd.Series(plus_dm).ewm(span=window, adjust=False, min_periods=window).mean().values / atr
-        minus_di = 100 * pd.Series(minus_dm).ewm(span=window, adjust=False, min_periods=window).mean().values / atr
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = pd.Series(dx).ewm(span=window, adjust=False, min_periods=window).mean().values
-        
-        # Handle division by zero
-        adx = np.where((plus_di + minus_di) == 0, 0, adx)
-        return adx
+                direction[i] = direction[i-1]
+                
+            if direction[i] == 1:
+                supertrend_vals[i] = max(lowerband[i], supertrend_vals[i-1]) if not np.isnan(supertrend_vals[i-1]) else lowerband[i]
+            else:
+                supertrend_vals[i] = min(upperband[i], supertrend_vals[i-1]) if not np.isnan(supertrend_vals[i-1]) else upperband[i]
+                
+        return supertrend_vals, direction
     
-    adx_14_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
+    st_12h, st_dir_12h = supertrend(high_12h, low_12h, close_12h, 10, 3)
     
-    # Calculate 1d volume 20-period average
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate 4h Donchian(20) channels
+    def donchian_channel(high_vals, low_vals, window):
+        upper = pd.Series(high_vals).rolling(window=window, min_periods=window).max().values
+        lower = pd.Series(low_vals).rolling(window=window, min_periods=window).min().values
+        return upper, lower
     
-    # Align all to primary timeframe (12h)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    adx_14_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_14_1w)
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    donchian_upper, donchian_lower = donchian_channel(high, low, 20)
+    
+    # Calculate 4h volume 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all to primary timeframe (4h)
+    st_12h_aligned = align_htf_to_ltf(prices, df_12h, st_12h)
+    st_dir_12h_aligned = align_htf_to_ltf(prices, df_12h, st_dir_12h)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)  # Using 12h df for alignment but values are 4h
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
+    
+    # Fix alignment: realign the 4h indicators properly
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 100  # need enough for ADX and volume MA
+    start_idx = 30  # need enough for Supertrend and Donchian
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(adx_14_1w_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(st_12h_aligned[i]) or 
+            np.isnan(st_dir_12h_aligned[i]) or 
+            np.isnan(donchian_upper_aligned[i]) or 
+            np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(vol_ma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20_1d_aligned[i]
-        
-        # Trend filter: 1w ADX > 25 indicates trending market
-        trending = adx_14_1w_aligned[i] > 25
+        # Volume confirmation: current 4h volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20_aligned[i]
         
         if position == 0:
-            # Long: price breaks above Camarilla R1 with volume and trend
-            if (close[i] > camarilla_r1_aligned[i] and 
-                volume_confirmed and 
-                trending):
+            # Long: price breaks above 20-period high with 12h Supertrend bullish and volume
+            if (close[i] > donchian_upper_aligned[i] and 
+                st_dir_12h_aligned[i] == 1 and 
+                volume_confirmed):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla S1 with volume and trend
-            elif (close[i] < camarilla_s1_aligned[i] and 
-                  volume_confirmed and 
-                  trending):
+            # Short: price breaks below 20-period low with 12h Supertrend bearish and volume
+            elif (close[i] < donchian_lower_aligned[i] and 
+                  st_dir_12h_aligned[i] == -1 and 
+                  volume_confirmed):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below Camarilla S1 (opposite side)
-            if close[i] < camarilla_s1_aligned[i]:
+            # Exit long: price falls back below 20-period low OR Supertrend turns bearish
+            if (close[i] < donchian_lower_aligned[i] or 
+                st_dir_12h_aligned[i] == -1):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above Camarilla R1 (opposite side)
-            if close[i] > camarilla_r1_aligned[i]:
+            # Exit short: price rises back above 20-period high OR Supertrend turns bullish
+            if (close[i] > donchian_upper_aligned[i] or 
+                st_dir_12h_aligned[i] == 1):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -144,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dCamarilla_R1S1_Breakout_1wADX_Volume_Confirm"
-timeframe = "12h"
+name = "4h_12hSupertrend10_3_Donchian20_Breakout_Volume_Confirm"
+timeframe = "4h"
 leverage = 1.0
