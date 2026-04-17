@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla R1/S1 breakout with 1d volume confirmation and ATR trailing stop.
-Long when price breaks above R1 AND 1d volume > 1.5x 20-period average.
-Short when price breaks below S1 AND 1d volume > 1.5x 20-period average.
-Exit when price retraces 50% of ATR from the extreme favorable price since entry.
-Designed for low trade frequency (12-37/year) to minimize fee drag while capturing strong intraday moves.
-Works in both bull and bear markets via volume confirmation and ATR-based risk control.
+Hypothesis: 4h 1d Camarilla R1/S1 breakout with volume confirmation and ATR stop.
+Long when price breaks above 1d Camarilla R1 level AND volume > 1.5x 20-period average.
+Short when price breaks below 1d Camarilla S1 level AND volume > 1.5x 20-period average.
+Exit when price retraces 30% of ATR from extreme favorable price since entry.
+Uses proven Camarilla pivot structure with volume filter to reduce false breakouts.
+Designed for low trade frequency (20-50/year) to minimize fee drag while capturing strong intraday moves.
 """
 
 import numpy as np
@@ -27,31 +27,29 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla pivot levels (R1, S1) on 1d timeframe
-    # Pivot = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    # Calculate 1d Camarilla levels (R1, S1)
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    rng_1d = high_1d - low_1d
+    camarilla_r1_1d = close_1d + rng_1d * 1.1 / 12
+    camarilla_s1_1d = close_1d - rng_1d * 1.1 / 12
     
     # Calculate volume average (20-period) on 1d
+    volume_1d = df_1d['volume'].values
     volume_1d_series = pd.Series(volume_1d)
     volume_ma_1d = volume_1d_series.rolling(window=20, min_periods=20).mean().values
     
-    # Calculate ATR (14-period) on 1d for trailing stop
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First bar: use high-low
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate ATR (14-period) on 1d for stop loss
+    tr1_1d = high_1d - low_1d
+    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
+    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
+    tr_1d[0] = tr1_1d[0]  # First bar: use high-low
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     
-    # Align all indicators to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align all indicators to 4h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
     volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
     atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
@@ -63,13 +61,13 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
             np.isnan(volume_ma_aligned[i]) or np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             continue
         
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
+        r1 = camarilla_r1_aligned[i]
+        s1 = camarilla_s1_aligned[i]
         vol_ma = volume_ma_aligned[i]
         vol = volume[i]
         atr = atr_aligned[i]
@@ -93,8 +91,8 @@ def generate_signals(prices):
             # Update extreme price (highest since entry)
             if price > extreme_price:
                 extreme_price = price
-            # Exit long: price retraces 50% of ATR from extreme price
-            if price < extreme_price - 0.5 * atr:
+            # Exit long: price retraces 30% of ATR from extreme price
+            if price < extreme_price - 0.3 * atr:
                 signals[i] = 0.0
                 position = 0
                 extreme_price = 0.0
@@ -105,8 +103,8 @@ def generate_signals(prices):
             # Update extreme price (lowest since entry)
             if price < extreme_price:
                 extreme_price = price
-            # Exit short: price retraces 50% of ATR from extreme price
-            if price > extreme_price + 0.5 * atr:
+            # Exit short: price retraces 30% of ATR from extreme price
+            if price > extreme_price + 0.3 * atr:
                 signals[i] = 0.0
                 position = 0
                 extreme_price = 0.0
@@ -115,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Volume_ATRTrail"
-timeframe = "12h"
+name = "4h_1dCamarilla_R1S1_Volume_ATRTrail"
+timeframe = "4h"
 leverage = 1.0
