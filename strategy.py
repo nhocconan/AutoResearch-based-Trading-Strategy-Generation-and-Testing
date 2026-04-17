@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_RangeBound_MeanReversion
-Hypothesis: In ranging markets, price tends to revert from Camarilla R1/S1 levels on 12h timeframe.
-Long near S1 when price is below EMA34 (bearish bias) with bullish reversal signals.
-Short near R1 when price is above EMA34 (bullish bias) with bearish reversal signals.
-Uses RSI(7) for mean reversion signals and volume confirmation. Designed for 12h to avoid overtrading.
-Works in sideways markets (2025-2026) and captures reversals from extremes.
+4h_Momentum_Reversal_With_Trend_Filter
+Hypothesis: In BTC/ETH, momentum reversals occur when price deviates from short-term momentum while 4h trend remains intact.
+Buy when RSI(14) < 30 and price > EMA(50) (oversold in uptrend). Sell when RSI(14) > 70 and price < EMA(50) (overbought in downtrend).
+Uses 1d ADX(14) > 20 to filter for trending markets only. Designed for 4h to capture medium-term reversals with low trade frequency.
+Works in both bull (buy oversold dips) and bear (sell overbought rallies) markets.
 """
 
 import numpy as np
@@ -22,103 +21,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data for Camarilla pivot, EMA trend, and RSI ===
+    # === 4h indicators (primary timeframe) ===
+    # RSI(14) for momentum
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
+    
+    # EMA(50) for trend filter
+    ema50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    
+    # === 1d ADX for trend strength filter ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla pivot levels from previous 1d bar
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first bar
     
-    # Handle first bar
-    prev_high_1d[0] = high_1d[0]
-    prev_low_1d[0] = low_1d[0]
-    prev_close_1d[0] = close_1d[0]
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    cam_r1 = prev_close_1d + 0.25 * (prev_high_1d - prev_low_1d)
-    cam_s1 = prev_close_1d - 0.25 * (prev_high_1d - prev_low_1d)
+    # Smoothed values
+    tr14 = pd.Series(tr).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    plus_dm14 = pd.Series(plus_dm).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    minus_dm14 = pd.Series(minus_dm).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
     
-    # Align Camarilla levels to 12h timeframe
-    cam_r1_aligned = align_htf_to_ltf(prices, df_1d, cam_r1)
-    cam_s1_aligned = align_htf_to_ltf(prices, df_1d, cam_s1)
+    # Directional Indicators
+    plus_di = 100 * plus_dm14 / np.where(tr14 == 0, 1e-10, tr14)
+    minus_di = 100 * minus_dm14 / np.where(tr14 == 0, 1e-10, tr14)
     
-    # 1d EMA34 for trend bias filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) == 0, 1e-10, (plus_di + minus_di))
+    adx = pd.Series(dx).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
     
-    # 1d RSI(7) for mean reversion signals
-    delta = pd.Series(close_1d).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/7, min_periods=7, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/7, min_periods=7, adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0, 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d = rsi_1d.values
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # 1d volume average (20-period) for volume confirmation
-    vol_avg20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg20_1d)
+    # Align 1d ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     
-    # Warmup: covers EMA34, RSI, and rollouts
-    warmup = 40
+    # Warmup: covers RSI, EMA50, and ADX calculations
+    warmup = 50
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(cam_r1_aligned[i]) or 
-            np.isnan(cam_s1_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(vol_avg20_1d_aligned[i])):
+        if (np.isnan(rsi[i]) or 
+            np.isnan(ema50[i]) or 
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Get current 1d volume
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
+        # Trend filter: only trade in trending markets (ADX > 20)
+        trending = adx_aligned[i] > 20
         
-        # Volume filter: current volume > 1.3x 20-period average
-        vol_filter = vol_1d_current > 1.3 * vol_avg20_1d_aligned[i]
-        
-        # Mean reversion conditions
-        if position == 0:
-            # Long near S1: price near support, bearish bias (price < EMA34), oversold RSI
-            price_near_s1 = abs(close[i] - cam_s1_aligned[i]) < 0.005 * close[i]  # within 0.5%
-            bearish_bias = close[i] < ema34_1d_aligned[i]
-            oversold = rsi_1d_aligned[i] < 30
-            
-            if price_near_s1 and bearish_bias and oversold and vol_filter:
+        if position == 0 and trending:
+            # Long setup: oversold RSI in uptrend (price above EMA50)
+            if rsi[i] < 30 and close[i] > ema50[i]:
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # Short near R1: price near resistance, bullish bias (price > EMA34), overbought RSI
-            price_near_r1 = abs(close[i] - cam_r1_aligned[i]) < 0.005 * close[i]  # within 0.5%
-            bullish_bias = close[i] > ema34_1d_aligned[i]
-            overbought = rsi_1d_aligned[i] > 70
-            
-            if price_near_r1 and bullish_bias and overbought and vol_filter:
+            # Short setup: overbought RSI in downtrend (price below EMA50)
+            if rsi[i] > 70 and close[i] < ema50[i]:
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit conditions: mean reversion complete or RSI returns to neutral
+        # Exit conditions: RSI returns to neutral or trend weakens
         elif position == 1:
-            # Exit long when RSI returns to neutral or price moves to midpoint
-            rsi_neutral = rsi_1d_aligned[i] > 50
-            price_at_mid = abs(close[i] - (cam_r1_aligned[i] + cam_s1_aligned[i])/2) < 0.002 * close[i]
-            
-            if rsi_neutral or price_at_mid:
+            # Exit long when RSI returns to neutral (50) or trend weakens
+            if rsi[i] > 50 or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -126,11 +114,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when RSI returns to neutral or price moves to midpoint
-            rsi_neutral = rsi_1d_aligned[i] < 50
-            price_at_mid = abs(close[i] - (cam_r1_aligned[i] + cam_s1_aligned[i])/2) < 0.002 * close[i]
-            
-            if rsi_neutral or price_at_mid:
+            # Exit short when RSI returns to neutral (50) or trend weakens
+            if rsi[i] < 50 or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -139,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_RangeBound_MeanReversion"
-timeframe = "12h"
+name = "4h_Momentum_Reversal_With_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
