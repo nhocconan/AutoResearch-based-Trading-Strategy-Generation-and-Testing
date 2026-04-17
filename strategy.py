@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d timeframe with 1h market structure filter.
-Trade 1d Donchian channel breakouts with 1h market structure (HH/HL vs LH/LL) and volume confirmation.
-Use 1d for signal generation and 1h for trend confirmation to avoid false breakouts in choppy markets.
-Targets 15-25 trades/year by requiring confluence of daily breakout, hourly structure, and volume.
-Works in bull markets via trend-following breakouts and in bear via avoiding false breakouts during downtrends.
+Hypothesis: 12h timeframe with 1h timeframe for structure and 1d trend filter.
+Trade 1h breakouts of Donchian channels (20-period) with 1d EMA200 trend filter and volume confirmation.
+Use 12h only for position sizing and trend filtering to keep trade frequency low (12-30/year).
+Works in bull markets via trend-following breakouts and in bear via mean-reversion at 1h structure.
+Uses tight entry conditions (3+ confluence) to avoid overtrading.
 """
 import numpy as np
 import pandas as pd
@@ -20,95 +20,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels (main signal)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Calculate 1d Donchian channels (20-period)
-    high_max_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Get 1h data for market structure (trend filter)
+    # Get 1h data for structure (Donchian channels)
     df_1h = get_htf_data(prices, '1h')
     high_1h = df_1h['high'].values
     low_1h = df_1h['low'].values
-    close_1h = df_1h['close'].values
     
-    # Calculate 1h swing points: Higher Highs (HH) and Higher Lows (HL) for uptrend
-    # Lower Highs (LH) and Lower Lows (LL) for downtrend
-    # Simple approach: compare current high/low to previous swing points
-    # We'll use a 5-period lookback for swing identification
-    hh = np.zeros_like(high_1h, dtype=bool)  # Higher High
-    hl = np.zeros_like(low_1h, dtype=bool)   # Higher Low
-    lh = np.zeros_like(high_1h, dtype=bool)  # Lower High
-    ll = np.zeros_like(low_1h, dtype=bool)   # Lower Low
+    # Calculate 1h Donchian channels (20-period)
+    high_max_20 = pd.Series(high_1h).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low_1h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate swing points
-    for i in range(5, len(high_1h)):
-        # Higher High: current high > previous high and previous high > high before that
-        if high_1h[i] > high_1h[i-1] and high_1h[i-1] > high_1h[i-2]:
-            hh[i] = True
-        # Higher Low: current low > previous low and previous low > low before that
-        if low_1h[i] > low_1h[i-1] and low_1h[i-1] > low_1h[i-2]:
-            hl[i] = True
-        # Lower High: current high < previous high and previous high < high before that
-        if high_1h[i] < high_1h[i-1] and high_1h[i-1] < high_1h[i-2]:
-            lh[i] = True
-        # Lower Low: current low < previous low and previous low < low before that
-        if low_1h[i] < low_1h[i-1] and low_1h[i-1] < low_1h[i-2]:
-            ll[i] = True
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Determine trend: uptrend if HH and HL, downtrend if LH and LL
-    uptrend = hh & hl
-    downtrend = lh & ll
+    # 1d EMA(200) for trend filter
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Align 1d and 1h data to 1d timeframe (since we're generating signals on 1d)
-    high_max_20_aligned = align_htf_to_ltf(df_1d, df_1d, high_max_20)  # 1d to 1d (no change)
-    low_min_20_aligned = align_htf_to_ltf(df_1d, df_1d, low_min_20)   # 1d to 1d (no change)
+    # Align 1h and 1d data to 12h
+    high_max_20_aligned = align_htf_to_ltf(prices, df_1h, high_max_20)
+    low_min_20_aligned = align_htf_to_ltf(prices, df_1h, low_min_20)
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # For 1h data aligned to 1d: we need the 1h trend value that corresponds to each 1d bar
-    # Since 1d = 24 * 1h bars, we take the last 1h value of each day
-    uptrend_aligned = align_htf_to_ltf(df_1d, df_1h, uptrend.astype(float))
-    downtrend_aligned = align_htf_to_ltf(df_1d, df_1h, downtrend.astype(float))
+    # Volume filter: current volume > 1.5x 24-period average (to avoid noise)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_filter = volume > (vol_ma * 1.5)
     
-    # Volume filter: current volume > 1.3x 20-period average (to avoid noise)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.3)
+    # Session filter: 08-20 UTC (reduce noise outside active hours)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 20  # Need at least 20 days for Donchian
+    start_idx = 50
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available
+        # Skip if any required data is not available or outside session
         if (np.isnan(high_max_20_aligned[i]) or np.isnan(low_min_20_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+            np.isnan(ema_200_1d_aligned[i]) or np.isnan(vol_ma[i]) or
+            not session_filter[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above 1d Donchian high with volume and 1h uptrend
-            if close[i] > high_max_20_aligned[i] and volume_filter[i] and uptrend_aligned[i] > 0.5:
+            # Long: price breaks above 1h Donchian high with volume and above 1d EMA200
+            if close[i] > high_max_20_aligned[i] and volume_filter[i] and close[i] > ema_200_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 1d Donchian low with volume and 1h downtrend
-            elif close[i] < low_min_20_aligned[i] and volume_filter[i] and downtrend_aligned[i] > 0.5:
+            # Short: price breaks below 1h Donchian low with volume and below 1d EMA200
+            elif close[i] < low_min_20_aligned[i] and volume_filter[i] and close[i] < ema_200_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below 1d Donchian low (mean reversion) OR trend breaks down
-            if close[i] < low_min_20_aligned[i] or downtrend_aligned[i] > 0.5:
+            # Exit long: price breaks below 1h Donchian low (mean reversion)
+            if close[i] < low_min_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above 1d Donchian high (mean reversion) OR trend breaks up
-            if close[i] > high_max_20_aligned[i] or uptrend_aligned[i] > 0.5:
+            # Exit short: price breaks above 1h Donchian high (mean reversion)
+            if close[i] > high_max_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1hStructure_Volume_Filter"
-timeframe = "1d"
+name = "12h_1hDonchian20_1dEMA200_Volume_Session"
+timeframe = "12h"
 leverage = 1.0
