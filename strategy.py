@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: On 4-hour timeframe, price respects 1-week key support/resistance levels.
-We use 1-week high/low as breakout levels with 1-day EMA50 trend filter and volume confirmation.
-Long when price breaks above prior 1-week high with volume > 1.5x average and price above 1-day EMA50.
-Short when price breaks below prior 1-week low with volume > 1.5x average and price below 1-day EMA50.
-Exit when price returns to the prior 1-week midpoint (mean reversion) or on opposite breakout.
-Designed for 4h to work in trending (breakouts) and ranging (mean reversion to mid-point) markets with ~20-40 trades per year.
+Hypothesis: On the 6-hour timeframe, price reverses from extreme weekly RSI levels when confirmed by daily volume imbalance.
+We use weekly RSI(14) for overbought/oversold conditions and daily volume delta (buy vs sell volume) for confirmation.
+Long when weekly RSI < 30 (oversold) and daily volume delta > 0 (buying pressure).
+Short when weekly RSI > 70 (overbought) and daily volume delta < 0 (selling pressure).
+Exit when RSI returns to neutral zone (40-60) or on opposite signal.
+Designed for 6h to work in ranging markets with mean reversion from extremes, suitable for both accumulation and distribution phases.
 """
 
 import numpy as np
@@ -14,74 +14,76 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    taker_buy_volume = prices['taker_buy_volume'].values
     
-    # Get 1w data for prior period's high/low
+    # Get weekly data for RSI calculation
     df_1w = get_htf_data(prices, '1w')
     
-    # Prior 1w high and low (use shift(1) to avoid look-ahead: use completed period's levels)
-    pwhigh = df_1w['high'].shift(1).values
-    pwlow = df_1w['low'].shift(1).values
+    # Calculate weekly RSI(14)
+    delta = np.diff(df_1w['close'].values, prepend=df_1w['close'].values[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # Prior 1w midpoint for mean reversion exit
-    pwmid = (pwhigh + pwlow) / 2
-    
-    # Get 1d data for EMA50 trend filter
+    # Get daily data for volume delta calculation
     df_1d = get_htf_data(prices, '1d')
-    pclose_1d = df_1d['close'].values
-    ema_50 = pd.Series(pclose_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align all levels to 4h timeframe (waits for 1w/1d bar to close)
-    pwhigh_4h = align_htf_to_ltf(prices, df_1w, pwhigh)
-    pwlow_4h = align_htf_to_ltf(prices, df_1w, pwlow)
-    pwmid_4h = align_htf_to_ltf(prices, df_1w, pwmid)
-    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Calculate daily volume delta (buy volume - sell volume)
+    buy_volume = df_1d['taker_buy_volume'].values
+    sell_volume = df_1d['volume'].values - buy_volume
+    volume_delta = buy_volume - sell_volume
     
-    # Volume confirmation: 20-period volume MA on 4h
-    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    # Align weekly RSI to 6h timeframe (waits for weekly bar to close)
+    rsi_6h = align_htf_to_ltf(prices, df_1w, rsi_values)
+    
+    # Align daily volume delta to 6h timeframe (waits for daily bar to close)
+    volume_delta_6h = align_htf_to_ltf(prices, df_1d, volume_delta)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 60  # warmup for EMA50 and volume MA
+    start_idx = 50  # warmup for RSI calculation
     
     for i in range(start_idx, n):
-        if (np.isnan(pwhigh_4h[i]) or np.isnan(pwlow_4h[i]) or np.isnan(pwmid_4h[i]) or
-            np.isnan(ema_50_4h[i]) or np.isnan(volume_ma_20.iloc[i])):
+        if (np.isnan(rsi_6h[i]) or np.isnan(volume_delta_6h[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        vol = volume[i]
-        vol_ma = volume_ma_20.iloc[i]
+        rsi_val = rsi_6h[i]
+        vol_delta = volume_delta_6h[i]
         
         if position == 0:
-            # Long: price breaks above prior 1w high with volume spike and above 1d EMA50
-            if price > pwhigh_4h[i] and vol > 1.5 * vol_ma and price > ema_50_4h[i]:
+            # Long: weekly RSI oversold (<30) with buying pressure (positive volume delta)
+            if rsi_val < 30 and vol_delta > 0:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below prior 1w low with volume spike and below 1d EMA50
-            elif price < pwlow_4h[i] and vol > 1.5 * vol_ma and price < ema_50_4h[i]:
+            # Short: weekly RSI overbought (>70) with selling pressure (negative volume delta)
+            elif rsi_val > 70 and vol_delta < 0:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to prior 1w midpoint (mean reversion) OR breaks below prior 1w low (invalidates breakout)
-            if price < pwmid_4h[i] or price < pwlow_4h[i]:
+            # Long exit: RSI returns to neutral zone (>=40) or opposite signal
+            if rsi_val >= 40 or (rsi_val > 70 and vol_delta < 0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to prior 1w midpoint (mean reversion) OR breaks above prior 1w high (invalidates breakout)
-            if price > pwmid_4h[i] or price > pwhigh_4h[i]:
+            # Short exit: RSI returns to neutral zone (<=60) or opposite signal
+            if rsi_val <= 60 or (rsi_val < 30 and vol_delta > 0):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Prior1W_HL_Breakout_MeanRev"
-timeframe = "4h"
+name = "6h_WeeklyRSI_VolumeDelta_MeanReversion"
+timeframe = "6h"
 leverage = 1.0
