@@ -13,79 +13,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Williams Alligator ===
+    # === 1d Donchian Channel (20) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Alligator lines: Jaw (13-period SMMA, 8 bars ahead), Teeth (8-period SMMA, 5 bars ahead), Lips (5-period SMMA, 3 bars ahead)
-    # SMMA = smoothed moving average (similar to EMA with alpha = 1/period)
-    def smma(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) == 0:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: SMMA = (prev_SMMA * (period-1) + current_price) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Calculate Donchian channels
+    upper_20 = np.full_like(high_1d, np.nan)
+    lower_20 = np.full_like(low_1d, np.nan)
+    for i in range(len(high_1d)):
+        if i >= 19:
+            upper_20[i] = np.max(high_1d[i-19:i+1])
+            lower_20[i] = np.min(low_1d[i-19:i+1])
+        else:
+            upper_20[i] = np.nan
+            lower_20[i] = np.nan
     
-    jaw = smma(close_1d, 13)  # Blue line
-    teeth = smma(close_1d, 8)  # Red line
-    lips = smma(close_1d, 5)   # Green line
+    # === 1d ATR (14) for volatility filter ===
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close[:-1]) if len(close) > 1 else np.array([])
+    tr3 = np.abs(low_1d[1:] - close[:-1]) if len(close) > 1 else np.array([])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))]) if len(tr1) > 0 else np.array([np.nan])
     
-    # === 6h Williams %R (14-period) ===
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = np.full_like(close, np.nan)
-    lowest_low = np.full_like(close, np.nan)
-    for i in range(len(close)):
+    atr_14 = np.full_like(high_1d, np.nan)
+    for i in range(len(high_1d)):
         if i >= 13:
-            highest_high[i] = np.max(high[i-13:i+1])
-            lowest_low[i] = np.min(low[i-13:i+1])
+            atr_14[i] = np.mean(tr[i-13:i+1])
         elif i > 0:
-            highest_high[i] = np.max(high[0:i+1])
-            lowest_low[i] = np.min(low[0:i+1])
+            atr_14[i] = np.mean(tr[1:i+1]) if i >= 1 else np.nan
         else:
-            highest_high[i] = high[i]
-            lowest_low[i] = low[i]
+            atr_14[i] = np.nan
     
-    williams_r = np.full_like(close, np.nan)
-    for i in range(len(close)):
-        if not np.isnan(highest_high[i]) and not np.isnan(lowest_low[i]) and highest_high[i] != lowest_low[i]:
-            williams_r[i] = ((highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i])) * -100
-        else:
-            williams_r[i] = np.nan
+    # === 1d ADX (14) for trend strength ===
+    # +DM and -DM
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
     
-    # === 1d Williams %R for trend filter ===
-    highest_high_1d = np.full_like(close_1d, np.nan)
-    lowest_low_1d = np.full_like(close_1d, np.nan)
-    for i in range(len(close_1d)):
+    # Smoothed values
+    tr_14 = np.full_like(high_1d, np.nan)
+    plus_dm_14 = np.full_like(high_1d, np.nan)
+    minus_dm_14 = np.full_like(high_1d, np.nan)
+    for i in range(len(high_1d)):
         if i >= 13:
-            highest_high_1d[i] = np.max(high_1d[i-13:i+1])
-            lowest_low_1d[i] = np.min(low_1d[i-13:i+1])
+            tr_14[i] = np.sum(tr[i-13:i+1])
+            plus_dm_14[i] = np.sum(plus_dm[i-13:i+1])
+            minus_dm_14[i] = np.sum(minus_dm[i-13:i+1])
         elif i > 0:
-            highest_high_1d[i] = np.max(high_1d[0:i+1])
-            lowest_low_1d[i] = np.min(low_1d[0:i+1])
+            tr_14[i] = np.sum(tr[1:i+1])
+            plus_dm_14[i] = np.sum(plus_dm[1:i+1])
+            minus_dm_14[i] = np.sum(minus_dm[1:i+1])
         else:
-            highest_high_1d[i] = high_1d[i]
-            lowest_low_1d[i] = low_1d[i]
+            tr_14[i] = np.nan
+            plus_dm_14[i] = np.nan
+            minus_dm_14[i] = np.nan
     
-    williams_r_1d = np.full_like(close_1d, np.nan)
-    for i in range(len(close_1d)):
-        if not np.isnan(highest_high_1d[i]) and not np.isnan(lowest_low_1d[i]) and highest_high_1d[i] != lowest_low_1d[i]:
-            williams_r_1d[i] = ((highest_high_1d[i] - close_1d[i]) / (highest_high_1d[i] - lowest_low_1d[i])) * -100
+    # Avoid division by zero
+    plus_di = np.full_like(high_1d, np.nan)
+    minus_di = np.full_like(high_1d, np.nan)
+    dx = np.full_like(high_1d, np.nan)
+    for i in range(len(high_1d)):
+        if not np.isnan(tr_14[i]) and tr_14[i] > 0:
+            plus_di[i] = 100 * plus_dm_14[i] / tr_14[i]
+            minus_di[i] = 100 * minus_dm_14[i] / tr_14[i]
+            if plus_di[i] + minus_di[i] > 0:
+                dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+            else:
+                dx[i] = 0.0
         else:
-            williams_r_1d[i] = np.nan
+            plus_di[i] = np.nan
+            minus_di[i] = np.nan
+            dx[i] = np.nan
     
-    # === Align indicators to 6h timeframe ===
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    williams_r_1d_aligned = align_htf_to_ltf(prices, df_1d, williams_r_1d)
+    adx = np.full_like(high_1d, np.nan)
+    for i in range(len(high_1d)):
+        if i >= 27:  # Need 14 for DX + 14 for smoothing
+            valid_dx = dx[i-13:i+1]
+            if not np.any(np.isnan(valid_dx)):
+                adx[i] = np.mean(valid_dx)
+        elif i > 0:
+            adx[i] = np.nan
+        else:
+            adx[i] = np.nan
     
-    # === 6h Volume confirmation ===
+    # === Align indicators to 4h timeframe ===
+    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # === 4h Volume confirmation ===
     vol_ma_20 = np.full_like(volume, np.nan)
     for i in range(len(volume)):
         if i >= 19:
@@ -98,42 +119,32 @@ def generate_signals(prices):
     vol_confirm = volume > vol_ma_20 * 1.5
     
     signals = np.zeros(n)
-    
-    # Warmup period
     warmup = 100
     
-    # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
-        # Skip if any required data is NaN
-        if (np.isnan(jaw_aligned[i]) or 
-            np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or 
-            np.isnan(williams_r[i]) or 
-            np.isnan(williams_r_1d_aligned[i]) or 
+        if (np.isnan(upper_20_aligned[i]) or 
+            np.isnan(lower_20_aligned[i]) or 
+            np.isnan(atr_14_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or 
             np.isnan(vol_confirm[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Alligator alignment: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
-        # Williams %R: > -20 = overbought, < -80 = oversold
-        
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: Alligator aligned up + Williams %R oversold + 1d trend up (Williams %R > -50)
-            if (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i] and 
-                williams_r[i] < -80 and 
-                williams_r_1d_aligned[i] > -50 and
+            # Long: break above upper Donchian in strong trend (ADX > 25) with volume
+            if (close[i] > upper_20_aligned[i] and 
+                adx_aligned[i] > 25 and 
                 vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: Alligator aligned down + Williams %R overbought + 1d trend down (Williams %R < -50)
-            elif (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i] and 
-                  williams_r[i] > -20 and 
-                  williams_r_1d_aligned[i] < -50 and
+            # Short: break below lower Donchian in strong trend (ADX > 25) with volume
+            elif (close[i] < lower_20_aligned[i] and 
+                  adx_aligned[i] > 25 and 
                   vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
@@ -141,9 +152,9 @@ def generate_signals(prices):
         
         # Exit logic
         elif position == 1:
-            # Exit long: Alligator alignment breaks OR Williams %R overbought
-            if (lips_aligned[i] < teeth_aligned[i] or 
-                williams_r[i] > -20):
+            # Exit long: price returns to lower Donchian OR trend weakens (ADX < 20)
+            if (close[i] < lower_20_aligned[i] or 
+                adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -151,9 +162,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Alligator alignment breaks OR Williams %R oversold
-            if (lips_aligned[i] > teeth_aligned[i] or 
-                williams_r[i] < -80):
+            # Exit short: price returns to upper Donchian OR trend weakens (ADX < 20)
+            if (close[i] > upper_20_aligned[i] or 
+                adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -162,6 +173,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Alligator_WilliamsR_Trend_v1"
-timeframe = "6h"
+name = "4h_Donchian20_ADX25_VolumeFilter_v1"
+timeframe = "4h"
 leverage = 1.0
