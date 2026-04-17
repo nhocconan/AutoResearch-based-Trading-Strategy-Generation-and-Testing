@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h strategy using 1d pivot point resistance/support levels (R1, S1) for breakout entries.
-Enter long when price breaks above R1 with volume confirmation and ADX trend filter.
-Enter short when price breaks below S1 with volume confirmation and ADX trend filter.
-Use ATR-based stop loss via signal=0 when price moves against position.
-Designed to work in bull markets via breakouts and in bear via mean-reversion at pivot levels.
-Target: 50-150 total trades over 4 years (12-37/year).
+Hypothesis: 1d timeframe with 1-week RSI filter and volume confirmation.
+Trade pullbacks to the 21-period EMA in the direction of the weekly trend (RSI > 50 for long, RSI < 50 for short).
+Use volume spike (>1.5x 20-day average) to confirm momentum.
+Designed to work in bull markets via trend-following pullbacks and in bear via mean-reversion at EMA support/resistance.
+Target: 30-100 total trades over 4 years (7-25/year).
 """
 import numpy as np
 import pandas as pd
@@ -21,54 +20,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivot points
+    # Get 1w data for RSI trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Calculate 14-period RSI on weekly
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_14 = 100 - (100 / (1 + rs))
+    
+    # Get 1d data for EMA and volume
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate pivot points: P = (H + L + C)/3
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    # R1 = 2*P - L, S1 = 2*P - H
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    
-    # Get 1d data for ADX (trend strength)
-    # ADX calculation: +DM, -DM, TR, then smoothed
-    high_diff = np.diff(high_1d, prepend=high_1d[0])
-    low_diff = np.diff(low_1d, prepend=low_1d[0])
-    plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0.0)
-    minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0.0)
-    tr1 = np.abs(np.diff(high_1d, prepend=high_1d[0]))
-    tr2 = np.abs(np.diff(low_1d, prepend=low_1d[0]))
-    tr3 = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Smooth with Wilder's smoothing (alpha = 1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            result[period-1] = np.mean(data[:period])
-            for i in range(period, len(data)):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    period = 14
-    atr_1d = wilders_smoothing(tr, period)
-    plus_di_1d = 100 * wilders_smoothing(plus_dm, period) / atr_1d
-    minus_di_1d = 100 * wilders_smoothing(minus_dm, period) / atr_1d
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = wilders_smoothing(dx_1d, period)
-    
-    # Get 1d data for volume MA
     volume_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all to 4h
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Calculate 21-period EMA on daily
+    ema_21 = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+    
+    # Calculate 20-day average volume on daily
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all to daily
+    rsi_14_aligned = align_htf_to_ltf(prices, df_1w, rsi_14)
+    ema_21_aligned = align_htf_to_ltf(prices, df_1d, ema_21)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -77,37 +56,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(rsi_14_aligned[i]) or np.isnan(ema_21_aligned[i]) or 
+            np.isnan(vol_ma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > (vol_ma_1d_aligned[i] * 1.5)
-        # Trend filter: ADX > 20
-        trend_filter = adx_1d_aligned[i] > 20
+        # Determine trend from weekly RSI
+        bullish_trend = rsi_14_aligned[i] > 50
+        bearish_trend = rsi_14_aligned[i] < 50
+        
+        # Volume filter: current volume > 1.5x 20-day average
+        volume_filter = volume[i] > (vol_ma_20_aligned[i] * 1.5)
         
         if position == 0:
-            # Long: price breaks above R1, volume spike, ADX > 20
-            if close[i] > r1_aligned[i] and volume_filter and trend_filter:
+            # Long: pullback to EMA in bullish trend with volume
+            if (low[i] <= ema_21_aligned[i] <= high[i] and bullish_trend and volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1, volume spike, ADX > 20
-            elif close[i] < s1_aligned[i] and volume_filter and trend_filter:
+            # Short: pullback to EMA in bearish trend with volume
+            elif (low[i] <= ema_21_aligned[i] <= high[i] and bearish_trend and volume_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price moves back below R1 or ATR-based stop
-            if close[i] < r1_aligned[i]:
+            # Exit long: price closes above EMA or trend turns bearish
+            if close[i] > ema_21_aligned[i] or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price moves back above S1 or ATR-based stop
-            if close[i] > s1_aligned[i]:
+            # Exit short: price closes below EMA or trend turns bullish
+            if close[i] < ema_21_aligned[i] or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -115,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dPivot_R1S1_Breakout_Volume_ADX"
-timeframe = "4h"
+name = "1d_1wRSI_EMA21_Pullback_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
