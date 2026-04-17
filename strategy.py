@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA trend filter and volume spike.
-# Uses price channels (Donchian) for entries, 1d EMA for trend filter, volume for confirmation.
-# Designed to work in bull (breakouts with trend) and bear (breakouts against trend).
-# Target: 15-30 trades/year to avoid fee drag.
+# Hypothesis: 4h Donchian breakout with 12h ADX trend filter and volume confirmation.
+# Uses 4h Donchian channel for breakout signals, 12h ADX for trend strength, and volume spike for confirmation.
+# Designed to capture strong trending moves in both bull and bear markets while avoiding chop.
+# Target: 20-40 trades/year to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,77 +18,97 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian and EMA
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 12h data for ADX calculation
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate daily Donchian channels (20-period)
-    # Upper = max(high, 20), Lower = min(low, 20)
-    high_series = pd.Series(high_1d)
-    low_series = pd.Series(low_1d)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate 12h ADX (14-period)
+    period = 14
+    # True Range
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # Align with indices
     
-    # Calculate daily EMA50 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Directional Movement
+    dm_plus = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
+                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
+    dm_minus = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
+                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Align daily Donchian and EMA to 12h
-    donchian_upper_12h = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_12h = align_htf_to_ltf(prices, df_1d, donchian_lower)
-    ema50_12h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Smoothed values
+    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/period, adjust=False).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/period, adjust=False).mean().values
     
-    # Volume filter: current volume > 1.5 * 50-period average (moderate to reduce trades)
-    volume_ma50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False).mean().values
+    
+    # Align 12h ADX to 4h
+    adx_4h = align_htf_to_ltf(prices, df_12h, adx)
+    
+    # 4h Donchian channel (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume filter: current volume > 1.5 * 20-period average
+    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # Need daily EMA50 and volume MA50
+    start_idx = 50  # Need sufficient data for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_upper_12h[i]) or 
-            np.isnan(donchian_lower_12h[i]) or 
-            np.isnan(ema50_12h[i]) or 
-            np.isnan(volume_ma50[i])):
+        if (np.isnan(adx_4h[i]) or 
+            np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or 
+            np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: spike > 1.5x average (moderate to reduce trades)
-        volume_filter = volume[i] > (1.5 * volume_ma50[i])
+        # Trend filter: ADX > 25 indicates strong trend
+        trend_filter = adx_4h[i] > 25
         
-        # Trend filter: price above/below daily EMA50
-        price_above_ema = close[i] > ema50_12h[i]
-        price_below_ema = close[i] < ema50_12h[i]
+        # Volume filter: spike > 1.5x average
+        volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
-        # Price relative to daily Donchian levels
-        price_above_upper = close[i] > donchian_upper_12h[i]
-        price_below_lower = close[i] < donchian_lower_12h[i]
+        # Donchian breakout
+        breakout_high = close[i] > donchian_high[i]
+        breakout_low = close[i] < donchian_low[i]
         
         if position == 0:
-            # Long: Price breaks above Donchian upper with volume and above daily EMA50
-            if (price_above_upper and price_above_ema and volume_filter):
+            # Long: Break above Donchian high with trend and volume
+            if (breakout_high and trend_filter and volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian lower with volume and below daily EMA50
-            elif (price_below_lower and price_below_ema and volume_filter):
+            # Short: Break below Donchian low with trend and volume
+            elif (breakout_low and trend_filter and volume_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price crosses below Donchian lower OR below daily EMA50
-            if (close[i] < donchian_lower_12h[i]) or (close[i] < ema50_12h[i]):
+            # Exit long: Break below Donchian low
+            if close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price crosses above Donchian upper OR above daily EMA50
-            if (close[i] > donchian_upper_12h[i]) or (close[i] > ema50_12h[i]):
+            # Exit short: Break above Donchian high
+            if close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_EMA50_Volume"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_ADX25_Volume"
+timeframe = "4h"
 leverage = 1.0
