@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_MultiTF_Pivot_Reversal_v1
-Daily Pivot Point reversal with weekly trend filter and volume confirmation.
-- Daily Pivot (PP), Support 1 (S1), Resistance 1 (R1) calculated from prior day
-- Weekly trend: price above/below weekly EMA20 determines long/short bias
-- Entry: price rejects S1/R1 (touch + close back inside) in direction of weekly trend
-- Volume confirmation: volume > 1.5x 20-period average
-- Target: 50-150 total trades over 4 years (12-37/year)
+12h_Williams_Alligator_RSI_Volume_v1
+Williams Alligator (3 SMAs: Jaw=13, Teeth=8, Lips=5) + RSI(14) + Volume Spike on 12h timeframe.
+Trend direction from Alligator alignment: Jaw > Teeth > Lips = uptrend, reverse for downtrend.
+Entries on RSI extremes (overbought/oversold) with volume confirmation, exits on RSI normalization.
+Designed to work in both bull and bear markets by combining trend-following with mean-reversion.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -23,38 +22,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Daily Pivot Points (from prior day) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 12h Williams Alligator (Smoothed Moving Average) ===
+    # Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
+    def smma(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) >= period:
+            # First value is simple average
+            result[period-1] = np.mean(arr[:period])
+            # Subsequent values: SMMA = (Prev SMMA * (period-1) + Close) / period
+            for i in range(period, len(arr)):
+                result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Calculate pivot points for each day
-    pp = np.zeros_like(close_1d)
-    s1 = np.zeros_like(close_1d)
-    r1 = np.zeros_like(close_1d)
+    jaw = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
     
-    for i in range(1, len(close_1d)):
-        # Use prior day's OHLC
-        pp[i] = (high_1d[i-1] + low_1d[i-1] + close_1d[i-1]) / 3.0
-        s1[i] = 2.0 * pp[i] - high_1d[i-1]
-        r1[i] = 2.0 * pp[i] - low_1d[i-1]
+    # === 12h RSI (14-period) ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # === Weekly EMA20 for trend filter ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
+    for i in range(len(close)):
+        if i >= 14:
+            if i == 14:
+                avg_gain[i] = np.mean(gain[1:15])
+                avg_loss[i] = np.mean(loss[1:15])
+            else:
+                avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+                avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+        else:
+            avg_gain[i] = np.nan
+            avg_loss[i] = np.nan
     
-    # Calculate EMA20 on weekly
-    ema_20 = np.zeros_like(close_1w)
-    if len(close_1w) >= 20:
-        ema_20[19] = np.mean(close_1w[:20])
-        multiplier = 2 / (20 + 1)
-        for i in range(20, len(close_1w)):
-            ema_20[i] = (close_1w[i] - ema_20[i-1]) * multiplier + ema_20[i-1]
-    else:
-        ema_20[:] = close_1w[0] if len(close_1w) > 0 else 0
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
     
-    # === Volume confirmation (20-period average) ===
+    # === 12h Volume confirmation (20-period average) ===
     vol_ma_20 = np.full_like(volume, np.nan)
     for i in range(len(volume)):
         if i >= 20:
@@ -64,13 +70,7 @@ def generate_signals(prices):
         else:
             vol_ma_20[i] = volume[0]
     
-    vol_confirm = volume > vol_ma_20 * 1.5
-    
-    # === Align to 6h timeframe ===
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
+    vol_confirm = volume > vol_ma_20 * 1.5  # volume spike: 1.5x average
     
     signals = np.zeros(n)
     
@@ -82,36 +82,40 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(pp_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(ema_20_aligned[i]) or 
-            np.isnan(vol_confirm[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(rsi[i]) or np.isnan(vol_confirm[i])):
             signals[i] = 0.0
             position = 0
             continue
         
+        # Determine Alligator trend
+        # Uptrend: Lips > Teeth > Jaw
+        # Downtrend: Jaw > Teeth > Lips
+        is_uptrend = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        is_downtrend = jaw[i] > teeth[i] and teeth[i] > lips[i]
+        
         # Entry logic: only enter when flat
         if position == 0:
-            # Long bias: price above weekly EMA20
-            if close[i] > ema_20_aligned[i]:
-                # Look for rejection of S1: low touches S1 and close returns above it
-                if (low[i] <= s1_aligned[i] and close[i] > s1_aligned[i] and vol_confirm[i]):
-                    signals[i] = 0.25
-                    position = 1
-                    continue
-            # Short bias: price below weekly EMA20
-            elif close[i] < ema_20_aligned[i]:
-                # Look for rejection of R1: high touches R1 and close returns below it
-                if (high[i] >= r1_aligned[i] and close[i] < r1_aligned[i] and vol_confirm[i]):
-                    signals[i] = -0.25
-                    position = -1
-                    continue
+            # Long: uptrend AND RSI oversold (<30) AND volume confirmation
+            if (is_uptrend and 
+                rsi[i] < 30 and 
+                vol_confirm[i]):
+                signals[i] = 0.25
+                position = 1
+                continue
+            # Short: downtrend AND RSI overbought (>70) AND volume confirmation
+            elif (is_downtrend and 
+                  rsi[i] > 70 and 
+                  vol_confirm[i]):
+                signals[i] = -0.25
+                position = -1
+                continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price crosses below S1 or weekly trend changes
-            if close[i] < s1_aligned[i] or close[i] < ema_20_aligned[i]:
+            # Exit long: RSI overbought (>70) OR trend changes to downtrend
+            if (rsi[i] > 70 or 
+                not is_uptrend):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -119,8 +123,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above R1 or weekly trend changes
-            if close[i] > r1_aligned[i] or close[i] > ema_20_aligned[i]:
+            # Exit short: RSI oversold (<30) OR trend changes to uptrend
+            if (rsi[i] < 30 or 
+                not is_downtrend):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -129,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_MultiTF_Pivot_Reversal_v1"
-timeframe = "6h"
+name = "12h_Williams_Alligator_RSI_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
