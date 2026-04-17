@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: On 12h, price respects weekly Pivot (S1/R1) as support/resistance.
-We use 1-week Pivot levels (based on prior week's high/low/close) as S1/R1.
-We go long when price crosses above R1 with volume > 1.3x average and price above 1d EMA50.
-We go short when price crosses below S1 with volume > 1.3x average and price below 1d EMA50.
-Exit when price returns to the weekly pivot point (P) or on opposite signal.
-Designed for 12h to work in trending and ranging markets with ~15-30 trades per year.
+Hypothesis: On 4h, price respects 1-week Camarilla pivot levels (H3, L3) as support/resistance.
+We combine with volume confirmation and a 1-day EMA50 trend filter.
+Long when price crosses above H3 with volume > 1.5x average and price above EMA50.
+Short when price crosses below L3 with volume > 1.5x average and price below EMA50.
+Exit when price returns to the 1-week midpoint (H4/L4) or on opposite signal.
+Designed for 4h to work in trending and ranging markets with ~20-50 trades per year.
 """
 
 import numpy as np
@@ -22,38 +22,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for weekly Pivot levels
+    # Get 1w data for Camarilla pivot levels
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly Pivot levels from prior week's data (avoid look-ahead)
-    p_high = df_1w['high'].shift(1).values
-    p_low = df_1w['low'].shift(1).values
-    p_close = df_1w['close'].shift(1).values
+    # Calculate Camarilla pivot levels from prior 1-week data
+    # Using prior week's high, low, close to avoid look-ahead
+    phigh = df_1w['high'].shift(1).values
+    plow = df_1w['low'].shift(1).values
+    pclose = df_1w['close'].shift(1).values
     
-    # Weekly Pivot Point (P) and support/resistance levels
-    pivot = (p_high + p_low + p_close) / 3
-    s1 = 2 * pivot - p_high
-    r1 = 2 * pivot - p_low
-    s2 = pivot - (p_high - p_low)
-    r2 = pivot + (p_high - p_low)
+    # Camarilla levels
+    range_val = phigh - plow
+    h3 = pclose + range_val * 1.1 / 4
+    l3 = pclose - range_val * 1.1 / 4
+    h4 = pclose + range_val * 1.1 / 2
+    l4 = pclose - range_val * 1.1 / 2
     
-    # Get 1d data for EMA50 trend filter
+    # Calculate 1d EMA50 for trend filter (use prior period's close to avoid look-ahead)
     df_1d = get_htf_data(prices, '1d')
+    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 1d EMA50 (use prior day's close to avoid look-ahead)
-    ema_50 = pd.Series(p_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align all levels to 4h timeframe (waits for bar to close)
+    h3_4h = align_htf_to_ltf(prices, df_1w, h3)
+    l3_4h = align_htf_to_ltf(prices, df_1w, l3)
+    h4_4h = align_htf_to_ltf(prices, df_1w, h4)
+    l4_4h = align_htf_to_ltf(prices, df_1w, l4)
+    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Align all weekly levels to 12h timeframe
-    pivot_12h = align_htf_to_ltf(prices, df_1w, pivot)
-    s1_12h = align_htf_to_ltf(prices, df_1w, s1)
-    r1_12h = align_htf_to_ltf(prices, df_1w, r1)
-    s2_12h = align_htf_to_ltf(prices, df_1w, s2)
-    r2_12h = align_htf_to_ltf(prices, df_1w, r2)
-    
-    # Align 1d EMA50 to 12h timeframe
-    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50)
-    
-    # Volume confirmation: 20-period volume MA on 12h
+    # Volume confirmation: 20-period volume MA on 4h
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
     signals = np.zeros(n)
@@ -62,9 +58,8 @@ def generate_signals(prices):
     start_idx = 50  # warmup for EMA50 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_12h[i]) or np.isnan(s1_12h[i]) or np.isnan(r1_12h[i]) or 
-            np.isnan(s2_12h[i]) or np.isnan(r2_12h[i]) or np.isnan(ema_50_12h[i]) or 
-            np.isnan(volume_ma_20.iloc[i])):
+        if (np.isnan(h3_4h[i]) or np.isnan(l3_4h[i]) or np.isnan(h4_4h[i]) or 
+            np.isnan(l4_4h[i]) or np.isnan(ema_50_4h[i]) or np.isnan(volume_ma_20.iloc[i])):
             signals[i] = 0.0
             continue
         
@@ -73,26 +68,26 @@ def generate_signals(prices):
         vol_ma = volume_ma_20.iloc[i]
         
         if position == 0:
-            # Long: price crosses above R1 with volume spike and above EMA50
-            if price > r1_12h[i] and vol > 1.3 * vol_ma and price > ema_50_12h[i]:
+            # Long: price crosses above H3 with volume spike and above EMA50
+            if price > h3_4h[i] and vol > 1.5 * vol_ma and price > ema_50_4h[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below S1 with volume spike and below EMA50
-            elif price < s1_12h[i] and vol > 1.3 * vol_ma and price < ema_50_12h[i]:
+            # Short: price crosses below L3 with volume spike and below EMA50
+            elif price < l3_4h[i] and vol > 1.5 * vol_ma and price < ema_50_4h[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to pivot point or breaks below S1 (invalidates support)
-            if price < pivot_12h[i] or price < s1_12h[i]:
+            # Long exit: price returns to H4 (pivot resistance) or breaks below L3 (invalidates support)
+            if price < h4_4h[i] or price < l3_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to pivot point or breaks above R1 (invalidates resistance)
-            if price > pivot_12h[i] or price > r1_12h[i]:
+            # Short exit: price returns to L4 (pivot support) or breaks above H3 (invalidates resistance)
+            if price > l4_4h[i] or price > h3_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WeeklyPivot_S1R1_1dEMA50_Volume"
-timeframe = "12h"
+name = "4h_1wCamarilla_H3L3_1dEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
