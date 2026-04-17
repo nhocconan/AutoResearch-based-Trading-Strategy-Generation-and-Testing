@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray Index + 1d ADX/EMA Regime Filter.
-Long when Bull Power > 0 and Bear Power < 0 in trending market (ADX > 25) with price above 1d EMA50.
-Short when Bear Power < 0 and Bull Power > 0 in trending market (ADX > 25) with price below 1d EMA50.
-Exit when power diverges or regime turns ranging (ADX < 20).
-Uses 13-period Elder Ray for responsiveness, 1d ADX(14) and EMA(50) for regime.
-Target: 50-150 total trades over 4 years (12-37/year).
+Hypothesis: 12h Camarilla Pivot R2/S2 Breakout with Volume Spike and Chop Regime Filter.
+Long when price breaks above R2 with volume > 2.0x average in choppy market (CHOP > 61.8).
+Short when price breaks below S2 with volume > 2.0x average in choppy market.
+Exit when price reverts to pivot point (PP) or chop regime ends (CHOP < 38.2).
+Uses 1d for Camarilla pivot calculation, 12h for price/volume, 1d for chop filter.
+Target: 50-150 total trades over 4 years (12-37/year). Uses tighter R2/S2 levels and higher volume threshold to reduce trade frequency and improve edge.
 """
 
 import numpy as np
@@ -20,83 +20,74 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for ADX and EMA regime filter
+    # Get 1d data for Camarilla pivots and chop filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 13-period Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13)
-    def calculate_ema(arr, period):
-        ema = np.full_like(arr, np.nan)
-        multiplier = 2 / (period + 1)
-        ema[period-1] = np.mean(arr[:period])
-        for i in range(period, len(arr)):
-            ema[i] = (arr[i] - ema[i-1]) * multiplier + ema[i-1]
-        return ema
+    # Calculate 1d Camarilla pivot levels (R2, S2, PP)
+    def calculate_camarilla(high, low, close):
+        pp = (high + low + close) / 3.0
+        r2 = close + (high - low) * 1.1 / 6.0
+        s2 = close - (high - low) * 1.1 / 6.0
+        return pp, r2, s2
     
-    ema13 = calculate_ema(close, 13)
-    bull_power = high - ema13
-    bear_power = low - ema13
+    pp_1d = np.zeros_like(close_1d)
+    r2_1d = np.zeros_like(close_1d)
+    s2_1d = np.zeros_like(close_1d)
     
-    # Calculate 1d ADX (14-period)
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr = np.zeros_like(high)
-        for i in range(1, len(high)):
+    for i in range(len(close_1d)):
+        pp, r2, s2 = calculate_camarilla(high_1d[i], low_1d[i], close_1d[i])
+        pp_1d[i] = pp
+        r2_1d[i] = r2
+        s2_1d[i] = s2
+    
+    # Calculate 1d Choppiness Index (CHOP)
+    def calculate_chop(high, low, close, period=14):
+        atr = np.zeros_like(close)
+        tr = np.zeros_like(close)
+        
+        for i in range(1, len(close)):
             tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
         
-        # Directional Movement
-        dm_plus = np.zeros_like(high)
-        dm_minus = np.zeros_like(high)
-        for i in range(1, len(high)):
-            up_move = high[i] - high[i-1]
-            down_move = low[i-1] - low[i]
-            dm_plus[i] = up_move if up_move > down_move and up_move > 0 else 0
-            dm_minus[i] = down_move if down_move > up_move and down_move > 0 else 0
-        
-        # Smoothed TR, DM+ (Wilder's smoothing)
-        atr = np.zeros_like(high)
-        dm_plus_smooth = np.zeros_like(high)
-        dm_minus_smooth = np.zeros_like(high)
+        # Wilder's ATR
         atr[period] = np.mean(tr[1:period+1])
-        dm_plus_smooth[period] = np.mean(dm_plus[1:period+1])
-        dm_minus_smooth[period] = np.mean(dm_minus[1:period+1])
-        for i in range(period+1, len(high)):
+        for i in range(period+1, len(tr)):
             atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-            dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period-1) + dm_plus[i]) / period
-            dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period-1) + dm_minus[i]) / period
         
-        # Directional Indicators
-        di_plus = np.zeros_like(high)
-        di_minus = np.zeros_like(high)
-        for i in range(period, len(high)):
-            if atr[i] != 0:
-                di_plus[i] = (dm_plus_smooth[i] / atr[i]) * 100
-                di_minus[i] = (dm_minus_smooth[i] / atr[i]) * 100
+        # Sum of ATR over period
+        atr_sum = np.zeros_like(close)
+        for i in range(period, len(close)):
+            atr_sum[i] = np.sum(atr[i-period+1:i+1])
         
-        # DX and ADX
-        dx = np.zeros_like(high)
-        for i in range(period, len(high)):
-            if di_plus[i] + di_minus[i] != 0:
-                dx[i] = abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i]) * 100
+        # Max true range over period
+        max_tr = np.zeros_like(close)
+        for i in range(period, len(close)):
+            max_tr[i] = np.max(tr[i-period+1:i+1])
         
-        adx = np.zeros_like(high)
-        adx[2*period-1] = np.mean(dx[period:2*period])
-        for i in range(2*period, len(high)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
+        # Chop formula: 100 * log10(atr_sum / max_tr) / log10(period)
+        chop = np.zeros_like(close)
+        for i in range(period, len(close)):
+            if max_tr[i] > 0:
+                chop[i] = 100 * np.log10(atr_sum[i] / max_tr[i]) / np.log10(period)
+            else:
+                chop[i] = 50  # neutral
+        return chop
     
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    chop_1d = calculate_chop(high_1d, low_1d, close_1d, 14)
     
-    # Calculate 1d EMA50
-    ema50_1d = calculate_ema(close_1d, 50)
+    # Align 1d indicators to 12h timeframe
+    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Align 1d indicators to 6h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate volume spike (current volume > 2.0x 20-period average)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (volume_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -105,45 +96,46 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(adx_1d_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or
-            np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i])):
+        if (np.isnan(pp_1d_aligned[i]) or 
+            np.isnan(r2_1d_aligned[i]) or 
+            np.isnan(s2_1d_aligned[i]) or 
+            np.isnan(chop_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        adx_val = adx_1d_aligned[i]
-        ema50 = ema50_1d_aligned[i]
-        bull = bull_power[i]
-        bear = bear_power[i]
+        vol_spike = volume_spike[i]
+        chop_val = chop_1d_aligned[i]
+        pp = pp_1d_aligned[i]
+        r2 = r2_1d_aligned[i]
+        s2 = s2_1d_aligned[i]
         
-        # Regime: ADX > 25 = trending (good for trend following)
-        is_trending = adx_val > 25
-        # Exit regime: ADX < 20 = ranging (avoid false signals)
-        is_ranging = adx_val < 20
+        # Chop regime: CHOP > 61.8 = ranging (good for mean reversion at pivots)
+        is_choppy = chop_val > 61.8
+        # Exit chop regime: CHOP < 38.2 = trending (avoid false signals)
+        is_trending = chop_val < 38.2
         
         if position == 0:
-            # Long: Bull Power > 0 and Bear Power < 0 in trending market with price above EMA50
-            if bull > 0 and bear < 0 and is_trending and price > ema50:
+            # Long: price breaks above R2 with volume spike in choppy market
+            if price > r2 and vol_spike and is_choppy:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 and Bull Power > 0 in trending market with price below EMA50
-            elif bear < 0 and bull > 0 and is_trending and price < ema50:
+            # Short: price breaks below S2 with volume spike in choppy market
+            elif price < s2 and vol_spike and is_choppy:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: power diverges OR regime turns ranging
-            if bull <= 0 or bear >= 0 or is_ranging:
+            # Exit long: price returns to pivot point OR chop regime ends (trending)
+            if price <= pp or is_trending:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: power diverges OR regime turns ranging
-            if bear >= 0 or bull <= 0 or is_ranging:
+            # Exit short: price returns to pivot point OR chop regime ends (trending)
+            if price >= pp or is_trending:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -151,6 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_1dADXEMA_Regime"
-timeframe = "6h"
+name = "12h_Camarilla_R2S2_VolumeSpike_ChopRegime"
+timeframe = "12h"
 leverage = 1.0
