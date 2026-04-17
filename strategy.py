@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout + volume confirmation + weekly EMA200 trend filter.
-Long when price breaks above Donchian upper band AND volume > 1.5x average AND close > weekly EMA200.
-Short when price breaks below Donchian lower band AND volume > 1.5x average AND close < weekly EMA200.
-Exit when price reverts to Donchian middle (20-period mean) OR weekly EMA200 slope flips.
-Uses 1d for primary timeframe and 1w for HTF trend filter to capture major moves while avoiding counter-trend whipsaw.
-Target: 30-100 total trades over 4 years (7-25/year). Donchian breakouts capture strong trends,
-volume confirmation filters fakeouts, weekly EMA200 ensures alignment with major trend.
-Works in bull markets (captures uptrends) and bear markets (captures downtrends) by only trading in direction of weekly trend.
+Hypothesis: 12h Camarilla pivot R1/S1 breakout with 1d volume confirmation and 1d choppiness regime filter.
+Long when price breaks above Camarilla R1 AND 1d volume > 1.3x average AND 1d chop < 61.8 (trending).
+Short when price breaks below Camarilla S1 AND 1d volume > 1.3x average AND 1d chop < 61.8.
+Exit when price reverts to Camarilla midpoint (close) OR chop > 61.8 (choppy market).
+Uses 12h for price action and 1d for volume/chop filters to reduce whipsaw and overtrading.
+Target: 50-150 total trades over 4 years (12-37/year). Camarilla pivots provide structured support/resistance,
+volume confirmation filters breakout validity, chop filter avoids ranging markets.
+Works in bull markets (captures uptrends via R1 breaks) and bear markets (captures downtrends via S1 breaks).
 """
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,79 +24,107 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian calculation (primary timeframe)
+    # Get 1d data for Camarilla calculation, volume, and choppiness
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate Donchian channels on 1d timeframe (20-period)
+    # Calculate Camarilla pivot levels on 1d timeframe (based on previous day)
+    # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
+    # Using previous day's OHLC to avoid look-ahead
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    # First day: use same day's data (will be NaN until warmup completes)
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
+    
+    rang = prev_high - prev_low
+    camarilla_r1 = prev_close + 1.1 * rang / 12
+    camarilla_s1 = prev_close - 1.1 * rang / 12
+    camarilla_mid = prev_close  # midpoint is previous close
+    
+    # Calculate 1d choppiness index (14-period)
     high_1d_series = pd.Series(high_1d)
     low_1d_series = pd.Series(low_1d)
-    donchian_upper = high_1d_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_1d_series.rolling(window=20, min_periods=20).min().values
-    donchian_middle = ((donchian_upper + donchian_lower) / 2).values
+    close_1d_series = pd.Series(close_1d)
     
-    # Volume average (20-period) on 1d
-    volume_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
     
-    # Get 1w data for weekly EMA200 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # ATR (14-period)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate weekly EMA200
-    ema200_1w = pd.Series(close_1w).ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # Highest high and lowest low over 14 periods
+    hh = high_1d_series.rolling(window=14, min_periods=14).max().values
+    ll = low_1d_series.rolling(window=14, min_periods=14).min().values
     
-    # Align 1d indicators to 1d timeframe (no alignment needed)
-    donchian_upper_aligned = donchian_upper
-    donchian_lower_aligned = donchian_lower
-    donchian_middle_aligned = donchian_middle
-    volume_ma_aligned = volume_ma
+    # Chop = 100 * log10(sum(atr)/log(hh/ll)) / log10(14)
+    sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    ratio = hh / ll
+    ratio = np.where(ratio <= 1, 1.001, ratio)  # avoid division by zero or log<=0
+    chop = 100 * (np.log10(sum_atr) - np.log10(ratio)) / np.log10(14)
+    
+    # Calculate 1d volume average (20-period)
+    volume_1d_series = pd.Series(volume_1d)
+    volume_ma = volume_1d_series.rolling(window=20, min_periods=20).mean().values
+    
+    # Align 1d indicators to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    camarilla_mid_aligned = align_htf_to_ltf(prices, df_1d, camarilla_mid)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 200  # warmup for EMA200
+    start_idx = 50  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(donchian_middle_aligned[i]) or np.isnan(volume_ma_aligned[i]) or 
-            np.isnan(ema200_1w_aligned[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(camarilla_mid_aligned[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(volume_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        du = donchian_upper_aligned[i]
-        dl = donchian_lower_aligned[i]
-        dm = donchian_middle_aligned[i]
+        r1 = camarilla_r1_aligned[i]
+        s1 = camarilla_s1_aligned[i]
+        mid = camarilla_mid_aligned[i]
+        chop_val = chop_aligned[i]
         vol_ma = volume_ma_aligned[i]
         vol = volume[i]
         price = close[i]
-        ema200 = ema200_1w_aligned[i]
         
         if position == 0:
-            # Long: price > Donchian upper AND volume > 1.5x avg AND price > weekly EMA200
-            if price > du and vol > 1.5 * vol_ma and price > ema200:
+            # Long: price > Camarilla R1 AND volume > 1.3x avg AND chop < 61.8 (trending)
+            if price > r1 and vol > 1.3 * vol_ma and chop_val < 61.8:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < Donchian lower AND volume > 1.5x avg AND price < weekly EMA200
-            elif price < dl and vol > 1.5 * vol_ma and price < ema200:
+            # Short: price < Camarilla S1 AND volume > 1.3x avg AND chop < 61.8 (trending)
+            elif price < s1 and vol > 1.3 * vol_ma and chop_val < 61.8:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price < Donchian middle OR price < weekly EMA200 (trend change)
-            if price < dm or price < ema200:
+            # Exit long: price < Camarilla midpoint OR chop > 61.8 (choppy market)
+            if price < mid or chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price > Donchian middle OR price > weekly EMA200 (trend change)
-            if price > dm or price > ema200:
+            # Exit short: price > Camarilla midpoint OR chop > 61.8 (choppy market)
+            if price > mid or chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_Volume_WeeklyEMA200"
-timeframe = "1d"
+name = "12h_Camarilla_R1S1_Volume_Chop_Filter"
+timeframe = "12h"
 leverage = 1.0
