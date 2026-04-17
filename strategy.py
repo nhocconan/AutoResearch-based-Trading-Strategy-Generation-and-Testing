@@ -1,3 +1,9 @@
+# 6h_WilliamsR_EMA34_VolumeFilter_v1
+# Williams %R + EMA34 + Volume filter on 6h timeframe
+# Williams %R identifies overbought/oversold conditions, EMA34 provides trend filter, volume confirms momentum
+# Designed to work in both bull and bear markets by using mean reversion with trend alignment
+# Target: 50-150 total trades over 4 years (12-37/year)
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -62,11 +68,11 @@ def generate_signals(prices):
         for i in range(len(close_1d)):
             ema_34[i] = np.mean(close_1d[:i+1]) if i >= 0 else close_1d[0]
     
-    # === Align indicators to 1h timeframe ===
+    # === Align indicators to 6h timeframe ===
     williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r_smooth)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # === 1h Volume confirmation ===
+    # === 6h Volume confirmation ===
     # Calculate 20-period average volume
     vol_ma_20 = np.full_like(volume, np.nan)
     for i in range(len(volume)):
@@ -86,10 +92,6 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
     # Warmup period
     warmup = 100
     
@@ -100,8 +102,7 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(williams_r_aligned[i]) or 
             np.isnan(ema_34_aligned[i]) or 
-            np.isnan(vol_confirm[i]) or
-            not in_session[i]):
+            np.isnan(vol_confirm[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -112,14 +113,14 @@ def generate_signals(prices):
             if (williams_r_aligned[i] > OVERSOLD and 
                 williams_r_aligned[i-1] <= OVERSOLD and  # crossed up
                 close[i] > ema_34_aligned[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
                 continue
             # Short: Williams %R crosses below -20 from above AND price below EMA34
             elif (williams_r_aligned[i] < OVERBOUGHT and 
                   williams_r_aligned[i-1] >= OVERBOUGHT and  # crossed down
                   close[i] < ema_34_aligned[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
                 continue
         
@@ -132,7 +133,7 @@ def generate_signals(prices):
                 position = 0
                 continue
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
             # Exit short: Williams %R crosses above -50 OR crosses below -80
@@ -142,10 +143,10 @@ def generate_signals(prices):
                 position = 0
                 continue
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_WilliamsR_EMA34_VolumeFilter_v1"
-timeframe = "1h"
+name = "6h_WilliamsR_EMA34_VolumeFilter_v1"
+timeframe = "6h"
 leverage = 1.0
