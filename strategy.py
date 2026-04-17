@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_1dEMA21_VolumeFilter_V1
-Strategy: 4h Donchian(20) breakout with 1d EMA21 trend filter and volume confirmation.
-Long: Price breaks above 20-period high + price > 1d EMA21 + volume > 1.5x 20-period avg
-Short: Price breaks below 20-period low + price < 1d EMA21 + volume > 1.5x 20-period avg
-Exit: Opposite Donchian breakout or trend reversal
+4h_Engulfing_Engulfing_VolumeFilter_V1
+Strategy: 4h bullish/bearish engulfing candle with volume confirmation.
+Long: Bullish engulfing pattern + volume > 1.5x 20-period average
+Short: Bearish engulfing pattern + volume > 1.5x 20-period average
+Exit: Opposite engulfing pattern or time-based (max 10 bars)
 Position size: 0.25
-Designed to work in both bull and bear markets by following the higher timeframe trend.
+Uses candlestick patterns for reversal signals, volume for confirmation.
+Designed to capture reversals in both trending and ranging markets.
 """
 
 import numpy as np
@@ -15,89 +16,78 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
+    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA21
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 21:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily EMA21
-    close_1d = df_1d['close'].values
-    ema_21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
-    
-    # Calculate 4h Donchian channels (20-period)
-    high_4h = high
-    low_4h = low
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate 4h volume average (20-period)
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_in_trade = 0
     
-    # Precompute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    
-    for i in range(20, n):  # warmup for Donchian
-        # Session filter: 08-20 UTC
-        if not (8 <= hours[i] <= 20):
+    for i in range(50, n):  # warmup for EMA
+        # Skip if EMA not available
+        if np.isnan(ema_34_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Skip if any required data is not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_21_1d_aligned[i]) or np.isnan(volume_ma20[i])):
-            signals[i] = 0.0
-            continue
-        
+        # Volume filter: current volume > 1.5x 20-period average
         volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
-        # Breakout signals
-        breakout_up = close[i] > donchian_high[i]
-        breakout_down = close[i] < donchian_low[i]
-        
-        # Trend filter
-        uptrend = close[i] > ema_21_1d_aligned[i]
-        downtrend = close[i] < ema_21_1d_aligned[i]
+        # Engulfing patterns
+        bullish_engulfing = (close[i] > open_price[i-1]) and (open_price[i] < close[i-1])
+        bearish_engulfing = (open_price[i] > close[i-1]) and (close[i] < open_price[i-1])
         
         if position == 0:
-            # Long: Breakout above Donchian high + uptrend + volume
-            if breakout_up and uptrend and volume_filter:
+            # Long: Bullish engulfing + above EMA34 + volume filter
+            if bullish_engulfing and (close[i] > ema_34_1d_aligned[i]) and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Breakdown below Donchian low + downtrend + volume
-            elif breakout_down and downtrend and volume_filter:
+                bars_in_trade = 0
+            # Short: Bearish engulfing + below EMA34 + volume filter
+            elif bearish_engulfing and (close[i] < ema_34_1d_aligned[i]) and volume_filter:
                 signals[i] = -0.25
                 position = -1
+                bars_in_trade = 0
         
         elif position == 1:
-            # Exit long: Breakdown below Donchian low or trend reversal
-            if breakout_down or not uptrend:
+            bars_in_trade += 1
+            # Exit conditions: bearish engulfing OR max 10 bars
+            if bearish_engulfing or bars_in_trade >= 10:
                 signals[i] = 0.0
                 position = 0
+                bars_in_trade = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Breakout above Donchian high or trend reversal
-            if breakout_up or not downtrend:
+            bars_in_trade += 1
+            # Exit conditions: bullish engulfing OR max 10 bars
+            if bullish_engulfing or bars_in_trade >= 10:
                 signals[i] = 0.0
                 position = 0
+                bars_in_trade = 0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "4h_Donchian20_1dEMA21_VolumeFilter_V1"
+name = "4h_Engulfing_Engulfing_VolumeFilter_V1"
 timeframe = "4h"
 leverage = 1.0
