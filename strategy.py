@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-1d Donchian Breakout with Weekly Trend and Volume Confirmation
-Long: Close breaks above Donchian(20) high AND price above 20-week EMA AND volume > 1.5x 20-day volume average
-Short: Close breaks below Donchian(20) low AND price below 20-week EMA AND volume > 1.5x 20-day volume average
-Exit: Close crosses back below Donchian(20) midpoint (for long) or above midpoint (for short)
-Target: 8-20 trades/year per symbol (32-80 total over 4 years)
+6h Weekly Pivot + Volume Spike Strategy
+Long: Price breaks above weekly R1 with volume > 1.5x volume SMA(20)
+Short: Price breaks below weekly S1 with volume > 1.5x volume SMA(20)
+Exit: Price crosses back below weekly pivot (long) or above weekly pivot (short)
+Uses weekly pivot points for structure, volume for confirmation, 6h timeframe for lower frequency
+Target: 12-30 trades/year per symbol (48-120 total over 4 years)
 """
 
 import numpy as np
@@ -21,61 +22,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Get weekly data for pivot points
+    df_w = get_htf_data(prices, '1w')
     
-    # Calculate 20-week EMA for trend direction
-    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate weekly pivot points: (H+L+C)/3
+    # Then R1 = 2*P - L, S1 = 2*P - H
+    typical_price = (df_w['high'] + df_w['low'] + df_w['close']) / 3
+    pivot = typical_price.values
+    r1 = (2 * pivot) - df_w['low'].values
+    s1 = (2 * pivot) - df_w['high'].values
     
-    # Calculate Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (high_roll + low_roll) / 2.0
+    # Align weekly pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_w, s1)
     
-    # Calculate 20-day volume average for volume filter
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 6h volume SMA(20) for volume filter
+    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 20  # Donchian needs 20 periods
+    start_idx = 20  # Volume SMA needs 20 bars
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(high_roll[i]) or 
-            np.isnan(low_roll[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(vol_sma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_avg_val = vol_avg[i]
-        ema_1w_val = ema_20_1w_aligned[i]
-        donchian_high = high_roll[i]
-        donchian_low = low_roll[i]
-        donchian_mid_val = donchian_mid[i]
+        vol_sma_val = vol_sma[i]
+        pivot_val = pivot_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
         
         if position == 0:
-            # Long: Close breaks above Donchian high + price above 20-week EMA + volume > 1.5x avg
-            if price > donchian_high and price > ema_1w_val and vol > 1.5 * vol_avg_val:
+            # Long: Price breaks above weekly R1 with volume > 1.5x volume SMA
+            if price > r1_val and vol > 1.5 * vol_sma_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below Donchian low + price below 20-week EMA + volume > 1.5x avg
-            elif price < donchian_low and price < ema_1w_val and vol > 1.5 * vol_avg_val:
+            # Short: Price breaks below weekly S1 with volume > 1.5x volume SMA
+            elif price < s1_val and vol > 1.5 * vol_sma_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Close crosses below Donchian midpoint
-            if price < donchian_mid_val:
+            # Long exit: Price crosses back below weekly pivot
+            if price < pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Close crosses above Donchian midpoint
-            if price > donchian_mid_val:
+            # Short exit: Price crosses back above weekly pivot
+            if price > pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -83,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "6h_WeeklyPivot_VolumeBreakout"
+timeframe = "6h"
 leverage = 1.0
