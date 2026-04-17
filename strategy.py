@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla pivot breakout with 1d volume spike filter and ATR-based trailing stop.
-Long when price breaks above Camarilla R3 level AND 1d volume > 2.0x 20-day average.
-Short when price breaks below Camarilla S3 level AND 1d volume > 2.0x 20-day average.
-Exit when price reverts to Camarilla H3/L3 levels OR ATR trailing stop hit (2.5x ATR from extreme).
-Uses 4h for Camarilla calculation (derived from 1d OHLC) and 1d for volume filter to avoid lower-timeframe noise.
-Trailing stop reduces whipsaw in ranging markets while capturing trends. Target: 75-200 total trades over 4 years.
-Camarilla levels work well in both bull and bear markets as they adapt to recent volatility.
-Volume spike confirms institutional interest, reducing false breakouts.
-ATR trailing stop allows profits to run while limiting drawdowns.
+Hypothesis: 12h Williams Alligator with volume confirmation and 1w ADX trend filter.
+Long when price > Alligator Jaw AND Alligator Teeth > Alligator Lips (bullish alignment) 
+          AND volume > 1.3x average AND 1w ADX > 20.
+Short when price < Alligator Jaw AND Alligator Teeth < Alligator Lips (bearish alignment) 
+          AND volume > 1.3x average AND 1w ADX > 20.
+Exit when price crosses Alligator Teeth OR 1w ADX < 15 (trend weakens).
+Uses 12h for Alligator calculation and 1w for ADX filter to reduce whipsaw.
+Target: 50-150 total trades over 4 years (12-37/year). Alligator identifies trends,
+volume confirmation filters weak breakouts, weekly ADX ensures strong trend context.
+Works in bull markets (captures uptrends) and bear markets (captures downtrends).
 """
 
 import numpy as np
@@ -17,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,99 +26,119 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation (based on previous day OHLC)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 12h data for Alligator calculation
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate Camarilla levels from previous 1d bar
-    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.125*(high-low), etc.
-    # We use R3/S3 for entry and H3/L3 for exit (more conservative)
-    rng = high_1d - low_1d
-    camarilla_r3 = close_1d + 1.125 * rng
-    camarilla_s3 = close_1d - 1.125 * rng
-    camarilla_h3 = close_1d + 1.000 * rng  # H3/L3 for exit
-    camarilla_l3 = close_1d - 1.000 * rng
+    # Williams Alligator: SMAs of median price (typical price)
+    # Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
+    # SMMA = smoothed moving average (similar to EMA but with different smoothing)
+    typical_price_12h = (high_12h + low_12h + close_12h) / 3.0
     
-    # Align 1d Camarilla levels to 4h timeframe (wait for 1d bar to close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Calculate SMMA using EMA with alpha = 1/period (approximation)
+    jaw_12h = pd.Series(typical_price_12h).ewm(alpha=1/13, adjust=False).mean().values
+    teeth_12h = pd.Series(typical_price_12h).ewm(alpha=1/8, adjust=False).mean().values
+    lips_12h = pd.Series(typical_price_12h).ewm(alpha=1/5, adjust=False).mean().values
     
-    # Get 1d data for volume filter
-    volume_1d = df_1d['volume'].values
-    volume_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
+    # Get 1w data for ADX filter
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # ATR for trailing stop (using 1d ATR for consistency with volume filter)
-    high_1d_series = pd.Series(high_1d)
-    low_1d_series = pd.Series(low_1d)
-    close_1d_series = pd.Series(close_1d)
+    # Calculate ADX on 1w timeframe (14-period)
+    high_1w_series = pd.Series(high_1w)
+    low_1w_series = pd.Series(low_1w)
+    close_1w_series = pd.Series(close_1w)
     
     # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # first period
     
-    # ATR (14-period)
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Plus Directional Movement (+DM)
+    up_move = high_1w - np.roll(high_1w, 1)
+    down_move = np.roll(low_1w, 1) - low_1w
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smooth TR, +DM, -DM (14-period)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate +DI and -DI
+    plus_di = 100 * (plus_dm_smooth / np.where(atr != 0, atr, np.inf))
+    minus_di = 100 * (minus_dm_smooth / np.where(atr != 0, atr, np.inf))
+    
+    # Calculate DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) != 0, (plus_di + minus_di), np.inf)
+    adx_1w = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align 12h Alligator to 12h timeframe (no alignment needed)
+    jaw_12h_aligned = jaw_12h
+    teeth_12h_aligned = teeth_12h
+    lips_12h_aligned = lips_12h
+    
+    # Align 1w ADX to 12h timeframe
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    
+    # Volume average (20-period) on 12h
+    volume_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_12h)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    long_high = 0.0   # highest high since entering long
-    short_low = 0.0   # lowest low since entering short
     
-    start_idx = 50  # warmup for indicators
+    start_idx = 100  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(volume_ma_aligned[i]) or np.isnan(atr_aligned[i])):
+        if (np.isnan(jaw_12h_aligned[i]) or np.isnan(teeth_12h_aligned[i]) or 
+            np.isnan(lips_12h_aligned[i]) or np.isnan(adx_1w_aligned[i]) or 
+            np.isnan(volume_ma_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        r3 = camarilla_r3_aligned[i]
-        s3 = camarilla_s3_aligned[i]
-        h3 = camarilla_h3_aligned[i]
-        l3 = camarilla_l3_aligned[i]
-        vol_ma = volume_ma_aligned[i]
-        vol = volume_1d[i]  # use 1d volume for filter
-        atr_val = atr_aligned[i]
+        jaw = jaw_12h_aligned[i]
+        teeth = teeth_12h_aligned[i]
+        lips = lips_12h_aligned[i]
+        adx_val = adx_1w_aligned[i]
+        vol_ma = volume_ma_12h_aligned[i]
+        vol = volume[i]
         price = close[i]
         
         if position == 0:
-            # Long: price > Camarilla R3 AND volume > 2.0x 20-day average
-            if price > r3 and vol > 2.0 * vol_ma:
+            # Bullish alignment: price > Jaw AND Teeth > Lips
+            bullish = price > jaw and teeth > lips
+            # Bearish alignment: price < Jaw AND Teeth < Lips
+            bearish = price < jaw and teeth < lips
+            
+            # Long: bullish alignment AND volume > 1.3x avg AND ADX > 20
+            if bullish and vol > 1.3 * vol_ma and adx_val > 20:
                 signals[i] = 0.25
                 position = 1
-                long_high = price  # initialize trailing stop high
-            # Short: price < Camarilla S3 AND volume > 2.0x 20-day average
-            elif price < s3 and vol > 2.0 * vol_ma:
+            # Short: bearish alignment AND volume > 1.3x avg AND ADX > 20
+            elif bearish and vol > 1.3 * vol_ma and adx_val > 20:
                 signals[i] = -0.25
                 position = -1
-                short_low = price  # initialize trailing stop low
         
         elif position == 1:
-            # Update trailing stop high
-            long_high = max(long_high, price)
-            # Exit long: price < Camarilla H3 OR price drops 2.5*ATR from high
-            if price < h3 or price < long_high - 2.5 * atr_val:
+            # Exit long: price < Teeth OR ADX < 15 (trend weakening)
+            if price < teeth or adx_val < 15:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Update trailing stop low
-            short_low = min(short_low, price)
-            # Exit short: price > Camarilla L3 OR price rises 2.5*ATR from low
-            if price > l3 or price > short_low + 2.5 * atr_val:
+            # Exit short: price > Teeth OR ADX < 15 (trend weakening)
+            if price > teeth or adx_val < 15:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -125,6 +146,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_CamarillaR3S3_VolumeSpike_ATRTrail"
-timeframe = "4h"
+name = "12h_Alligator_Volume_1wADX_Filter"
+timeframe = "12h"
 leverage = 1.0
