@@ -13,130 +13,99 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d VWAP (Volume Weighted Average Price) ===
+    # === 1d KAMA (Kaufman Adaptive Moving Average) ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate typical price and VWAP
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
-    vwap_numerator = np.cumsum(typical_price_1d * volume_1d)
-    vwap_denominator = np.cumsum(volume_1d)
-    vwap_1d = np.divide(vwap_numerator, vwap_denominator, 
-                        out=np.full_like(vwap_numerator, np.nan), 
-                        where=vwap_denominator!=0)
+    # Calculate efficiency ratio (ER)
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.sum(np.abs(np.diff(close_1d, prepend=close_1d[0])), axis=0) if len(close_1d) > 1 else 0
+    # More efficient calculation
+    er = np.zeros(len(close_1d))
+    for i in range(len(close_1d)):
+        if i == 0:
+            er[i] = 1.0
+        else:
+            price_change = np.abs(close_1d[i] - close_1d[i-10]) if i >= 10 else np.abs(close_1d[i] - close_1d[0])
+            sum_abs_change = np.sum(np.abs(np.diff(close_1d[max(0, i-9):i+1]))) if i > 0 else 0
+            er[i] = price_change / (sum_abs_change + 1e-10) if sum_abs_change > 0 else 1.0
     
-    # === 1d VWAP Standard Deviation (20 periods) ===
-    # Calculate deviation from VWAP
-    dev_squared = (typical_price_1d - vwap_1d) ** 2
-    # Weighted variance using volume
-    vwap_var = np.divide(np.cumsum(dev_squared * volume_1d), 
-                         vwap_denominator,
-                         out=np.full_like(vwap_numerator, np.nan),
-                         where=vwap_denominator!=0)
-    vwap_std = np.sqrt(np.maximum(vwap_var, 0))
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1) # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # VWAP Bands (2 standard deviations)
-    vwap_upper = vwap_1d + 2.0 * vwap_std
-    vwap_lower = vwap_1d - 2.0 * vwap_std
+    # Calculate KAMA
+    kama = np.zeros(len(close_1d))
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    
+    # === 1d RSI (14) ===
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing
+    avg_gain = np.zeros(len(gain))
+    avg_loss = np.zeros(len(loss))
+    avg_gain[0] = gain[0]
+    avg_loss[0] = loss[0]
+    for i in range(1, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # === 1d Volume Spike ===
+    vol_ma_20_1d = np.convolve(volume_1d, np.ones(20)/20, mode='same')
+    vol_ma_20_1d[:10] = volume_1d[:10].mean() if len(volume_1d) >= 10 else volume_1d.mean()
+    vol_ma_20_1d[-10:] = volume_1d[-10:].mean() if len(volume_1d) >= 10 else volume_1d.mean()
     
     # Align to 4h timeframe
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
-    vwap_upper_aligned = align_htf_to_ltf(prices, df_1d, vwap_upper)
-    vwap_lower_aligned = align_htf_to_ltf(prices, df_1d, vwap_lower)
-    
-    # === 1d Volume Spike Detection ===
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    
-    # === 1d ADX (14 periods) for trend strength ===
-    # Calculate directional movement
-    plus_dm = np.zeros(len(high_1d))
-    minus_dm = np.zeros(len(high_1d))
-    tr = np.zeros(len(high_1d))
-    
-    for i in range(1, len(high_1d)):
-        high_diff = high_1d[i] - high_1d[i-1]
-        low_diff = low_1d[i-1] - low_1d[i]
-        plus_dm[i] = max(high_diff, 0) if high_diff > low_diff else 0
-        minus_dm[i] = max(low_diff, 0) if low_diff > high_diff else 0
-        tr[i] = max(high_1d[i] - low_1d[i], 
-                    abs(high_1d[i] - high_1d[i-1]), 
-                    abs(low_1d[i] - low_1d[i-1]))
-    
-    # Wilder's smoothing (alpha = 1/period)
-    atr_14 = np.zeros(len(tr))
-    plus_di_14 = np.zeros(len(plus_dm))
-    minus_di_14 = np.zeros(len(minus_dm))
-    
-    # Initialize first values
-    atr_14[0] = tr[0]
-    plus_di_14[0] = plus_dm[0]
-    minus_di_14[0] = minus_dm[0]
-    
-    # Smooth subsequent values
-    for i in range(1, len(tr)):
-        atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
-        plus_di_14[i] = (plus_di_14[i-1] * 13 + plus_dm[i]) / 14
-        minus_di_14[i] = (minus_di_14[i-1] * 13 + minus_dm[i]) / 14
-    
-    # Calculate DX
-    dx = np.zeros(len(atr_14))
-    mask = (plus_di_14 + minus_di_14) > 0
-    dx[mask] = 100 * np.abs(plus_di_14[mask] - minus_di_14[mask]) / (plus_di_14[mask] + minus_di_14[mask])
-    
-    # Calculate ADX (smoothed DX)
-    adx_14 = np.zeros(len(dx))
-    if len(dx) > 0:
-        adx_14[0] = dx[0]
-        for i in range(1, len(dx)):
-            adx_14[i] = (adx_14[i-1] * 13 + dx[i]) / 14
-    
-    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
     
     signals = np.zeros(n)
     
-    # Warmup: need enough data for calculations
-    warmup = 100
+    # Warmup
+    warmup = 50
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(vwap_upper_aligned[i]) or 
-            np.isnan(vwap_lower_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or 
-            np.isnan(adx_14_aligned[i])):
+        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Volume confirmation: current 1d volume > 2.0x 20-period average
+        # Volume confirmation: current volume > 1.5x 20-period average
         vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-        vol_confirm = vol_1d_aligned[i] > vol_ma_20_1d_aligned[i] * 2.0
-        
-        # ADX filter: only trade when trend is strong (ADX > 25)
-        adx_strong = adx_14_aligned[i] > 25
+        vol_confirm = vol_1d_aligned[i] > vol_ma_20_1d_aligned[i] * 1.5
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price crosses above VWAP upper band with volume confirmation and strong trend
-            if close[i] > vwap_upper_aligned[i] and vol_confirm and adx_strong:
+            # Long: price above KAMA and RSI > 50 with volume confirmation
+            if close[i] > kama_1d_aligned[i] and rsi_1d_aligned[i] > 50 and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price crosses below VWAP lower band with volume confirmation and strong trend
-            elif close[i] < vwap_lower_aligned[i] and vol_confirm and adx_strong:
+            # Short: price below KAMA and RSI < 50 with volume confirmation
+            elif close[i] < kama_1d_aligned[i] and rsi_1d_aligned[i] < 50 and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic: price returns to VWAP
+        # Exit logic: price crosses KAMA in opposite direction
         elif position == 1:
-            # Exit long: price crosses below VWAP
-            if close[i] < vwap_1d_aligned[i]:
+            # Exit long: price crosses below KAMA
+            if close[i] < kama_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -144,8 +113,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above VWAP
-            if close[i] > vwap_1d_aligned[i]:
+            # Exit short: price crosses above KAMA
+            if close[i] > kama_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -154,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_VWAP_2Std_Dev_VolumeSpike_ADXFilter"
+name = "1d_KAMA_RSI_VolumeConfirmation"
 timeframe = "4h"
 leverage = 1.0
