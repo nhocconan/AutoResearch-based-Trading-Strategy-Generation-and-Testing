@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Donchian channel breakout with 4h EMA100 trend filter and volume confirmation.
-Uses Donchian(20) for breakout detection, 4h EMA100 for trend filter, and volume spike (>1.5x 20-period average) for confirmation.
-Designed to capture strong trending moves while avoiding false breakouts in choppy markets.
-Target: 15-37 trades/year with low turnover to minimize fee drag. Works in both bull and bear markets by using trend filter.
+Hypothesis: 1h momentum strategy using 4h RSI trend filter and 1d volume regime filter.
+Uses 1h RSI(14) for momentum signals, filtered by 4h RSI(50) > 50 for bull/bear regime,
+and 1d volume > 1.2x 20-day average to ensure sufficient liquidity.
+Designed to capture momentum bursts in trending markets while avoiding choppy, low-volume periods.
+Target: 15-30 trades/year by requiring confluence of momentum, trend, and volume filters.
+Works in bull markets (long bias) and bear markets (short bias) via 4h RSI regime filter.
 """
 
 import numpy as np
@@ -15,76 +17,89 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Donchian(20) on 1h ===
-    lookback = 20
-    donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # === 1h RSI(14) for momentum signal ===
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, 1e-10)
+    rsi_1h = (100 - (100 / (1 + rs))).values
     
-    # === 4h EMA100 (trend filter) ===
+    # === 4h RSI(50) for trend regime filter ===
     df_4h = get_htf_data(prices, '4h')
     close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    delta_4h = pd.Series(close_4h).diff()
+    gain_4h = delta_4h.clip(lower=0)
+    loss_4h = -delta_4h.clip(upper=0)
+    avg_gain_4h = gain_4h.ewm(alpha=1/50, adjust=False, min_periods=50).mean()
+    avg_loss_4h = loss_4h.ewm(alpha=1/50, adjust=False, min_periods=50).mean()
+    rs_4h = avg_gain_4h / avg_loss_4h.replace(0, 1e-10)
+    rsi_50_4h = (100 - (100 / (1 + rs_4h))).values
+    rsi_50_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_50_4h)
     
-    ema100_4h = pd.Series(close_4h).ewm(span=100, adjust=False, min_periods=100).mean().values
-    ema100_4h_aligned = align_htf_to_ltf(prices, df_4h, ema100_4h)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
+    # === 1d volume regime filter ===
+    df_1d = get_htf_data(prices, '1d')
+    volume_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
     signals = np.zeros(n)
     
-    # Warmup: need enough data for Donchian and EMA
-    warmup = max(lookback, 100)
+    # Warmup: need enough data for RSI calculations
+    warmup = 50
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(ema100_4h_aligned[i]) or np.isnan(vol_ma_20_4h_aligned[i])):
+        if (np.isnan(rsi_1h[i]) or np.isnan(rsi_50_4h_aligned[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Get aligned volume for current bar
-        vol_current_aligned = align_htf_to_ltf(prices, df_4h, volume_4h)
+        # Volume regime: today's volume > 1.2x 20-day average
+        vol_today_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+        vol_regime = vol_today_aligned[i] > vol_ma_20_1d_aligned[i] * 1.2
         
-        # Volume spike condition
-        vol_spike = vol_current_aligned[i] > vol_ma_20_4h_aligned[i] * 1.5
+        # Skip if not in high-volume regime
+        if not vol_regime:
+            signals[i] = 0.0
+            position = 0
+            continue
         
-        # Trend filter: price relative to 4h EMA100
-        price_above_ema100 = close[i] > ema100_4h_aligned[i]
-        price_below_ema100 = close[i] < ema100_4h_aligned[i]
+        # Momentum signals
+        rsi_overbought = rsi_1h[i] > 70
+        rsi_oversold = rsi_1h[i] < 30
         
-        # Breakout conditions
-        breakout_up = close[i] > donchian_high[i]
-        breakout_down = close[i] < donchian_low[i]
+        # Trend filter from 4h RSI
+        bull_regime = rsi_50_4h_aligned[i] > 50
+        bear_regime = rsi_50_4h_aligned[i] < 50
         
         # Entry logic: only enter when flat
         if position == 0:
-            if vol_spike:
-                # Long: upward breakout AND price above 4h EMA100
-                if breakout_up and price_above_ema100:
-                    signals[i] = 0.20
-                    position = 1
-                    continue
-                # Short: downward breakout AND price below 4h EMA100
-                elif breakout_down and price_below_ema100:
-                    signals[i] = -0.20
-                    position = -1
-                    continue
+            # Long: oversold momentum in bull regime
+            if rsi_oversold and bull_regime:
+                signals[i] = 0.20
+                position = 1
+                continue
+            # Short: overbought momentum in bear regime
+            elif rsi_overbought and bear_regime:
+                signals[i] = -0.20
+                position = -1
+                continue
         
-        # Exit logic: exit when opposite breakout occurs or trend changes
+        # Exit logic: exit on momentum reversal or regime change
         elif position == 1:
-            # Exit long if downward breakout or price crosses below EMA100
-            if breakout_down or close[i] < ema100_4h_aligned[i]:
+            # Exit long if overbought or regime turns bearish
+            if rsi_overbought or not bull_regime:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -92,8 +107,8 @@ def generate_signals(prices):
                 signals[i] = 0.20
         
         elif position == -1:
-            # Exit short if upward breakout or price crosses above EMA100
-            if breakout_up or close[i] > ema100_4h_aligned[i]:
+            # Exit short if oversold or regime turns bullish
+            if rsi_oversold or not bear_regime:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -102,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_Donchian20_4hEMA100_VolumeSpike_1.5x"
+name = "1h_RSI14_4hRSI50_1dVolumeRegime"
 timeframe = "1h"
 leverage = 1.0
