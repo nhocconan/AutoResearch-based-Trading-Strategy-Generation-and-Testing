@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d ADX(25) filter and volume confirmation.
-Uses 1d volume surge (>1.5x 20-period avg) to confirm breakout strength.
-Targets 25-40 trades/year to avoid fee drag. Works in bull (catch momentum) and bear (ADX filters weak breakouts).
+Hypothesis: 4h Camarilla Pivot R1/S1 breakout with 1d volume confirmation and ADX filter.
+Uses 1d volume spike (>2x 20-period avg) and ADX>20 to filter breakouts.
+Targets 20-30 trades/year to avoid fee drag. Works in bull (catch momentum) and bear (ADX filters weak breakouts).
 """
 import numpy as np
 import pandas as pd
@@ -17,23 +17,22 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # === Weekly Donchian Channel (20-period) ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # === Daily Camarilla Pivot Levels (R1, S1) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate rolling max/min for Donchian with min_periods
-    upper = np.full(len(high_1w), np.nan)
-    lower = np.full(len(low_1w), np.nan)
-    for i in range(20, len(high_1w)):
-        upper[i] = np.max(high_1w[i-20:i])
-        lower[i] = np.min(low_1w[i-20:i])
+    # Calculate pivot and levels
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_ = high_1d - low_1d
+    r1 = pivot + (range_ * 1.1 / 12)
+    s1 = pivot - (range_ * 1.1 / 12)
     
-    upper_aligned = align_htf_to_ltf(prices, df_1w, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_1w, lower)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # === Daily ADX (14) for trend strength ===
-    df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -74,7 +73,7 @@ def generate_signals(prices):
     adx_14 = wilders_smoothing(dx, 14)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
     
-    # === Daily volume surge confirmation ===
+    # === Daily volume spike confirmation ===
     volume_1d = df_1d['volume'].values
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
@@ -89,7 +88,7 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
             np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma_20_aligned[i])):
             signals[i] = 0.0
             position = 0
@@ -97,32 +96,32 @@ def generate_signals(prices):
         
         price = close[i]
         
-        # Volume surge: current 1d volume > 1.5x 20-period average
+        # Volume spike: current 1d volume > 2x 20-period average
         df_1d_current = get_htf_data(prices, '1d')
         vol_1d_current = df_1d_current['volume'].values
         vol_1d_aligned = align_htf_to_ltf(prices, df_1d_current, vol_1d_current)
-        vol_surge = vol_1d_aligned[i] > vol_ma_20_aligned[i] * 1.5
+        vol_spike = vol_1d_aligned[i] > vol_ma_20_aligned[i] * 2.0
         
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx_1d_aligned[i] > 25.0
+        # Trend filter: ADX > 20 indicates trending market
+        trending = adx_1d_aligned[i] > 20.0
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: Price breaks above weekly Donchian upper + volume surge + trending
-            if price > upper_aligned[i] and vol_surge and trending:
+            # Long: Price breaks above Camarilla R1 + volume spike + trending
+            if price > r1_aligned[i] and vol_spike and trending:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: Price breaks below weekly Donchian lower + volume surge + trending
-            elif price < lower_aligned[i] and vol_surge and trending:
+            # Short: Price breaks below Camarilla S1 + volume spike + trending
+            elif price < s1_aligned[i] and vol_spike and trending:
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic: reverse signal on opposite breakout
         elif position == 1:
-            # Exit long if price breaks below weekly Donchian lower
-            if price < lower_aligned[i]:
+            # Exit long if price breaks below Camarilla S1
+            if price < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -130,8 +129,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short if price breaks above weekly Donchian upper
-            if price > upper_aligned[i]:
+            # Exit short if price breaks above Camarilla R1
+            if price > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -140,6 +139,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WeeklyDonchian20_1dVolume1.5x_ADX25_TrendBreakout"
+name = "4h_Camarilla_R1_S1_1dVolume2x_ADX20_Breakout"
 timeframe = "4h"
 leverage = 1.0
