@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_RSI20_TrendFilter_V1
-RSI(20) > 60 for long, RSI(20) < 40 for short with 6h trend filter from 1w EMA200.
-Exit when RSI crosses back to neutral (40-60) or trend weakens.
-Designed to capture momentum in trending markets while avoiding whipsaws in ranges.
-Target: 50-150 total trades over 4 years (12-37/year).
+12h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_v2
+Camarilla R1/S1 breakout with volume spike and ATR volatility filter.
+Long: break above R1 with volume > 1.5x average and ATR > 0.5x ATR(50)
+Short: break below S1 with volume > 1.5x average and ATR > 0.5x ATR(50)
+Exit: price re-enters between H3 and L3 or ATR drops below 0.3x ATR(50)
+Designed to capture institutional breakouts with volatility confirmation.
+Target: 20-50 trades per year (80-200 total over 4 years).
 """
 
 import numpy as np
@@ -13,65 +15,92 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # === RSI(20) ===
-    delta = np.diff(close)
-    delta = np.concatenate([[0], delta])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # === ATR(14) and ATR(50) for volatility filter ===
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    avg_gain = pd.Series(gain).rolling(window=20, min_periods=20).mean().values
-    avg_loss = pd.Series(loss).rolling(window=20, min_periods=20).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
     
-    # === 1w EMA200 for trend filter ===
-    df_1w = get_htf_data(prices, '1w')
-    ema_200_1w = pd.Series(df_1w['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # === Volume average (20-period) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # === Daily Camarilla levels ===
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Previous day's OHLC for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Calculate Camarilla levels for current day using previous day's data
+    camarilla_range = prev_high - prev_low
+    r1 = prev_close + camarilla_range * 1.1 / 12
+    s1 = prev_close - camarilla_range * 1.1 / 12
+    h3 = prev_close + camarilla_range * 1.1 / 4
+    l3 = prev_close - camarilla_range * 1.1 / 4
+    
+    # Align to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 200
+    warmup = 100
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi[i]) or 
-            np.isnan(ema_200_1w_aligned[i])):
+        if (np.isnan(atr[i]) or np.isnan(atr50[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(h3_aligned[i]) or 
+            np.isnan(l3_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
+        # Volume spike condition (1.5x average)
+        volume_spike = volume[i] > 1.5 * vol_ma[i]
+        
+        # ATR filter: current ATR > 0.5 * ATR50 for entry, < 0.3 * ATR50 for exit
+        vol_filter_entry = atr[i] > 0.5 * atr50[i]
+        vol_filter_exit = atr[i] < 0.3 * atr50[i]
+        
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: RSI > 60, price above 1w EMA200
-            if (rsi[i] > 60 and 
-                close[i] > ema_200_1w_aligned[i]):
+            # Long: break above R1 with volume spike and sufficient volatility
+            if (close[i] > r1_aligned[i] and 
+                volume_spike and vol_filter_entry):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: RSI < 40, price below 1w EMA200
-            elif (rsi[i] < 40 and 
-                  close[i] < ema_200_1w_aligned[i]):
+            # Short: break below S1 with volume spike and sufficient volatility
+            elif (close[i] < s1_aligned[i] and 
+                  volume_spike and vol_filter_entry):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: RSI < 40 OR price below 1w EMA200
-            if (rsi[i] < 40 or 
-                close[i] < ema_200_1w_aligned[i]):
+            # Exit long: re-entry below H3 OR low volatility
+            if (close[i] < h3_aligned[i] or vol_filter_exit):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -79,9 +108,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI > 60 OR price above 1w EMA200
-            if (rsi[i] > 60 or 
-                close[i] > ema_200_1w_aligned[i]):
+            # Exit short: re-entry above S3 OR low volatility
+            if (close[i] > l3_aligned[i] or vol_filter_exit):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -90,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_RSI20_TrendFilter_V1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_v2"
+timeframe = "12h"
 leverage = 1.0
