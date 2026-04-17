@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_Breakout_Volume_Regime
-Hypothesis: Donchian channel breakouts with volume confirmation and ADX regime filter capture trends while avoiding whipsaw in choppy markets. Works in bull markets by catching breakouts and in bear markets by filtering false signals via ADX < 25 (range) condition. Uses 1d ATR for volatility filtering to adapt to changing market conditions.
+1d_Camarilla_Pivot_R1_S1_Breakout_Volume_Confirmation
+Hypothesis: Daily Camarilla pivot levels (R1/S1) act as strong support/resistance.
+Breakouts above R1 or below S1 with volume confirmation indicate institutional participation.
+Volume filter reduces false breakouts. Works in bull (breakouts continue) and bear (breakdowns continue).
+Uses 1w trend filter to avoid counter-trend trades. Target: 15-25 trades/year.
 """
 
 import numpy as np
@@ -13,122 +16,81 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
-    def donchian_channel(high, low, period=20):
-        upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-        lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-        return upper, lower
+    # Calculate prior day's Camarilla pivot levels
+    # Using prior day's high, low, close
+    phigh = np.roll(high, 1)
+    plow = np.roll(low, 1)
+    pclose = np.roll(close, 1)
+    phigh[0] = high[0]
+    plow[0] = low[0]
+    pclose[0] = close[0]
     
-    donch_high, donch_low = donchian_channel(high, low, 20)
+    # Camarilla calculations
+    range_val = phigh - plow
+    r1 = pclose + range_val * 1.1 / 12
+    s1 = pclose - range_val * 1.1 / 12
     
-    # ADX (14-period) for regime filtering
-    def adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(high[i] - high[i-1], 0) if high[i] - high[i-1] > low[i-1] - low[i] else 0
-            minus_dm[i] = max(low[i-1] - low[i], 0) if low[i-1] - low[i] > high[i] - high[i-1] else 0
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Smooth using Wilder's smoothing (alpha = 1/period)
-        atr = np.zeros_like(tr)
-        plus_di = np.zeros_like(plus_dm)
-        minus_di = np.zeros_like(minus_dm)
-        
-        atr[period-1] = np.mean(tr[1:period+1])
-        plus_di[period-1] = np.mean(plus_dm[1:period+1]) / atr[period-1] * 100 if atr[period-1] != 0 else 0
-        minus_di[period-1] = np.mean(minus_dm[1:period+1]) / atr[period-1] * 100 if atr[period-1] != 0 else 0
-        
-        for i in range(period, len(high)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-            plus_di[i] = (plus_di[i-1] * (period-1) + plus_dm[i]) / atr[i] * 100 if atr[i] != 0 else 0
-            minus_di[i] = (minus_di[i-1] * (period-1) + minus_dm[i]) / atr[i] * 100 if atr[i] != 0 else 0
-        
-        dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
-        adx_vals = np.zeros_like(dx)
-        adx_vals[2*period-1] = np.mean(dx[period:2*period])
-        for i in range(2*period, len(high)):
-            adx_vals[i] = (adx_vals[i-1] * (period-1) + dx[i]) / period
-        
-        return adx_vals
-    
-    adx_vals = adx(high, low, close, 14)
-    
-    # Volume confirmation (20-period average)
+    # Volume confirmation: 20-day average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 1d ATR for volatility filtering
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d ATR (14-period)
-    def atr(high, low, close, period=14):
-        tr = np.zeros_like(high)
-        for i in range(1, len(high)):
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        atr_vals = np.zeros_like(tr)
-        atr_vals[period-1] = np.mean(tr[1:period+1])
-        for i in range(period, len(high)):
-            atr_vals[i] = (atr_vals[i-1] * (period-1) + tr[i]) / period
-        return atr_vals
+    # Calculate 1w EMA20 for trend filter
+    close_series_1w = pd.Series(close_1w)
+    ema20_1w = close_series_1w.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    atr_1d = atr(high_1d, low_1d, close_1d, 14)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Align 1w EMA to daily timeframe
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = max(20, 20, 14*2)  # Donchian, volume MA20, ADX
+    start_idx = 20  # volume MA20 needs 20 periods
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donch_high[i]) or 
-            np.isnan(donch_low[i]) or 
+        if (np.isnan(r1[i]) or 
+            np.isnan(s1[i]) or 
             np.isnan(volume_ma20[i]) or 
-            np.isnan(adx_vals[i]) or 
-            np.isnan(atr_1d_aligned[i])):
+            np.isnan(ema20_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period average
+        # Volume filter: current volume > 1.5x 20-day average
         volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
-        # ADX regime filter: only trade when ADX > 25 (trending market)
-        regime_filter = adx_vals[i] > 25
-        
-        # Volatility filter: avoid extremely low volatility periods
-        vol_filter = atr_1d_aligned[i] > np.percentile(atr_1d_aligned[:i+1], 20) if i >= 20 else True
+        # Breakout conditions
+        breakout_long = close[i] > r1[i]  # Close above R1
+        breakdown_short = close[i] < s1[i]  # Close below S1
         
         if position == 0:
-            # Long: price breaks above Donchian upper + volume + regime + vol filter
-            if close[i] > donch_high[i] and volume_filter and regime_filter and vol_filter:
+            # Long: breakout above R1 + volume filter + 1w uptrend
+            if breakout_long and volume_filter and close[i] > ema20_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower + volume + regime + vol filter
-            elif close[i] < donch_low[i] and volume_filter and regime_filter and vol_filter:
+            # Short: breakdown below S1 + volume filter + 1w downtrend
+            elif breakdown_short and volume_filter and close[i] < ema20_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below Donchian lower
-            if close[i] < donch_low[i]:
+            # Exit long: breakdown below S1 (reversal signal)
+            if breakdown_short:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above Donchian upper
-            if close[i] > donch_high[i]:
+            # Exit short: breakout above R1 (reversal signal)
+            if breakout_long:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -136,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_Regime"
-timeframe = "4h"
+name = "1d_Camarilla_Pivot_R1_S1_Breakout_Volume_Confirmation"
+timeframe = "1d"
 leverage = 1.0
