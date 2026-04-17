@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout + 1d ADX regime filter + volume confirmation.
-Long when price breaks above Donchian(20) high AND 1d ADX > 20 AND volume > 1.5x 20-period average.
-Short when price breaks below Donchian(20) low AND 1d ADX > 20 AND volume > 1.5x 20-period average.
-Exit when price returns to Donchian midpoint OR ADX < 20 (range regime) OR volume condition fails.
-Uses 1d ADX for trend regime filtering to avoid whipsaws in sideways markets.
-Target: 75-200 total trades over 4 years (19-50/year) on BTC/ETH/SOL.
+Hypothesis: 6h Bollinger Band Squeeze Breakout + 1d ADX Regime Filter.
+Long when price breaks above upper BB with 1d ADX > 25 (trending) or ADX < 20 with mean-reversion bounce from lower BB.
+Short when price breaks below lower BB with 1d ADX > 25 or ADX < 20 with rejection at upper BB.
+Uses Bollinger Bands (20,2) on 6h for volatility squeeze/expansion and 1d ADX for regime.
+Targets low-volatility breakouts in trending markets and mean-reversion bounces in ranging markets.
+Designed to work in both bull (trend breaks) and bear (mean-reversion in range) markets.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -14,13 +15,12 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
     # Get 1d data for ADX regime filter
     df_1d = get_htf_data(prices, '1d')
@@ -35,92 +35,94 @@ def generate_signals(prices):
         tr = np.zeros_like(high)
         
         for i in range(1, len(high)):
-            plus_dm[i] = max(high[i] - high[i-1], 0)
-            minus_dm[i] = max(low[i-1] - low[i], 0)
-            if plus_dm[i] < minus_dm[i]:
-                plus_dm[i] = 0
-            if minus_dm[i] < plus_dm[i]:
-                minus_dm[i] = 0
-            if plus_dm[i] == minus_dm[i]:
-                plus_dm[i] = 0
-                minus_dm[i] = 0
+            high_diff = high[i] - high[i-1]
+            low_diff = low[i-1] - low[i]
+            plus_dm[i] = max(high_diff, 0) if high_diff > low_diff else 0
+            minus_dm[i] = max(low_diff, 0) if low_diff > high_diff else 0
             tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
         
-        # Wilder's smoothing (alpha = 1/period)
+        # Initial ATR
         atr = np.zeros_like(tr)
-        atr[period] = np.mean(tr[1:period+1])
-        for i in range(period+1, len(tr)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        if len(tr) > period:
+            atr[period] = np.mean(tr[1:period+1])
+            for i in range(period+1, len(tr)):
+                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
         
-        plus_di = 100 * (pd.Series(plus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr)
-        minus_di = 100 * (pd.Series(minus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr)
+        # Avoid division by zero
+        atr_safe = np.where(atr == 0, 1e-10, atr)
+        
+        plus_di = 100 * (pd.Series(plus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr_safe)
+        minus_di = 100 * (pd.Series(minus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr_safe)
         dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
         adx = pd.Series(dx).ewm(alpha=1/period, adjust=False).mean().values
         return adx
     
-    # Calculate 1d ADX
+    # Calculate 6h Bollinger Bands (20,2)
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    bb_stddev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_bb = sma + (bb_stddev * bb_std)
+    lower_bb = sma - (bb_stddev * bb_std)
+    bb_width = (upper_bb - lower_bb) / sma  # Normalized width for squeeze detection
+    
+    # Calculate 1d ADX and align
     adx_14 = calculate_adx(high_1d, low_1d, close_1d, 14)
     adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
-    
-    # Calculate Donchian channels (20-period) on 4h
-    lookback = 20
-    highest_high = np.full_like(high, np.nan)
-    lowest_low = np.full_like(low, np.nan)
-    
-    for i in range(lookback-1, len(high)):
-        highest_high[i] = np.max(high[i-lookback+1:i+1])
-        lowest_low[i] = np.min(low[i-lookback+1:i+1])
-    
-    # Calculate volume average (20-period)
-    vol_avg = np.full_like(volume, np.nan)
-    for i in range(19, len(volume)):
-        vol_avg[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = max(30, 20)  # warmup for Donchian and volume avg
+    start_idx = 100  # warmup for BB and ADX
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or 
-            np.isnan(vol_avg[i]) or 
+        if (np.isnan(sma[i]) or np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or
             np.isnan(adx_14_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Conditions
-        donchian_high = highest_high[i]
-        donchian_low = lowest_low[i]
-        donchian_mid = (donchian_high + donchian_low) / 2
-        vol_ratio = volume[i] / vol_avg[i] if vol_avg[i] > 0 else 0
-        vol_confirm = vol_ratio > 1.5
-        trend_regime = adx_14_aligned[i] > 20
-        
         price = close[i]
+        adx_val = adx_14_aligned[i]
+        is_squeeze = bb_width[i] < 0.02  # Low volatility threshold
+        is_expansion = bb_width[i] > 0.03  # Volatility expansion threshold
+        
+        # Regime determination
+        is_trending = adx_val > 25
+        is_ranging = adx_val < 20
         
         if position == 0:
-            # Long: break above Donchian high + volume confirmation + trend regime
-            if price > donchian_high and vol_confirm and trend_regime:
+            # Long conditions:
+            # 1. Trending breakout: price crosses above upper BB during expansion
+            # 2. Ranging mean reversion: price bounces off lower BB with rejection of lower band
+            breakout_long = is_trending and is_expansion and price > upper_bb[i] and close[i-1] <= upper_bb[i-1]
+            bounce_long = is_ranging and price > lower_bb[i] and close[i-1] <= lower_bb[i] and low[i] < lower_bb[i]
+            
+            if breakout_long or bounce_long:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian low + volume confirmation + trend regime
-            elif price < donchian_low and vol_confirm and trend_regime:
+            
+            # Short conditions:
+            # 1. Trending breakout: price crosses below lower BB during expansion
+            # 2. Ranging mean reversion: price rejects upper BB with failure to break above
+            breakout_short = is_trending and is_expansion and price < lower_bb[i] and close[i-1] >= lower_bb[i-1]
+            bounce_short = is_ranging and price < upper_bb[i] and close[i-1] >= upper_bb[i] and high[i] > upper_bb[i]
+            
+            if breakout_short or bounce_short:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to midpoint OR trend regime ends OR volume confirmation fails
-            if price < donchian_mid or not trend_regime or not vol_confirm:
+            # Exit long: price returns to middle BB or opposite signal emerges
+            if price < sma[i] or (is_ranging and price > upper_bb[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to midpoint OR trend regime ends OR volume confirmation fails
-            if price > donchian_mid or not trend_regime or not vol_confirm:
+            # Exit short: price returns to middle BB or opposite signal emerges
+            if price > sma[i] or (is_ranging and price < lower_bb[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -128,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DonchianBreakout_1dADX_Volume_Regime"
-timeframe = "4h"
+name = "6h_BBSqueeze_1dADX_Regime"
+timeframe = "6h"
 leverage = 1.0
