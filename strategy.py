@@ -3,12 +3,6 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Use 1d EMA(34) for trend direction, 1d ATR(14) for volatility filter,
-# and 4h volume regime filter. Enter only during high-volume sessions (08-20 UTC)
-# when price is beyond 1.5x ATR from EMA in trend direction. Exit when price
-# returns to within 0.5x ATR of EMA. This captures trending moves while avoiding
-# chop. Target: 15-35 trades/year with controlled risk.
-
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
@@ -19,112 +13,110 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Precompute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # === Weekly Pivot Points for trend direction ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # === 1d EMA (34-period) for trend direction ===
+    # Calculate weekly pivot levels: P = (H+L+C)/3, R1 = 2*P-L, S1 = 2*P-H
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    
+    # Align weekly pivot levels to 6h timeframe
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    
+    # === Daily ATR for volatility filter ===
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    
-    # Wilder's EMA (alpha = 1/period)
-    alpha = 1.0 / 34
-    ema_34 = np.full_like(close_1d, np.nan)
-    if len(close_1d) > 0:
-        ema_34[0] = close_1d[0]
-        for i in range(1, len(close_1d)):
-            ema_34[i] = alpha * close_1d[i] + (1 - alpha) * ema_34[i-1]
-    
-    # === 1d ATR (14-period) for volatility filter ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.maximum(high_1d - low_1d,
+                    np.maximum(np.abs(high_1d - np.roll(close_1d, 1)),
+                               np.abs(low_1d - np.roll(close_1d, 1))))
+    tr[0] = high_1d[0] - low_1d[0]
     
-    # Wilder's smoothing for ATR
+    # ATR(14) with Wilder's smoothing
     atr_14 = np.full_like(tr, np.nan)
     if len(tr) >= 14:
         atr_14[13] = np.mean(tr[:14])
         for i in range(14, len(tr)):
             atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
     
-    # Align 1d indicators to 1h
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Align ATR to 6h timeframe
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # === 4h Volume regime filter ===
-    df_4h = get_htf_data(prices, '4h')
-    volume_4h = df_4h['volume'].values
+    # === 6h Volume filter ===
+    vol_ma_20 = np.full_like(volume, np.nan)
+    for i in range(len(volume)):
+        if i >= 19:
+            vol_ma_20[i] = np.mean(volume[i-19:i+1])
+        elif i > 0:
+            vol_ma_20[i] = np.mean(volume[max(0, i-9):i+1])
+        else:
+            vol_ma_20[i] = volume[0]
     
-    # 20-period EMA of volume on 4h
-    alpha_vol = 2.0 / (20 + 1)
-    vol_ema_20 = np.full_like(volume_4h, np.nan)
-    if len(volume_4h) > 0:
-        vol_ema_20[0] = volume_4h[0]
-        for i in range(1, len(volume_4h)):
-            vol_ema_20[i] = alpha_vol * volume_4h[i] + (1 - alpha_vol) * vol_ema_20[i-1]
-    
-    # Volume regime: high when current > 1.5x EMA
-    vol_regime_4h = volume_4h > vol_ema_20 * 1.5
-    vol_regime_aligned = align_htf_to_ltf(prices, df_4h, vol_regime_4h.astype(float))
+    volume_filter = volume > vol_ma_20 * 1.5
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: ensure indicators are valid
+    # Warmup period
     warmup = 100
     
+    # Track position state
+    position = 0  # 0: flat, 1: long, -1: short
+    
     for i in range(warmup, n):
-        # Skip if data not ready or outside session
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
-            np.isnan(vol_regime_aligned[i]) or not in_session[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or 
+            np.isnan(s1_1w_aligned[i]) or np.isnan(atr_14_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Distance from EMA in ATR units
-        if atr_14_aligned[i] <= 0:
-            dist_atr = 0
-        else:
-            dist_atr = (close[i] - ema_34_aligned[i]) / atr_14_aligned[i]
-        
-        # Entry: price beyond 1.5 ATR from EMA in trend direction
+        # Entry logic: only enter when flat
         if position == 0:
-            if dist_atr > 1.5:  # Strong uptrend
-                signals[i] = 0.20
+            # Long: price above weekly R1 + volatility filter + volume filter
+            if (close[i] > r1_1w_aligned[i] and 
+                atr_14_aligned[i] > 0.01 * close[i] and  # volatility filter
+                volume_filter[i]):
+                signals[i] = 0.25
                 position = 1
                 continue
-            elif dist_atr < -1.5:  # Strong downtrend
-                signals[i] = -0.20
+            # Short: price below weekly S1 + volatility filter + volume filter
+            elif (close[i] < s1_1w_aligned[i] and 
+                  atr_14_aligned[i] > 0.01 * close[i] and  # volatility filter
+                  volume_filter[i]):
+                signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit: price returns to within 0.5 ATR of EMA (mean reversion)
+        # Exit logic
         elif position == 1:
-            if dist_atr < 0.5:
+            # Exit long: price crosses below weekly pivot
+            if close[i] < pivot_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            if dist_atr > -0.5:
+            # Exit short: price crosses above weekly pivot
+            if close[i] > pivot_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_EMA34_ATR_VolumeRegime_Distance_v1"
-timeframe = "1h"
+name = "6h_WeeklyPivot_R1S1_Breakout_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
