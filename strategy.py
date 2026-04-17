@@ -36,13 +36,13 @@ def generate_signals(prices):
     r2_prev[0] = np.nan
     s2_prev[0] = np.nan
     
-    # Align daily pivot levels to 4h timeframe
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1_prev)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1_prev)
-    r2_4h = align_htf_to_ltf(prices, df_1d, r2_prev)
-    s2_4h = align_htf_to_ltf(prices, df_1d, s2_prev)
+    # Align daily pivot levels to 12h timeframe
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1_prev)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1_prev)
+    r2_12h = align_htf_to_ltf(prices, df_1d, r2_prev)
+    s2_12h = align_htf_to_ltf(prices, df_1d, s2_prev)
     
-    # Volume confirmation: current volume > 1.8 * 12-period average (12*4h = 48h ~ 2 days)
+    # Volume confirmation: current volume > 1.5 * 12-period average (12h * 12 = 6 days)
     volume_ma12 = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
     
     # ATR filter to avoid low volatility environments
@@ -59,38 +59,38 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 25  # Need R2/S2 and ATR MA10
+    start_idx = 20  # Need R2/S2 and ATR MA10
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(volume_ma12[i]) or 
             np.isnan(atr[i]) or 
             np.isnan(atr_ma10[i]) or 
-            np.isnan(r2_4h[i]) or 
-            np.isnan(s2_4h[i]) or
-            np.isnan(r1_4h[i]) or 
-            np.isnan(s1_4h[i])):
+            np.isnan(r2_12h[i]) or 
+            np.isnan(s2_12h[i]) or
+            np.isnan(r1_12h[i]) or 
+            np.isnan(s1_12h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.8x 12-period average
-        volume_filter = volume[i] > (1.8 * volume_ma12[i])
+        # Volume filter: current volume > 1.5x 12-period average
+        volume_filter = volume[i] > (1.5 * volume_ma12[i])
         # Volatility filter: ATR > ATR MA10 (avoid low volatility)
         volatility_filter = atr[i] > atr_ma10[i]
         
         if position == 0:
             # Long: price breaks above R2 with volume and volatility (strong breakout)
-            if close[i] > r2_4h[i] and volume_filter and volatility_filter:
+            if close[i] > r2_12h[i] and volume_filter and volatility_filter:
                 signals[i] = 0.25
                 position = 1
             # Short: price breaks below S2 with volume and volatility (strong breakdown)
-            elif close[i] < s2_4h[i] and volume_filter and volatility_filter:
+            elif close[i] < s2_12h[i] and volume_filter and volatility_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit long: price returns below R1 or volatility drops
-            if close[i] < r1_4h[i] or not volatility_filter:
+            if close[i] < r1_12h[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,7 +98,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit short: price returns above S1 or volatility drops
-            if close[i] > s1_4h[i] or not volatility_filter:
+            if close[i] > s1_12h[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Pivot_R2_S2_Breakout_Vol_v4"
-timeframe = "4h"
+name = "12h_Pivot_R2_S2_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
