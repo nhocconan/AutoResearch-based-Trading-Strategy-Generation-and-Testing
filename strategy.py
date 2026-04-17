@@ -1,37 +1,22 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 """
-6h_FibPivot_R1S1_EMA34_VolumeSpike_ATRFilter
-Strategy: 6h Fibonacci pivot breakout with EMA34 filter, volume spike, and ATR volatility filter.
-Long: Close > R1 + EMA34 + volume > 1.5x 20-bar avg + ATR(14) > 0.5x ATR(50)
-Short: Close < S1 + EMA34 + volume > 1.5x 20-bar avg + ATR(14) > 0.5x ATR(50)
-Exit: Close crosses EMA34 in opposite direction
+4h_Donchian20_12hTrend_VolumeConfirm
+Strategy: 4h Donchian(20) breakout with 12h trend filter and volume confirmation.
+Long: Price breaks above 20-period high + 12h close > 12h EMA(34) + volume > 1.5x 20-period avg
+Short: Price breaks below 20-period low + 12h close < 12h EMA(34) + volume > 1.5x 20-period avg
+Exit: Opposite breakout or ATR-based stop
 Position size: 0.25
-Uses Fibonacci pivots from daily timeframe for key levels, EMA34 for trend,
-volume spike for conviction, ATR filter to avoid low volatility whipsaws.
-Works in both bull and bear markets by fading at key daily levels with confirmation.
+Uses Donchian for breakout signals, 12h EMA for trend filter, volume for confirmation.
+Designed to work in both bull and bear markets by requiring trend alignment.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_atr(high, low, close, period):
-    """Calculate Average True Range"""
-    high_low = high - low
-    high_close = np.abs(high - np.roll(close, 1))
-    low_close = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    tr[0] = high_low[0]  # first period
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    return atr.values
-
-def calculate_ema(series, period):
-    """Calculate Exponential Moving Average"""
-    return pd.Series(series).ewm(span=period, adjust=False, min_periods=period).mean().values
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -39,34 +24,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Fibonacci pivots and EMA34
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate Fibonacci pivot points (daily)
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r1 = pivot + 0.382 * range_1d
-    s1 = pivot - 0.382 * range_1d
-    r2 = pivot + 0.618 * range_1d
-    s2 = pivot - 0.618 * range_1d
+    # Calculate 12h EMA(34) for trend filter
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Calculate EMA34 on daily close
-    ema34_1d = calculate_ema(close_1d, 34)
+    # Calculate 4h Donchian channels (20-period)
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Calculate ATR on 6h data
-    atr_6h = calculate_atr(high, low, close, 14)
-    atr_ma50_6h = pd.Series(atr_6h).rolling(window=50, min_periods=50).mean().values
+    # Donchian upper and lower bands
+    upper_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lower_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 20-period volume average
-    vol_ma20_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align Donchian bands to 4h timeframe (they are already on 4h)
+    upper_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_4h)
+    lower_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_4h)
     
-    # Align daily indicators to 6h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate 4h volume average (20-period)
+    volume_4h = df_4h['volume'].values
+    volume_ma20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    volume_ma20_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_ma20_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -74,52 +56,51 @@ def generate_signals(prices):
     # Precompute session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    for i in range(60, n):  # warmup for calculations
+    for i in range(50, n):  # warmup for indicators
         # Session filter: 08-20 UTC
         if not (8 <= hours[i] <= 20):
             signals[i] = 0.0
             continue
         
         # Skip if any required data is not available
-        if (np.isclose(r1_aligned[i], 0) or np.isclose(s1_aligned[i], 0) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(atr_6h[i]) or 
-            np.isnan(atr_ma50_6h[i]) or np.isnan(vol_ma20_6h[i])):
+        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(upper_4h_aligned[i]) or 
+            np.isnan(lower_4h_aligned[i]) or np.isnan(volume_ma20_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-bar average
-        volume_filter = volume[i] > (1.5 * vol_ma20_6h[i])
+        # Current 4h volume aligned to 4h
+        vol_4h_current = align_htf_to_ltf(prices, df_4h, volume_4h)[i]
+        volume_filter = vol_4h_current > (1.5 * volume_ma20_4h_aligned[i])
         
-        # ATR filter: current ATR > 0.5x 50-bar average ATR (avoid low volatility)
-        atr_filter = atr_6h[i] > (0.5 * atr_ma50_6h[i])
+        # Trend filter: 12h close vs 12h EMA(34)
+        uptrend_12h = close_12h[-1] > ema_34_12h[-1] if len(close_12h) > 0 else False
+        downtrend_12h = close_12h[-1] < ema_34_12h[-1] if len(close_12h) > 0 else False
         
-        # Trend filter: price vs daily EMA34
-        above_ema34 = close[i] > ema34_1d_aligned[i]
-        below_ema34 = close[i] < ema34_1d_aligned[i]
+        # Donchian breakout signals
+        breakout_up = close[i] > upper_4h_aligned[i]
+        breakout_down = close[i] < lower_4h_aligned[i]
         
         if position == 0:
-            # Long: break above R1 + above EMA34 + volume spike + ATR filter
-            if (close[i] > r1_aligned[i] and above_ema34 and 
-                volume_filter and atr_filter):
+            # Long: Donchian breakout up + 12h uptrend + volume filter
+            if breakout_up and uptrend_12h and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 + below EMA34 + volume spike + ATR filter
-            elif (close[i] < s1_aligned[i] and below_ema34 and 
-                  volume_filter and atr_filter):
+            # Short: Donchian breakout down + 12h downtrend + volume filter
+            elif breakout_down and downtrend_12h and volume_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below EMA34
-            if below_ema34:
+            # Exit long: Donchian breakout down
+            if breakout_down:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above EMA34
-            if above_ema34:
+            # Exit short: Donchian breakout up
+            if breakout_up:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -127,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_FibPivot_R1S1_EMA34_VolumeSpike_ATRFilter"
-timeframe = "6h"
+name = "4h_Donchian20_12hTrend_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
