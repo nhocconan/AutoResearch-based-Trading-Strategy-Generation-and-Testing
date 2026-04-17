@@ -1,21 +1,11 @@
 #!/usr/bin/env python3
-"""
-12h_KAMA_Trend_Filter
-KAMA-based trend following with volume confirmation and volatility filter
-Designed to work in both bull and bear markets by:
-- Using KAMA (adaptive moving average) to filter noise and capture trends
-- Requiring volume confirmation to avoid false breakouts
-- Using ATR-based volatility filter to avoid choppy markets
-Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,59 +13,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d KAMA (14-period) ===
+    # === 1d Bollinger Bands (20, 2) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate Efficiency Ratio (ER) and Smoothing Constants
+    # Calculate Bollinger Bands
+    sma_20 = np.full_like(close_1d, np.nan)
+    std_20 = np.full_like(close_1d, np.nan)
+    for i in range(len(close_1d)):
+        if i >= 19:
+            sma_20[i] = np.mean(close_1d[i-19:i+1])
+            std_20[i] = np.std(close_1d[i-19:i+1])
+        elif i > 0:
+            sma_20[i] = np.mean(close_1d[max(0, i-9):i+1])
+            std_20[i] = np.std(close_1d[max(0, i-9):i+1])
+        else:
+            sma_20[i] = close_1d[0]
+            std_20[i] = 0
+    
+    upper_band = sma_20 + 2 * std_20
+    lower_band = sma_20 - 2 * std_20
+    
+    # === 1d KAMA (10) ===
+    # Calculate Efficiency Ratio
     change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.abs(np.diff(close_1d))
+    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0) if len(close_1d) > 1 else 0
     er = np.zeros_like(close_1d)
     for i in range(len(close_1d)):
         if i >= 1:
-            if volatility[i] != 0:
-                er[i] = change[i] / volatility[i]
-            else:
-                er[i] = 1.0
+            price_change = np.abs(close_1d[i] - close_1d[i-10]) if i >= 10 else np.abs(close_1d[i] - close_1d[0])
+            volatility_sum = np.sum(np.abs(np.diff(close_1d[max(0, i-9):i+1])))
+            er[i] = price_change / (volatility_sum + 1e-10)
         else:
-            er[i] = 0.0
+            er[i] = 0
     
     # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
     
     # Calculate KAMA
-    kama_1d = np.zeros_like(close_1d)
-    kama_1d[0] = close_1d[0]
+    kama = np.full_like(close_1d, np.nan)
+    kama[0] = close_1d[0]
     for i in range(1, len(close_1d)):
-        kama_1d[i] = kama_1d[i-1] + sc[i] * (close_1d[i] - kama_1d[i-1])
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # === 1d ATR (14-period) for volatility filter ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === 1d RSI (14) ===
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    
-    atr_14 = np.full_like(close_1d, np.nan)
+    avg_gain = np.full_like(close_1d, np.nan)
+    avg_loss = np.full_like(close_1d, np.nan)
     for i in range(len(close_1d)):
         if i >= 13:
-            atr_14[i] = np.mean(tr[i-13:i+1])
+            avg_gain[i] = np.mean(gain[i-13:i+1])
+            avg_loss[i] = np.mean(loss[i-13:i+1])
         elif i > 0:
-            atr_14[i] = np.mean(tr[1:i+1])
+            avg_gain[i] = np.mean(gain[1:i+1])
+            avg_loss[i] = np.mean(loss[1:i+1])
         else:
-            atr_14[i] = np.nan
+            avg_gain[i] = gain[0] if i == 0 else 0
+            avg_loss[i] = loss[0] if i == 0 else 0
     
-    # === Align indicators to 12h timeframe ===
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # === 12h Volume confirmation ===
+    # === Align indicators to 4h timeframe ===
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
+    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
+    
+    # === 4h Volume confirmation ===
     # Calculate 20-period average volume
     vol_ma_20 = np.full_like(volume, np.nan)
     for i in range(len(volume)):
@@ -86,13 +94,13 @@ def generate_signals(prices):
         else:
             vol_ma_20[i] = volume[0]
     
-    # Volume confirmation: current volume > 1.3x 20-period average
-    vol_confirm = volume > vol_ma_20 * 1.3
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_confirm = volume > vol_ma_20 * 1.5
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 30
+    warmup = 100
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
@@ -100,7 +108,9 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # Skip if any required data is NaN
         if (np.isnan(kama_aligned[i]) or 
-            np.isnan(atr_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or 
+            np.isnan(upper_band_aligned[i]) or 
+            np.isnan(lower_band_aligned[i]) or 
             np.isnan(vol_confirm[i])):
             signals[i] = 0.0
             position = 0
@@ -108,25 +118,23 @@ def generate_signals(prices):
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price above KAMA with volume confirmation and sufficient volatility
-            if (close[i] > kama_aligned[i] and 
-                vol_confirm[i] and 
-                atr_aligned[i] > 0):  # volatility filter
-                signals[i] = 0.25
-                position = 1
-                continue
-            # Short: price below KAMA with volume confirmation and sufficient volatility
-            elif (close[i] < kama_aligned[i] and 
-                  vol_confirm[i] and 
-                  atr_aligned[i] > 0):  # volatility filter
-                signals[i] = -0.25
-                position = -1
-                continue
+            # Long: price above KAMA and RSI > 50 with volume
+            if close[i] > kama_aligned[i] and rsi_aligned[i] > 50:
+                if vol_confirm[i]:
+                    signals[i] = 0.25
+                    position = 1
+                    continue
+            # Short: price below KAMA and RSI < 50 with volume
+            elif close[i] < kama_aligned[i] and rsi_aligned[i] < 50:
+                if vol_confirm[i]:
+                    signals[i] = -0.25
+                    position = -1
+                    continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price crosses below KAMA
-            if close[i] < kama_aligned[i]:
+            # Exit long: price touches upper Bollinger Band
+            if close[i] >= upper_band_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -134,8 +142,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above KAMA
-            if close[i] > kama_aligned[i]:
+            # Exit short: price touches lower Bollinger Band
+            if close[i] <= lower_band_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -144,6 +152,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_KAMA_Trend_Filter"
-timeframe = "12h"
+name = "4h_KAMA_RSI_BBands_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
