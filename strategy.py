@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with volume confirmation and ADX trend filter.
-Enters long when price breaks above Donchian upper band with volume > 1.5x average and ADX > 25.
-Enters short when price breaks below Donchian lower band with volume > 1.5x average and ADX > 25.
-Exits when price crosses the Donchian middle (20-period midpoint). Uses ADX to filter range markets.
-Designed to work in both bull and bear markets by following established trends with volume confirmation.
-Target: 20-50 trades/year to minimize fee drag.
+Hypothesis: 12h timeframe with 1-day pivot points (R1/S1) and volume confirmation, filtered by 1-day EMA50 trend.
+Uses mean reversion at daily pivot levels with breakout confirmation. Designed to work in both bull and bear markets
+by trading reversals at key daily levels with volume filter to avoid false breakouts. Aims for 12-37 trades/year.
 """
 import numpy as np
 import pandas as pd
@@ -13,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,91 +18,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_high + lowest_low) / 2.0
+    # Get 1d data for pivot levels and EMA50
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # ADX calculation (14-period)
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    tr = np.zeros(n)
+    # Calculate 1d pivot points (standard formula)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r1_1d = 2 * pivot_1d - low_1d
+    s1_1d = 2 * pivot_1d - high_1d
     
-    for i in range(1, n):
-        high_diff = high[i] - high[i-1]
-        low_diff = low[i-1] - low[i]
-        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
-        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    # Align 1d pivot levels to 12h
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Smooth with Wilder's smoothing (alpha = 1/period)
-    atr = np.zeros(n)
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    dx = np.zeros(n)
-    adx = np.zeros(n)
+    # Get 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    period = 14
-    # Initial values
-    atr[period] = np.mean(tr[1:period+1])
-    plus_di[period] = 100 * np.mean(plus_dm[1:period+1]) / atr[period]
-    minus_di[period] = 100 * np.mean(minus_dm[1:period+1]) / atr[period]
-    
-    for i in range(period+1, n):
-        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        plus_di[i] = (plus_di[i-1] * (period-1) + plus_dm[i]) / period * 100 / atr[i] if atr[i] != 0 else 0
-        minus_di[i] = (minus_di[i-1] * (period-1) + minus_dm[i]) / period * 100 / atr[i] if atr[i] != 0 else 0
-        dx[i] = abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i]) * 100 if (plus_di[i] + minus_di[i]) != 0 else 0
-    
-    # ADX is smoothed DX
-    adx[period*2] = np.mean(dx[period+1:period*2+1])
-    for i in range(period*2+1, n):
-        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-    
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    volume_filter = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # enough for Donchian and ADX
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(donchian_mid[i]) or
-            np.isnan(adx[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian upper with volume and ADX > 25
-            if close[i] > highest_high[i] and volume_filter[i] and adx[i] > 25:
-                signals[i] = 0.30
+            # Long: price breaks above R1 with volume, and above 1d EMA50
+            if close[i] > r1_1d_aligned[i] and volume_filter[i] and close[i] > ema_50_1d_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower with volume and ADX > 25
-            elif close[i] < lowest_low[i] and volume_filter[i] and adx[i] > 25:
-                signals[i] = -0.30
+            # Short: price breaks below S1 with volume, and below 1d EMA50
+            elif close[i] < s1_1d_aligned[i] and volume_filter[i] and close[i] < ema_50_1d_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below Donchian middle
-            if close[i] < donchian_mid[i]:
+            # Exit long: price breaks below pivot
+            if close[i] < pivot_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above Donchian middle
-            if close[i] > donchian_mid[i]:
+            # Exit short: price breaks above pivot
+            if close[i] > pivot_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_Donchian20_Volume_ADX25"
-timeframe = "4h"
+name = "12h_1dPivot_R1S1_Volume_1dEMA50"
+timeframe = "12h"
 leverage = 1.0
