@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_1dWMA_VolumeBreakout
-- Uses 1d Weighted Moving Average (WMA) as trend filter
-- Enters long when price breaks above WMA with volume > 2x 20-period average
-- Enters short when price breaks below WMA with volume > 2x 20-period average
-- Exit when price crosses back across WMA
-- Position size: 0.25 to manage drawdown and limit trade frequency
-- Designed for 12h timeframe targeting 50-150 total trades over 4 years
-- Works in bull/bear via volume-confirmed breakouts aligned with daily trend
+Hypothesis: Price action tends to respect key psychological levels derived from prior day's range.
+Combining daily Camarilla pivot levels (R1/S1) with 4-hour volume spikes and trend alignment 
+(4h EMA34) creates high-probability breakout trades. The strategy targets 20-30 trades per year 
+by requiring confluence of three conditions: price breaking R1/S1, volume > 2x 20-bar average, 
+and price on correct side of daily EMA34. Exits occur when price returns to the daily pivot 
+or volume dries up, limiting adverse exposure in ranging markets. Designed for 4h timeframe 
+to work in both bull (breakouts continuation) and bear (mean reversion to pivot) regimes.
 """
 
 import numpy as np
@@ -24,21 +23,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for WMA trend filter
+    # Get daily data for Camarilla pivot and EMA
     df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate Camarilla pivot levels from previous day
+    # Based on previous day's high, low, close
+    phigh = df_1d['high'].values
+    plow = df_1d['low'].values
     pclose = df_1d['close'].values
     
-    # Calculate 1d WMA (20-period) for trend filter
-    # WMA = sum(price * weight) / sum(weights), weights = 1..20
-    weights = np.arange(1, 21)
-    wma_20 = np.convolve(pclose, weights[::-1], mode='full')[:len(pclose)] @ weights / weights.sum()
-    # Pad beginning with NaN for insufficient data
-    wma_20 = np.concatenate([np.full(19, np.nan), wma_20[19:]])
+    pivot = (phigh + plow + pclose) / 3
+    range_ = phigh - plow
     
-    # Align daily WMA to 12h timeframe (waits for daily bar to close)
-    wma_20_12h = align_htf_to_ltf(prices, df_1d, wma_20)
+    # Camarilla levels
+    R1 = pivot + (range_ * 1.1 / 12)
+    S1 = pivot - (range_ * 1.1 / 12)
+    R2 = pivot + (range_ * 1.1 / 6)
+    S2 = pivot - (range_ * 1.1 / 6)
+    R3 = pivot + (range_ * 1.1 / 4)
+    S3 = pivot - (range_ * 1.1 / 4)
+    R4 = pivot + (range_ * 1.1 / 2)
+    S4 = pivot - (range_ * 1.1 / 2)
     
-    # Volume confirmation: 20-period volume MA on 12h
+    # Calculate 1d EMA34 for trend filter
+    ema_34 = pd.Series(pclose).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align all daily levels to 4h timeframe (waits for daily bar to close)
+    R1_4h = align_htf_to_ltf(prices, df_1d, R1)
+    S1_4h = align_htf_to_ltf(prices, df_1d, S1)
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
+    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # Volume confirmation: 20-period volume MA on 4h
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
     signals = np.zeros(n)
@@ -47,7 +63,8 @@ def generate_signals(prices):
     start_idx = 40  # warmup for all indicators
     
     for i in range(start_idx, n):
-        if np.isnan(wma_20_12h[i]) or np.isnan(volume_ma_20.iloc[i]):
+        if (np.isnan(R1_4h[i]) or np.isnan(S1_4h[i]) or np.isnan(pivot_4h[i]) or
+            np.isnan(ema_34_4h[i]) or np.isnan(volume_ma_20.iloc[i])):
             signals[i] = 0.0
             continue
         
@@ -56,26 +73,26 @@ def generate_signals(prices):
         vol_ma = volume_ma_20.iloc[i]
         
         if position == 0:
-            # Long: price crosses above WMA with volume spike
-            if price > wma_20_12h[i] and close[i-1] <= wma_20_12h[i-1] and vol > 2.0 * vol_ma:
+            # Long: break above R1 with volume spike and above daily EMA34
+            if price > R1_4h[i] and vol > 2.0 * vol_ma and price > ema_34_4h[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below WMA with volume spike
-            elif price < wma_20_12h[i] and close[i-1] >= wma_20_12h[i-1] and vol > 2.0 * vol_ma:
+            # Short: break below S1 with volume spike and below daily EMA34
+            elif price < S1_4h[i] and vol > 2.0 * vol_ma and price < ema_34_4h[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses back below WMA
-            if price < wma_20_12h[i] and close[i-1] >= wma_20_12h[i-1]:
+            # Long exit: price returns to pivot or volume drops below average
+            if price < pivot_4h[i] or vol < vol_ma:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back above WMA
-            if price > wma_20_12h[i] and close[i-1] <= wma_20_12h[i-1]:
+            # Short exit: price returns to pivot or volume drops below average
+            if price > pivot_4h[i] or vol < vol_ma:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -83,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dWMA_VolumeBreakout"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Volume_EMA34"
+timeframe = "4h"
 leverage = 1.0
