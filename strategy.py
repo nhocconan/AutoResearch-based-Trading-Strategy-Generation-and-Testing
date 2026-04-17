@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-12h Multi-Timeframe Strategy: Combines 12h Donchian breakout with 1d EMA trend filter, 
-volume confirmation, and 1d Choppiness Index regime filter. 
-Long when price breaks above 12h Donchian upper band with volume > 1.5x average, 
-price above 1d EMA50, and CHOP > 61.8 (trending regime). 
-Short when price breaks below 12h Donchian lower band with volume > 1.5x average, 
-price below 1d EMA50, and CHOP > 61.8. 
-Exit on opposite Donchian breakout or when CHOP < 38.2 (range regime).
-Designed for 12h to work in trending markets with ~20-30 trades per year.
+Hypothesis: On the 4-hour timeframe, price respects the 1-day and 12-hour key support/resistance levels.
+We combine this with a 12-hour EMA34 trend filter and volume confirmation to capture breakouts.
+Long when price breaks above prior 1-day high with volume > 2x average and price above 12-hour EMA34.
+Short when price breaks below prior 1-day low with volume > 2x average and price below 12-hour EMA34.
+Exit when price returns to the prior 1-day midpoint (mean reversion) or on opposite breakout.
+Designed for 4h to work in trending (breakouts) and ranging (mean reversion to mid-point) markets with ~20-50 trades per year.
 """
 
 import numpy as np
@@ -16,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,51 +22,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian channels
-    df_12h = get_htf_data(prices, '12h')
-    
-    # 12h Donchian channels (20-period)
-    donch_high = pd.Series(df_12h['high']).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(df_12h['low']).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2
-    
-    # Align 12h Donchian levels to lower timeframe
-    donch_high_ltf = align_htf_to_ltf(prices, df_12h, donch_high)
-    donch_low_ltf = align_htf_to_ltf(prices, df_12h, donch_low)
-    donch_mid_ltf = align_htf_to_ltf(prices, df_12h, donch_mid)
-    
-    # Get 1d data for EMA and Choppiness Index
+    # Get 1d data for prior period's high/low and 12h EMA34
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d EMA50 for trend filter
-    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_ltf = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Prior 1d high and low (use shift(1) to avoid look-ahead: use completed period's levels)
+    phigh = df_1d['high'].shift(1).values
+    plow = df_1d['low'].shift(1).values
+    pclose = df_1d['close'].values
     
-    # 1d Choppiness Index (14-period) for regime filter
-    # CHOP = 100 * log10(sum(TR) / (HHV - LLV)) / log10(period)
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_sum = tr.rolling(window=14, min_periods=14).sum()
-    hh = df_1d['high'].rolling(window=14, min_periods=14).max()
-    ll = df_1d['low'].rolling(window=14, min_periods=14).min()
-    chop = 100 * np.log10(atr_sum / (hh - ll)) / np.log10(14)
-    chop_values = chop.values
-    chop_ltf = align_htf_to_ltf(prices, df_1d, chop_values)
+    # Prior 1d midpoint for mean reversion exit
+    pmid = (phigh + plow) / 2
     
-    # Volume confirmation: 20-period volume MA on current timeframe
+    # Calculate 12h EMA34 for trend filter (use prior period's close to avoid look-ahead)
+    ema_34 = pd.Series(pclose).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align all 1d levels to 4h timeframe (waits for 1d bar to close)
+    phigh_4h = align_htf_to_ltf(prices, df_1d, phigh)
+    plow_4h = align_htf_to_ltf(prices, df_1d, plow)
+    pmid_4h = align_htf_to_ltf(prices, df_1d, pmid)
+    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # Volume confirmation: 20-period volume MA on 4h
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 100  # warmup for all indicators
+    start_idx = 50  # warmup for EMA34 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(donch_high_ltf[i]) or np.isnan(donch_low_ltf[i]) or 
-            np.isnan(ema_50_ltf[i]) or np.isnan(chop_ltf[i]) or 
-            np.isnan(volume_ma_20.iloc[i])):
+        if (np.isnan(phigh_4h[i]) or np.isnan(plow_4h[i]) or np.isnan(pmid_4h[i]) or
+            np.isnan(ema_34_4h[i]) or np.isnan(volume_ma_20.iloc[i])):
             signals[i] = 0.0
             continue
         
@@ -77,28 +61,26 @@ def generate_signals(prices):
         vol_ma = volume_ma_20.iloc[i]
         
         if position == 0:
-            # Long: Donchian breakout up + volume + EMA filter + trending regime
-            if (price > donch_high_ltf[i] and vol > 1.5 * vol_ma and 
-                price > ema_50_ltf[i] and chop_ltf[i] > 61.8):
+            # Long: price breaks above prior 1d high with volume spike and above 12h EMA34
+            if price > phigh_4h[i] and vol > 2.0 * vol_ma and price > ema_34_4h[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Donchian breakout down + volume + EMA filter + trending regime
-            elif (price < donch_low_ltf[i] and vol > 1.5 * vol_ma and 
-                  price < ema_50_ltf[i] and chop_ltf[i] > 61.8):
+            # Short: price breaks below prior 1d low with volume spike and below 12h EMA34
+            elif price < plow_4h[i] and vol > 2.0 * vol_ma and price < ema_34_4h[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: opposite breakout OR range regime (CHOP < 38.2)
-            if price < donch_low_ltf[i] or chop_ltf[i] < 38.2:
+            # Long exit: price returns to prior 1d midpoint (mean reversion) OR breaks below prior 1d low (invalidates breakout)
+            if price < pmid_4h[i] or price < plow_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: opposite breakout OR range regime (CHOP < 38.2)
-            if price > donch_high_ltf[i] or chop_ltf[i] < 38.2:
+            # Short exit: price returns to prior 1d midpoint (mean reversion) OR breaks above prior 1d high (invalidates breakout)
+            if price > pmid_4h[i] or price > phigh_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_EMA_CHOP_Volume_Breakout"
-timeframe = "12h"
+name = "4h_Prior1D_HL_Breakout_MeanRev"
+timeframe = "4h"
 leverage = 1.0
