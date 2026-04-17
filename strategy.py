@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Trend_RSI_Momentum
-Strategy: KAMA trend direction with RSI momentum filter and volume confirmation.
-Long: KAMA rising + RSI > 55 + volume > 1.5x MA20
-Short: KAMA falling + RSI < 45 + volume > 1.5x MA20
-Exit: Opposite RSI signal or volume drop
+1d_WeeklyPivot_Squeeze_Breakout
+Strategy: Weekly Pivot Point breakout with Bollinger Squeeze filter.
+- Long when price breaks above weekly R1 with Bollinger Bandwidth < 50th percentile
+- Short when price breaks below weekly S1 with Bollinger Bandwidth < 50th percentile
+- Exit when price returns to weekly pivot (PP) or volatility expands
 Position size: 0.25
-Designed to capture momentum in trending markets while avoiding chop.
-Timeframe: 4h
+Designed to capture breakouts from low volatility regimes using weekly structure.
+Timeframe: 1d
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_hlf
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,75 +24,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average)
+    # Calculate weekly pivot points from weekly data
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) == 0:
+        return np.zeros(n)
+    
+    # Weekly high, low, close
+    wh = df_weekly['high'].values
+    wl = df_weekly['low'].values
+    wc = df_weekly['close'].values
+    
+    # Weekly pivot point and support/resistance levels
+    pp = (wh + wl + wc) / 3.0
+    r1 = 2 * pp - wl
+    s1 = 2 * pp - wh
+    r2 = pp + (wh - wl)
+    s2 = pp - (wh - wl)
+    
+    # Align weekly levels to daily
+    pp_aligned = align_htf_to_ltf(prices, df_weekly, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
+    
+    # Bollinger Bands (20, 2) on daily
     close_series = pd.Series(close)
-    # Efficiency Ratio
-    change = abs(close_series - close_series.shift(10))
-    volatility = abs(close_series.diff()).rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    # Smoothing constants
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    # KAMA calculation
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if not np.isnan(sc.iloc[i]) and not np.isnan(kama[i-1]):
-            kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    basis = close_series.rolling(window=20, min_periods=20).mean()
+    dev = close_series.rolling(window=20, min_periods=20).std()
+    upper = basis + 2.0 * dev
+    lower = basis - 2.0 * dev
+    bandwidth = (upper - lower) / basis
     
-    # Calculate RSI
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Percentile rank of bandwidth (252 lookback ~ 1 year)
+    bandwidth_series = pd.Series(bandwidth)
+    bandwidth_percentile = bandwidth_series.rolling(window=252, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
+    ).values
     
-    # Volume confirmation (20-period MA)
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Squeeze condition: bandwidth below 50th percentile
+    squeeze = bandwidth_percentile < 0.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)
+    start_idx = max(50, 252)  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (i < 10 or np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(volume_ma20[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(squeeze[i])):
             signals[i] = 0.0
             continue
         
-        # KAMA direction: rising if current > previous
-        kama_rising = kama[i] > kama[i-1]
-        kama_falling = kama[i] < kama[i-1]
-        
-        # Volume filter: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
-        
         # Entry conditions
         if position == 0:
-            # Long: KAMA rising + RSI > 55 + volume
-            if (kama_rising and rsi[i] > 55 and volume_filter):
+            # Long: break above R1 with squeeze
+            if close[i] > r1_aligned[i] and squeeze[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA falling + RSI < 45 + volume
-            elif (kama_falling and rsi[i] < 45 and volume_filter):
+            # Short: break below S1 with squeeze
+            elif close[i] < s1_aligned[i] and squeeze[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI drops below 50 or volume filter fails
-            if rsi[i] < 50 or not volume_filter:
+            # Exit long: return to pivot point or squeeze breaks
+            if close[i] <= pp_aligned[i] or not squeeze[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI rises above 50 or volume filter fails
-            if rsi[i] > 50 or not volume_filter:
+            # Exit short: return to pivot point or squeeze breaks
+            if close[i] >= pp_aligned[i] or not squeeze[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_Trend_RSI_Momentum"
-timeframe = "4h"
+name = "1d_WeeklyPivot_Squeeze_Breakout"
+timeframe = "1d"
 leverage = 1.0
