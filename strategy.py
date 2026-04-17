@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,40 +13,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h Close ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    volume_12h = df_12h['volume'].values
+    # === 1d Donchian Channels (20-period) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # === 12h KAMA (14) ===
-    # Calculate ER (Efficiency Ratio)
-    change = np.abs(np.diff(close_12h, prepend=close_12h[0]))
-    volatility = np.sum(np.abs(np.diff(close_12h)), axis=0)  # placeholder, will compute properly below
-    # Recalculate volatility properly
-    volatility = np.zeros_like(close_12h)
-    for i in range(1, len(close_12h)):
-        volatility[i] = volatility[i-1] + np.abs(close_12h[i] - close_12h[i-1])
+    # Upper channel: highest high of last 20 days
+    upper_20 = np.full_like(high_1d, np.nan)
+    for i in range(19, len(high_1d)):
+        upper_20[i] = np.max(high_1d[i-19:i+1])
     
-    # Avoid division by zero
-    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
+    # Lower channel: lowest low of last 20 days
+    lower_20 = np.full_like(low_1d, np.nan)
+    for i in range(19, len(low_1d)):
+        lower_20[i] = np.min(low_1d[i-19:i+1])
     
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    # Middle channel: average of upper and lower
+    middle_20 = (upper_20 + lower_20) / 2.0
     
-    # Calculate KAMA
-    kama = np.zeros_like(close_12h)
-    kama[0] = close_12h[0]
-    for i in range(1, len(close_12h)):
-        kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
+    # === 1d ADX (14-period) for trend strength ===
+    # Calculate +DM and -DM
+    high_diff = np.diff(high_1d, prepend=high_1d[0])
+    low_diff = np.diff(low_1d, prepend=low_1d[0])
     
-    # === 12h RSI(14) ===
-    delta = np.diff(close_12h, prepend=close_12h[0])
+    plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0)
+    minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0)
+    
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]  # First period
+    tr2[0] = np.abs(high_1d[0] - close_1d[0])
+    tr3[0] = np.abs(low_1d[0] - close_1d[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Wilder's smoothing (14-period)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            result[period-1] = np.mean(data[:period])
+            for i in range(period, len(data)):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    atr_14 = wilders_smoothing(tr, 14)
+    plus_di_14 = 100 * wilders_smoothing(plus_dm, 14) / atr_14
+    minus_di_14 = 100 * wilders_smoothing(minus_dm, 14) / atr_14
+    dx = np.where((plus_di_14 + minus_di_14) > 0, 
+                  100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14), 0)
+    adx_14 = wilders_smoothing(dx, 14)
+    
+    # === 1d RSI (14-period) for overbought/oversold ===
+    delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
-    # Wilder's smoothing
     avg_gain = np.zeros_like(gain)
     avg_loss = np.zeros_like(loss)
     if len(gain) > 0:
@@ -58,66 +82,56 @@ def generate_signals(prices):
         avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
     rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    rsi_14 = 100 - (100 / (1 + rs))
     
-    # === 12h Volume MA(20) ===
-    vol_ma_20 = np.zeros_like(volume_12h)
-    for i in range(len(volume_12h)):
-        if i >= 19:
-            vol_ma_20[i] = np.mean(volume_12h[i-19:i+1])
-        else:
-            vol_ma_20[i] = np.mean(volume_12h[max(0, i-9):i+1]) if i > 0 else volume_12h[0]
-    
-    # Align to 6h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_12h, kama)
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
-    close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
-    high_12h_aligned = align_htf_to_ltf(prices, df_12h, high_12h)
-    low_12h_aligned = align_htf_to_ltf(prices, df_12h, low_12h)
-    volume_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_12h)
+    # Align all indicators to 4h timeframe
+    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
+    middle_20_aligned = align_htf_to_ltf(prices, df_1d, middle_20)
+    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
+    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
     
     signals = np.zeros(n)
     
-    # Warmup
-    warmup = 200
+    # Warmup period
+    warmup = 100
     
-    # Track position
+    # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
-        # Skip if any data is NaN
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_12h_aligned[i]) or 
-            np.isnan(vol_ma_20_aligned[i]) or np.isnan(close_12h_aligned[i]) or
-            np.isnan(high_12h_aligned[i]) or np.isnan(low_12h_aligned[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
+            np.isnan(adx_14_aligned[i]) or np.isnan(rsi_14_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Volume confirmation: current 12h volume > 1.3x 20-period average
-        vol_confirm = volume_12h_aligned[i] > vol_ma_20_aligned[i] * 1.3
-        
-        # Price position relative to 12h range
-        range_12h = high_12h_aligned[i] - low_12h_aligned[i]
-        if range_12h > 0:
-            pos_in_range = (close_12h_aligned[i] - low_12h_aligned[i]) / range_12h
-        else:
-            pos_in_range = 0.5
+        # Volume confirmation: current 1d volume > 1.3x 20-period average
+        vol_ma_20_1d = np.zeros_like(volume_1d)
+        for j in range(len(volume_1d)):
+            if j >= 19:
+                vol_ma_20_1d[j] = np.mean(volume_1d[j-19:j+1])
+            else:
+                vol_ma_20_1d[j] = np.mean(volume_1d[max(0, j-9):j+1]) if j > 0 else volume_1d[0]
+        vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+        vol_confirm = vol_1d_aligned[i] > vol_ma_20_1d_aligned[i] * 1.3
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price above KAMA, RSI < 40, in lower 40% of range, with volume confirmation
-            if (close[i] > kama_aligned[i] and 
-                rsi_12h_aligned[i] < 40 and 
-                pos_in_range < 0.4 and 
+            # Long: price breaks above upper Donchian + strong trend (ADX>25) + not overbought (RSI<70) + volume
+            if (close[i] > upper_20_aligned[i] and 
+                adx_14_aligned[i] > 25 and 
+                rsi_14_aligned[i] < 70 and 
                 vol_confirm):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price below KAMA, RSI > 60, in upper 60% of range, with volume confirmation
-            elif (close[i] < kama_aligned[i] and 
-                  rsi_12h_aligned[i] > 60 and 
-                  pos_in_range > 0.6 and 
+            # Short: price breaks below lower Donchian + strong trend (ADX>25) + not oversold (RSI>30) + volume
+            elif (close[i] < lower_20_aligned[i] and 
+                  adx_14_aligned[i] > 25 and 
+                  rsi_14_aligned[i] > 30 and 
                   vol_confirm):
                 signals[i] = -0.25
                 position = -1
@@ -125,8 +139,10 @@ def generate_signals(prices):
         
         # Exit logic
         elif position == 1:
-            # Exit long: price below KAMA OR RSI > 50
-            if close[i] < kama_aligned[i] or rsi_12h_aligned[i] > 50:
+            # Exit long: price returns to middle Donchian OR trend weakens (ADX<20) OR overbought (RSI>75)
+            if (close[i] < middle_20_aligned[i] or 
+                adx_14_aligned[i] < 20 or 
+                rsi_14_aligned[i] > 75):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -134,8 +150,10 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price above KAMA OR RSI < 50
-            if close[i] > kama_aligned[i] or rsi_12h_aligned[i] < 50:
+            # Exit short: price returns to middle Donchian OR trend weakens (ADX<20) OR oversold (RSI<25)
+            if (close[i] > middle_20_aligned[i] or 
+                adx_14_aligned[i] < 20 or 
+                rsi_14_aligned[i] < 25):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -144,6 +162,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_KAMA_RSI_Range_Position"
-timeframe = "6h"
+name = "Donchian_ADX_RSI_Volume_Breakout"
+timeframe = "4h"
 leverage = 1.0
