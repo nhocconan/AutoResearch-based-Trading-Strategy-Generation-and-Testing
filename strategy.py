@@ -33,9 +33,9 @@ def generate_signals(prices):
     upper_break = daily_open + 0.5 * daily_range
     lower_break = daily_open - 0.5 * daily_range
     
-    # Align daily breakout levels to 4h timeframe
-    upper_break_4h = align_htf_to_ltf(prices, df_1d, upper_break)
-    lower_break_4h = align_htf_to_ltf(prices, df_1d, lower_break)
+    # Align daily breakout levels to 1d timeframe
+    upper_break_1d = align_htf_to_ltf(prices, df_1d, upper_break)
+    lower_break_1d = align_htf_to_ltf(prices, df_1d, lower_break)
     
     # Volume confirmation: current volume > 1.5 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -61,8 +61,8 @@ def generate_signals(prices):
         if (np.isnan(volume_ma20[i]) or 
             np.isnan(atr[i]) or 
             np.isnan(atr_ma20[i]) or 
-            np.isnan(upper_break_4h[i]) or 
-            np.isnan(lower_break_4h[i])):
+            np.isnan(upper_break_1d[i]) or 
+            np.isnan(lower_break_1d[i])):
             signals[i] = 0.0
             continue
         
@@ -73,17 +73,17 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price breaks above upper level with volume and volatility
-            if close[i] > upper_break_4h[i] and volume_filter and volatility_filter:
+            if close[i] > upper_break_1d[i] and volume_filter and volatility_filter:
                 signals[i] = 0.25
                 position = 1
             # Short: price breaks below lower level with volume and volatility
-            elif close[i] < lower_break_4h[i] and volume_filter and volatility_filter:
+            elif close[i] < lower_break_1d[i] and volume_filter and volatility_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit long: price returns below the breakout level or volatility drops
-            if close[i] < upper_break_4h[i] or not volatility_filter:
+            if close[i] < upper_break_1d[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,7 +91,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit short: price returns above the breakout level or volatility drops
-            if close[i] > lower_break_4h[i] or not volatility_filter:
+            if close[i] > lower_break_1d[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyRangeBreakout_VolVol"
-timeframe = "4h"
+name = "1d_DailyRangeBreakout_VolVol"
+timeframe = "1d"
 leverage = 1.0
