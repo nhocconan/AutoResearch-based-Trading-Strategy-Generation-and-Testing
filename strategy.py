@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyPivot_Squeeze_Breakout
-Strategy: Weekly Pivot Point breakout with Bollinger Squeeze filter.
-- Long when price breaks above weekly R1 with Bollinger Bandwidth < 50th percentile
-- Short when price breaks below weekly S1 with Bollinger Bandwidth < 50th percentile
-- Exit when price returns to weekly pivot (PP) or volatility expands
+12h_Pivot_R1_S1_Breakout_Volume_TrendFilter_v2
+Strategy: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation.
+Long: Price breaks above R1 with volume > 1.5x 20-period average and 1d EMA34 up
+Short: Price breaks below S1 with volume > 1.5x 20-period average and 1d EMA34 down
+Exit: Price returns to Pivot point or volume drops below average
 Position size: 0.25
-Designed to capture breakouts from low volatility regimes using weekly structure.
-Timeframe: 1d
+Designed to capture institutional breakout attempts with trend and volume confirmation.
+Timeframe: 12h
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_hlf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,79 +24,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate weekly pivot points from weekly data
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) == 0:
+    # Calculate 1d EMA34 for trend filter (using daily data)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Weekly high, low, close
-    wh = df_weekly['high'].values
-    wl = df_weekly['low'].values
-    wc = df_weekly['close'].values
-    
-    # Weekly pivot point and support/resistance levels
-    pp = (wh + wl + wc) / 3.0
-    r1 = 2 * pp - wl
-    s1 = 2 * pp - wh
-    r2 = pp + (wh - wl)
-    s2 = pp - (wh - wl)
-    
-    # Align weekly levels to daily
-    pp_aligned = align_htf_to_ltf(prices, df_weekly, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
-    
-    # Bollinger Bands (20, 2) on daily
-    close_series = pd.Series(close)
-    basis = close_series.rolling(window=20, min_periods=20).mean()
-    dev = close_series.rolling(window=20, min_periods=20).std()
-    upper = basis + 2.0 * dev
-    lower = basis - 2.0 * dev
-    bandwidth = (upper - lower) / basis
-    
-    # Percentile rank of bandwidth (252 lookback ~ 1 year)
-    bandwidth_series = pd.Series(bandwidth)
-    bandwidth_percentile = bandwidth_series.rolling(window=252, min_periods=50).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
-    ).values
-    
-    # Squeeze condition: bandwidth below 50th percentile
-    squeeze = bandwidth_percentile < 0.5
+    # Calculate 20-period volume MA for volume confirmation
+    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 252)  # Need enough data for indicators
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(squeeze[i])):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma20[i]):
             signals[i] = 0.0
             continue
         
+        # Calculate Camarilla pivot levels for previous day
+        # Need previous day's high, low, close
+        if i < 2:  # Need at least 2 periods for previous day data
+            signals[i] = 0.0
+            continue
+            
+        # Get previous day's OHLC (assuming 2 periods per day for 12h timeframe)
+        prev_high = high[i-2]
+        prev_low = low[i-2]
+        prev_close = close[i-2]
+        
+        # Calculate pivot point and support/resistance levels
+        pivot = (prev_high + prev_low + prev_close) / 3.0
+        r1 = pivot + (prev_high - prev_low) * 1.1 / 12.0
+        s1 = pivot - (prev_high - prev_low) * 1.1 / 12.0
+        
+        # Volume filter: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        
         # Entry conditions
         if position == 0:
-            # Long: break above R1 with squeeze
-            if close[i] > r1_aligned[i] and squeeze[i]:
+            # Long: Price breaks above R1 with volume and 1d uptrend
+            if (close[i] > r1 and 
+                volume_filter and 
+                ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]):  # 1d EMA34 rising
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with squeeze
-            elif close[i] < s1_aligned[i] and squeeze[i]:
+            # Short: Price breaks below S1 with volume and 1d downtrend
+            elif (close[i] < s1 and 
+                  volume_filter and 
+                  ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]):  # 1d EMA34 falling
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: return to pivot point or squeeze breaks
-            if close[i] <= pp_aligned[i] or not squeeze[i]:
+            # Exit long: Price returns to pivot or volume drops
+            if close[i] <= pivot or not volume_filter:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: return to pivot point or squeeze breaks
-            if close[i] >= pp_aligned[i] or not squeeze[i]:
+            # Exit short: Price returns to pivot or volume drops
+            if close[i] >= pivot or not volume_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyPivot_Squeeze_Breakout"
-timeframe = "1d"
+name = "12h_Pivot_R1_S1_Breakout_Volume_TrendFilter_v2"
+timeframe = "12h"
 leverage = 1.0
