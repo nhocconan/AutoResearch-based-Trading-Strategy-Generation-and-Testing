@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h strategy using Donchian channel breakout with 1d EMA trend filter and volume spike.
-- Calculate Donchian upper/lower bands from previous 20 bars (20-period high/low)
-- Enter long when price breaks above upper band with volume > 1.5x 20-period volume MA and price above 1d EMA50
-- Enter short when price breaks below lower band with volume > 1.5x 20-period volume MA and price below 1d EMA50
-- Exit when price crosses back to the opposite Donchian band (lower band for shorts, upper band for longs)
-- Fixed position size 0.25 to manage drawdown
-- Uses 1d trend filter to avoid counter-trend trades
-- Designed for 4h timeframe with strict entry conditions to limit trades to 75-200 total over 4 years
+Hypothesis: 4h strategy using 12h Supertrend trend filter with price crossing above/below
+the 12h Supertrend line as entry signal, confirmed by volume spike (1.5x 20-period volume MA)
+and ATR-based volatility filter (ATR > 0.5 * 20-period ATR mean) to avoid low-volatility chop.
+Exits when price crosses back below/above the Supertrend line.
+Fixed position size 0.25 to manage drawdown. Designed for 4h timeframe with strict entry
+conditions to limit trades to 75-200 total over 4 years.
 """
 
 import numpy as np
@@ -24,66 +22,121 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12-hour data for Supertrend calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate Supertrend on 12h data
+    atr_period = 10
+    multiplier = 3.0
     
-    # Calculate Donchian channels from previous 20 periods (high/low of last 20 bars)
-    # Upper band = highest high of last 20 periods
-    # Lower band = lowest low of last 20 periods
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
+    # True Range
+    tr1 = df_12h['high'] - df_12h['low']
+    tr2 = abs(df_12h['high'] - df_12h['close'].shift(1))
+    tr3 = abs(df_12h['low'] - df_12h['close'].shift(1))
+    tr = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1)
+    atr = tr.rolling(window=atr_period, min_periods=atr_period).mean()
+    
+    # Basic Upper and Lower Bands
+    hl2 = (df_12h['high'] + df_12h['low']) / 2
+    upper_band = hl2 + (multiplier * atr)
+    lower_band = hl2 - (multiplier * atr)
+    
+    # Initialize Supertrend
+    supertrend = pd.Series(index=df_12h.index, dtype=float)
+    direction = pd.Series(index=df_12h.index, dtype=float)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(len(df_12h)):
+        if i == 0:
+            supertrend.iloc[i] = upper_band.iloc[i]
+            direction.iloc[i] = 1
+        else:
+            if df_12h['close'].iloc[i] <= upper_band.iloc[i-1]:
+                upper_band.iloc[i] = min(upper_band.iloc[i], upper_band.iloc[i-1])
+            else:
+                upper_band.iloc[i] = upper_band.iloc[i]
+                
+            if df_12h['close'].iloc[i] >= lower_band.iloc[i-1]:
+                lower_band.iloc[i] = max(lower_band.iloc[i], lower_band.iloc[i-1])
+            else:
+                lower_band.iloc[i] = lower_band.iloc[i]
+            
+            if direction.iloc[i-1] == 1:
+                if df_12h['close'].iloc[i] <= lower_band.iloc[i]:
+                    direction.iloc[i] = -1
+                    supertrend.iloc[i] = upper_band.iloc[i]
+                else:
+                    direction.iloc[i] = 1
+                    supertrend.iloc[i] = lower_band.iloc[i]
+            else:
+                if df_12h['close'].iloc[i] >= upper_band.iloc[i]:
+                    direction.iloc[i] = 1
+                    supertrend.iloc[i] = lower_band.iloc[i]
+                else:
+                    direction.iloc[i] = -1
+                    supertrend.iloc[i] = upper_band.iloc[i]
+    
+    supertrend_values = supertrend.values
+    direction_values = direction.values
+    
+    # Align Supertrend and direction to 4h timeframe
+    supertrend_aligned = align_htf_to_ltf(prices, df_12h, supertrend_values)
+    direction_aligned = align_htf_to_ltf(prices, df_12h, direction_values)
     
     # Volume confirmation: 20-period volume MA
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
+    # ATR-based volatility filter: ATR > 0.5 * 20-period ATR mean
+    atr_14 = pd.Series(
+        np.maximum(
+            np.maximum(high - low, np.abs(high - np.roll(close, 1))),
+            np.abs(low - np.roll(close, 1))
+        )
+    ).rolling(window=14, min_periods=14).mean()
+    atr_mean_20 = pd.Series(atr_14).rolling(window=20, min_periods=20).mean()
+    volatility_filter = atr_14 > (0.5 * atr_mean_20)
+    
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 20  # warmup for Donchian and volume MA
+    start_idx = max(20, 14, 30)  # warmup for volume MA, ATR, and Supertrend
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(volume_ma_20.iloc[i]) or np.isnan(ema_50_aligned[i])):
+        if (np.isnan(volume_ma_20.iloc[i]) or 
+            np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i]) or
+            np.isnan(atr_14.iloc[i]) or np.isnan(atr_mean_20.iloc[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = volume_ma_20.iloc[i]
-        upper_band = donchian_upper[i]
-        lower_band = donchian_lower[i]
-        ema_val = ema_50_aligned[i]
+        st_val = supertrend_aligned[i]
+        dir_val = direction_aligned[i]
+        vol_filter = volatility_filter.iloc[i]
         
         if position == 0:
-            # Look for Donchian breakouts with volume confirmation and trend filter
-            # Long: price breaks above upper band + volume spike + price above 1d EMA50
-            if price > upper_band and vol > 1.5 * vol_ma and price > ema_val:
+            # Enter long when price crosses above Supertrend (uptrend) with volume spike and volatility
+            if price > st_val and dir_val == 1 and vol > 1.5 * vol_ma and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower band + volume spike + price below 1d EMA50
-            elif price < lower_band and vol > 1.5 * vol_ma and price < ema_val:
+            # Enter short when price crosses below Supertrend (downtrend) with volume spike and volatility
+            elif price < st_val and dir_val == -1 and vol > 1.5 * vol_ma and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when price crosses below lower band (opposite band)
-            if price < lower_band:
+            # Exit when price crosses below Supertrend
+            if price < st_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price crosses above upper band (opposite band)
-            if price > upper_band:
+            # Exit when price crosses above Supertrend
+            if price > st_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DonchianBreakout_Volume_1dEMA50"
+name = "4h_Supertrend12h_Volume_VolatilityFilter"
 timeframe = "4h"
 leverage = 1.0
