@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Camarilla R1/S1 breakout with volume confirmation and weekly EMA20 filter.
-Long when price breaks above R1 with volume > 1.5x 20-period average AND close > weekly EMA20.
-Short when price breaks below S1 with volume > 1.5x 20-period average AND close < weekly EMA20.
-Exit when price returns to the Camarilla pivot (PP) or volume drops below average.
-Designed for low trade frequency (7-25/year) on 1d timeframe to minimize fee drag and work in both bull/bear regimes.
+Hypothesis: 6h Donchian(20) breakout + 1d EMA50 trend filter + volume confirmation.
+Long when price breaks above Donchian upper band AND close > 1d EMA50 AND volume > 1.5x 20-period average.
+Short when price breaks below Donchian lower band AND close < 1d EMA50 AND volume > 1.5x 20-period average.
+Exit when price crosses the Donchian middle band (20-period mean) or volume drops below average.
+Designed for low trade frequency (12-37/year) on 6h timeframe to minimize fee drag.
+Donchian provides objective breakout levels, 1d EMA50 filters for higher timeframe trend,
+volume confirmation reduces false breakouts.
 """
 
 import numpy as np
@@ -21,37 +23,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for indicator calculation (primary timeframe)
+    # Get 6h data for Donchian calculation (primary timeframe)
+    df_6h = get_htf_data(prices, '6h')
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    volume_6h = df_6h['volume'].values
+    
+    # Calculate Donchian channels (20-period)
+    def rolling_max(arr, window):
+        """Rolling maximum"""
+        result = np.full_like(arr, np.nan, dtype=float)
+        for i in range(len(arr)):
+            if i < window - 1:
+                result[i] = np.nan
+            else:
+                result[i] = np.max(arr[i-window+1:i+1])
+        return result
+    
+    def rolling_min(arr, window):
+        """Rolling minimum"""
+        result = np.full_like(arr, np.nan, dtype=float)
+        for i in range(len(arr)):
+            if i < window - 1:
+                result[i] = np.nan
+            else:
+                result[i] = np.min(arr[i-window+1:i+1])
+        return result
+    
+    upper = rolling_max(high_6h, 20)
+    lower = rolling_min(low_6h, 20)
+    middle = (upper + lower) / 2.0
+    
+    # Get 1d data for EMA50 trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla pivot levels (using previous day's OHLC)
-    # PP = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    # We shift by 1 to avoid look-ahead (use previous day's data)
-    pp = (np.roll(high_1d, 1) + np.roll(low_1d, 1) + np.roll(close_1d, 1)) / 3
-    r1 = np.roll(close_1d, 1) + (np.roll(high_1d, 1) - np.roll(low_1d, 1)) * 1.1 / 12
-    s1 = np.roll(close_1d, 1) - (np.roll(high_1d, 1) - np.roll(low_1d, 1)) * 1.1 / 12
+    # Calculate EMA50 on 1d
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate weekly EMA20 on 1d timeframe (HTF = 1w)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Calculate volume average (20-period) on 6h
+    volume_6h_series = pd.Series(volume_6h)
+    volume_ma_6h = volume_6h_series.rolling(window=20, min_periods=20).mean().values
     
-    # Calculate volume average (20-period) on 1d
-    volume_1d_series = pd.Series(volume_1d)
-    volume_ma_1d = volume_1d_series.rolling(window=20, min_periods=20).mean().values
-    
-    # Align all indicators to 1d timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
+    # Align all indicators to 6h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_6h, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_6h, lower)
+    middle_aligned = align_htf_to_ltf(prices, df_6h, middle)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    volume_ma_aligned = align_htf_to_ltf(prices, df_6h, volume_ma_6h)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -60,40 +80,40 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(volume_ma_aligned[i]) or np.isnan(ema20_1w_aligned[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(middle_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        pp_val = pp_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
+        upper_val = upper_aligned[i]
+        lower_val = lower_aligned[i]
+        middle_val = middle_aligned[i]
+        ema50 = ema50_1d_aligned[i]
         vol_ma = volume_ma_aligned[i]
-        ema20_1w = ema20_1w_aligned[i]
         vol = volume[i]
         price = close[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume confirmation AND close > weekly EMA20
-            if price > r1_val and vol > 1.5 * vol_ma and price > ema20_1w:
+            # Long: price > upper band AND close > 1d EMA50 AND volume > 1.5x avg
+            if price > upper_val and close[i] > ema50 and vol > 1.5 * vol_ma:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume confirmation AND close < weekly EMA20
-            elif price < s1_val and vol > 1.5 * vol_ma and price < ema20_1w:
+            # Short: price < lower band AND close < 1d EMA50 AND volume > 1.5x avg
+            elif price < lower_val and close[i] < ema50 and vol > 1.5 * vol_ma:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to pivot (PP) OR volume drops below average
-            if price <= pp_val or vol < vol_ma:
+            # Exit long: price crosses middle band OR volume < average
+            if price < middle_val or vol < vol_ma:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to pivot (PP) OR volume drops below average
-            if price >= pp_val or vol < vol_ma:
+            # Exit short: price crosses middle band OR volume < average
+            if price > middle_val or vol < vol_ma:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1S1_Volume_1wEMA20_Filter"
-timeframe = "1d"
+name = "6h_Donchian20_Volume_1dEMA50_Filter"
+timeframe = "6h"
 leverage = 1.0
