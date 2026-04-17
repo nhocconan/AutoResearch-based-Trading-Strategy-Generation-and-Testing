@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Williams_Alligator_Momentum_v1
-Williams Alligator (Jaw=13, Teeth=8, Lips=5) + momentum filter (ROC 5) + volume confirmation.
-Long when price > Teeth and ROC > 0 and volume > avg volume. Short when price < Teeth and ROC < 0 and volume > avg volume.
-Exit when price crosses Jaw or volume drops below average.
-Uses 1d ADX > 25 as trend filter to avoid choppy markets.
+12h_Donchian_20_Breakout_With_Volume_Filter
+Long when price breaks above Donchian high(20) with volume > 1.5x median volume(20).
+Short when price breaks below Donchian low(20) with volume > 1.5x median volume(20).
+Exit when price re-enters the Donchian channel.
+Uses 1d ADX > 20 as trend filter to avoid whipsaws in ranging markets.
+Designed for 12h timeframe to capture medium-term trends with volume confirmation.
 Target: 50-150 total trades over 4 years (12-37/year).
 """
 
@@ -22,23 +23,16 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Williams Alligator (SMA of median price) ===
-    median_price = (high + low) / 2.0
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values  # 13-bar
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values   # 8-bar
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values    # 5-bar
+    # === Donchian Channel (20) ===
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === ROC(5) for momentum ===
-    roc = np.zeros_like(close)
-    roc[5:] = (close[5:] - close[:-5]) / close[:-5]
-    
-    # === Volume average (20-period) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # === Volume filter: volume > 1.5x median volume(20) ===
+    vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median().values
+    vol_filter = volume > (1.5 * vol_median)
     
     # === 1d ADX(14) for trend filter ===
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate ADX on 1d data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -58,56 +52,55 @@ def generate_signals(prices):
     plus_dm_1d = np.concatenate([[0], plus_dm_1d])
     minus_dm_1d = np.concatenate([[0], minus_dm_1d])
     
-    # Smooth TR and DM
+    # ADX calculation
     atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     plus_di_1d = 100 * pd.Series(plus_dm_1d).rolling(window=14, min_periods=14).sum().values / (atr_1d * 14)
     minus_di_1d = 100 * pd.Series(minus_dm_1d).rolling(window=14, min_periods=14).sum().values / (atr_1d * 14)
     dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d + 1e-10)
     adx_1d = pd.Series(dx_1d).rolling(window=14, min_periods=14).mean().values
     
-    # Align 1d ADX to 4h
+    # Align 1d ADX to 12h timeframe
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 20
+    warmup = 50
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(roc[i]) or np.isnan(vol_ma[i]) or np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(donch_high[i]) or 
+            np.isnan(donch_low[i]) or 
+            np.isnan(vol_filter[i]) or 
+            np.isnan(adx_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price > Teeth, ROC > 0, volume > average, ADX > 25
-            if (close[i] > teeth[i] and 
-                roc[i] > 0 and 
-                volume[i] > vol_ma[i] and 
-                adx_1d_aligned[i] > 25):
+            # Long: price breaks above Donchian high, volume filter, ADX > 20
+            if (close[i] > donch_high[i] and 
+                vol_filter[i] and 
+                adx_1d_aligned[i] > 20):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price < Teeth, ROC < 0, volume > average, ADX > 25
-            elif (close[i] < teeth[i] and 
-                  roc[i] < 0 and 
-                  volume[i] > vol_ma[i] and 
-                  adx_1d_aligned[i] > 25):
+            # Short: price breaks below Donchian low, volume filter, ADX > 20
+            elif (close[i] < donch_low[i] and 
+                  vol_filter[i] and 
+                  adx_1d_aligned[i] > 20):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price < Jaw OR volume < average
-            if (close[i] < jaw[i] or 
-                volume[i] < vol_ma[i]):
+            # Exit long: price re-enters Donchian channel (below Donchian high)
+            if close[i] < donch_high[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -115,9 +108,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price > Jaw OR volume < average
-            if (close[i] > jaw[i] or 
-                volume[i] < vol_ma[i]):
+            # Exit short: price re-enters Donchian channel (above Donchian low)
+            if close[i] > donch_low[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -126,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Williams_Alligator_Momentum_v1"
-timeframe = "4h"
+name = "12h_Donchian_20_Breakout_With_Volume_Filter"
+timeframe = "12h"
 leverage = 1.0
