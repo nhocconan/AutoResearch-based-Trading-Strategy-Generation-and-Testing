@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data for trend context ===
+    # === 1d data for trend and volatility context ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
@@ -31,22 +31,22 @@ def generate_signals(prices):
     atr14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
     
-    # === 12h data for entry triggers ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    volume_12h = df_12h['volume'].values
+    # === 4h data for entry triggers ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    volume_4h = df_4h['volume'].values
     
-    # 12h Donchian channels (20-period) for breakouts
-    donch_high_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donch_low_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donch_high_20_aligned = align_htf_to_ltf(prices, df_12h, donch_high_20)
-    donch_low_20_aligned = align_htf_to_ltf(prices, df_12h, donch_low_20)
+    # 4h Donchian channels (20-period) for breakouts
+    donch_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donch_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donch_high_20_aligned = align_htf_to_ltf(prices, df_4h, donch_high_20)
+    donch_low_20_aligned = align_htf_to_ltf(prices, df_4h, donch_low_20)
     
-    # 12h volume average (20-period) for volume confirmation
-    vol_avg20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_avg20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_avg20_12h)
+    # 4h volume average (20-period) for volume confirmation
+    vol_avg20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_avg20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_avg20_4h)
     
     signals = np.zeros(n)
     
@@ -61,17 +61,17 @@ def generate_signals(prices):
         if (np.isnan(ema50_1d_aligned[i]) or 
             np.isnan(donch_high_20_aligned[i]) or 
             np.isnan(donch_low_20_aligned[i]) or
-            np.isnan(vol_avg20_12h_aligned[i]) or
+            np.isnan(vol_avg20_4h_aligned[i]) or
             np.isnan(atr14_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Get current 12h values
-        vol_12h_current = align_htf_to_ltf(prices, df_12h, volume_12h)[i]
+        # Get current 4h values
+        vol_4h_current = align_htf_to_ltf(prices, df_4h, volume_4h)[i]
         
-        # Volume filter: current volume > 1.8x average
-        vol_filter = vol_12h_current > 1.8 * vol_avg20_12h_aligned[i]
+        # Volume filter: current volume > 1.5x average
+        vol_filter = vol_4h_current > 1.5 * vol_avg20_4h_aligned[i]
         
         # Entry conditions
         if position == 0:
@@ -120,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_1dTrend_VolumeFilter"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_1dTrend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
