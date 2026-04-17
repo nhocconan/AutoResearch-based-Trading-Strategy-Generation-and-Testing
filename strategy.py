@@ -3,10 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator + Elder Ray with volume confirmation.
-# Uses Williams Alligator (Jaw/Teeth/Lips) for trend direction, Elder Ray (Bull/Bear Power) for momentum,
-# and volume spike for confirmation. Designed to capture trends in bull markets and reversals in bear markets.
-# Target: 15-30 trades/year to avoid fee drag.
+# Hypothesis: 4h Choppiness Index regime filter with 4h Donchian breakout and volume spike.
+# Uses Choppiness Index (14) to detect ranging vs trending regimes:
+#   CHOP > 61.8 = ranging (mean reversion at Donchian bands)
+#   CHOP < 38.2 = trending (breakout continuation)
+# Combines with Donchian(20) breakouts and volume confirmation for high-probability entries.
+# Designed to work in bull (trending breakouts) and bear (mean reversion in ranges).
+# Target: 20-40 trades/year to avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,33 +21,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Williams Alligator and Elder Ray
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate ATR(14) for Choppiness Index
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Williams Alligator: SMA of median price (HL/2) with specific periods
-    median_price_1d = (high_1d + low_1d) / 2
-    jaw_period = 13
-    teeth_period = 8
-    lips_period = 5
+    # Calculate Choppiness Index (14)
+    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(sum_tr / (highest_high - lowest_low)) / np.log10(14)
+    # Handle division by zero or invalid cases
+    chop = np.where((highest_high - lowest_low) > 0, chop, 50.0)
     
-    jaw = pd.Series(median_price_1d).rolling(window=jaw_period, min_periods=jaw_period).mean().values
-    teeth = pd.Series(median_price_1d).rolling(window=teeth_period, min_periods=teeth_period).mean().values
-    lips = pd.Series(median_price_1d).rolling(window=lips_period, min_periods=lips_period).mean().values
-    
-    # Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high_1d - ema13_1d
-    bear_power = low_1d - ema13_1d
-    
-    # Align Williams Alligator and Elder Ray to 12h
-    jaw_12h = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_12h = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_12h = align_htf_to_ltf(prices, df_1d, lips)
-    bull_power_12h = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_12h = align_htf_to_ltf(prices, df_1d, bear_power)
+    # Calculate Donchian channels (20)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume filter: current volume > 1.5 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,15 +47,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 20  # Need volume MA20 and Elder Ray components
+    start_idx = 20  # Need Donchian20 and chop
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(jaw_12h[i]) or 
-            np.isnan(teeth_12h[i]) or 
-            np.isnan(lips_12h[i]) or 
-            np.isnan(bull_power_12h[i]) or 
-            np.isnan(bear_power_12h[i]) or 
+        if (np.isnan(donch_high[i]) or 
+            np.isnan(donch_low[i]) or 
+            np.isnan(chop[i]) or 
             np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
@@ -68,37 +61,43 @@ def generate_signals(prices):
         # Volume filter: spike > 1.5x average
         volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
-        # Williams Alligator trend: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
-        lips_above_teeth = lips_12h[i] > teeth_12h[i]
-        teeth_above_jaw = teeth_12h[i] > jaw_12h[i]
-        lips_below_teeth = lips_12h[i] < teeth_12h[i]
-        teeth_below_jaw = teeth_12h[i] < jaw_12h[i]
+        # Price relative to Donchian channels
+        price_at_upper = close[i] >= donch_high[i]
+        price_at_lower = close[i] <= donch_low[i]
         
-        # Elder Ray momentum: Bull Power > 0 and rising, Bear Power < 0 and falling
-        bull_power_positive = bull_power_12h[i] > 0
-        bear_power_negative = bear_power_12h[i] < 0
+        # Regime filters
+        chop_ranging = chop[i] > 61.8  # Ranging market
+        chop_trending = chop[i] < 38.2  # Trending market
         
         if position == 0:
-            # Long: Lips > Teeth > Jaw (uptrend) AND Bull Power > 0 AND volume spike
-            if (lips_above_teeth and teeth_above_jaw and bull_power_positive and volume_filter):
+            # Long in trending market: break above Donchian high with volume
+            if (chop_trending and price_at_upper and volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: Lips < Teeth < Jaw (downtrend) AND Bear Power < 0 AND volume spike
-            elif (lips_below_teeth and teeth_below_jaw and bear_power_negative and volume_filter):
+            # Short in trending market: break below Donchian low with volume
+            elif (chop_trending and price_at_lower and volume_filter):
+                signals[i] = -0.25
+                position = -1
+            # Long in ranging market: mean reversion from Donchian low
+            elif (chop_ranging and price_at_lower and volume_filter):
+                signals[i] = 0.25
+                position = 1
+            # Short in ranging market: mean reversion from Donchian high
+            elif (chop_ranging and price_at_upper and volume_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Lips < Teeth (loss of uptrend momentum) OR Bear Power > 0 (bullish momentum fading)
-            if (lips_12h[i] < teeth_12h[i]) or (bear_power_12h[i] > 0):
+            # Exit long: price crosses below Donchian low OR chop shifts to strong trending
+            if (close[i] <= donch_low[i]) or (chop[i] < 25.0):  # Strong trend, consider trailing
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Lips > Teeth (loss of downtrend momentum) OR Bull Power < 0 (bearish momentum fading)
-            if (lips_12h[i] > teeth_12h[i]) or (bull_power_12h[i] < 0):
+            # Exit short: price crosses above Donchian high OR chop shifts to strong trending
+            if (close[i] >= donch_high[i]) or (chop[i] < 25.0):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsAlligator_ElderRay_Volume"
-timeframe = "12h"
+name = "4h_Chop_DonchianBreakout_Volume"
+timeframe = "4h"
 leverage = 1.0
