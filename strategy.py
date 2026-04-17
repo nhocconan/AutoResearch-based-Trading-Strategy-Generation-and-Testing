@@ -9,49 +9,32 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h Donchian(20) Breakout + Volume Spike + ADX Filter ===
-    # Get 12h data
+    # === 4h price channel: 20-period Donchian breakout ===
+    # Calculate high and low of last 20 periods
+    high_20 = pd.Series(close).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(close).rolling(window=20, min_periods=20).min().values
+    
+    # === 12h ADX(14) for trend filter ===
     df_12h = get_htf_data(prices, '12h')
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
-    
-    # Donchian channels (20-period)
-    donch_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    
-    # Breakout signals
-    breakout_up = close_12h > donch_high
-    breakout_down = close_12h < donch_low
-    
-    # Volume confirmation (12h volume > 1.5x 20-period average)
-    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_12h > vol_ma_20 * 1.5
-    
-    # ADX trend filter (1-day)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
     # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.concatenate([[close_12h[0]], close_12h[:-1]]))
+    tr3 = np.abs(low_12h - np.concatenate([[close_12h[0]], close_12h[:-1]]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
     # Directional Movement
-    dm_plus = np.where((high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])) > 
-                       (np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d), 
-                       np.maximum(high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]]), 0), 0)
-    dm_minus = np.where((np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d) > 
-                        (high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])), 
-                        np.maximum(np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d, 0), 0)
+    dm_plus = np.where((high_12h - np.concatenate([[high_12h[0]], high_12h[:-1]])) > 
+                       (np.concatenate([[low_12h[0]], low_12h[:-1]]) - low_12h), 
+                       np.maximum(high_12h - np.concatenate([[high_12h[0]], high_12h[:-1]]), 0), 0)
+    dm_minus = np.where((np.concatenate([[low_12h[0]], low_12h[:-1]]) - low_12h) > 
+                        (high_12h - np.concatenate([[high_12h[0]], high_12h[:-1]])), 
+                        np.maximum(np.concatenate([[low_12h[0]], low_12h[:-1]]) - low_12h, 0), 0)
     
     # Smoothed values
     tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
@@ -66,51 +49,68 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Align indicators to 12h timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low)
-    breakout_up_aligned = align_htf_to_ltf(prices, df_12h, breakout_up)
-    breakout_down_aligned = align_htf_to_ltf(prices, df_12h, breakout_down)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_12h, vol_spike)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align 12h ADX to 4h
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    
+    # === 12h volume confirmation ===
+    volume_12h = df_12h['volume'].values
+    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
+    
+    # === 4h volume confirmation ===
+    vol_ma_10_4h = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 50
+    warmup = 30
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
-            np.isnan(breakout_up_aligned[i]) or np.isnan(breakout_down_aligned[i]) or
-            np.isnan(vol_spike_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(adx_12h_aligned[i]) or 
+            np.isnan(vol_ma_20_12h_aligned[i]) or np.isnan(vol_ma_10_4h[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Trend filter: only trade when ADX > 25 (trending market)
-        trending = adx_aligned[i] > 25
+        # Get current 12h volume
+        df_12h_current = get_htf_data(prices, '12h')
+        volume_12h_current = df_12h_current['volume'].values
+        volume_12h_aligned = align_htf_to_ltf(prices, df_12h_current, volume_12h_current)
+        
+        # Volume spike: current 12h volume > 1.5x 20-period average AND 4h volume > 1.3x 10-period average
+        vol_spike_12h = volume_12h_aligned[i] > vol_ma_20_12h_aligned[i] * 1.5
+        vol_spike_4h = volume[i] > vol_ma_10_4h[i] * 1.3
+        
+        # Donchian breakout conditions
+        breakout_up = close[i] > high_20[i-1]  # Break above previous period's high
+        breakout_down = close[i] < low_20[i-1]  # Break below previous period's low
+        
+        # Trend filter
+        trending = adx_12h_aligned[i] > 25
         
         # Entry logic: only enter when flat
         if position == 0:
             # Long: Donchian breakout up + volume spike + trending
-            if breakout_up_aligned[i] and vol_spike_aligned[i] and trending:
+            if breakout_up and vol_spike_12h and vol_spike_4h and trending:
                 signals[i] = 0.25
                 position = 1
                 continue
             # Short: Donchian breakout down + volume spike + trending
-            elif breakout_down_aligned[i] and vol_spike_aligned[i] and trending:
+            elif breakout_down and vol_spike_12h and vol_spike_4h and trending:
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long when price touches opposite Donchian band or trend weakens
-            if close[i] <= donch_low_aligned[i] or adx_aligned[i] < 20:
+            # Exit long when price returns to middle of channel or trend weakens
+            mid_channel = (high_20[i] + low_20[i]) / 2
+            if close[i] < mid_channel or adx_12h_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -118,8 +118,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when price touches opposite Donchian band or trend weakens
-            if close[i] >= donch_high_aligned[i] or adx_aligned[i] < 20:
+            # Exit short when price returns to middle of channel or trend weakens
+            mid_channel = (high_20[i] + low_20[i]) / 2
+            if close[i] > mid_channel or adx_12h_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -128,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dADX25_Volume1.5x"
-timeframe = "12h"
+name = "4h_Donchian20_12hADX25_Volume1.5x_4hVol1.3x"
+timeframe = "4h"
 leverage = 1.0
