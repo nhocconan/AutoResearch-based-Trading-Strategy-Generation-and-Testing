@@ -1,3 +1,7 @@
+#1d KAMA Trend with Weekly Filter v1
+# Hypothesis: KAMA adapts to market noise, reducing whipsaw in ranging markets. Weekly trend filter ensures alignment with higher-timeframe momentum. Works in both bull and bear by following the weekly trend while filtering noise on daily.
+# Expect 10-25 trades/year with low false signals due to dual timeframe confirmation.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,90 +17,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for daily pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === DAILY KAMA CALCULATION ===
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))
+    change = np.concatenate([np.full(10, np.nan), change])
+    volatility = np.abs(np.diff(close, n=1))
+    volatility = np.concatenate([np.array([np.nan]), volatility])
+    vol_sum = pd.Series(volatility).rolling(window=10, min_periods=10).sum().values
+    er = change / vol_sum
+    er = np.nan_to_num(er, nan=0.0)
     
-    # Calculate daily pivot (using previous day)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
+    # === WEEKLY TREND FILTER ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    # Weekly EMA34 for trend
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    weekly_trend = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Align daily pivots to 6h timeframe
-    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
-    r2_6h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_6h = align_htf_to_ltf(prices, df_1d, s2)
-    
-    # Volume confirmation (20-period MA on 6h)
+    # === VOLUME CONFIRMATION (DAILY) ===
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR for volatility filter (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = np.nan
-    tr2[0] = np.nan
-    tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
+    # === SIGNAL GENERATION ===
     signals = np.zeros(n)
-    position = 0  # -1: short, 0: flat, 1: long
+    position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 20  # volume MA20 and ATR
+    start_idx = max(34, 20)  # weekly EMA34 and volume MA20
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available
-        if (np.isnan(volume_ma20[i]) or 
-            np.isnan(atr[i]) or 
-            np.isnan(pivot_6h[i]) or 
-            np.isnan(r1_6h[i]) or 
-            np.isnan(s1_6h[i]) or 
-            np.isnan(r2_6h[i]) or 
-            np.isnan(s2_6h[i])):
+        # Skip if data not ready
+        if np.isnan(kama[i]) or np.isnan(weekly_trend[i]) or np.isnan(volume_ma20[i]):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.2x 20-period average
-        volume_filter = volume[i] > (1.2 * volume_ma20[i])
-        # Volatility filter: ATR > 0.5 * 20-period ATR average (avoid low volatility chop)
-        atr_ma20 = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
-        volatility_filter = atr[i] > (0.5 * atr_ma20[i]) if not np.isnan(atr_ma20[i]) else False
+        volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
         if position == 0:
-            # Long: break above R2 with volume and volatility
-            if close[i] > r2_6h[i] and volume_filter and volatility_filter:
+            # Long: price above KAMA AND above weekly EMA34 AND volume surge
+            if close[i] > kama[i] and close[i] > weekly_trend[i] and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S2 with volume and volatility
-            elif close[i] < s2_6h[i] and volume_filter and volatility_filter:
+            # Short: price below KAMA AND below weekly EMA34 AND volume surge
+            elif close[i] < kama[i] and close[i] < weekly_trend[i] and volume_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below R1 or volatility drops
-            if close[i] < r1_6h[i] or not volatility_filter:
+            # Exit long: price crosses below KAMA OR weekly trend turns down
+            if close[i] < kama[i] or close[i] < weekly_trend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above S1 or volatility drops
-            if close[i] > s1_6h[i] or not volatility_filter:
+            # Exit short: price crosses above KAMA OR weekly trend turns up
+            if close[i] > kama[i] or close[i] > weekly_trend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_DailyPivot_R2_S2_Breakout_VolVol"
-timeframe = "6h"
+name = "1d_KAMA_Trend_With_Weekly_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
