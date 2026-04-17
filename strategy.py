@@ -44,28 +44,9 @@ def generate_signals(prices):
         for i in range(14, len(tr)):
             atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
     
-    # === 1d RSI (14-period) for mean reversion filter ===
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing for RSI
-    avg_gain = np.full_like(gain, np.nan)
-    avg_loss = np.full_like(loss, np.nan)
-    if len(gain) >= 14:
-        avg_gain[13] = np.mean(gain[:14])
-        avg_loss[13] = np.mean(loss[:14])
-        for i in range(14, len(gain)):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_14 = 100 - (100 / (1 + rs))
-    
     # Align all indicators to 4h timeframe
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
     
     signals = np.zeros(n)
     
@@ -77,8 +58,7 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
-            np.isnan(rsi_14_aligned[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(atr_14_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -94,28 +74,25 @@ def generate_signals(prices):
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price above EMA34 + volatility filter (ATR > 0.5 * price) + volume + RSI not overbought
+            # Long: price above EMA34 + volatility filter (ATR > 0.5% price) + volume
             if (close[i] > ema_34_aligned[i] and 
                 atr_14_aligned[i] > 0.005 * close[i] and  # volatility filter
-                vol_confirm and
-                rsi_14_aligned[i] < 70):
+                vol_confirm):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price below EMA34 + volatility filter + volume + RSI not oversold
+            # Short: price below EMA34 + volatility filter + volume
             elif (close[i] < ema_34_aligned[i] and 
                   atr_14_aligned[i] > 0.005 * close[i] and  # volatility filter
-                  vol_confirm and
-                  rsi_14_aligned[i] > 30):
+                  vol_confirm):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price crosses below EMA34 OR RSI overbought
-            if (close[i] < ema_34_aligned[i] or
-                rsi_14_aligned[i] > 70):
+            # Exit long: price crosses below EMA34
+            if close[i] < ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -123,9 +100,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above EMA34 OR RSI oversold
-            if (close[i] > ema_34_aligned[i] or
-                rsi_14_aligned[i] < 30):
+            # Exit short: price crosses above EMA34
+            if close[i] > ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -134,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "EMA34_ATR_RSI_Volume_Filter_v1"
+name = "EMA34_ATR_Volume_Filter_v1"
 timeframe = "4h"
 leverage = 1.0
