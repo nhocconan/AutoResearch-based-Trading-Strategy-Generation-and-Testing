@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_12h_1d_Camarilla_Pivot_Breakout_Volume_Trend
-Strategy: Camarilla R1/S1 breakout on 4h with 12h EMA trend filter and 1d volume confirmation.
-Long: Close breaks above R1 + 12h EMA34 > EMA144 + volume > 1.5x 1d average volume
-Short: Close breaks below S1 + 12h EMA34 < EMA144 + volume > 1.5x 1d average volume
-Exit: Close returns to CAM (pivot) or trend reverses
+1d_KAMA_Direction_RSI_Momentum_WeeklyTrendFilter
+Strategy: KAMA trend direction on daily timeframe with weekly trend filter and RSI momentum.
+Long: KAMA rising + weekly EMA34 > EMA144 + RSI(14) > 50
+Short: KAMA falling + weekly EMA34 < EMA144 + RSI(14) < 50
+Exit: KAMA direction change or RSI crosses 50
 Position size: 0.25
-Designed to capture institutional breakouts with trend alignment and volume confirmation.
-Timeframe: 4h
+Designed to capture medium-term trends with momentum confirmation and weekly trend filter.
+Timeframe: 1d
 """
 
 import numpy as np
@@ -20,106 +20,99 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h EMA34 and EMA144 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Calculate KAMA (Kaufman Adaptive Moving Average) on daily close
+    close_series = pd.Series(close)
+    # Efficiency ratio: |price change| / sum of absolute price changes
+    change = abs(close_series.diff(1))
+    volatility = change.rolling(window=10, min_periods=10).sum()
+    er = change / volatility.replace(0, np.nan)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = close_series.copy()
+    for i in range(1, len(kama)):
+        if not np.isnan(sc.iloc[i]):
+            kama.iloc[i] = kama.iloc[i-1] + sc.iloc[i] * (close_series.iloc[i] - kama.iloc[i-1])
+        else:
+            kama.iloc[i] = kama.iloc[i-1]
+    kama_values = kama.values
     
-    close_series_12h = pd.Series(close_12h)
-    ema34_12h = close_series_12h.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema144_12h = close_series_12h.ewm(span=144, adjust=False, min_periods=144).mean().values
+    # Calculate weekly EMA34 and EMA144 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Align 12h EMAs to 4h timeframe
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
-    ema144_12h_aligned = align_htf_to_ltf(prices, df_12h, ema144_12h)
+    close_series_1w = pd.Series(close_1w)
+    ema34_1w = close_series_1w.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema144_1w = close_series_1w.ewm(span=144, adjust=False, min_periods=144).mean().values
     
-    # Calculate 1d average volume for volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    volume_1d_ma20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_1d_ma20_aligned = align_htf_to_ltf(prices, df_1d, volume_1d_ma20)
+    # Align weekly EMAs to daily timeframe
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    ema144_1w_aligned = align_htf_to_ltf(prices, df_1w, ema144_1w)
+    
+    # RSI(14) for momentum
+    delta = close_series.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(144, 20)
+    start_idx = max(144, 10, 14)  # max of weekly EMA144, KAMA ER period, RSI period
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema34_12h_aligned[i]) or np.isnan(ema144_12h_aligned[i]) or 
-            np.isnan(volume_1d_ma20_aligned[i])):
+        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(ema144_1w_aligned[i]) or 
+            np.isnan(rsi_values[i]) or np.isnan(kama_values[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period average from 1d data
-        volume_filter = volume[i] > (1.5 * volume_1d_ma20_aligned[i])
+        # KAMA direction: rising if current > previous, falling if current < previous
+        kama_rising = kama_values[i] > kama_values[i-1]
+        kama_falling = kama_values[i] < kama_values[i-1]
         
-        # Trend filter: 12h EMA34 > EMA144 for long, < for short
-        ema34_gt_ema144 = ema34_12h_aligned[i] > ema144_12h_aligned[i]
-        ema34_lt_ema144 = ema34_12h_aligned[i] < ema144_12h_aligned[i]
+        # Weekly trend filter: EMA34 > EMA144 for uptrend, < for downtrend
+        weekly_uptrend = ema34_1w_aligned[i] > ema144_1w_aligned[i]
+        weekly_downtrend = ema34_1w_aligned[i] < ema144_1w_aligned[i]
         
-        # Calculate Camarilla levels from previous day's OHLC
-        # Need previous day's data - use daily OHLC from 1d timeframe
-        if i >= 96:  # Need at least 96 4h bars (4 days) to get previous day
-            # Get daily data for Camarilla calculation
-            # Current 4h bar timestamp
-            current_time = prices['open_time'].iloc[i]
-            # Previous day's date
-            prev_day = current_time - pd.Timedelta(days=1)
-            
-            # Get previous day's OHLC from 1d data
-            day_mask = df_1d['open_time'].dt.date == prev_day.date()
-            if day_mask.any():
-                prev_day_data = df_1d[day_mask].iloc[0]
-                prev_high = prev_day_data['high']
-                prev_low = prev_day_data['low']
-                prev_close = prev_day_data['close']
-                
-                # Calculate Camarilla levels
-                range_val = prev_high - prev_low
-                if range_val > 0:
-                    camarilla_pivot = (prev_high + prev_low + prev_close) / 3
-                    camarilla_r1 = camarilla_pivot + (range_val * 1.1 / 12)
-                    camarilla_s1 = camarilla_pivot - (range_val * 1.1 / 12)
-                    
-                    # Entry conditions
-                    if position == 0:
-                        # Long: Close breaks above R1 + trend up + volume
-                        if (close[i] > camarilla_r1 and ema34_gt_ema144 and volume_filter):
-                            signals[i] = 0.25
-                            position = 1
-                        # Short: Close breaks below S1 + trend down + volume
-                        elif (close[i] < camarilla_s1 and ema34_lt_ema144 and volume_filter):
-                            signals[i] = -0.25
-                            position = -1
-                    
-                    elif position == 1:
-                        # Exit long: Close returns to pivot or trend reverses
-                        if close[i] < camarilla_pivot or not ema34_gt_ema144:
-                            signals[i] = 0.0
-                            position = 0
-                        else:
-                            signals[i] = 0.25
-                    
-                    elif position == -1:
-                        # Exit short: Close returns to pivot or trend reverses
-                        if close[i] > camarilla_pivot or not ema34_lt_ema144:
-                            signals[i] = 0.0
-                            position = 0
-                        else:
-                            signals[i] = -0.25
-                else:
-                    signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        # RSI momentum: > 50 for bullish momentum, < 50 for bearish momentum
+        rsi_bullish = rsi_values[i] > 50
+        rsi_bearish = rsi_values[i] < 50
+        
+        # Entry conditions
+        if position == 0:
+            # Long: KAMA rising + weekly uptrend + bullish RSI momentum
+            if kama_rising and weekly_uptrend and rsi_bullish:
+                signals[i] = 0.25
+                position = 1
+            # Short: KAMA falling + weekly downtrend + bearish RSI momentum
+            elif kama_falling and weekly_downtrend and rsi_bearish:
+                signals[i] = -0.25
+                position = -1
+        
+        elif position == 1:
+            # Exit long: KAMA falling or RSI turns bearish
+            if kama_falling or not rsi_bullish:
+                signals[i] = 0.0
+                position = 0
             else:
-                signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-        else:
-            signals[i] = 0.0
+                signals[i] = 0.25
+        
+        elif position == -1:
+            # Exit short: KAMA rising or RSI turns bullish
+            if kama_rising or rsi_bullish:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_12h_1d_Camarilla_Pivot_Breakout_Volume_Trend"
-timeframe = "4h"
+name = "1d_KAMA_Direction_RSI_Momentum_WeeklyTrendFilter"
+timeframe = "1d"
 leverage = 1.0
