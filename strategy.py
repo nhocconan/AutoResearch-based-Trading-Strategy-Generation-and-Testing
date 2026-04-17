@@ -1,8 +1,5 @@
-#!/usr/bin/env python3
-"""
-12h_Pivot_R1_S1_Breakout_Volume_Confirm
-Hypothesis: On 12h timeframe, enter long when price breaks above Camarilla R1 with volume confirmation and price > daily close; enter short when price breaks below S1 with volume confirmation and price < daily close. Uses 1d close trend filter to avoid counter-trend trades. Designed for low trade frequency (12-37/year) to minimize fee drag while capturing strong trending moves in both bull and bear markets.
-"""
+# 4h_Range_Breakout_With_Trend_Filter
+# Hypothesis: In 4h timeframe, enter long when price breaks above Donchian high (20-period) with volume confirmation and price > 200-period EMA; enter short when price breaks below Donchian low with volume confirmation and price < 200 EMA. Use 12h ADX to filter for trending markets only. Designed for low trade frequency to minimize fee drag while capturing strong trending moves in both bull and bear markets.
 
 import numpy as np
 import pandas as pd
@@ -10,7 +7,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,80 +15,87 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 12h Camarilla Pivot Levels (based on previous 12h bar) ===
-    # Calculate pivot points using previous bar's OHLC
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]  # Avoid NaN on first bar
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    # === Donchian Channels (20-period) ===
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_val = prev_high - prev_low
-    r1 = pivot + (range_val * 1.1 / 12)
-    s1 = pivot - (range_val * 1.1 / 12)
+    # === 200-period EMA for trend filter ===
+    ema200 = pd.Series(close).ewm(span=200, min_periods=200, adjust=False).mean().values
     
-    # === 1d close trend filter (bullish/bearish daily candle) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    open_1d = df_1d['open'].values
-    daily_bullish = close_1d > open_1d  # Bullish daily candle
-    daily_bearish = close_1d < open_1d  # Bearish daily candle
-    daily_bullish_aligned = align_htf_to_ltf(prices, df_1d, daily_bullish)
-    daily_bearish_aligned = align_htf_to_ltf(prices, df_1d, daily_bearish)
+    # === Volume confirmation (current volume > 1.5x 20-period average) ===
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === 1d volume average for confirmation ===
-    volume_1d = df_1d['volume'].values
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    # === 12h ADX for trend strength filter ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # True Range
+    tr1 = np.abs(high_12h - low_12h)
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    
+    # Directional Movement
+    up_move = np.diff(high_12h, prepend=high_12h[0])
+    down_move = -np.diff(low_12h, prepend=low_12h[0])
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(span=14, min_periods=14, adjust=False).mean().values
+    
+    # Align 12h ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 20  # For volume average
+    warmup = 200  # For EMA200 and ADX
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1[i]) or 
-            np.isnan(s1[i]) or
-            np.isnan(daily_bullish_aligned[i]) or
-            np.isnan(daily_bearish_aligned[i]) or
-            np.isnan(vol_avg_20_1d_aligned[i])):
+        if (np.isnan(donch_high[i]) or 
+            np.isnan(donch_low[i]) or
+            np.isnan(ema200[i]) or
+            np.isnan(vol_ma20[i]) or
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Get current daily bar's volume for confirmation
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
+        # Volume filter: current volume > 1.5x 20-period average volume
+        vol_filter = volume[i] > 1.5 * vol_ma20[i]
         
-        # Volume filter: current volume > 1.5x daily average volume
-        vol_filter = vol_1d_current > 1.5 * vol_avg_20_1d_aligned[i]
-        
-        # Daily trend filters
-        daily_bull = daily_bullish_aligned[i]
-        daily_bear = daily_bearish_aligned[i]
+        # Trend filter: ADX > 25 indicates trending market
+        trend_filter = adx_aligned[i] > 25
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: break above R1 + volume filter + bullish daily candle
-            if close[i] > r1[i] and vol_filter and daily_bull:
+            # Long: break above Donchian high + volume filter + trend filter + price > EMA200
+            if close[i] > donch_high[i] and vol_filter and trend_filter and close[i] > ema200[i]:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: break below S1 + volume filter + bearish daily candle
-            elif close[i] < s1[i] and vol_filter and daily_bear:
+            # Short: break below Donchian low + volume filter + trend filter + price < EMA200
+            elif close[i] < donch_low[i] and vol_filter and trend_filter and close[i] < ema200[i]:
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit when price closes below S1 (reversal signal)
-            if close[i] < s1[i]:
+            # Exit when price closes below Donchian low (reversal signal)
+            if close[i] < donch_low[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -99,8 +103,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price closes above R1 (reversal signal)
-            if close[i] > r1[i]:
+            # Exit when price closes above Donchian high (reversal signal)
+            if close[i] > donch_high[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -109,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_R1_S1_Breakout_Volume_Confirm"
-timeframe = "12h"
+name = "4h_Range_Breakout_With_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
