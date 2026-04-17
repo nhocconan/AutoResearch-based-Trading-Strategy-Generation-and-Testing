@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with volume confirmation and ATR-based trailing stop.
-Long when price breaks above 20-period high with volume > 1.5x average.
-Short when price breaks below 20-period low with volume > 1.5x average.
-Exit via ATR trailing stop (3x ATR) or opposite Donchian breakout.
-Uses discrete position sizing (0.25) to limit fee drag. Target: 50-150 trades over 4 years.
+Hypothesis: 6h Elder Ray + 1d ADX/EMA Regime Filter.
+Long when Bull Power > 0 and Bear Power < 0 in bull regime (ADX > 25 and price > EMA50).
+Short when Bear Power < 0 and Bull Power > 0 in bear regime (ADX > 25 and price < EMA50).
+Exit when power diverges or regime shifts to ranging (ADX < 20).
+Uses 13-period Elder Ray (EMA13) for sensitivity. Target: 50-150 total trades over 4 years (12-37/year).
+Works in both bull (trend continuation) and bear (mean reversion at extremes) via regime filter.
 """
 
 import numpy as np
@@ -13,99 +14,147 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate ATR for stoploss
-    def calculate_atr(high, low, close, period=14):
+    # Get 1d data for ADX and EMA regime filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate 1d ADX (14-period)
+    def calculate_adx(high, low, close, period=14):
+        # True Range
         tr = np.zeros_like(close)
         for i in range(1, len(close)):
             tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
         
+        # Directional Movement
+        dm_plus = np.zeros_like(close)
+        dm_minus = np.zeros_like(close)
+        for i in range(1, len(close)):
+            up_move = high[i] - high[i-1]
+            down_move = low[i-1] - low[i]
+            dm_plus[i] = up_move if up_move > down_move and up_move > 0 else 0
+            dm_minus[i] = down_move if down_move > up_move and down_move > 0 else 0
+        
+        # Smoothed TR, DM+, DM- (Wilder's smoothing)
         atr = np.zeros_like(close)
+        dmp = np.zeros_like(close)
+        dmm = np.zeros_like(close)
+        
+        # Initial values
         atr[period] = np.mean(tr[1:period+1])
-        for i in range(period+1, len(tr)):
+        dmp[period] = np.mean(dm_plus[1:period+1])
+        dmm[period] = np.mean(dm_minus[1:period+1])
+        
+        # Wilder's smoothing
+        for i in range(period+1, len(close)):
             atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        return atr
+            dmp[i] = (dmp[i-1] * (period-1) + dm_plus[i]) / period
+            dmm[i] = (dmm[i-1] * (period-1) + dm_minus[i]) / period
+        
+        # Directional Indicators
+        dip = np.zeros_like(close)
+        dim = np.zeros_like(close)
+        dx = np.zeros_like(close)
+        for i in range(period, len(close)):
+            if atr[i] > 0:
+                dip[i] = dmp[i] / atr[i] * 100
+                dim[i] = dmm[i] / atr[i] * 100
+                if dip[i] + dim[i] > 0:
+                    dx[i] = abs(dip[i] - dim[i]) / (dip[i] + dim[i]) * 100
+                else:
+                    dx[i] = 0
+        
+        # ADX (smoothed DX)
+        adx = np.zeros_like(close)
+        adx[2*period-1] = np.mean(dx[period:2*period])
+        for i in range(2*period, len(close)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    atr = calculate_atr(high, low, close, 14)
+    # Calculate 1d EMA50
+    def calculate_ema(data, period):
+        ema = np.zeros_like(data)
+        multiplier = 2 / (period + 1)
+        ema[0] = data[0]
+        for i in range(1, len(data)):
+            ema[i] = (data[i] - ema[i-1]) * multiplier + ema[i-1]
+        return ema
     
-    # Donchian channels (20-period)
-    def donchian_channels(high, low, period=20):
-        upper = np.full_like(high, np.nan)
-        lower = np.full_like(low, np.nan)
-        for i in range(period-1, len(high)):
-            upper[i] = np.max(high[i-period+1:i+1])
-            lower[i] = np.min(low[i-period+1:i+1])
-        return upper, lower
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    ema50_1d = calculate_ema(close_1d, 50)
     
-    upper_channel, lower_channel = donchian_channels(high, low, 20)
+    # Calculate 6h Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13)
+    def calculate_ema_fast(data, period):
+        ema = np.zeros_like(data)
+        multiplier = 2 / (period + 1)
+        ema[0] = data[0]
+        for i in range(1, len(data)):
+            ema[i] = (data[i] - ema[i-1]) * multiplier + ema[i-1]
+        return ema
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.5)
+    ema13 = calculate_ema_fast(close, 13)
+    bull_power = high - ema13
+    bear_power = low - ema13
+    
+    # Align 1d indicators to 6h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    start_idx = 20  # warmup for Donchian
+    start_idx = 50  # warmup for indicators
     
     for i in range(start_idx, n):
-        # Skip if ATR not ready
-        if np.isnan(atr[i]):
+        # Skip if any required data is not available
+        if (np.isnan(adx_1d_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i])):
             signals[i] = 0.0
             continue
-            
+        
+        adx_val = adx_1d_aligned[i]
+        ema50 = ema50_1d_aligned[i]
+        bp = bull_power[i]
+        br = bear_power[i]
         price = close[i]
-        vol_conf = volume_confirm[i]
-        upper = upper_channel[i]
-        lower = lower_channel[i]
+        
+        # Regime definition
+        is_bull_regime = adx_val > 25 and price > ema50
+        is_bear_regime = adx_val > 25 and price < ema50
+        is_ranging = adx_val < 20
         
         if position == 0:
-            # Long: price breaks above upper channel with volume confirmation
-            if price > upper and vol_conf:
+            # Long: Bull Power > 0 and Bear Power < 0 in bull regime
+            if bp > 0 and br < 0 and is_bull_regime:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-                highest_since_entry = price
-            # Short: price breaks below lower channel with volume confirmation
-            elif price < lower and vol_conf:
+            # Short: Bear Power < 0 and Bull Power > 0 in bear regime
+            elif br < 0 and bp > 0 and is_bear_regime:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
-                lowest_since_entry = price
         
         elif position == 1:
-            # Update highest price since entry
-            highest_since_entry = max(highest_since_entry, price)
-            # ATR trailing stop: exit if price drops 3*ATR from high
-            if price < highest_since_entry - 3.0 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-            # Opposite breakout exit
-            elif price < lower:
+            # Exit long: Power diverges OR regime shifts to ranging/bear
+            if bp <= 0 or br >= 0 or is_ranging or is_bear_regime:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Update lowest price since entry
-            lowest_since_entry = min(lowest_since_entry, price)
-            # ATR trailing stop: exit if price rises 3*ATR from low
-            if price > lowest_since_entry + 3.0 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-            # Opposite breakout exit
-            elif price > upper:
+            # Exit short: Power diverges OR regime shifts to ranging/bull
+            if br >= 0 or bp <= 0 or is_ranging or is_bull_regime:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,6 +162,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_VolumeSpike_ATRStop"
-timeframe = "4h"
+name = "6h_ElderRay_1dADXEMA_Regime"
+timeframe = "6h"
 leverage = 1.0
