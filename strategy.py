@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_RSI_Chop_v1
-KAMA(14,10) for trend direction + RSI(14) + Choppiness Index(14) regime filter.
-Long when KAMA rising, RSI>50, CHOP<40 (trending). Short when KAMA falling, RSI<50, CHOP<40.
-Uses 1w EMA50 as higher timeframe trend filter.
-Target: 50-100 total trades over 4 years (12-25/year).
+4h_Keltner_Channel_Squeeze_v1
+Hypothesis: Keltner Channel width contraction (low volatility) followed by expansion with directional breakout captures trend initiation in both bull and bear markets. Uses 1d ADX for trend strength filter and volume surge for confirmation. Target: 20-50 trades/year.
 """
 
 import numpy as np
@@ -13,98 +10,100 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # === KAMA(14,10) ===
-    # Efficiency Ratio
-    change = np.abs(close - np.roll(close, 14))
-    change[0:14] = np.nan
-    volatility = np.abs(np.diff(close, prepend=np.nan))
-    volatility_sum = pd.Series(volatility).rolling(window=14, min_periods=14).sum().values
-    er = change / volatility_sum
-    er[0:14] = np.nan
-    # Smoothing constants
-    sc = (er * (2/(10+1) - 2/(30+1)) + 2/(30+1))**2
-    # KAMA calculation
-    kama = np.full_like(close, np.nan)
-    kama[14] = close[14]  # seed
-    for i in range(15, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # === Keltner Channel (20, 2.0) ===
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr = pd.Series(
+        np.maximum(
+            np.maximum(high - low, np.abs(high - np.roll(close, 1))),
+            np.abs(low - np.roll(close, 1))
+        )
+    ).rolling(window=20, min_periods=20).mean().values
+    atr[0] = high[0] - low[0]  # first ATR
     
-    # === RSI(14) ===
-    delta = np.diff(close, prepend=np.nan)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    upper = ema20 + 2.0 * atr
+    lower = ema20 - 2.0 * atr
+    width = upper - lower
     
-    # === Choppiness Index(14) ===
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low + 1e-10)) / np.log10(14)
+    # === Keltner Squeeze: width < 20-period average width ===
+    avg_width = pd.Series(width).rolling(window=20, min_periods=20).mean().values
+    squeeze = width < avg_width
     
-    # === 1w EMA50 trend filter ===
-    df_1w = get_htf_data(prices, '1w')
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # === Breakout direction ===
+    breakout_up = close > upper
+    breakout_down = close < lower
     
+    # === Volume confirmation: volume > 1.5 x 20-period average volume ===
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_surge = volume > 1.5 * avg_volume
+    
+    # === 1d ADX for trend strength filter ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1d[0] = tr1[0]
+    
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / (atr_1d * 14)
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / (atr_1d * 14)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx_1d = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # === Signal generation ===
     signals = np.zeros(n)
-    
-    # Warmup period
-    warmup = 50
-    
-    # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
+    warmup = 60
+    
     for i in range(warmup, n):
-        # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(chop[i]) or 
-            np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(ema20[i]) or np.isnan(atr[i]) or 
+            np.isnan(adx_1d_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Entry logic: only enter when flat
+        # Entry: only when coming out of squeeze with volume surge
         if position == 0:
-            # Long: KAMA rising, RSI>50, CHOP<40 (trending), price above 1w EMA50
-            if (kama[i] > kama[i-1] and 
-                rsi[i] > 50 and 
-                chop[i] < 40 and 
-                close[i] > ema_50_1w_aligned[i]):
+            if (squeeze[i-1] and  # was in squeeze previous bar
+                breakout_up[i] and 
+                volume_surge[i] and 
+                adx_1d_aligned[i] > 20):  # strong trend
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: KAMA falling, RSI<50, CHOP<40 (trending), price below 1w EMA50
-            elif (kama[i] < kama[i-1] and 
-                  rsi[i] < 50 and 
-                  chop[i] < 40 and 
-                  close[i] < ema_50_1w_aligned[i]):
+            elif (squeeze[i-1] and  # was in squeeze previous bar
+                  breakout_down[i] and 
+                  volume_surge[i] and 
+                  adx_1d_aligned[i] > 20):  # strong trend
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic
+        # Exit: when price returns to middle (EMA20) or volatility drops
         elif position == 1:
-            # Exit long: KAMA falling OR RSI<40 OR CHOP>61.8 (choppy)
-            if (kama[i] < kama[i-1] or 
-                rsi[i] < 40 or 
-                chop[i] > 61.8):
+            if close[i] <= ema20[i] or width[i] < avg_width[i] * 0.5:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -112,10 +111,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: KAMA rising OR RSI>60 OR CHOP>61.8 (choppy)
-            if (kama[i] > kama[i-1] or 
-                rsi[i] > 60 or 
-                chop[i] > 61.8):
+            if close[i] >= ema20[i] or width[i] < avg_width[i] * 0.5:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -124,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_RSI_Chop_v1"
-timeframe = "1d"
+name = "4h_Keltner_Channel_Squeeze_v1"
+timeframe = "4h"
 leverage = 1.0
