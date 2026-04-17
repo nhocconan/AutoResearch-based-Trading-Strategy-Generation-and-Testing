@@ -1,3 +1,7 @@
+# 12h_DailyPivot_Breakout_Volume_TrendFilter_Strict
+# Hypothesis: Daily pivot levels (R1/S1) act as key support/resistance on 12h timeframe. Breakouts with volume and trend filters capture institutional moves. Works in bull/bear by following momentum.
+# Timeframe: 12h, uses 1d for pivots. Target: 25-50 trades/year to avoid fee drag.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
