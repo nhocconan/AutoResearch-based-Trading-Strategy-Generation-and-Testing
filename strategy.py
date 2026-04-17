@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_EMA21_With_1d_Trend_Filter
-Hypothesis: EMA21 provides responsive trend detection; combining with 1d EMA200 reduces whipsaw in choppy markets while capturing strong trends.
-Long when EMA21 crosses above EMA50 + price > EMA21 + 1d EMA200 upward slope + volume > 1.5x average.
-Short when EMA21 crosses below EMA50 + price < EMA21 + 1d EMA200 downward slope + volume > 1.5x average.
-Exit on opposite EMA cross. Position size: ±0.25. Uses 4h primary with 1d trend filter.
-Designed to work in bull (trend capture) and bear (avoids false signals via 1d filter).
+1d_Donchian20_WeeklyTrend_Filter
+Hypothesis: Daily Donchian(20) breakout with weekly trend filter (price > weekly SMA40) captures strong trends while avoiding counter-trend whipsaws. Works in bull (captures rallies) and bear (avoids false longs in downtrends) by requiring alignment with weekly trend. Volume confirmation ensures breakout legitimacy. Low trade frequency (~10-20/year) minimizes fee drag.
 """
 
 import numpy as np
@@ -22,77 +18,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate EMAs
-    close_series = pd.Series(close)
-    ema21 = close_series.ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Donchian channels (20-period)
+    def donchian_channels(high, low, window):
+        upper = pd.Series(high).rolling(window=window, min_periods=window).max().values
+        lower = pd.Series(low).rolling(window=window, min_periods=window).min().values
+        return upper, lower
     
-    # Calculate EMA crossovers
-    ema21_cross_above_ema50 = (ema21 > ema50) & (np.roll(ema21, 1) <= np.roll(ema50, 1))
-    ema21_cross_below_ema50 = (ema21 < ema50) & (np.roll(ema21, 1) >= np.roll(ema50, 1))
-    # Handle first element
-    ema21_cross_above_ema50[0] = False
-    ema21_cross_below_ema50[0] = False
+    dc_upper, dc_lower = donchian_channels(high, low, 20)
     
-    # Volume confirmation (10-period MA on 4h)
-    volume_ma10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    # Volume confirmation (20-period average)
+    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    close_weekly = df_weekly['close'].values
     
-    # Calculate 1d EMA200 for trend filter
-    close_series_1d = pd.Series(close_1d)
-    ema200_1d = close_series_1d.ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate weekly SMA40 for trend filter
+    sma40_weekly = pd.Series(close_weekly).rolling(window=40, min_periods=40).mean().values
     
-    # Align 1d EMA200 to 4h timeframe
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    
-    # Calculate 1d EMA200 slope (1-period change)
-    ema200_1d_slope = np.diff(ema200_1d, prepend=0)
-    ema200_1d_slope_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d_slope)
+    # Align weekly SMA40 to daily timeframe
+    sma40_weekly_aligned = align_htf_to_ltf(prices, df_weekly, sma40_weekly)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = max(21, 50, 10, 200)  # EMA21, EMA50, volume MA10, EMA200
+    start_idx = max(20, 20, 40)  # Donchian, volume MA20, weekly SMA40
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema21[i]) or 
-            np.isnan(ema50[i]) or 
-            np.isnan(ema21_cross_above_ema50[i]) or 
-            np.isnan(ema21_cross_below_ema50[i]) or 
-            np.isnan(volume_ma10[i]) or 
-            np.isnan(ema200_1d_aligned[i]) or 
-            np.isnan(ema200_1d_slope_aligned[i])):
+        if (np.isnan(dc_upper[i]) or 
+            np.isnan(dc_lower[i]) or 
+            np.isnan(volume_ma20[i]) or 
+            np.isnan(sma40_weekly_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 10-period average
-        volume_filter = volume[i] > (1.5 * volume_ma10[i])
+        # Volume filter: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        
+        # Donchian breakout conditions
+        breakout_up = close[i] > dc_upper[i]
+        breakout_down = close[i] < dc_lower[i]
+        
+        # Weekly trend filter: price above/below weekly SMA40
+        weekly_uptrend = close[i] > sma40_weekly_aligned[i]
+        weekly_downtrend = close[i] < sma40_weekly_aligned[i]
         
         if position == 0:
-            # Long: EMA21 crosses above EMA50 + price > EMA21 + 1d uptrend + volume filter
-            if ema21_cross_above_ema50[i] and close[i] > ema21[i] and ema200_1d_slope_aligned[i] > 0 and volume_filter:
+            # Long: upward breakout + volume filter + weekly uptrend
+            if breakout_up and volume_filter and weekly_uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: EMA21 crosses below EMA50 + price < EMA21 + 1d downtrend + volume filter
-            elif ema21_cross_below_ema50[i] and close[i] < ema21[i] and ema200_1d_slope_aligned[i] < 0 and volume_filter:
+            # Short: downward breakout + volume filter + weekly downtrend
+            elif breakout_down and volume_filter and weekly_downtrend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: EMA21 crosses below EMA50
-            if ema21_cross_below_ema50[i]:
+            # Exit long: price touches or goes below weekly SMA40 (trailing stop)
+            if close[i] <= sma40_weekly_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: EMA21 crosses above EMA50
-            if ema21_cross_above_ema50[i]:
+            # Exit short: price touches or goes above weekly SMA40 (trailing stop)
+            if close[i] >= sma40_weekly_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA21_With_1d_Trend_Filter"
-timeframe = "4h"
+name = "1d_Donchian20_WeeklyTrend_Filter"
+timeframe = "1d"
 leverage = 1.0
