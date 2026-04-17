@@ -1,10 +1,3 @@
-# 1d Pivot S3R3 Breakout with Weekly Trend Filter
-# Hypothesis: Price breaking S3/R3 daily pivot levels with weekly trend alignment captures breakouts
-# in both bull and bear markets. Weekly EMA50 filter ensures trades align with higher timeframe trend.
-# Using 1d timeframe targets 30-100 trades over 4 years (7-25/year) to minimize fee drag.
-# Volume and volatility filters reduce false breakouts.
-# Focus on BTC/ETH as primary targets with S3/R3 levels providing structure.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -37,8 +30,7 @@ def generate_signals(prices):
     r4_1d = pivot_1d + 3 * (high_1d - low_1d)
     s4_1d = pivot_1d - 3 * (high_1d - low_1d)
     
-    # Align pivot levels to 1d timeframe (no alignment needed as we're using 1d data on 1d timeframe)
-    # But we keep the align_htf_to_ltf call for consistency with the framework
+    # Align pivot levels to 6h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
@@ -58,7 +50,7 @@ def generate_signals(prices):
     ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Calculate 1d ATR for volatility filter
+    # Calculate 6h ATR for volatility filter
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
@@ -112,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Pivot_S3R3_Breakout_WeeklyTrend"
-timeframe = "1d"
+name = "6h_Pivot_S3R3_Breakout_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
