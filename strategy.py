@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,87 +13,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend direction
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Get weekly data for higher timeframe trend
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 4h EMA34 for trend
-    ema34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
+    # Calculate weekly EMA(34) for trend direction
+    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Get 1d data for volume context
+    # Get daily data for pivot points
     df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    volume_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma20_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 1h ATR for volatility filter
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate daily pivot points (standard formula)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = 2 * pivot_1d - low_1d
+    s1_1d = 2 * pivot_1d - high_1d
+    r2_1d = pivot_1d + (high_1d - low_1d)
+    s2_1d = pivot_1d - (high_1d - low_1d)
     
-    # 1h EMA20 for entry timing
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Align daily pivot levels to 6h timeframe (use previous day's levels)
+    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_6h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_6h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r2_6h = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s2_6h = align_htf_to_ltf(prices, df_1d, s2_1d)
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # Volume filter: current volume > 1.5 * 20-period average
+    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # Ensure sufficient warmup
+    start_idx = 34  # Need sufficient data for weekly EMA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema34_4h_aligned[i]) or np.isnan(volume_ma20_1d_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(ema20[i])):
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or
+            np.isnan(s1_6h[i]) or np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade 08-20 UTC
-        if not (8 <= hours[i] <= 20):
-            signals[i] = 0.0
-            continue
+        # Weekly trend filter: price above/below weekly EMA(34)
+        weekly_uptrend = close[i] > ema_1w_aligned[i]
+        weekly_downtrend = close[i] < ema_1w_aligned[i]
         
-        # Trend filter: price relative to 4h EMA34
-        uptrend = close[i] > ema34_4h_aligned[i]
-        downtrend = close[i] < ema34_4h_aligned[i]
-        
-        # Volume filter: current 1h volume > 1.3 * 20-day average volume
-        volume_filter = volume[i] > (1.3 * volume_ma20_1d_aligned[i])
-        
-        # Entry timing: price crosses 1h EMA20 in direction of trend
-        ema20_cross_up = close[i] > ema20[i] and close[i-1] <= ema20[i-1]
-        ema20_cross_down = close[i] < ema20[i] and close[i-1] >= ema20[i-1]
+        # Volume filter
+        volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
         if position == 0:
-            # Long entry: uptrend + volume + EMA20 cross up
-            if uptrend and volume_filter and ema20_cross_up:
-                signals[i] = 0.20
+            # Long: price breaks above R1 with weekly uptrend and volume
+            if close[i] > r1_6h[i] and weekly_uptrend and volume_filter:
+                signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + volume + EMA20 cross down
-            elif downtrend and volume_filter and ema20_cross_down:
-                signals[i] = -0.20
+            # Short: price breaks below S1 with weekly downtrend and volume
+            elif close[i] < s1_6h[i] and weekly_downtrend and volume_filter:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: trend reversal or volume drying up
-            if not uptrend or not volume_filter:
+            # Exit long: price falls below S2 OR weekly trend turns down
+            if close[i] < s2_6h[i] or not weekly_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: trend reversal or volume drying up
-            if not downtrend or not volume_filter:
+            # Exit short: price rises above R2 OR weekly trend turns up
+            if close[i] > r2_6h[i] or not weekly_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_EMA34_Trend_Volume_EMA20Entry"
-timeframe = "1h"
+name = "6h_WeeklyEMA34_DailyPivot_Breakout"
+timeframe = "6h"
 leverage = 1.0
