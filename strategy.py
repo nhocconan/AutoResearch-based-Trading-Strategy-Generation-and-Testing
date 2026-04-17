@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h timeframe with 1d ATR volatility regime filter + 4h Donchian(20) breakout + volume confirmation.
-Long when price breaks above 4h Donchian(20) upper band with 1d ATR ratio (ATR7/ATR30) > 1.2 (expanding volatility) and volume > 1.5x 20-period 4h volume average.
-Short when price breaks below 4h Donchian(20) lower band with same volatility and volume conditions.
-Volatility expansion captures breakout momentum in both bull and bear markets; Donchian provides structural breakout levels; volume confirms participation.
-Designed to avoid choppy markets (low ATR ratio) and false breakouts. Target: 50-150 total trades over 4 years.
+Hypothesis: 12h timeframe with 1d Donchian(20) breakout + volume confirmation + ATR-based stoploss.
+Long when price breaks above 20-period 1d Donchian high with volume > 1.5x 20-period 1d volume average.
+Short when price breaks below 20-period 1d Donchian low with volume > 1.5x 20-period 1d volume average.
+Uses discrete position sizing 0.25 to limit fee drag. Target: 50-150 total trades over 4 years.
+Donchian channels provide structural breakout levels; volume confirms institutional participation.
+Designed to work in bull markets (breakout continuation) and bear markets (mean reversion after volatility expansion).
 """
 
 import numpy as np
@@ -21,96 +22,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian breakout and volume
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
-    
-    # Get 1d data for ATR volatility regime
+    # Get 1d data for Donchian channels and volume
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 4h Donchian(20) channels
-    def donchian_channel(high_arr, low_arr, window):
-        upper = pd.Series(high_arr).rolling(window=window, min_periods=window).max().values
-        lower = pd.Series(low_arr).rolling(window=window, min_periods=window).min().values
-        return upper, lower
+    # Calculate 1d Donchian channels (20-period)
+    donchian_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    donchian_upper_4h, donchian_lower_4h = donchian_channel(high_4h, low_4h, 20)
+    # Calculate 1d volume 20-period average
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 4h volume 20-period average
-    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate 1d ATR(7) and ATR(30) for volatility regime
-    def atr(high_arr, low_arr, close_arr, window):
-        tr1 = high_arr - low_arr
-        tr2 = np.abs(high_arr - np.roll(close_arr, 1))
-        tr3 = np.abs(low_arr - np.roll(close_arr, 1))
-        tr2[0] = tr1[0]  # first bar: no previous close
-        tr3[0] = tr1[0]
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        atr_val = pd.Series(tr).rolling(window=window, min_periods=window).mean().values
-        return atr_val
-    
-    atr_7_1d = atr(high_1d, low_1d, close_1d, 7)
-    atr_30_1d = atr(high_1d, low_1d, close_1d, 30)
-    atr_ratio_1d = atr_7_1d / atr_30_1d  # >1.2 indicates expanding volatility
-    
-    # Align all to 6h
-    donchian_upper_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper_4h)
-    donchian_lower_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower_4h)
-    vol_ma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
-    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
-    volume_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_4h)
+    # Align all to 12h
+    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
+    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 30  # need enough for Donchian and ATR
+    start_idx = 20  # need enough for Donchian and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_upper_4h_aligned[i]) or np.isnan(donchian_lower_4h_aligned[i]) or 
-            np.isnan(vol_ma_20_4h_aligned[i]) or np.isnan(atr_ratio_1d_aligned[i]) or 
-            np.isnan(volume_4h_aligned[i])):
+        if (np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(volume_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: expanding volatility (ATR7/ATR30 > 1.2)
-        volatility_expanding = atr_ratio_1d_aligned[i] > 1.2
-        
-        # Volume confirmation: current 4h volume > 1.5x 20-period average
-        volume_confirmed = volume_4h_aligned[i] > 1.5 * vol_ma_20_4h_aligned[i]
+        # Volume confirmation: current 1d volume > 1.5x 20-period average
+        volume_confirmed = volume_1d_aligned[i] > 1.5 * vol_ma_20_1d_aligned[i]
         
         if position == 0:
-            # Long: price breaks above 4h Donchian upper with expanding volatility and volume
-            if (close[i] > donchian_upper_4h_aligned[i] and 
-                volatility_expanding and 
-                volume_confirmed):
+            # Long: price breaks above 1d Donchian high with volume confirmation
+            if (close[i] > donchian_high_20_aligned[i] and volume_confirmed):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 4h Donchian lower with expanding volatility and volume
-            elif (close[i] < donchian_lower_4h_aligned[i] and 
-                  volatility_expanding and 
-                  volume_confirmed):
+            # Short: price breaks below 1d Donchian low with volume confirmation
+            elif (close[i] < donchian_low_20_aligned[i] and volume_confirmed):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below 4h Donchian lower (reversal signal)
-            if close[i] < donchian_lower_4h_aligned[i]:
+            # Exit long: price falls back below 1d Donchian low (mean reversion)
+            if close[i] < donchian_low_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above 4h Donchian upper (reversal signal)
-            if close[i] > donchian_upper_4h_aligned[i]:
+            # Exit short: price rises back above 1d Donchian high (mean reversion)
+            if close[i] > donchian_high_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -118,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1dATR_VolRegime_4hDonchian20_Volume_Confirm"
-timeframe = "6h"
+name = "12h_1dDonchian20_Volume_Confirm_MeanReversion"
+timeframe = "12h"
 leverage = 1.0
