@@ -13,61 +13,103 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Donchian Channels (20-period) ===
+    # === 1d RSI (14-period) ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate upper and lower bands
-    upper_donchian = np.full_like(high_1d, np.nan)
-    lower_donchian = np.full_like(low_1d, np.nan)
+    # Calculate RSI using Wilder's smoothing with proper seeding
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    for i in range(len(high_1d)):
-        if i >= 19:
-            upper_donchian[i] = np.max(high_1d[i-19:i+1])
-            lower_donchian[i] = np.min(low_1d[i-19:i+1])
-        else:
-            upper_donchian[i] = np.nan
-            lower_donchian[i] = np.nan
-    
-    # === 1d ATR (14-period) for stop loss ===
-    tr = np.maximum(high_1d - low_1d,
-                    np.maximum(np.abs(high_1d - np.roll(close, 1)),
-                               np.abs(low_1d - np.roll(close, 1))))
-    tr[0] = high_1d[0] - low_1d[0]
-    
-    atr = np.full_like(tr, np.nan)
-    for i in range(len(tr)):
-        if i < 14:
+    # Wilder's smoothing with proper seeding
+    avg_gain = np.full_like(gain, np.nan)
+    avg_loss = np.full_like(loss, np.nan)
+    period = 14
+    for i in range(len(gain)):
+        if i < period:
             if i == 0:
-                atr[i] = tr[i]
+                avg_gain[i] = gain[i]
+                avg_loss[i] = loss[i]
             else:
-                atr[i] = np.mean(tr[:i+1])
+                avg_gain[i] = (avg_gain[i-1] * (i-1) + gain[i]) / i
+                avg_loss[i] = (avg_loss[i-1] * (i-1) + loss[i]) / i
         else:
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
     
-    # === Align to 12h timeframe ===
-    upper_donchian_12h = align_htf_to_ltf(prices, df_1d, upper_donchian)
-    lower_donchian_12h = align_htf_to_ltf(prices, df_1d, lower_donchian)
-    atr_12h = align_htf_to_ltf(prices, df_1d, atr)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d[avg_loss == 0] = 100
     
-    # === 12h Volume confirmation ===
-    df_12h = get_htf_data(prices, '12h')
-    volume_12h = df_12h['volume'].values
-    
-    # Calculate 20-period average volume on 12h timeframe
-    vol_ma_20 = np.full_like(volume_12h, np.nan)
-    for i in range(len(volume_12h)):
+    # === 1d Bollinger Bands (20,2) ===
+    # Calculate SMA20
+    sma_20 = np.full_like(close_1d, np.nan)
+    for i in range(len(close_1d)):
         if i >= 19:
-            vol_ma_20[i] = np.mean(volume_12h[i-19:i+1])
+            sma_20[i] = np.mean(close_1d[i-19:i+1])
+        elif i > 0:
+            sma_20[i] = np.mean(close_1d[max(0, i-9):i+1])
         else:
-            vol_ma_20[i] = np.nan
+            sma_20[i] = close_1d[0]
     
-    # Volume confirmation: current 12h volume > 1.5x 20-period average
-    vol_confirm = volume_12h > vol_ma_20 * 1.5
+    # Calculate standard deviation
+    std_20 = np.full_like(close_1d, np.nan)
+    for i in range(len(close_1d)):
+        if i >= 19:
+            std_20[i] = np.std(close_1d[i-19:i+1])
+        elif i > 0:
+            std_20[i] = np.std(close_1d[max(0, i-9):i+1])
+        else:
+            std_20[i] = 0.0
     
-    # === Align volume confirmation to main timeframe ===
-    vol_confirm_aligned = align_htf_to_ltf(prices, df_12h, vol_confirm)
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
+    
+    # === 1d Bollinger Band Width (for squeeze detection) ===
+    bb_width = (upper_bb - lower_bb) / sma_20
+    
+    # === 1d BB Width percentile (20-period) for regime detection ===
+    bb_width_percentile = np.full_like(bb_width, np.nan)
+    for i in range(len(bb_width)):
+        if i >= 19:
+            window = bb_width[i-19:i+1]
+            rank = np.sum(window <= bb_width[i]) / len(window)
+            bb_width_percentile[i] = rank * 100
+        elif i > 0:
+            window = bb_width[max(0, i-9):i+1]
+            rank = np.sum(window <= bb_width[i]) / len(window)
+            bb_width_percentile[i] = rank * 100
+        else:
+            bb_width_percentile[i] = 50.0
+    
+    # === Align indicators to 4h timeframe ===
+    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_1d, bb_width_percentile)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    sma_20_aligned = align_htf_to_ltf(prices, df_1d, sma_20)
+    
+    # === 4h Volume confirmation ===
+    df_4h = get_htf_data(prices, '4h')
+    volume_4h = df_4h['volume'].values
+    
+    # Calculate 20-period average volume on 4h timeframe
+    vol_ma_20 = np.full_like(volume_4h, np.nan)
+    for i in range(len(volume_4h)):
+        if i >= 19:
+            vol_ma_20[i] = np.mean(volume_4h[i-19:i+1])
+        elif i > 0:
+            vol_ma_20[i] = np.mean(volume_4h[max(0, i-9):i+1])
+        else:
+            vol_ma_20[i] = volume_4h[0]
+    
+    # Volume confirmation: current 4h volume > 1.5x 20-period average
+    vol_confirm = volume_4h > vol_ma_20 * 1.5
+    
+    # === 4h Session filter (08-20 UTC) ===
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     
@@ -79,31 +121,49 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_donchian_12h[i]) or 
-            np.isnan(lower_donchian_12h[i]) or 
-            np.isnan(atr_12h[i]) or 
-            np.isnan(vol_confirm_aligned[i])):
+        if (np.isnan(bb_width_percentile_aligned[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(upper_bb_aligned[i]) or 
+            np.isnan(lower_bb_aligned[i]) or 
+            np.isnan(sma_20_aligned[i]) or 
+            np.isnan(vol_confirm[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Entry logic: only enter when flat
+        # Skip if outside session
+        if not session_filter[i]:
+            signals[i] = 0.0
+            position = 0
+            continue
+        
+        # Market regime: low volatility squeeze (BB Width < 20th percentile)
+        is_squeeze = bb_width_percentile_aligned[i] < 20
+        
+        # Entry logic: only enter when flat AND volume confirmation
         if position == 0:
-            # Long: price breaks above upper Donchian + volume confirmation
-            if close[i] > upper_donchian_12h[i] and vol_confirm_aligned[i]:
+            # Long: RSI < 30 (oversold) + BB squeeze + price near lower BB + volume confirmation
+            if (rsi_1d_aligned[i] < 30 and 
+                is_squeeze and 
+                close[i] <= lower_bb_aligned[i] * 1.02 and  # within 2% of lower BB
+                vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price breaks below lower Donchian + volume confirmation
-            elif close[i] < lower_donchian_12h[i] and vol_confirm_aligned[i]:
+            # Short: RSI > 70 (overbought) + BB squeeze + price near upper BB + volume confirmation
+            elif (rsi_1d_aligned[i] > 70 and 
+                  is_squeeze and 
+                  close[i] >= upper_bb_aligned[i] * 0.98 and  # within 2% of upper BB
+                  vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic with ATR-based stop loss
+        # Exit logic
         elif position == 1:
-            # Exit long: price closes below lower Donchian OR stop loss hit
-            if close[i] < lower_donchian_12h[i] or close[i] < (high[i] - 2.0 * atr_12h[i]):
+            # Exit long: RSI crosses above 50 OR price reaches middle BB
+            if (rsi_1d_aligned[i] > 50 or 
+                close[i] >= sma_20_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -111,8 +171,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price closes above upper Donchian OR stop loss hit
-            if close[i] > upper_donchian_12h[i] or close[i] > (low[i] + 2.0 * atr_12h[i]):
+            # Exit short: RSI crosses below 50 OR price reaches middle BB
+            if (rsi_1d_aligned[i] < 50 or 
+                close[i] <= sma_20_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -121,6 +182,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_Volume_ATR_Stop_v1"
-timeframe = "12h"
+name = "4h_BB_Squeeze_RSI_MeanReversion_VolumeFilter_v3"
+timeframe = "4h"
 leverage = 1.0
