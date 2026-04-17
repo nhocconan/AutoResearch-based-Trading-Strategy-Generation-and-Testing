@@ -1,30 +1,24 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Williams Alligator with 1-day ADX trend filter and volume confirmation.
-- Williams Alligator: Jaw (13-period SMMA shifted 8), Teeth (8-period SMMA shifted 5), Lips (5-period SMMA shifted 3)
-- Long when Lips > Teeth > Jaw (bullish alignment) and price above 1-day ADX > 25 with volume > 1.5x 20-period volume MA
-- Short when Lips < Teeth < Jaw (bearish alignment) and price below 1-day ADX > 25 with volume > 1.5x 20-period volume MA
-- Exit when Alligator alignment reverses
+Hypothesis: 1d strategy using Weekly Pivot (R1/S1) breakout with volume confirmation and ADX filter.
+- Uses weekly pivot levels (R1, S1) as key support/resistance
+- Enter long when price breaks above R1 with volume > 1.5x 20-period volume MA and ADX > 25
+- Enter short when price breaks below S1 with volume > 1.5x 20-period volume MA and ADX > 25
+- Exit when price returns to the weekly pivot (central pivot) or opposite signal occurs
 - Fixed position size 0.25 to manage drawdown
-- Uses 1-day ADX filter to avoid counter-trend trades in ranging markets
-- Designed for 4h timeframe with strict entry conditions to limit trades to 75-200 total over 4 years
+- Designed for 1d timeframe with strict entry conditions to limit trades to 30-100 total over 4 years
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def smma(series, period):
-    """Smoothed Moving Average (SMMA)"""
-    if len(series) < period:
-        return np.full_like(series, np.nan, dtype=np.float64)
-    result = np.full_like(series, np.nan, dtype=np.float64)
-    # First value is simple SMA
-    result[period-1] = np.mean(series[:period])
-    # Subsequent values: (prev_smma * (period-1) + current_value) / period
-    for i in range(period, len(series)):
-        result[i] = (result[i-1] * (period-1) + series[i]) / period
-    return result
+def calculate_pivot_points(high, low, close):
+    """Calculate classic pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    return pivot, r1, s1
 
 def generate_signals(prices):
     n = len(prices)
@@ -36,142 +30,110 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for pivot points
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 10:
         return np.zeros(n)
     
-    # Calculate 1-day ADX (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly pivot points
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    pivot, r1, s1 = calculate_pivot_points(weekly_high, weekly_low, weekly_close)
     
-    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
-    
-    # Smoothed TR, +DM, -DM (14-period)
-    tr_period = 14
-    atr = np.full_like(tr, np.nan, dtype=np.float64)
-    dm_plus_smooth = np.full_like(dm_plus, np.nan, dtype=np.float64)
-    dm_minus_smooth = np.full_like(dm_minus, np.nan, dtype=np.float64)
-    
-    # Initial values (simple average)
-    if len(tr) >= tr_period:
-        atr[tr_period-1] = np.nanmean(tr[1:tr_period])  # Skip first NaN
-        dm_plus_smooth[tr_period-1] = np.nanmean(dm_plus[1:tr_period])
-        dm_minus_smooth[tr_period-1] = np.nanmean(dm_minus[1:tr_period])
-        
-        # Subsequent values (smoothed)
-        for i in range(tr_period, len(tr)):
-            atr[i] = (atr[i-1] * (tr_period-1) + tr[i]) / tr_period
-            dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (tr_period-1) + dm_plus[i]) / tr_period
-            dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (tr_period-1) + dm_minus[i]) / tr_period
-    
-    # Directional Indicators
-    plus_di = np.full_like(atr, np.nan, dtype=np.float64)
-    minus_di = np.full_like(atr, np.nan, dtype=np.float64)
-    dx = np.full_like(atr, np.nan, dtype=np.float64)
-    
-    valid = (~np.isnan(atr)) & (atr != 0)
-    plus_di[valid] = 100 * dm_plus_smooth[valid] / atr[valid]
-    minus_di[valid] = 100 * dm_minus_smooth[valid] / atr[valid]
-    
-    dx_valid = (~np.isnan(plus_di)) & (~np.isnan(minus_di)) & ((plus_di + minus_di) != 0)
-    dx[dx_valid] = 100 * np.abs(plus_di[dx_valid] - minus_di[dx_valid]) / (plus_di[dx_valid] + minus_di[dx_valid])
-    
-    # ADX (smoothed DX)
-    adx = np.full_like(dx, np.nan, dtype=np.float64)
-    adx_period = 14
-    if len(dx) >= adx_period:
-        # First ADX value is average of first adx_period DX values
-        first_adx_idx = adx_period - 1
-        if first_adx_idx < len(dx):
-            adx[first_adx_idx] = np.nanmean(dx[1:adx_period+1])  # Skip first NaN in DX
-            
-            # Subsequent ADX values
-            for i in range(adx_period+1, len(dx)):
-                adx[i] = (adx[i-1] * (adx_period-1) + dx[i]) / adx_period
-    
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Williams Alligator components (using SMMA)
-    # Jaw: 13-period SMMA shifted 8 bars
-    jaw = smma(close, 13)
-    jaw_shifted = np.roll(jaw, 8)
-    jaw_shifted[:8] = np.nan  # First 8 values invalid after shift
-    
-    # Teeth: 8-period SMMA shifted 5 bars
-    teeth = smma(close, 8)
-    teeth_shifted = np.roll(teeth, 5)
-    teeth_shifted[:5] = np.nan  # First 5 values invalid after shift
-    
-    # Lips: 5-period SMMA shifted 3 bars
-    lips = smma(close, 5)
-    lips_shifted = np.roll(lips, 3)
-    lips_shifted[:3] = np.nan  # First 3 values invalid after shift
+    # Align weekly pivot levels to daily timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
     
     # Volume confirmation: 20-period volume MA
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
+    # ADX filter (14-period)
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(0, high[i] - high[i-1])
+            minus_dm[i] = max(0, low[i-1] - low[i])
+            if plus_dm[i] < minus_dm[i]:
+                plus_dm[i] = 0
+            if minus_dm[i] < plus_dm[i]:
+                minus_dm[i] = 0
+            
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Smooth using Wilder's smoothing (equivalent to EMA with alpha=1/period)
+        atr = np.zeros_like(tr)
+        atr[period] = np.mean(tr[1:period+1])
+        for i in range(period+1, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        plus_di = np.zeros_like(high)
+        minus_di = np.zeros_like(high)
+        dx = np.zeros_like(high)
+        
+        for i in range(period, len(high)):
+            if atr[i] != 0:
+                plus_di[i] = 100 * (np.mean(plus_dm[i-period+1:i+1]) / atr[i])
+                minus_di[i] = 100 * (np.mean(minus_dm[i-period+1:i+1]) / atr[i])
+                if (plus_di[i] + minus_di[i]) != 0:
+                    dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+        
+        adx = np.zeros_like(high)
+        adx[2*period-1] = np.mean(dx[period:2*period]) if np.any(dx[period:2*period]) else 0
+        for i in range(2*period, len(high)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period if not np.isnan(dx[i]) else adx[i-1]
+        
+        return adx
+    
+    adx = calculate_adx(high, low, close, 14)
+    
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 30  # warmup for Alligator and volume MA
+    start_idx = max(20, 30)  # warmup for volume MA and ADX
     
     for i in range(start_idx, n):
         if (np.isnan(volume_ma_20.iloc[i]) or 
-            np.isnan(lips_shifted[i]) or np.isnan(teeth_shifted[i]) or np.isnan(jaw_shifted[i]) or
-            np.isnan(adx_aligned[i])):
+            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(adx[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = volume_ma_20.iloc[i]
-        lips_val = lips_shifted[i]
-        teeth_val = teeth_shifted[i]
-        jaw_val = jaw_shifted[i]
-        adx_val = adx_aligned[i]
+        adx_val = adx[i]
+        pivot_val = pivot_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
         
         if position == 0:
-            # Look for Alligator signals with volume confirmation and trend filter
-            # Bullish alignment: Lips > Teeth > Jaw
-            bullish_align = lips_val > teeth_val > jaw_val
-            # Bearish alignment: Lips < Teeth < Jaw
-            bearish_align = lips_val < teeth_val < jaw_val
-            
-            # Long: Bullish alignment, ADX > 25 (trending), price above Jaw, volume spike
-            if bullish_align and adx_val > 25 and price > jaw_val and vol > 1.5 * vol_ma:
+            # Look for breakout signals with volume confirmation and ADX filter
+            # Long: price breaks above R1, volume spike, ADX > 25
+            if price > r1_val and vol > 1.5 * vol_ma and adx_val > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish alignment, ADX > 25 (trending), price below Jaw, volume spike
-            elif bearish_align and adx_val > 25 and price < jaw_val and vol > 1.5 * vol_ma:
+            # Short: price breaks below S1, volume spike, ADX > 25
+            elif price < s1_val and vol > 1.5 * vol_ma and adx_val > 25:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when Alligator turns bearish (Lips < Teeth or Teeth < Jaw)
-            if lips_val < teeth_val or teeth_val < jaw_val:
+            # Exit when price returns to pivot or breaks below S1
+            if price <= pivot_val or price < s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when Alligator turns bullish (Lips > Teeth or Teeth > Jaw)
-            if lips_val > teeth_val or teeth_val > jaw_val:
+            # Exit when price returns to pivot or breaks above R1
+            if price >= pivot_val or price > r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -179,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsAlligator_ADX25_Volume"
-timeframe = "4h"
+name = "1d_WeeklyPivot_R1S1_Volume_ADX25"
+timeframe = "1d"
 leverage = 1.0
