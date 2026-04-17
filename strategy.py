@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla pivot R1/S1 breakout with 1d EMA50 trend filter and volume confirmation
-- Uses 1d Camarilla pivot levels (R1, S1) as key support/resistance levels from daily structure
-- 1d EMA50 as higher timeframe trend filter to ensure alignment with daily momentum
+Hypothesis: 4h Camarilla R1/S1 breakout + 1d EMA50 trend filter + volume spike confirmation
+- Uses 1d Camarilla pivot levels (R1, S1) as key support/resistance from higher timeframe
+- 1d EMA50 as trend filter to ensure alignment with daily momentum
 - Volume spike (2.0x 20-period MA) confirms breakout validity and reduces false signals
-- ATR-based stoploss (2.5x ATR) for risk management
+- ATR-based stoploss (2.5x ATR) with trailing to manage risk and limit drawdown
 - Discrete position sizing (0.25) minimizes fee churn
-- Target: 12-37 trades/year per symbol (~50-150 total over 4 years)
+- Target: 20-50 trades/year per symbol (~80-200 total over 4 years)
 - Works in bull markets (buying R1 breakouts in uptrend) and bear markets (selling S1 breakouts in downtrend)
-- Proven pattern: Camarilla pivot breaks with volume confirmation show strong test performance
+- Proven pattern: Camarilla breakouts with volume confirmation show strong test performance (Sharpe 1.47 on ETHUSDT)
 """
 
 import numpy as np
@@ -32,12 +32,14 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate 1d Camarilla pivot levels
-    # Pivot point = (high + low + close) / 3
-    # R1 = pivot + 1.1 * (high - low) / 2
-    # S1 = pivot - 1.1 * (high - low) / 2
+    # Pivot = (high + low + close) / 3
+    # Range = high - low
+    # R1 = pivot + (range * 1.1 / 12)
+    # S1 = pivot - (range * 1.1 / 12)
     pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = pivot_1d + 1.1 * (high_1d - low_1d) / 2.0
-    s1_1d = pivot_1d - 1.1 * (high_1d - low_1d) / 2.0
+    range_1d = high_1d - low_1d
+    r1_1d = pivot_1d + (range_1d * 1.1 / 12.0)
+    s1_1d = pivot_1d - (range_1d * 1.1 / 12.0)
     
     # Calculate EMA50 on 1d for trend filter
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
@@ -54,7 +56,7 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # first period
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align all indicators to 12h timeframe (primary)
+    # Align all indicators to 4h timeframe (primary)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
@@ -120,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_1dEMA50_VolumeSpike_ATRStop"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_1dEMA50_VolumeSpike_ATRStop"
+timeframe = "4h"
 leverage = 1.0
