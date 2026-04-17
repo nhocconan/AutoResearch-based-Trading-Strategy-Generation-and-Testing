@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_12h_Camarilla_Breakout_Volume_Filter
-Strategy: Camarilla R1/S1 breakout on 4h with 12h trend filter and volume confirmation.
-Long: Close breaks above R1 + 12h EMA34 > EMA144 + volume > 1.5x average
-Short: Close breaks below S1 + 12h EMA34 < EMA144 + volume > 1.5x average
+12h_1d_Camarilla_R1S1_Breakout_1dTrend_VolumeFilter
+Strategy: Camarilla R1/S1 breakout on 12h with 1d trend filter and volume confirmation.
+Long: Close breaks above R1 + 1d EMA34 > EMA144 + volume > 1.5x average
+Short: Close breaks below S1 + 1d EMA34 < EMA144 + volume > 1.5x average
 Exit: Close returns to CAM (pivot) or trend reverses
 Position size: 0.25
 Designed to capture institutional breakouts with trend alignment and volume confirmation.
-Timeframe: 4h
+Timeframe: 12h
 """
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 150:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,19 +24,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h EMA34 and EMA144 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Calculate 1d EMA34 and EMA144 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    close_series_12h = pd.Series(close_12h)
-    ema34_12h = close_series_12h.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema144_12h = close_series_12h.ewm(span=144, adjust=False, min_periods=144).mean().values
+    close_series_1d = pd.Series(close_1d)
+    ema34_1d = close_series_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema144_1d = close_series_1d.ewm(span=144, adjust=False, min_periods=144).mean().values
     
-    # Align 12h EMAs to 4h timeframe
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
-    ema144_12h_aligned = align_htf_to_ltf(prices, df_12h, ema144_12h)
+    # Align 1d EMAs to 12h timeframe
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema144_1d_aligned = align_htf_to_ltf(prices, df_1d, ema144_1d)
     
-    # Volume confirmation (20-period MA on 4h)
+    # Volume confirmation (20-period MA on 12h)
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -46,7 +46,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema34_12h_aligned[i]) or np.isnan(ema144_12h_aligned[i]) or 
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(ema144_1d_aligned[i]) or 
             np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
@@ -54,18 +54,17 @@ def generate_signals(prices):
         # Volume filter: current volume > 1.5x 20-period average
         volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
-        # Trend filter: 12h EMA34 > EMA144 for long, < for short
-        ema34_gt_ema144 = ema34_12h_aligned[i] > ema144_12h_aligned[i]
-        ema34_lt_ema144 = ema34_12h_aligned[i] < ema144_12h_aligned[i]
+        # Trend filter: 1d EMA34 > EMA144 for long, < for short
+        ema34_gt_ema144 = ema34_1d_aligned[i] > ema144_1d_aligned[i]
+        ema34_lt_ema144 = ema34_1d_aligned[i] < ema144_1d_aligned[i]
         
         # Calculate Camarilla levels from previous day's OHLC
         # Need previous day's data - use daily OHLC from 1d timeframe
-        if i >= 96:  # Need at least 96 4h bars (4 days) to get previous day
+        if i >= 2:  # Need at least 2 12h bars (1 day) to get previous day
             # Get daily data for Camarilla calculation
-            df_1d = get_htf_data(prices, '1d')
             
             # Find previous day's index in 1d data
-            # Current 4h bar timestamp
+            # Current 12h bar timestamp
             current_time = prices['open_time'].iloc[i]
             # Previous day's date
             prev_day = current_time - pd.Timedelta(days=1)
@@ -120,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_Camarilla_Breakout_Volume_Filter"
-timeframe = "4h"
+name = "12h_1d_Camarilla_R1S1_Breakout_1dTrend_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
