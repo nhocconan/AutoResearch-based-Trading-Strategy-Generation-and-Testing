@@ -1,8 +1,8 @@
-#!/usr/bin/env python3
-"""
-12h_Camarilla_R1_S1_Breakout_Volume_Confirm
-Hypothesis: On 12h, enter long when price breaks above Camarilla R1 (H4) with volume confirmation, short when breaks below S1 (L4). Uses 1d trend filter (EMA34) to avoid counter-trend trades. Designed for 15-25 trades/year to minimize fee drag and work in both bull/bear regimes via trend alignment. Camarilla levels provide institutional support/resistance, volume confirms institutional participation.
-"""
+# 1d_Weekly_Keltner_MeanReversion
+# Hypothesis: On daily timeframe, mean-revert at Keltner Channel bands (ATR-based) with weekly trend filter.
+# Enter long when price touches lower band in weekly uptrend, short when touches upper band in weekly downtrend.
+# Uses volume confirmation to avoid false signals. Designed for 10-25 trades/year to minimize fee drag.
+# Works in bull/bear via weekly trend alignment: only trade in direction of weekly trend.
 
 import numpy as np
 import pandas as pd
@@ -18,79 +18,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data for Camarilla pivot levels and trend ===
+    # === Daily data for Keltner Channel ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    # Keltner Channel: EMA(20) ± ATR(10) * 2
+    ema20_1d = pd.Series(close_1d).ewm(span=20, min_periods=20, adjust=False).mean().values
+    atr10_1d = pd.Series(high_1d - low_1d).rolling(window=10, min_periods=10).mean().values
+    upper_keltner = ema20_1d + 2 * atr10_1d
+    lower_keltner = ema20_1d - 2 * atr10_1d
+    
+    # Align Keltner bands to daily timeframe (already aligned, but explicit)
+    upper_keltner_aligned = align_htf_to_ltf(prices, df_1d, upper_keltner)
+    lower_keltner_aligned = align_htf_to_ltf(prices, df_1d, lower_keltner)
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    
+    # === Weekly trend filter ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    # Weekly EMA34 for trend
+    ema34_1w = pd.Series(close_1w).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    
+    # === Daily volume average (20-period) for confirmation ===
     volume_1d = df_1d['volume'].values
-    
-    # Calculate Camarilla levels from previous day
-    # R1 = close + 1.1 * (high - low) / 12
-    # S1 = close - 1.1 * (high - low) / 12
-    # Using previous day's values to avoid look-ahead
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = high_1d[0]  # first day uses same day
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
-    
-    R1 = prev_close + 1.1 * (prev_high - prev_low) / 12
-    S1 = prev_close - 1.1 * (prev_high - prev_low) / 12
-    
-    # Align Camarilla levels to 12h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # 1d volume average (20-period) for confirmation
     vol_avg20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_avg20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg20_1d)
     
     signals = np.zeros(n)
     
-    # Warmup: covers EMA34 and volume average
-    warmup = 34
+    # Warmup: covers EMA20, ATR10, EMA34 weekly, volume average
+    warmup = max(20, 10, 34, 20)
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or 
+        if (np.isnan(upper_keltner_aligned[i]) or 
+            np.isnan(lower_keltner_aligned[i]) or 
+            np.isnan(ema34_1w_aligned[i]) or 
             np.isnan(vol_avg20_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Get current 1d volume
+        # Get current daily volume
         vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
         
-        # Volume filter: current volume > 1.5x 20-period average
-        vol_filter = vol_1d_current > 1.5 * vol_avg20_1d_aligned[i]
+        # Volume filter: current volume > 1.3x 20-period average
+        vol_filter = vol_1d_current > 1.3 * vol_avg20_1d_aligned[i]
         
         # Entry conditions
         if position == 0:
-            # Long: price breaks above R1 + above 1d EMA34 + volume
-            if close[i] > R1_aligned[i] and close[i] > ema34_1d_aligned[i] and vol_filter:
+            # Long: price touches lower Keltner band + weekly uptrend + volume
+            if close[i] <= lower_keltner_aligned[i] and close[i] > ema34_1w_aligned[i] and vol_filter:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price breaks below S1 + below 1d EMA34 + volume
-            elif close[i] < S1_aligned[i] and close[i] < ema34_1d_aligned[i] and vol_filter:
+            # Short: price touches upper Keltner band + weekly downtrend + volume
+            elif close[i] >= upper_keltner_aligned[i] and close[i] < ema34_1w_aligned[i] and vol_filter:
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit conditions: reverse when price returns to opposite Camarilla level
+        # Exit conditions: return to EMA20 (mean reversion target)
         elif position == 1:
-            if close[i] < S1_aligned[i]:  # exit long when price breaks below S1
+            if close[i] >= ema20_1d_aligned[i]:  # exit long when price returns to EMA20
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -98,7 +94,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            if close[i] > R1_aligned[i]:  # exit short when price breaks above R1
+            if close[i] <= ema20_1d_aligned[i]:  # exit short when price returns to EMA20
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -107,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_Volume_Confirm"
-timeframe = "12h"
+name = "1d_Weekly_Keltner_MeanReversion"
+timeframe = "1d"
 leverage = 1.0
