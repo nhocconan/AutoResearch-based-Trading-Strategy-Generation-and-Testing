@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h timeframe with 1d Camarilla pivot breakout and volume confirmation.
-Trade breakouts of Camarilla R1/S1 levels with volume spike (>1.8x 20-period average).
-Use 1d ADX > 25 to filter for trending markets and avoid ranging whipsaws.
-In trending markets: buy breakouts above R1, sell breakdowns below S1.
+Hypothesis: 4h timeframe with 1d ATR-based volatility breakout and volume confirmation.
+Go long when price breaks above high + 0.5*ATR(20) with volume > 1.5x average.
+Go short when price breaks below low - 0.5*ATR(20) with volume > 1.5x average.
+Use 1d ADX > 20 to filter for sufficient momentum and avoid choppy markets.
 Position sizing: 0.25 for entries, 0 for exits.
 Target: 75-200 total trades over 4 years (19-50/year).
-Camarilla pivots from 1d provide intraday structure levels that work in both bull and bear markets.
+ATR breakouts capture expansion moves that work in both bull and bear markets.
 """
 
 import numpy as np
@@ -23,18 +23,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and ADX
+    # Get 1d data for ATR, breakout levels, and ADX
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Camarilla pivot levels (R1, S1)
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_hl = high_1d - low_1d
-    r1 = pivot + (range_hl * 1.1 / 12)
-    s1 = pivot - (range_hl * 1.1 / 12)
+    # Calculate 1d ATR (20)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate 1d breakout levels: high +/- 0.5*ATR, low +/- 0.5*ATR
+    upper_breakout = high_1d + 0.5 * atr
+    lower_breakout = low_1d - 0.5 * atr
     
     # Calculate 1d ADX (14)
     plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
@@ -44,23 +49,20 @@ def generate_signals(prices):
     plus_dm = np.concatenate([[0], plus_dm])
     minus_dm = np.concatenate([[0], minus_dm])
     
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_adx = np.maximum(tr1, np.maximum(tr2, tr3))  # reuse TR
     
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / atr
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / atr
+    atr_adx = pd.Series(tr_adx).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / atr_adx
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / atr_adx
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Volume filter: 1.8x 20-period average
+    # Volume filter: 1.5x 20-period average
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
     # Align all to 4h
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    upper_breakout_aligned = align_htf_to_ltf(prices, df_1d, upper_breakout)
+    lower_breakout_aligned = align_htf_to_ltf(prices, df_1d, lower_breakout)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
@@ -71,48 +73,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+        if (np.isnan(upper_breakout_aligned[i]) or np.isnan(lower_breakout_aligned[i]) or 
             np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend direction from ADX components
-        plus_di_aligned = align_htf_to_ltf(prices, df_1d, plus_di)
-        minus_di_aligned = align_htf_to_ltf(prices, df_1d, minus_di)
-        
-        if np.isnan(plus_di_aligned[i]) or np.isnan(minus_di_aligned[i]):
-            signals[i] = 0.0
-            continue
-            
-        uptrend = plus_di_aligned[i] > minus_di_aligned[i]
-        downtrend = plus_di_aligned[i] < minus_di_aligned[i]
-        strong_trend = adx_aligned[i] > 25
+        # Determine trend strength from ADX
+        strong_momentum = adx_aligned[i] > 20
         
         if position == 0:
-            # Long: price breaks above R1, volume spike, strong trend
-            if (close[i] > r1_aligned[i] and 
-                volume[i] > vol_ma_20_aligned[i] * 1.8 and 
-                strong_trend and uptrend):
+            # Long: price breaks above upper level, volume spike, sufficient momentum
+            if (close[i] > upper_breakout_aligned[i] and 
+                volume[i] > vol_ma_20_aligned[i] * 1.5 and 
+                strong_momentum):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1, volume spike, strong trend
-            elif (close[i] < s1_aligned[i] and 
-                  volume[i] > vol_ma_20_aligned[i] * 1.8 and 
-                  strong_trend and downtrend):
+            # Short: price breaks below lower level, volume spike, sufficient momentum
+            elif (close[i] < lower_breakout_aligned[i] and 
+                  volume[i] > vol_ma_20_aligned[i] * 1.5 and 
+                  strong_momentum):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns below S1 or trend weakens
-            if close[i] < s1_aligned[i] or adx_aligned[i] < 20:
+            # Exit long: price returns below lower breakout or momentum weakens
+            if close[i] < lower_breakout_aligned[i] or adx_aligned[i] < 15:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns above R1 or trend weakens
-            if close[i] > r1_aligned[i] or adx_aligned[i] < 20:
+            # Exit short: price returns above upper breakout or momentum weakens
+            if close[i] > upper_breakout_aligned[i] or adx_aligned[i] < 15:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -120,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dCamarilla_R1S1_Volume_ADX"
+name = "4h_1dATRBreakout_Volume_ADX"
 timeframe = "4h"
 leverage = 1.0
