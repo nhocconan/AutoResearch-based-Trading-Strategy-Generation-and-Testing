@@ -1,18 +1,16 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h trading with 4h directional bias and 1d trend filter.
-# Uses 4h EMA21 for trend direction (price > EMA21 = long bias, < EMA21 = short bias)
-# 1d ADX > 25 ensures we only trade in strong trending markets to avoid whipsaws
-# Entry triggered on 1h when price crosses EMA13 in direction of 4h trend
-# Conservative position size (0.20) and session filter (08-20 UTC) to limit trades to ~20-40/year
-# Designed to work in both bull (trend following) and bear (avoids false signals via ADX filter)
+# Hypothesis: 12-hour Donchian breakout with 1-day volume confirmation and 1-day ATR volatility filter
+# Donchian(20) breakouts capture trending moves; volume confirmation ensures conviction;
+# ATR filter avoids low-volatility chop. Target: 15-25 trades/year for low fee decay.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,14 +18,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h EMA21 for trend direction ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
+    # === 12h Donchian Channel (20-period) ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # === 1d ADX (14-period) for trend strength filter ===
+    # Upper band: 20-period high
+    donch_high_20_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    # Lower band: 20-period low
+    donch_low_20_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    
+    donch_high_20_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_high_20_12h)
+    donch_low_20_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_low_20_12h)
+    
+    # === 1-day Volume Spike (vs 20-period average) ===
     df_1d = get_htf_data(prices, '1d')
+    volume_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    
+    # === 1-day ATR (14-period) for volatility filter ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -38,100 +48,75 @@ def generate_signals(prices):
     tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Directional Movement
-    up_move = high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])
-    down_move = np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed DM
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di_1d = 100 * plus_dm_smooth / (atr_1d + 1e-10)
-    minus_di_1d = 100 * minus_dm_smooth / (atr_1d + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d + 1e-10)
-    adx_1d = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # === 1h EMA13 for entry timing ===
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    atr_ma_20_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
+    atr_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20_1d)
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 100
-    
-    # Pre-compute session hours (08-20 UTC)
-    if isinstance(prices.index, pd.DatetimeIndex):
-        hours = prices.index.hour
-    else:
-        hours = pd.DatetimeIndex(prices['open_time']).hour
+    warmup = 50
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
-            np.isnan(ema_13[i])):
+        if (np.isnan(donch_high_20_12h_aligned[i]) or np.isnan(donch_low_20_12h_aligned[i]) or
+            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(atr_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Session filter: 08-20 UTC only
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
+        # Get current 12h price and volume (avoid calling get_htf_data in loop)
+        close_12h_aligned = align_htf_to_ltf(prices, df_12h, df_12h['close'].values)
+        volume_12h_aligned = align_htf_to_ltf(prices, df_12h, df_12h['volume'].values)
+        volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
         
-        if not in_session:
-            signals[i] = 0.0
-            position = 0
-            continue
+        # Volume spike: current 1d volume > 1.5x 20-period average
+        vol_spike = volume_1d_aligned[i] > vol_ma_20_1d_aligned[i] * 1.5
         
-        # Trend filters
-        strong_trend = adx_1d_aligned[i] > 25
-        bullish_bias = close[i] > ema_21_4h_aligned[i]  # price above 4h EMA21
-        bearish_bias = close[i] < ema_21_4h_aligned[i]  # price below 4h EMA21
+        # Volatility filter: current ATR > 20-period average ATR (avoid low volatility chop)
+        vol_filter = atr_1d[i] > atr_ma_20_1d_aligned[i]
+        
+        # Donchian breakout signals
+        breakout_up = close_12h_aligned[i] > donch_high_20_12h_aligned[i]
+        breakout_down = close_12h_aligned[i] < donch_low_20_12h_aligned[i]
         
         # Entry logic: only enter when flat
         if position == 0:
-            if strong_trend and in_session:
-                # Go long if bullish bias and price crosses above EMA13
-                if bullish_bias and close[i] > ema_13[i] and (i == warmup or close[i-1] <= ema_13[i-1]):
-                    signals[i] = 0.20
+            if vol_spike and vol_filter:
+                if breakout_up:
+                    signals[i] = 0.25
                     position = 1
                     continue
-                # Go short if bearish bias and price crosses below EMA13
-                elif bearish_bias and close[i] < ema_13[i] and (i == warmup or close[i-1] >= ema_13[i-1]):
-                    signals[i] = -0.20
+                elif breakout_down:
+                    signals[i] = -0.25
                     position = -1
                     continue
         
-        # Exit logic
+        # Exit logic: exit when price returns to middle of channel or conditions fail
         elif position == 1:
-            # Exit long if bearish bias forms or trend weakens
-            if bearish_bias or not strong_trend:
+            # Exit long if price returns to midpoint or volatility drops
+            midpoint = (donch_high_20_12h_aligned[i] + donch_low_20_12h_aligned[i]) / 2
+            if close_12h_aligned[i] < midpoint or not vol_filter:
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short if bullish bias forms or trend weakens
-            if bullish_bias or not strong_trend:
+            # Exit short if price returns to midpoint or volatility drops
+            midpoint = (donch_high_20_12h_aligned[i] + donch_low_20_12h_aligned[i]) / 2
+            if close_12h_aligned[i] > midpoint or not vol_filter:
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_EMA13_4hEMA21_1dADXFilter"
-timeframe = "1h"
+name = "12h_Donchian20_1dVolatilityFilter_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
