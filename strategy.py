@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_RVOL_Breakout_Trend_v1
-Relative Volume breakout with trend filter on 4h timeframe.
-Buys when price breaks above 20-period high with 2x average volume and price above 50 EMA.
-Sells when price breaks below 20-period low with 2x average volume and price below 50 EMA.
-Uses 1d ADX > 20 to filter for trending markets only.
-Designed to capture breakouts in both bull and bear markets with volume confirmation.
-Target: 20-50 total trades over 4 years (5-12/year).
+6h_ElderRay_200EMA_Filter_v1
+Elder Ray (Bull/Bear Power) + 200-period EMA trend filter on 6h timeframe.
+Bull Power = High - EMA13, Bear Power = EMA13 - Low.
+Long when Bull Power > 0 and price > EMA200 (uptrend).
+Short when Bear Power > 0 and price < EMA200 (downtrend).
+Exit when power reverses or price crosses EMA200.
+Designed to capture momentum in trending markets while avoiding counter-trend trades.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -15,131 +16,70 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # === 4h indicators ===
-    # 20-period high/low for breakout
-    high_20 = np.full(n, np.nan)
-    low_20 = np.full(n, np.nan)
-    for i in range(n):
-        if i >= 19:
-            high_20[i] = np.max(high[i-19:i+1])
-            low_20[i] = np.min(low[i-19:i+1])
+    # === 60-period EMA for Elder Ray (13-period equivalent scaled to 6h) ===
+    # Using 60 to approximate 13 periods on higher timeframe for smoother signal
+    alpha = 2 / (60 + 1)
+    ema60 = np.zeros_like(close)
+    ema60[0] = close[0]
+    for i in range(1, n):
+        ema60[i] = ema60[i-1] + alpha * (close[i] - ema60[i-1])
     
-    # 50 EMA for trend filter
-    ema_50 = np.full(n, np.nan)
-    if n >= 50:
-        ema_50[49] = np.mean(close[:50])
-        for i in range(50, n):
-            ema_50[i] = close[i] * 0.04 + ema_50[i-1] * 0.96  # alpha = 2/(50+1)
+    # === 200-period EMA for trend filter ===
+    alpha200 = 2 / (200 + 1)
+    ema200 = np.zeros_like(close)
+    ema200[0] = close[0]
+    for i in range(1, n):
+        ema200[i] = ema200[i-1] + alpha200 * (close[i] - ema200[i-1])
     
-    # Volume average (20-period)
-    vol_avg_20 = np.full(n, np.nan)
-    for i in range(n):
-        if i >= 19:
-            vol_avg_20[i] = np.mean(volume[i-19:i+1])
-    
-    # === 1d ADX for regime filter ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr = np.maximum(
-        high_1d[1:] - low_1d[1:],
-        np.maximum(
-            np.abs(high_1d[1:] - close_1d[:-1]),
-            np.abs(low_1d[1:] - close_1d[:-1])
-        )
-    )
-    tr = np.concatenate([[np.nan], tr])
-    
-    # Directional Movement
-    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    
-    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    minus_dm = np.concatenate([[np.nan], minus_dm])
-    
-    # Smooth TR, +DM, -DM (14-period Wilder's smoothing)
-    def wilders_smooth(arr, period):
-        smoothed = np.full_like(arr, np.nan)
-        if len(arr) >= period:
-            smoothed[period-1] = np.nansum(arr[1:period+1])
-            for i in range(period, len(arr)):
-                if not np.isnan(smoothed[i-1]) and not np.isnan(arr[i]):
-                    smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + arr[i]
-        return smoothed
-    
-    tr14 = wilders_smooth(tr, 14)
-    plus_dm14 = wilders_smooth(plus_dm, 14)
-    minus_dm14 = wilders_smooth(minus_dm, 14)
-    
-    # DI+ and DI-
-    plus_di14 = np.where(tr14 != 0, 100 * plus_dm14 / tr14, 0)
-    minus_di14 = np.where(tr14 != 0, 100 * minus_dm14 / tr14, 0)
-    
-    # DX and ADX
-    dx = np.where((plus_di14 + minus_di14) != 0, 
-                  100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14), 0)
-    adx = wilders_smooth(dx, 14)
-    
-    # Align 1d ADX to 4h
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # === Elder Ray components ===
+    bull_power = high - ema60  # High - EMA13 equivalent
+    bear_power = ema60 - low   # EMA13 - Low equivalent
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 50
+    warmup = 200
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or 
-            np.isnan(ema_50[i]) or 
-            np.isnan(vol_avg_20[i]) or 
-            np.isnan(volume[i]) or 
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(ema60[i]) or 
+            np.isnan(ema200[i]) or 
+            np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long breakout: price > 20-period high AND volume > 2x average AND price > EMA50 AND ADX > 20
-            if (close[i] > high_20[i] and 
-                volume[i] > vol_avg_20[i] * 2 and 
-                close[i] > ema_50[i] and 
-                adx_aligned[i] > 20):
+            # Long: Bull Power positive AND price above EMA200 (uptrend)
+            if (bull_power[i] > 0 and 
+                close[i] > ema200[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short breakout: price < 20-period low AND volume > 2x average AND price < EMA50 AND ADX > 20
-            elif (close[i] < low_20[i] and 
-                  volume[i] > vol_avg_20[i] * 2 and 
-                  close[i] < ema_50[i] and 
-                  adx_aligned[i] > 20):
+            # Short: Bear Power positive AND price below EMA200 (downtrend)
+            elif (bear_power[i] > 0 and 
+                  close[i] < ema200[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price breaks below 20-period low OR price < EMA50
-            if (close[i] < low_20[i] or 
-                close[i] < ema_50[i]):
+            # Exit long: Bear Power becomes positive OR price crosses below EMA200
+            if (bear_power[i] > 0 or 
+                close[i] < ema200[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -147,9 +87,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above 20-period high OR price > EMA50
-            if (close[i] > high_20[i] or 
-                close[i] > ema_50[i]):
+            # Exit short: Bull Power becomes positive OR price crosses above EMA200
+            if (bull_power[i] > 0 or 
+                close[i] > ema200[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -158,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RVOL_Breakout_Trend_v1"
-timeframe = "4h"
+name = "6h_ElderRay_200EMA_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
