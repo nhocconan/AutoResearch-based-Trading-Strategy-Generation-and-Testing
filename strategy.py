@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour 123-reversal pattern with 1d volume confirmation.
-# The 123-reversal (also called 1-2-3 pattern) identifies trend exhaustion:
-# Point 1: swing extreme, Point 2: pullback, Point 3: failed retest of Point 1.
-# Entry: break of Point 2 with volume confirmation on 1d timeframe.
-# Exit: opposite 123 pattern forms or volatility contraction.
-# Works in trending and ranging markets by capturing exhaustion at swing points.
+# Hypothesis: 12-hour timeframe with weekly pivot (R1/S1) breakout and 1-day volume confirmation.
+# Weekly pivots provide strong institutional support/resistance levels. Breakout above R1 or below S1
+# with elevated daily volume indicates institutional participation. Works in bull markets (breakouts continue)
+# and bear markets (breakdowns accelerate). Uses 1-day volume to avoid false breakouts on low volume.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Need sufficient data for swing detection
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,136 +19,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data for volume confirmation ===
+    # === Weekly data for pivot points ===
+    df_1w = get_htf_data(prices, '1w')
+    # Typical price for pivot calculation
+    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
+    # Calculate weekly pivot points
+    pivot = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
+    r1 = 2 * pivot - df_1w['low']
+    s1 = 2 * pivot - df_1w['high']
+    # Align to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot.values)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1.values)
+    
+    # === Daily data for volume confirmation ===
     df_1d = get_htf_data(prices, '1d')
     volume_1d = df_1d['volume'].values
-    
-    # 20-period average volume on daily data
+    # 20-day average volume
     volume_1d_series = pd.Series(volume_1d)
     vol_avg20_1d = volume_1d_series.rolling(window=20, min_periods=20).mean().values
     vol_avg20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg20_1d)
-    
-    # Find swing points (simplified fractal detection)
-    def find_swing_points(high, low, left=2, right=2):
-        """Find swing highs and lows"""
-        n = len(high)
-        swing_high = np.zeros(n, dtype=bool)
-        swing_low = np.zeros(n, dtype=bool)
-        
-        for i in range(left, n - right):
-            # Swing high: highest in window
-            if high[i] == np.max(high[i-left:i+right+1]):
-                swing_high[i] = True
-            # Swing low: lowest in window
-            if low[i] == np.min(low[i-left:i+right+1]):
-                swing_low[i] = True
-        return swing_high, swing_low
-    
-    swing_high, swing_low = find_swing_points(high, low, 2, 2)
-    
-    # Track most recent swing points for 123 pattern
-    last_swing_high_idx = -1
-    last_swing_low_idx = -1
-    last_swing_high_val = 0
-    last_swing_low_val = 0
-    
-    # Track Point 2 (pullback) for each swing
-    point2_high_idx = -1  # For bearish pattern (after swing high)
-    point2_low_idx = -1   # For bullish pattern (after swing low)
-    point2_high_val = 0
-    point2_low_val = 0
+    # Current day volume aligned
+    vol_1d_current_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after warmup
-        if np.isnan(vol_avg20_1d_aligned[i]):
+    for i in range(20, n):
+        # Skip if weekly data not available
+        if np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]):
             signals[i] = 0.0
             continue
+            
+        # Volume filter: current day volume > 1.5x 20-day average
+        vol_filter = vol_1d_current_aligned[i] > 1.5 * vol_avg20_1d_aligned[i]
         
-        # Update swing points
-        if swing_high[i]:
-            last_swing_high_idx = i
-            last_swing_high_val = high[i]
-            # Reset bearish pattern tracking
-            point2_high_idx = -1
-            point2_high_val = 0
-        
-        if swing_low[i]:
-            last_swing_low_idx = i
-            last_swing_low_val = low[i]
-            # Reset bullish pattern tracking
-            point2_low_idx = -1
-            point2_low_val = 0
-        
-        # Track pullbacks (Point 2) after swing points
-        if last_swing_high_idx != -1 and i > last_swing_high_idx:
-            # Looking for pullback after swing high (for bearish 123)
-            if low[i] < low[i-1] and low[i] < low[i+1] if i+1 < n else True:
-                # Simple pullback detection: local low
-                if point2_high_idx == -1 or low[i] < low[point2_high_idx]:
-                    point2_high_idx = i
-                    point2_high_val = low[i]
-        
-        if last_swing_low_idx != -1 and i > last_swing_low_idx:
-            # Looking for pullback after swing low (for bullish 123)
-            if high[i] > high[i-1] and high[i] > high[i+1] if i+1 < n else True:
-                # Simple pullback detection: local high
-                if point2_low_idx == -1 or high[i] > high[point2_low_idx]:
-                    point2_low_idx = i
-                    point2_low_val = high[i]
-        
-        vol_1d_current = volume_1d[i // (24*60//4)] if hasattr(volume_1d, '__getitem__') else 0
-        # Actually get the aligned volume for current bar
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
-        vol_filter = vol_1d_current > 1.5 * vol_avg20_1d_aligned[i]
-        
-        # Check for bullish 123 pattern completion (break of Point 2 after swing low)
-        bullish_setup = (
-            last_swing_low_idx != -1 and 
-            point2_low_idx != -1 and 
-            i > point2_low_idx and
-            close[i] > point2_low_val and  # Break above Point 2
-            close[i-1] <= point2_low_val   # Was at or below Point 2
-        )
-        
-        # Check for bearish 123 pattern completion (break of Point 2 after swing high)
-        bearish_setup = (
-            last_swing_high_idx != -1 and 
-            point2_high_idx != -1 and 
-            i > point2_high_idx and
-            close[i] < point2_high_val and  # Break below Point 2
-            close[i-1] >= point2_high_val   # Was at or above Point 2
-        )
-        
-        if position == 0:
-            # Bullish entry: break of Point 2 after swing low + volume
-            if bullish_setup and vol_filter:
+        # Long signal: close breaks above R1 with volume confirmation
+        if close[i] > r1_aligned[i] and vol_filter:
+            if position <= 0:  # Only enter if not already long
                 signals[i] = 0.25
                 position = 1
-            # Bearish entry: break of Point 2 after swing high + volume
-            elif bearish_setup and vol_filter:
+            else:
+                signals[i] = 0.25  # Maintain position
+        # Short signal: close breaks below S1 with volume confirmation
+        elif close[i] < s1_aligned[i] and vol_filter:
+            if position >= 0:  # Only enter if not already short
                 signals[i] = -0.25
                 position = -1
-        
-        elif position == 1:
-            # Long exit: bearish 123 forms or volatility drop
-            if bearish_setup and vol_filter:
-                signals[i] = 0.0
-                position = 0
             else:
-                signals[i] = 0.25
-        
-        elif position == -1:
-            # Short exit: bullish 123 forms or volatility drop
-            if bullish_setup and vol_filter:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+                signals[i] = -0.25  # Maintain position
+        # Exit conditions: return to pivot zone or volume drops
+        elif position == 1 and (close[i] < pivot_aligned[i] or not vol_filter):
+            signals[i] = 0.0
+            position = 0
+        elif position == -1 and (close[i] > pivot_aligned[i] or not vol_filter):
+            signals[i] = 0.0
+            position = 0
+        else:
+            # Hold current position
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
 
-name = "4h_123Reversal_VolumeConfirmation"
-timeframe = "4h"
+name = "12h_WeeklyPivot_R1_S1_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
