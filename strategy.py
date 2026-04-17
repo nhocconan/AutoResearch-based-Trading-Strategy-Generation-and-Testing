@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h Elder Ray Power with 1d Trend Filter and Volume Confirmation
-Long: Bull Power > 0 AND Bear Power < 0 AND close > 1d EMA(50) AND volume > 1.5x 6s volume SMA(20)
-Short: Bull Power < 0 AND Bear Power > 0 AND close < 1d EMA(50) AND volume > 1.5x 6s volume SMA(20)
-Exit: Bull Power and Bear Power same sign (both positive or both negative)
-Uses 1d EMA for trend, Elder Ray for momentum/balance, volume for confirmation
-Target: 15-30 trades/year per symbol (60-120 total over 4 years)
+4h Camarilla R1/S1 Breakout with Volume Spike and 1d EMA Trend Filter
+Long: Price breaks above R1 + volume > 2x 4h volume SMA(20) + price > 1d EMA(50)
+Short: Price breaks below S1 + volume > 2x 4h volume SMA(20) + price < 1d EMA(50)
+Exit: Price retests the pivot point (PP) or opposite stop via ATR
+Uses Camarilla levels from daily pivot, volume confirmation, and trend filter
+Target: 20-30 trades/year per symbol (80-120 total over 4 years)
 """
 
 import numpy as np
@@ -22,62 +22,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for Camarilla pivot and EMA trend
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA(50) for trend direction
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate typical price for pivot
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    # Calculate pivot point (PP)
+    pp = (df_1d['high'].iloc[0] + df_1d['low'].iloc[0] + df_1d['close'].iloc[0]) / 3  # simplified, will update per bar
+    # Actually calculate rolling pivot based on previous day
+    # For each bar, we need previous day's HLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    # Shift by 1 to get previous day's values for current bar calculation
+    pp_vals = (np.roll(high_1d, 1) + np.roll(low_1d, 1) + np.roll(close_1d, 1)) / 3
+    pp_vals[0] = np.nan  # first bar has no previous day
+    
+    # Calculate Camarilla levels: R1 = PP + 1.1*(H-L)/12, S1 = PP - 1.1*(H-L)/12
+    hl_range = np.roll(high_1d, 1) - np.roll(low_1d, 1)
+    r1 = pp_vals + 1.1 * hl_range / 12
+    s1 = pp_vals - 1.1 * hl_range / 12
+    
+    # Align to 4h
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_vals)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Calculate 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate EMA(13) for Elder Ray (standard period)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Calculate Elder Ray components
-    bull_power = high - ema_13  # High minus EMA
-    bear_power = low - ema_13   # Low minus EMA
-    
-    # Calculate 6s volume SMA(20) for volume filter
-    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 4h volume SMA(20) for volume filter
+    vol_sma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = max(50, 20, 13)  # Ensure we have enough data for all indicators
+    start_idx = max(30, 50)  # need EMA50 and volume SMA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(vol_sma[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_sma_4h[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_sma_val = vol_sma[i]
-        ema_1d_val = ema_50_1d_aligned[i]
-        bull = bull_power[i]
-        bear = bear_power[i]
+        vol_sma_val = vol_sma_4h[i]
+        ema_50_val = ema_50_1d_aligned[i]
+        pp_val = pp_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
         
         if position == 0:
-            # Long: Bull Power > 0 AND Bear Power < 0 AND price above 1d EMA + volume > 1.5x SMA
-            if bull > 0 and bear < 0 and price > ema_1d_val and vol > 1.5 * vol_sma_val:
+            # Long: Price breaks above R1 + volume > 2x SMA + price > 1d EMA50
+            if price > r1_val and close[i-1] <= r1_val and vol > 2.0 * vol_sma_val and price > ema_50_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bull Power < 0 AND Bear Power > 0 AND price below 1d EMA + volume > 1.5x SMA
-            elif bull < 0 and bear > 0 and price < ema_1d_val and vol > 1.5 * vol_sma_val:
+            # Short: Price breaks below S1 + volume > 2x SMA + price < 1d EMA50
+            elif price < s1_val and close[i-1] >= s1_val and vol > 2.0 * vol_sma_val and price < ema_50_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Bull Power and Bear Power same sign (both >= 0 or both <= 0)
-            if (bull >= 0 and bear >= 0) or (bull <= 0 and bear <= 0):
+            # Long exit: Price retests PP or breaks below S1
+            if price < pp_val or price < s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Bull Power and Bear Power same sign (both >= 0 or both <= 0)
-            if (bull >= 0 and bear >= 0) or (bull <= 0 and bear <= 0):
+            # Short exit: Price retests PP or breaks above R1
+            if price > pp_val or price > r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -85,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_Power_1dEMA50_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_Breakout_VolumeSpike_1dEMA50"
+timeframe = "4h"
 leverage = 1.0
