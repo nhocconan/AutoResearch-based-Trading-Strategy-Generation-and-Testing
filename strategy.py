@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h timeframe with 1d timeframe Camarilla pivot R1/S1 breakout + volume confirmation.
-Long when price breaks above Camarilla R1 level with volume > 1.3x 20-period volume average.
-Short when price breaks below Camarilla S1 level with volume > 1.3x 20-period volume average.
-Exit when price returns to Camarilla pivot point (PP) level.
-Designed to capture intraday momentum within the 12h timeframe while filtering false breakouts with volume confirmation.
-Works in both bull and bear markets by trading breakouts from key intraday support/resistance levels.
+Hypothesis: 4h timeframe with 1d ATR volatility filter + 4h Donchian(20) breakout + volume confirmation.
+Long when price breaks above 20-period high with 1d ATR(14)/ATR(50) > 1.2 (expanding volatility) and volume > 1.5x 20-period volume average.
+Short when price breaks below 20-period low with 1d ATR(14)/ATR(50) > 1.2 and volume > 1.5x 20-period volume average.
+Volatility expansion filter increases probability of genuine breakouts vs fakeouts in both bull and bear markets.
 """
 
 import numpy as np
@@ -22,73 +20,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation
+    # Get 1d data for ATR calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Camarilla pivot levels
-    def camarilla_levels(high_vals, low_vals, close_vals):
-        # Typical price
-        pp = (high_vals + low_vals + close_vals) / 3.0
-        # Range
-        rng = high_vals - low_vals
-        # Camarilla levels
-        r1 = pp + (rng * 1.1 / 12)
-        s1 = pp - (rng * 1.1 / 12)
-        return pp, r1, s1
+    # Calculate 1d ATR(14) and ATR(50) for volatility regime filter
+    def atr(high_vals, low_vals, close_vals, window):
+        tr1 = high_vals - low_vals
+        tr2 = np.abs(high_vals - np.roll(close_vals, 1))
+        tr3 = np.abs(low_vals - np.roll(close_vals, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # first period TR is just high-low
+        atr_vals = pd.Series(tr).ewm(span=window, adjust=False, min_periods=window).mean().values
+        return atr_vals
     
-    pp_1d, r1_1d, s1_1d = camarilla_levels(high_1d, low_1d, close_1d)
+    atr_14_1d = atr(high_1d, low_1d, close_1d, 14)
+    atr_50_1d = atr(high_1d, low_1d, close_1d, 50)
+    atr_ratio_1d = atr_14_1d / atr_50_1d
     
-    # Calculate 1d volume 20-period average
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Get 4h data for Donchian channels and volume
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
     
-    # Align all to primary timeframe (12h)
-    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Calculate 4h Donchian(20) channels
+    def donchian_channel(high_vals, low_vals, window):
+        upper = pd.Series(high_vals).rolling(window=window, min_periods=window).max().values
+        lower = pd.Series(low_vals).rolling(window=window, min_periods=window).min().values
+        return upper, lower
+    
+    donchian_upper, donchian_lower = donchian_channel(high_4h, low_4h, 20)
+    
+    # Calculate 4h volume 20-period average
+    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all to primary timeframe (4h)
+    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
+    vol_ma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 20  # need enough for volume MA
+    start_idx = 100  # need enough for ATR and Donchian
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pp_1d_aligned[i]) or 
-            np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(atr_ratio_1d_aligned[i]) or 
+            np.isnan(donchian_upper_aligned[i]) or 
+            np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(vol_ma_20_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.3x 20-period average
-        volume_confirmed = volume[i] > 1.3 * vol_ma_20_1d_aligned[i]
+        # Volatility filter: ATR ratio > 1.2 (expanding volatility)
+        volatility_expanding = atr_ratio_1d_aligned[i] > 1.2
+        
+        # Volume confirmation: current 4h volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20_4h_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume confirmation
-            if (close[i] > r1_1d_aligned[i] and volume_confirmed):
+            # Long: price breaks above 20-period high with volatility expansion and volume
+            if (close[i] > donchian_upper_aligned[i] and 
+                volatility_expanding and 
+                volume_confirmed):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume confirmation
-            elif (close[i] < s1_1d_aligned[i] and volume_confirmed):
+            # Short: price breaks below 20-period low with volatility expansion and volume
+            elif (close[i] < donchian_lower_aligned[i] and 
+                  volatility_expanding and 
+                  volume_confirmed):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to pivot point (PP) level
-            if close[i] <= pp_1d_aligned[i]:
+            # Exit long: price falls back below 20-period low (opposite side of channel)
+            if close[i] < donchian_lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to pivot point (PP) level
-            if close[i] >= pp_1d_aligned[i]:
+            # Exit short: price rises back above 20-period high (opposite side of channel)
+            if close[i] > donchian_upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dCamarilla_R1S1_Breakout_Volume_Confirm_PP_Exit"
-timeframe = "12h"
+name = "4h_1dATRratio_VolatilityExpansion_Donchian20_Breakout_Volume_Confirm"
+timeframe = "4h"
 leverage = 1.0
