@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Williams_Alligator_RSI_Volume_v1
-Williams Alligator (3 SMAs: Jaw=13, Teeth=8, Lips=5) + RSI(14) + Volume Spike on 12h timeframe.
-Trend direction from Alligator alignment: Jaw > Teeth > Lips = uptrend, reverse for downtrend.
-Entries on RSI extremes (overbought/oversold) with volume confirmation, exits on RSI normalization.
-Designed to work in both bull and bear markets by combining trend-following with mean-reversion.
-Target: 50-150 total trades over 4 years (12-37/year).
+1d_KAMA_RSI_Volume_v1
+KAMA trend + RSI mean reversion + volume confirmation on 1d timeframe.
+Uses daily close trend filter (KAMA direction) for trend alignment,
+RSI(14) for mean reversion entries, and volume spike for confirmation.
+Designed to work in both bull and bear markets by combining trend following
+with mean reversion at extreme RSI levels.
+Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
@@ -22,30 +23,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h Williams Alligator (Smoothed Moving Average) ===
-    # Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
-    def smma(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) >= period:
-            # First value is simple average
-            result[period-1] = np.mean(arr[:period])
-            # Subsequent values: SMMA = (Prev SMMA * (period-1) + Close) / period
-            for i in range(period, len(arr)):
-                result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # === 1d KAMA (Kaufman Adaptive Moving Average) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    jaw = smma(close, 13)
-    teeth = smma(close, 8)
-    lips = smma(close, 5)
+    # Calculate Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.abs(np.diff(close_1d))
+    er = np.zeros_like(close_1d)
+    for i in range(len(close_1d)):
+        if i >= 10:
+            er[i] = np.sum(change[i-9:i+1]) / np.sum(volatility[i-9:i+1]) if np.sum(volatility[i-9:i+1]) > 0 else 0
+        else:
+            er[i] = 0
     
-    # === 12h RSI (14-period) ===
-    delta = np.diff(close, prepend=close[0])
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    
+    # Calculate KAMA
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    
+    # === 1d RSI (14-period) ===
+    delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    for i in range(len(close)):
+    avg_gain = np.zeros_like(close_1d)
+    avg_loss = np.zeros_like(close_1d)
+    for i in range(len(close_1d)):
         if i >= 14:
             if i == 14:
                 avg_gain[i] = np.mean(gain[1:15])
@@ -60,7 +68,7 @@ def generate_signals(prices):
     rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
     rsi = 100 - (100 / (1 + rs))
     
-    # === 12h Volume confirmation (20-period average) ===
+    # === 1d Volume confirmation (20-period average) ===
     vol_ma_20 = np.full_like(volume, np.nan)
     for i in range(len(volume)):
         if i >= 20:
@@ -72,50 +80,50 @@ def generate_signals(prices):
     
     vol_confirm = volume > vol_ma_20 * 1.5  # volume spike: 1.5x average
     
+    # === Align 1d KAMA, RSI, volume to 1d timeframe (no change needed as already 1d) ===
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    vol_confirm_aligned = align_htf_to_ltf(prices, df_1d, vol_confirm)
+    
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 50
+    warmup = 30
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(rsi[i]) or np.isnan(vol_confirm[i])):
+        if (np.isnan(kama_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or 
+            np.isnan(vol_confirm_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Determine Alligator trend
-        # Uptrend: Lips > Teeth > Jaw
-        # Downtrend: Jaw > Teeth > Lips
-        is_uptrend = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        is_downtrend = jaw[i] > teeth[i] and teeth[i] > lips[i]
-        
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: uptrend AND RSI oversold (<30) AND volume confirmation
-            if (is_uptrend and 
-                rsi[i] < 30 and 
-                vol_confirm[i]):
+            # Long: price above KAMA (uptrend) AND RSI oversold (<30) AND volume confirmation
+            if (close[i] > kama_aligned[i] and 
+                rsi_aligned[i] < 30 and 
+                vol_confirm_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: downtrend AND RSI overbought (>70) AND volume confirmation
-            elif (is_downtrend and 
-                  rsi[i] > 70 and 
-                  vol_confirm[i]):
+            # Short: price below KAMA (downtrend) AND RSI overbought (>70) AND volume confirmation
+            elif (close[i] < kama_aligned[i] and 
+                  rsi_aligned[i] > 70 and 
+                  vol_confirm_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: RSI overbought (>70) OR trend changes to downtrend
-            if (rsi[i] > 70 or 
-                not is_uptrend):
+            # Exit long: RSI overbought (>70) OR price crosses below KAMA
+            if (rsi_aligned[i] > 70 or 
+                close[i] < kama_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -123,9 +131,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI oversold (<30) OR trend changes to uptrend
-            if (rsi[i] < 30 or 
-                not is_downtrend):
+            # Exit short: RSI oversold (<30) OR price crosses above KAMA
+            if (rsi_aligned[i] < 30 or 
+                close[i] > kama_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -134,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Williams_Alligator_RSI_Volume_v1"
-timeframe = "12h"
+name = "1d_KAMA_RSI_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
