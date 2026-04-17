@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-1h Donchian Breakout with 4h Trend Filter + Volume Spike
-Long: Price > 20-period Donchian High + 4h EMA50 up + volume > 1.5x 20-bar avg
-Short: Price < 20-period Donchian Low + 4h EMA50 down + volume > 1.5x 20-bar avg
-Exit: Opposite Donchian breakout or volume drop below average
-Uses 4h EMA for trend direction and 1h Donchian for precise entry timing.
-Target: 60-150 total trades over 4 years (15-37/year)
+12h Donchian Breakout + Volume Spike + ADX Trend Filter
+Long: Price breaks above Donchian(20) high + volume > 2x 12m volume SMA(20) + ADX(14) > 25
+Short: Price breaks below Donchian(20) low + volume > 2x 12m volume SMA(20) + ADX(14) > 25
+Exit: Opposite breakout
+Uses Donchian channels for breakout detection, volume for confirmation, ADX for trend strength.
+Designed to capture strong trends in both bull and bear markets while avoiding chop.
+Target: 50-150 total trades over 4 years (12-37/year)
 """
 
 import numpy as np
@@ -22,67 +23,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Get 1d data for ADX trend filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 4h EMA(50) for trend filter
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate ADX(14) on 1d
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
     
-    # Calculate 20-period Donchian channels
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Calculate 20-period volume SMA for volume filter
-    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Smooth TR, +DM, -DM
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
+    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
+    
+    # Avoid division by zero
+    plus_di_14 = np.where(tr_14 != 0, 100 * plus_dm_14 / tr_14, 0)
+    minus_di_14 = np.where(tr_14 != 0, 100 * minus_dm_14 / tr_14, 0)
+    
+    # DX and ADX
+    dx = np.where((plus_di_14 + minus_di_14) != 0, 
+                  100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14), 0)
+    adx_14 = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
+    
+    # Calculate 12m volume SMA(20) for volume filter
+    vol_sma_12m = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate Donchian(20) channels
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 30  # need sufficient data for indicators
+    start_idx = 20  # need Donchian(20)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(adx_14_aligned[i]) or np.isnan(vol_sma_12m[i]) or
+            np.isnan(donch_high[i]) or np.isnan(donch_low[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_sma_val = vol_sma_20[i]
-        ema_50_val = ema_50_4h_aligned[i]
-        upper = donchian_high[i]
-        lower = donchian_low[i]
+        vol_sma_val = vol_sma_12m[i]
+        adx_val = adx_14_aligned[i]
+        upper = donch_high[i]
+        lower = donch_low[i]
         
         if position == 0:
-            # Long: Price breaks above Donchian high + 4h EMA50 rising + volume spike
-            if price > upper and ema_50_val > ema_50_4h_aligned[i-1] and vol > 1.5 * vol_sma_val:
-                signals[i] = 0.20
+            # Long: break above upper Donchian + volume spike + strong trend
+            if price > upper and vol > 2.0 * vol_sma_val and adx_val > 25:
+                signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian low + 4h EMA50 falling + volume spike
-            elif price < lower and ema_50_val < ema_50_4h_aligned[i-1] and vol > 1.5 * vol_sma_val:
-                signals[i] = -0.20
+            # Short: break below lower Donchian + volume spike + strong trend
+            elif price < lower and vol > 2.0 * vol_sma_val and adx_val > 25:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price breaks below Donchian low or volume drops below average
-            if price < lower or vol < vol_sma_val:
+            # Long exit: break below lower Donchian
+            if price < lower:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price breaks above Donchian high or volume drops below average
-            if price > upper or vol < vol_sma_val:
+            # Short exit: break above upper Donchian
+            if price > upper:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Donchian_Breakout_4hEMA50_VolumeSpike"
-timeframe = "1h"
+name = "12h_Donchian_Breakout_VolumeSpike_ADXFilter"
+timeframe = "12h"
 leverage = 1.0
