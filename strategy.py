@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_VolumeSpike_Regime
-Strategy: 4h TRIX momentum + volume spike + Choppiness regime filter.
-Long: TRIX > 0, volume > 2.0x 20-period avg, Choppiness > 61.8 (range)
-Short: TRIX < 0, volume > 2.0x 20-period avg, Choppiness > 61.8 (range)
-Exit: TRIX crosses zero or volume spike ends
+12h_1d_Camarilla_R1_S1_Breakout_Volume_Regime
+Strategy: 12-hour breakout of daily Camarilla R1/S1 levels with volume confirmation and 1d trend filter.
+Long: Price breaks above daily R1 + volume > 1.8x 20-period avg + price above 1d EMA50
+Short: Price breaks below daily S1 + volume > 1.8x 20-period avg + price below 1d EMA50
+Exit: Price returns to 12h VWAP or breaks opposite Camarilla level
 Position size: 0.25
-Designed to capture momentum bursts in ranging markets across bull/bear cycles.
-Timeframe: 4h
+Designed to capture breakouts aligned with daily trend while avoiding range-bound conditions.
+Timeframe: 12h
 """
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,85 +24,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate TRIX (15-period EMA of EMA of EMA of log returns)
-    log_returns = np.log(close[1:] / close[:-1])
-    log_returns = np.concatenate([[np.nan], log_returns])  # align length
-    ema1 = pd.Series(log_returns).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = ema3 * 100  # scale for readability
+    # Calculate 12h VWAP for exit
+    typical_price = (high + low + close) / 3.0
+    vwap_num = (typical_price * volume).cumsum()
+    vwap_den = volume.cumsum()
+    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
     
-    # Calculate Choppiness Index (14-period)
-    atr_vals = np.zeros(n)
-    for i in range(1, n):
-        tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        atr_vals[i] = tr
-    atr_ma = pd.Series(atr_vals).rolling(window=14, min_periods=14).mean().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_ma.sum() / (highest_high - lowest_low)) / np.log10(14)
-    # Fix: rolling sum of ATR
-    atr_sum = pd.Series(atr_vals).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
-    
-    # Volume confirmation (20-period MA)
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Get 1-day trend filter (EMA34)
+    # Calculate 1d OHLC for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Calculate 1d EMA50 for trend filter
+    close_series_1d = pd.Series(close_1d)
+    ema50_1d = close_series_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Calculate 1d Camarilla levels: R1, S1
+    # R1 = Close + (High - Low) * 1.1 / 12
+    # S1 = Close - (High - Low) * 1.1 / 12
+    range_1d = high_1d - low_1d
+    r1_1d = close_1d + range_1d * 1.1 / 12
+    s1_1d = close_1d - range_1d * 1.1 / 12
+    
+    # Align 1d levels to 12h timeframe
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Volume confirmation (20-period MA on 12h)
+    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20, 15)  # ensure all indicators ready
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(trix[i]) or 
-            np.isnan(chop[i]) or 
-            np.isnan(volume_ma20[i]) or 
-            np.isnan(ema34_1d_aligned[i])):
+        if (np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2.0x 20-period average
-        volume_filter = volume[i] > (2.0 * volume_ma20[i])
+        # Volume filter: current volume > 1.8x 20-period average
+        volume_filter = volume[i] > (1.8 * volume_ma20[i])
         
-        # Regime filter: Choppiness > 61.8 (ranging market)
-        regime_filter = chop[i] > 61.8
+        # Trend filter: price above/below 1d EMA50
+        price_above_ema = close[i] > ema50_1d_aligned[i]
+        price_below_ema = close[i] < ema50_1d_aligned[i]
         
-        # TRIX signals
-        trix_bullish = trix[i] > 0
-        trix_bearish = trix[i] < 0
+        # Breakout conditions
+        breakout_up = close[i] > r1_1d_aligned[i-1]  # break above previous day R1
+        breakout_down = close[i] < s1_1d_aligned[i-1]  # break below previous day S1
         
-        # Trend filter: price vs 1d EMA34
-        price_above_ema = close[i] > ema34_1d_aligned[i]
-        price_below_ema = close[i] < ema34_1d_aligned[i]
+        # Return to 12h VWAP for exit (within 0.5% of VWAP)
+        return_to_vwap = abs(close[i] - vwap[i]) < 0.005 * close[i]
+        
+        # Exit opposite Camarilla level
+        exit_long = close[i] < s1_1d_aligned[i]  # price below S1
+        exit_short = close[i] > r1_1d_aligned[i]  # price above R1
         
         if position == 0:
-            # Long: TRIX bullish + volume spike + ranging + price above daily EMA
-            if trix_bullish and volume_filter and regime_filter and price_above_ema:
+            # Long: breakout above R1 + volume filter + price above EMA
+            if breakout_up and volume_filter and price_above_ema:
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX bearish + volume spike + ranging + price below daily EMA
-            elif trix_bearish and volume_filter and regime_filter and price_below_ema:
+            # Short: breakout below S1 + volume filter + price below EMA
+            elif breakout_down and volume_filter and price_below_ema:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: TRIX turns bearish OR volume spike ends
-            if not trix_bullish or not volume_filter:
+            # Exit long: return to VWAP or price below S1
+            if return_to_vwap or exit_long:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: TRIX turns bullish OR volume spike ends
-            if not trix_bearish or not volume_filter:
+            # Exit short: return to VWAP or price above R1
+            if return_to_vwap or exit_short:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_TRIX_VolumeSpike_Regime"
-timeframe = "4h"
+name = "12h_1d_Camarilla_R1_S1_Breakout_Volume_Regime"
+timeframe = "12h"
 leverage = 1.0
