@@ -1,11 +1,17 @@
-#!/usr/bin/env python3
+# 2025-07-07: 4h Donchian Breakout with Volume Confirmation and ADX Trend Filter
+# Hypothesis: Donchian(20) breakouts capture breakout momentum in both bull and bear markets.
+# Volume > 1.5x 20-bar average confirms institutional participation.
+# ADX > 25 ensures we only trade in trending regimes, reducing false breakouts in ranging markets.
+# Fixed position size 0.25 to balance risk and reward, targeting 20-50 trades/year.
+# Uses 1d EMA50 as additional trend filter to avoid counter-trend trades.
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,76 +19,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend and daily data for signals
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Weekly EMA50 for trend filter
-    ema_50_w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_w)
+    # Calculate 1d EMA50 for trend filter
+    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Daily ATR for volatility filter
-    atr_14_d = pd.Series(df_1d['high'].values - df_1d['low'].values).rolling(window=14, min_periods=14).mean().values
-    atr_14_d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_d)
+    # Calculate ADX(14) on 4h for trend strength
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    tr = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - close[:-1]), np.absolute(low[1:] - close[:-1]))
+    plus_di = 100 * (pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean() / pd.Series(tr).ewm(alpha=1/14, adjust=False).mean())
+    minus_di = 100 * (pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean() / pd.Series(tr).ewm(alpha=1/14, adjust=False).mean())
+    dx = (np.absolute(plus_di - minus_di) / (plus_di + minus_di)) * 100
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    # Prepend NaN for alignment
+    adx = np.concatenate([np.full(1, np.nan), adx.values])
     
-    # Daily close for momentum
-    close_1d = df_1d['close'].values
-    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+    # Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Daily RSI(14) for momentum confirmation
-    delta = pd.Series(close_1d).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_14_d = 100 - (100 / (1 + rs))
-    rsi_14_d_values = rsi_14_d.fillna(50).values
-    rsi_14_d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_d_values)
+    # Volume confirmation: 20-period volume MA
+    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 100  # warmup for weekly EMA and daily ATR
+    start_idx = 50  # warmup for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_w_aligned[i]) or np.isnan(atr_14_d_aligned[i]) or 
-            np.isnan(close_1d_aligned[i]) or np.isnan(rsi_14_d_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(ema_50_4h[i]) or np.isnan(adx[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_w = ema_50_w_aligned[i]
-        atr_d = atr_14_d_aligned[i]
-        close_1d_val = close_1d_aligned[i]
-        rsi_val = rsi_14_d_aligned[i]
-        
-        # Trend and volatility filters
-        uptrend = price > ema_w
-        downtrend = price < ema_w
-        low_vol = atr_d < np.nanmedian(atr_14_d_aligned[:i+1]) * 1.5  # avoid extreme volatility
+        vol = volume[i]
+        vol_ma = volume_ma_20[i]
         
         if position == 0:
-            # Long: uptrend, RSI not overbought, price above daily close (momentum)
-            if uptrend and rsi_val < 70 and price > close_1d_val and low_vol:
+            # Long: break above Donchian high with volume confirmation and ADX > 25
+            if price > donchian_high[i] and vol > 1.5 * vol_ma and adx[i] > 25 and price > ema_50_4h[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend, RSI not oversold, price below daily close (momentum)
-            elif downtrend and rsi_val > 30 and price < close_1d_val and low_vol:
+            # Short: break below Donchian low with volume confirmation and ADX > 25
+            elif price < donchian_low[i] and vol > 1.5 * vol_ma and adx[i] > 25 and price < ema_50_4h[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend reversal or RSI overbought
-            if not uptrend or rsi_val >= 70:
+            # Long exit: price returns to Donchian low or ADX drops below 20
+            if price < donchian_low[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend reversal or RSI oversold
-            if not downtrend or rsi_val <= 30:
+            # Short exit: price returns to Donchian high or ADX drops below 20
+            if price > donchian_high[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyEMA50_DailyRSI14_Momentum"
-timeframe = "1d"
+name = "4h_DonchianBreakout_Volume_ADX"
+timeframe = "4h"
 leverage = 1.0
