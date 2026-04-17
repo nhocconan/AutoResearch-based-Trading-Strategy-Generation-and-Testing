@@ -1,21 +1,16 @@
-#!/usr/bin/env python3
-"""
-6h Triple Filter: 1d MACD Trend + 12h RSI Momentum + Volume Spike
-Long: MACD bullish (MACD>Signal) + RSI(14)>55 + volume > 2x 6m volume SMA(20)
-Short: MACD bearish (MACD<Signal) + RSI(14)<45 + volume > 2x 6m volume SMA(20)
-Exit: Opposite MACD cross or RSI crosses 50
-Uses MACD for trend direction, RSI for momentum filter, volume for confirmation.
-Designed to work in both bull and bear markets by requiring trend-momentum alignment.
-Target: 50-150 total trades over 4 years (12-37/year)
-"""
+# 12h_KAMA_Direction_RSI_Filter_VolumeConfirm
+# 12h timeframe with KAMA trend, RSI momentum filter, and volume confirmation
+# Designed for low trade frequency and robustness in bull/bear markets
+# Target: 50-150 total trades over 4 years (12-37/year)
 
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,77 +18,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for MACD trend filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate 1d MACD(12,26,9)
-    ema12 = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema26 = pd.Series(close_1d).ewm(span=26, adjust=False, min_periods=26).mean().values
-    macd_line = ema12 - ema26
-    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
-    macd_hist = macd_line - signal_line  # Positive = bullish, Negative = bearish
+    # Calculate 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align MACD histogram to 6h timeframe
-    macd_hist_aligned = align_htf_to_ltf(prices, df_1d, macd_hist)
+    # Calculate KAMA (Kaufman Adaptive Moving Average) for trend
+    # Using ER (efficiency ratio) with 10 period
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close, prepend=close[0]))
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2  # fast=2, slow=30
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Get 12h data for RSI momentum filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    
-    # Calculate 12h RSI(14)
-    delta = pd.Series(close_12h).diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = (-delta).where(delta < 0, 0.0)
+    # Calculate RSI(14) for momentum
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / np.where(avg_loss == 0, 1e-10, avg_loss)
-    rsi_12h = 100 - (100 / (1 + rs))
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align RSI to 6h timeframe
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
-    
-    # Calculate 6m volume SMA(20) for volume filter
-    vol_sma_6m = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate volume SMA(20) for volume confirmation
+    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = max(30, 50)  # need sufficient history for indicators
+    start_idx = max(30, 50)  # need sufficient data for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(macd_hist_aligned[i]) or np.isnan(rsi_12h_aligned[i]) or
-            np.isnan(vol_sma_6m[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(kama[i]) or 
+            np.isnan(rsi[i]) or np.isnan(vol_sma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_sma_val = vol_sma_6m[i]
-        macd_h = macd_hist_aligned[i]
-        rsi_val = rsi_12h_aligned[i]
+        vol_sma_val = vol_sma[i]
+        ema_50_val = ema_50_1d_aligned[i]
+        kama_val = kama[i]
+        rsi_val = rsi[i]
         
         if position == 0:
-            # Long: MACD bullish + RSI bullish momentum + volume spike
-            if macd_h > 0 and rsi_val > 55 and vol > 2.0 * vol_sma_val:
+            # Long: Price above KAMA (uptrend) + RSI > 50 (bullish momentum) + 
+            # Price above 1d EMA50 (long-term trend) + Volume confirmation
+            if (price > kama_val and rsi_val > 50 and price > ema_50_val and 
+                vol > 1.5 * vol_sma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: MACD bearish + RSI bearish momentum + volume spike
-            elif macd_h < 0 and rsi_val < 45 and vol > 2.0 * vol_sma_val:
+            # Short: Price below KAMA (downtrend) + RSI < 50 (bearish momentum) + 
+            # Price below 1d EMA50 (long-term trend) + Volume confirmation
+            elif (price < kama_val and rsi_val < 50 and price < ema_50_val and 
+                  vol > 1.5 * vol_sma_val):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: MACD turns bearish or RSI loses momentum
-            if macd_h < 0 or rsi_val < 50:
+            # Long exit: Price below KAMA (trend change) or RSI < 40 (momentum loss)
+            if price < kama_val or rsi_val < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: MACD turns bullish or RSI gains momentum
-            if macd_h > 0 or rsi_val > 50:
+            # Short exit: Price above KAMA (trend change) or RSI > 60 (momentum loss)
+            if price > kama_val or rsi_val > 60:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_TripleFilter_MACD_RSI_Volume"
-timeframe = "6h"
+name = "12h_KAMA_Direction_RSI_Filter_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
