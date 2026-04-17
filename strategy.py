@@ -1,9 +1,12 @@
-# 6H_Camarilla_Pivot_R1S1_Breakout_Volume_Filter
-# Hypothesis: Camarilla pivot levels (R1, S1) act as intraday support/resistance with strong mean reversion.
-# In ranging markets (common in 2025 BTC/ETH), price tends to revert from R1/S1.
-# In trending markets, breakouts beyond R1/S1 with volume confirmation indicate strong momentum.
-# Uses 1d Camarilla levels for context, volume filter to avoid false breakouts.
-# Target: 15-25 trades/year per symbol, avoids overtrading via strict breakout and volume filters.
+#!/usr/bin/env python3
+"""
+12h 1D High/Low Breakout with Volume and 1D Trend Filter
+Long: Price breaks above prior 1D high + volume > 1.5x 12h volume MA + price > 1D EMA50
+Short: Price breaks below prior 1D low + volume > 1.5x 12h volume MA + price < 1D EMA50
+Exit: Opposite break of prior 1D level
+Uses 1D EMA50 (not 12h) to align with longer-term bias and reduce false breakouts in chop
+Target: 20-30 trades/year per symbol
+"""
 
 import numpy as np
 import pandas as pd
@@ -19,100 +22,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for Camarilla pivot calculation
+    # Get 1D data for prior high/low and trend filter
     df_1d = get_htf_data(prices, '1d')
+    prior_1d_high = df_1d['high'].shift(1)  # Prior day's high
+    prior_1d_low = df_1d['low'].shift(1)    # Prior day's low
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Camarilla levels for each day
-    # R4 = C + ((H-L) * 1.1/2)
-    # R3 = C + ((H-L) * 1.1/4)
-    # R2 = C + ((H-L) * 1.1/6)
-    # R1 = C + ((H-L) * 1.1/12)
-    # S1 = C - ((H-L) * 1.1/12)
-    # S2 = C - ((H-L) * 1.1/6)
-    # S3 = C - ((H-L) * 1.1/4)
-    # S4 = C - ((H-L) * 1.1/2)
-    # Where C = (H+L+Close)/3 (typical price)
+    prior_1d_high_aligned = align_htf_to_ltf(prices, df_1d, prior_1d_high.values)
+    prior_1d_low_aligned = align_htf_to_ltf(prices, df_1d, prior_1d_low.values)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    hl_range = df_1d['high'] - df_1d['low']
-    
-    r1 = typical_price + hl_range * 1.1 / 12
-    s1 = typical_price - hl_range * 1.1 / 12
-    r4 = typical_price + hl_range * 1.1 / 2
-    s4 = typical_price - hl_range * 1.1 / 2
-    
-    # Align Camarilla levels to 6h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4.values)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4.values)
-    
-    # Volume confirmation: 6h volume > 1.5x 24-period (4-day) moving average
-    volume_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean()
+    # 12h volume moving average (24-period for confirmation)
+    df_12h = get_htf_data(prices, '12h')
+    volume_ma_24 = pd.Series(df_12h['volume']).rolling(window=24, min_periods=24).mean()
+    volume_ma_24_12h = align_htf_to_ltf(prices, df_12h, volume_ma_24.values)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     entry_price = 0.0
     
-    start_idx = 24  # warmup for volume MA
+    start_idx = 50  # warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(volume_ma[i])):
+        if (np.isnan(prior_1d_high_aligned[i]) or np.isnan(prior_1d_low_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ma_24_12h[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = volume_ma[i]
+        vol_ma = volume_ma_24_12h[i]
         
         if position == 0:
-            # Long: break above R1 with volume (momentum continuation)
-            if price > r1_aligned[i] and vol > 1.5 * vol_ma:
-                # Additional filter: avoid buying too close to R4 (overbought)
-                if price < r4_aligned[i] * 0.98:  # at least 2% below R4
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = price
-            # Short: break below S1 with volume (momentum continuation)
-            elif price < s1_aligned[i] and vol > 1.5 * vol_ma:
-                # Additional filter: avoid selling too close to S4 (oversold)
-                if price > s4_aligned[i] * 1.02:  # at least 2% above S4
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = price
-            # Mean reversion: sell at R1, buy at S1 (when no volume spike)
-            elif price > r1_aligned[i] and price < r4_aligned[i]:
-                # Sell near resistance if not breaking out with volume
-                signals[i] = -0.15
-                position = -1
-                entry_price = price
-            elif price < s1_aligned[i] and price > s4_aligned[i]:
-                # Buy near support if not breaking down with volume
-                signals[i] = 0.15
+            # Long: break above prior 1D high + volume + 1D trend
+            if price > prior_1d_high_aligned[i] and vol > 1.5 * vol_ma and price > ema_50_1d_aligned[i]:
+                signals[i] = 0.25
                 position = 1
+                entry_price = price
+            # Short: break below prior 1D low + volume + 1D trend
+            elif price < prior_1d_low_aligned[i] and vol > 1.5 * vol_ma and price < ema_50_1d_aligned[i]:
+                signals[i] = -0.25
+                position = -1
                 entry_price = price
         
         elif position == 1:
-            # Long exit: break below S1 (failed breakout or mean reversion)
-            if price < s1_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            # Take profit near R4
-            elif price > r4_aligned[i] * 0.995:  # 0.5% below R4
+            # Long exit: break below prior 1D low
+            if price < prior_1d_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: break above R1 (failed breakdown or mean reversion)
-            if price > r1_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            # Take profit near S4
-            elif price < s4_aligned[i] * 1.005:  # 0.5% above S4
+            # Short exit: break above prior 1D high
+            if price > prior_1d_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -120,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Camarilla_Pivot_R1S1_Breakout_Volume_Filter"
-timeframe = "6h"
+name = "12h_Prior1D_HL_Breakout_Volume_1DTrend"
+timeframe = "12h"
 leverage = 1.0
