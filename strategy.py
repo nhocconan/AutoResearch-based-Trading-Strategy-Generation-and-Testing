@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h strategy using Donchian channel breakout (20-period) with volume confirmation and ATR-based trailing stop.
-- Long when price breaks above upper Donchian(20) + volume > 1.5x 20-period volume MA
-- Short when price breaks below lower Donchian(20) + volume > 1.5x 20-period volume MA
+Hypothesis: 4h Donchian(20) breakout with volume confirmation and ATR stoploss.
+- Long when price closes above Donchian(20) upper band + volume > 1.3x 20-period volume MA
+- Short when price closes below Donchian(20) lower band + volume > 1.3x 20-period volume MA
 - Fixed position size 0.25 to limit fee churn and manage drawdown
 - ATR(10) trailing stop (2.0x ATR) to lock in profits
-- Designed for low trade frequency (target: 20-50 trades per year) to avoid fee drag
-- Works in bull markets (buying breakouts with volume) and bear markets (selling breakdowns with volume)
+- Works in bull markets (breakouts above upper band) and bear markets (breakdowns below lower band)
+- Target: 75-200 trades over 4 years (19-50/year) to avoid fee drag
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,7 +23,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period) on primary 4h timeframe
+    # Donchian(20) on primary 4h timeframe
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -43,7 +43,7 @@ def generate_signals(prices):
     entry_price = 0.0
     atr_stop = 0.0
     
-    start_idx = 20  # warmup for Donchian
+    start_idx = 100  # warmup
     
     for i in range(start_idx, n):
         if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
@@ -60,14 +60,14 @@ def generate_signals(prices):
         
         if position == 0:
             # Look for breakouts with volume confirmation
-            # Long: price breaks above upper Donchian + volume spike
-            if price > upper and vol > 1.5 * vol_ma:
+            # Long: price closes above Donchian upper + volume spike
+            if price > upper and vol > 1.3 * vol_ma:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 atr_stop = entry_price - 2.0 * atr_val
-            # Short: price breaks below lower Donchian + volume spike
-            elif price < lower and vol > 1.5 * vol_ma:
+            # Short: price closes below Donchian lower + volume spike
+            elif price < lower and vol > 1.3 * vol_ma:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
