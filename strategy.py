@@ -13,34 +13,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for main trend filter
+    # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Weekly EMA(34) for trend filter (slower = more reliable)
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # Daily Donchian(20) for breakout levels
+    # Get daily data for pivot points
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Donchian channels
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Weekly EMA(34) for trend filter
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Use previous day's levels (avoid look-ahead)
-    donchian_high_prev = np.roll(donchian_high, 1)
-    donchian_low_prev = np.roll(donchian_low, 1)
-    donchian_high_prev[0] = np.nan
-    donchian_low_prev[0] = np.nan
+    # Weekly standard deviation for volatility filter
+    std_1w = pd.Series(close_1w).rolling(window=34, min_periods=34).std().values
+    std_1w_aligned = align_htf_to_ltf(prices, df_1w, std_1w)
     
-    # Align daily Donchian levels to 1d timeframe
-    donchian_high_1d = align_htf_to_ltf(prices, df_1d, donchian_high_prev)
-    donchian_low_1d = align_htf_to_ltf(prices, df_1d, donchian_low_prev)
+    # Calculate weekly pivot points (standard formula)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    r2_1w = pivot_1w + (high_1w - low_1w)
+    s2_1w = pivot_1w - (high_1w - low_1w)
     
-    # Volume confirmation: current volume > 2.0 * 20-day average
+    # Use previous week's pivots (avoid look-ahead)
+    r1_1w_prev = np.roll(r1_1w, 1)
+    s1_1w_prev = np.roll(s1_1w, 1)
+    r2_1w_prev = np.roll(r2_1w, 1)
+    s2_1w_prev = np.roll(s2_1w, 1)
+    r1_1w_prev[0] = np.nan
+    s1_1w_prev[0] = np.nan
+    r2_1w_prev[0] = np.nan
+    s2_1w_prev[0] = np.nan
+    
+    # Align weekly pivot levels to 6h timeframe
+    r1_6h = align_htf_to_ltf(prices, df_1w, r1_1w_prev)
+    s1_6h = align_htf_to_ltf(prices, df_1w, s1_1w_prev)
+    r2_6h = align_htf_to_ltf(prices, df_1w, r2_1w_prev)
+    s2_6h = align_htf_to_ltf(prices, df_1w, s2_1w_prev)
+    
+    # Volume confirmation: current volume > 1.8 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR filter to avoid low volatility environments
@@ -57,34 +73,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 40  # Need EMA34, Donchian, volume MA20, ATR MA10
+    start_idx = 50  # Need EMA34, std, pivots, volume MA20, ATR MA10
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(volume_ma20[i]) or 
             np.isnan(atr[i]) or 
             np.isnan(atr_ma10[i]) or 
-            np.isnan(donchian_high_1d[i]) or 
-            np.isnan(donchian_low_1d[i]) or
-            np.isnan(ema34_1w_aligned[i])):
+            np.isnan(r1_6h[i]) or 
+            np.isnan(s1_6h[i]) or
+            np.isnan(r2_6h[i]) or
+            np.isnan(s2_6h[i]) or
+            np.isnan(ema34_1w_aligned[i]) or
+            np.isnan(std_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2.0x 20-day average
-        volume_filter = volume[i] > (2.0 * volume_ma20[i])
+        # Volume filter: current volume > 1.8x 20-period average
+        volume_filter = volume[i] > (1.8 * volume_ma20[i])
         # Volatility filter: ATR > ATR MA10 (avoid low volatility)
         volatility_filter = atr[i] > atr_ma10[i]
         # Weekly trend filter: price above/below weekly EMA34
         trend_up = close[i] > ema34_1w_aligned[i]
         trend_down = close[i] < ema34_1w_aligned[i]
+        # Weekly volatility filter: current weekly volatility > average
+        vol_filter = std_1w_aligned[i] > 0  # Only trade when volatility exists
         
         if position == 0:
-            # Long: price breaks above Donchian high with volume, volatility AND weekly uptrend
-            if close[i] > donchian_high_1d[i] and volume_filter and volatility_filter and trend_up:
+            # Long: price breaks above R1 with volume, volatility AND weekly uptrend
+            if (close[i] > r1_6h[i] and volume_filter and volatility_filter and 
+                trend_up and vol_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low with volume, volatility AND weekly downtrend
-            elif close[i] < donchian_low_1d[i] and volume_filter and volatility_filter and trend_down:
+            # Short: price breaks below S1 with volume, volatility AND weekly downtrend
+            elif (close[i] < s1_6h[i] and volume_filter and volatility_filter and 
+                  trend_down and vol_filter):
                 signals[i] = -0.25
                 position = -1
         
@@ -106,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyEMA34_DonchianBreakout_Volume_Filter"
-timeframe = "1d"
+name = "6d_WeeklyEMA34_PivotBreakout_Volume"
+timeframe = "6h"
 leverage = 1.0
