@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h trend filter and volume confirmation.
-# Uses price channels (Donchian) for breakouts, 12h EMA for trend filter, volume spike for confirmation.
-# Designed to work in bull (upward breakouts with trend) and bear (downward breakouts with trend).
-# Target: 20-40 trades/year to avoid fee drag.
+# Hypothesis: 1h ADX(14) + 4h VWAP trend + volume spike confirmation.
+# Uses 4h VWAP as trend filter (bullish when price > VWAP, bearish when price < VWAP),
+# ADX > 25 to confirm trending market, and volume > 1.5x 20-period average for momentum.
+# Designed to work in bull (trend up with volume) and bear (trend down with volume).
+# Target: 20-30 trades/year to avoid fee drag on 1h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,81 +19,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian and EMA
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Get 4h data for VWAP calculation
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
     
-    # Calculate 12h Donchian channels (20-period)
-    high_max_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Calculate 4h typical price and VWAP
+    typical_price_4h = (high_4h + low_4h + close_4h) / 3.0
+    vwap_num = np.cumsum(typical_price_4h * volume_4h)
+    vwap_den = np.cumsum(volume_4h)
+    vwap_4h = vwap_num / vwap_den
     
-    # Calculate 12h EMA34 for trend filter
-    close_12h_series = pd.Series(close_12h)
-    ema34_12h = close_12h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align 4h VWAP to 1h
+    vwap_1h = align_htf_to_ltf(prices, df_4h, vwap_4h)
     
-    # Align 12h Donchian and EMA to 4h
-    donchian_high_4h = align_htf_to_ltf(prices, df_12h, high_max_20)
-    donchian_low_4h = align_htf_to_ltf(prices, df_12h, low_min_20)
-    ema34_4h = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    # Calculate ADX(14) on 1h
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
     
-    # Volume filter: current volume > 2.0 * 20-period average (reduces trades)
+    tr1 = high - low
+    tr2 = np.abs(np.concatenate([[high[0]], high[:-1]]) - np.concatenate([[close[0]], close[:-1]]))
+    tr3 = np.abs(np.concatenate([[low[0]], low[:-1]]) - np.concatenate([[close[0]], close[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Volume filter: spike > 1.5x 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 54  # Need 20-period Donchian (12h) + EMA34 (12h) + volume MA20
+    start_idx = 35  # Need ADX(14) + VWAP + volume MA20
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_high_4h[i]) or 
-            np.isnan(donchian_low_4h[i]) or 
-            np.isnan(ema34_4h[i]) or 
+        if (np.isnan(vwap_1h[i]) or 
+            np.isnan(adx[i]) or 
             np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: spike > 2x average (strict to reduce trades)
-        volume_filter = volume[i] > (2.0 * volume_ma20[i])
+        # Volume filter: spike > 1.5x average
+        volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
-        # Trend filter: price above/below 12h EMA34
-        price_above_ema = close[i] > ema34_4h[i]
-        price_below_ema = close[i] < ema34_4h[i]
+        # Trend filter: ADX > 25 indicates strong trend
+        strong_trend = adx[i] > 25
         
-        # Price relative to 12h Donchian channels
-        price_above_high = close[i] > donchian_high_4h[i]
-        price_below_low = close[i] < donchian_low_4h[i]
+        # Price relative to 4h VWAP
+        price_above_vwap = close[i] > vwap_1h[i]
+        price_below_vwap = close[i] < vwap_1h[i]
         
         if position == 0:
-            # Long: Price breaks above 12h Donchian high with volume and above 12h EMA34
-            if (price_above_high and price_above_ema and volume_filter):
-                signals[i] = 0.25
+            # Long: Price above 4h VWAP with strong trend and volume
+            if (price_above_vwap and strong_trend and volume_filter):
+                signals[i] = 0.20
                 position = 1
-            # Short: Price breaks below 12h Donchian low with volume and below 12h EMA34
-            elif (price_below_low and price_below_ema and volume_filter):
-                signals[i] = -0.25
+            # Short: Price below 4h VWAP with strong trend and volume
+            elif (price_below_vwap and strong_trend and volume_filter):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: Price crosses below 12h Donchian low OR below 12h EMA34
-            if (close[i] < donchian_low_4h[i]) or (close[i] < ema34_4h[i]):
+            # Exit long: Price crosses below 4h VWAP OR ADX drops below 20 (weakening trend)
+            if (close[i] < vwap_1h[i]) or (adx[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: Price crosses above 12h Donchian high OR above 12h EMA34
-            if (close[i] > donchian_high_4h[i]) or (close[i] > ema34_4h[i]):
+            # Exit short: Price crosses above 4h VWAP OR ADX drops below 20
+            if (close[i] > vwap_1h[i]) or (adx[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Donchian20_12hEMA34_Volume"
-timeframe = "4h"
+name = "1h_ADX14_4hVWAP_Volume"
+timeframe = "1h"
 leverage = 1.0
