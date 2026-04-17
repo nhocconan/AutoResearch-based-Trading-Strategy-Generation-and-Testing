@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mts_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,125 +13,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1w Keltner Channels (20,2) - HTF Trend Filter ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # ATR(20) for Keltner
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.concatenate([[high_1w[0] - low_1w[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_20 = np.full_like(close_1w, np.nan)
-    for i in range(len(atr_20)):
-        if i < 19:
-            if i == 0:
-                atr_20[i] = tr[0]
-            else:
-                atr_20[i] = (atr_20[i-1] * 19 + tr[i]) / 20
-        else:
-            atr_20[i] = (atr_20[i-1] * 19 + tr[i]) / 20
-    
-    # Keltner Middle (EMA20)
-    ema_20 = np.full_like(close_1w, np.nan)
-    for i in range(len(ema_20)):
-        if i == 0:
-            ema_20[i] = close_1w[0]
-        else:
-            ema_20[i] = (close_1w[i] * 2 + ema_20[i-1] * 19) / 20
-    
-    upper_keltner = ema_20 + 2 * atr_20
-    lower_keltner = ema_20 - 2 * atr_20
-    
-    # === 1d Donchian Channel (20) - Entry Signal ===
+    # === 1d RSI (14-period) ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Donchian Upper/Lower (20)
-    donch_high = np.full_like(high_1d, np.nan)
-    donch_low = np.full_like(low_1d, np.nan)
-    for i in range(len(donch_high)):
-        if i < 19:
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing with min_periods
+    avg_gain = np.full_like(gain, np.nan)
+    avg_loss = np.full_like(loss, np.nan)
+    period = 14
+    for i in range(len(gain)):
+        if i < period:
             if i == 0:
-                donch_high[i] = high_1d[0]
-                donch_low[i] = low_1d[0]
+                avg_gain[i] = gain[i]
+                avg_loss[i] = loss[i]
             else:
-                donch_high[i] = np.max(high_1d[:i+1])
-                donch_low[i] = np.min(low_1d[:i+1])
+                avg_gain[i] = (avg_gain[i-1] * (i-1) + gain[i]) / i
+                avg_loss[i] = (avg_loss[i-1] * (i-1) + loss[i]) / i
         else:
-            donch_high[i] = np.max(high_1d[i-19:i+1])
-            donch_low[i] = np.min(low_1d[i-19:i+1])
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
     
-    # === 1d Volume Confirmation ===
-    vol_1d = df_1d['volume'].values
-    vol_ma_20 = np.full_like(vol_1d, np.nan)
-    for i in range(len(vol_ma_20)):
-        if i < 19:
-            if i == 0:
-                vol_ma_20[i] = vol_1d[0]
-            else:
-                vol_ma_20[i] = (vol_ma_20[i-1] * i + vol_1d[i]) / (i + 1)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d[avg_loss == 0] = 100
+    
+    # === 1w trend: EMA50 ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_50 = np.full_like(close_1w, np.nan)
+    for i in range(len(close_1w)):
+        if i == 0:
+            ema_50[i] = close_1w[i]
         else:
-            vol_ma_20[i] = (vol_ma_20[i-1] * 19 + vol_1d[i]) / 20
+            ema_50[i] = (close_1w[i] * 2 + ema_50[i-1] * 49) / 51
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_confirm = vol_1d > vol_ma_20 * 1.5
+    # === Align indicators to 1d timeframe ===
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
-    # === Align indicators to 12h timeframe ===
-    upper_keltner_aligned = align_htf_to_ltf(prices, df_1w, upper_keltner)
-    lower_keltner_aligned = align_htf_to_ltf(prices, df_1w, lower_keltner)
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
-    vol_confirm_aligned = align_htf_to_ltf(prices, df_1d, vol_confirm)
+    # === 1d Volume confirmation ===
+    vol_ma_20 = np.full_like(volume, np.nan)
+    for i in range(len(volume)):
+        if i >= 19:
+            vol_ma_20[i] = np.mean(volume[i-19:i+1])
+        elif i > 0:
+            vol_ma_20[i] = np.mean(volume[max(0, i-9):i+1])
+        else:
+            vol_ma_20[i] = volume[i]
+    
+    vol_confirm = volume > vol_ma_20 * 1.5
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 100
+    warmup = 50
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_keltner_aligned[i]) or 
-            np.isnan(lower_keltner_aligned[i]) or 
-            np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or 
-            np.isnan(vol_confirm_aligned[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or 
+            np.isnan(vol_confirm[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Market regime: Only trade when price is ABOVE weekly Keltner middle (uptrend bias)
-        # For bear markets, we'll use the opposite - price BELOW Keltner middle
-        # But to keep it simple and work in both regimes, we use breakout direction
-        
-        # Entry logic: only enter when flat
+        # Entry logic: only enter when flat AND volume confirmation
         if position == 0:
-            # Long: Price breaks above 1d Donchian High + weekly uptrend (price > weekly middle) + volume confirmation
-            if (close[i] > donch_high_aligned[i] and 
-                close[i] > (upper_keltner_aligned[i] + lower_keltner_aligned[i]) / 2 and  # price > weekly Keltner middle
-                vol_confirm_aligned[i]):
+            # Long: RSI < 30 (oversold) + price above weekly EMA50 + volume confirmation
+            if (rsi_1d_aligned[i] < 30 and 
+                close[i] > ema_50_aligned[i] and 
+                vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: Price breaks below 1d Donchian Low + weekly downtrend (price < weekly middle) + volume confirmation
-            elif (close[i] < donch_low_aligned[i] and 
-                  close[i] < (upper_keltner_aligned[i] + lower_keltner_aligned[i]) / 2 and  # price < weekly Keltner middle
-                  vol_confirm_aligned[i]):
+            # Short: RSI > 70 (overbought) + price below weekly EMA50 + volume confirmation
+            elif (rsi_1d_aligned[i] > 70 and 
+                  close[i] < ema_50_aligned[i] and 
+                  vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic: reverse signal or volatility-based exit
+        # Exit logic
         elif position == 1:
-            # Exit long: Price breaks below 1d Donchian Low OR weekly downtrend
-            if (close[i] < donch_low_aligned[i] or 
-                close[i] < (upper_keltner_aligned[i] + lower_keltner_aligned[i]) / 2):
+            # Exit long: RSI crosses above 50
+            if rsi_1d_aligned[i] > 50:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -139,9 +112,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price breaks above 1d Donchian High OR weekly uptrend
-            if (close[i] > donch_high_aligned[i] or 
-                close[i] > (upper_keltner_aligned[i] + lower_keltner_aligned[i]) / 2):
+            # Exit short: RSI crosses below 50
+            if rsi_1d_aligned[i] < 50:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -150,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Keltner_WeeklyTrend_DonchianBreakout_VolumeFilter_v1"
-timeframe = "12h"
+name = "1d_RSI14_WeeklyTrend_VolumeConfirmation_v1"
+timeframe = "1d"
 leverage = 1.0
