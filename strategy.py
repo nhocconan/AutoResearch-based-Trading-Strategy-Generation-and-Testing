@@ -27,10 +27,8 @@ def generate_signals(prices):
     s2_1d = pivot_1d - (high_1d - low_1d)
     r3_1d = high_1d + 2 * (pivot_1d - low_1d)
     s3_1d = low_1d - 2 * (high_1d - pivot_1d)
-    r4_1d = pivot_1d + 3 * (high_1d - low_1d)
-    s4_1d = pivot_1d - 3 * (high_1d - low_1d)
     
-    # Align pivot levels to 6h timeframe
+    # Align pivot levels to 4h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
@@ -38,8 +36,6 @@ def generate_signals(prices):
     s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
     # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -50,7 +46,7 @@ def generate_signals(prices):
     ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Calculate 6h ATR for volatility filter
+    # Calculate 4h ATR for volatility filter
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
@@ -68,8 +64,7 @@ def generate_signals(prices):
         # Skip if any required data is not available
         if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
             np.isnan(r2_1d_aligned[i]) or np.isnan(s2_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or
-            np.isnan(s3_1d_aligned[i]) or np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(atr[i])):
+            np.isnan(s3_1d_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -97,7 +92,7 @@ def generate_signals(prices):
         
         elif position == 1:
             # Exit long: price breaks below S2 or reverses at R4
-            if close[i] < s2_1d_aligned[i] or close[i] > r4_1d_aligned[i]:
+            if close[i] < s2_1d_aligned[i] or close[i] > r3_1d_aligned[i] + (r3_1d_aligned[i] - s3_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,7 +100,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit short: price breaks above R2 or reverses at S4
-            if close[i] > r2_1d_aligned[i] or close[i] < s4_1d_aligned[i]:
+            if close[i] > r2_1d_aligned[i] or close[i] < s3_1d_aligned[i] - (r3_1d_aligned[i] - s3_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Pivot_S3R3_Breakout_WeeklyTrend_Session"
-timeframe = "6h"
+name = "4h_Pivot_S3R3_Breakout_WeeklyTrend_Session"
+timeframe = "4h"
 leverage = 1.0
