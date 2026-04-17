@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_WilliamsAlligator_Trend_v1
-Williams Alligator system: Jaw (13), Teeth (8), Lips (5) SMAs.
-Long when Lips > Teeth > Jaw (bullish alignment), short when Lips < Teeth < Jaw (bearish).
-Weekly trend filter: price above/below weekly EMA50.
-Exit when Alligator alignment breaks.
-Designed to catch trends with smoothed filters to reduce whipsaw.
-Target: 20-50 total trades over 4 years (5-12/year).
+12h_KAMA_RSI_Chop_v1
+KAMA trend direction + RSI filter + Choppy market filter.
+Long when KAMA bullish, RSI > 50, and Chop < 61.8 (trending).
+Short when KAMA bearish, RSI < 50, and Chop < 61.8 (trending).
+Exit when conditions reverse or Chop > 61.8 (ranging).
+Uses 1d trend filter: price above/below 1d EMA200 for long/short bias.
+Designed to capture trending moves while avoiding choppy markets.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -15,61 +16,94 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # === Williams Alligator (using SMAs) ===
-    # Jaw: 13-period SMMA (using SMA as approximation)
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
-    # Teeth: 8-period SMMA
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values
-    # Lips: 5-period SMMA
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values
+    # === KAMA(10) ===
+    change = np.abs(close - np.roll(close, 1))
+    change[0] = 0
+    direction = np.abs(close - np.roll(close, 10))
+    direction[0:10] = 0
+    er = np.where(change != 0, direction / np.nansum(change.reshape(-1, 10), axis=1), 0)
+    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # seed
+    for i in range(10, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # === Weekly EMA50 for trend filter ===
-    df_1w = get_htf_data(prices, '1w')
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # === RSI(14) ===
+    delta = np.diff(close)
+    delta = np.concatenate([[0], delta])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # === Choppy Market Index(14) ===
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (hh - ll + 1e-10)) / np.log10(14)
+    
+    # === 1d EMA200 for trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 50
+    warmup = 100
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
-            np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(kama[i]) or 
+            np.isnan(rsi[i]) or 
+            np.isnan(chop[i]) or 
+            np.isnan(ema_200_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Bullish alignment: Lips > Teeth > Jaw
-            if (lips[i] > teeth[i] and teeth[i] > jaw[i] and 
-                close[i] > ema_50_1w_aligned[i]):
+            # Long: KAMA rising, RSI > 50, Chop < 61.8 (trending), price above 1d EMA200
+            if (kama[i] > kama[i-1] and 
+                rsi[i] > 50 and 
+                chop[i] < 61.8 and 
+                close[i] > ema_200_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Bearish alignment: Lips < Teeth < Jaw
-            elif (lips[i] < teeth[i] and teeth[i] < jaw[i] and 
-                  close[i] < ema_50_1w_aligned[i]):
+            # Short: KAMA falling, RSI < 50, Chop < 61.8 (trending), price below 1d EMA200
+            elif (kama[i] < kama[i-1] and 
+                  rsi[i] < 50 and 
+                  chop[i] < 61.8 and 
+                  close[i] < ema_200_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic: alignment breaks
+        # Exit logic
         elif position == 1:
-            # Exit long: bullish alignment broken (Lips <= Teeth or Teeth <= Jaw)
-            if (lips[i] <= teeth[i] or teeth[i] <= jaw[i]):
+            # Exit long: KAMA falling OR RSI < 50 OR Chop > 61.8 (ranging)
+            if (kama[i] < kama[i-1] or 
+                rsi[i] < 50 or 
+                chop[i] > 61.8):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -77,8 +111,10 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bearish alignment broken (Lips >= Teeth or Teeth >= Jaw)
-            if (lips[i] >= teeth[i] or teeth[i] >= jaw[i]):
+            # Exit short: KAMA rising OR RSI > 50 OR Chop > 61.8 (ranging)
+            if (kama[i] > kama[i-1] or 
+                rsi[i] > 50 or 
+                chop[i] > 61.8):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -87,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WilliamsAlligator_Trend_v1"
-timeframe = "1d"
+name = "12h_KAMA_RSI_Chop_v1"
+timeframe = "12h"
 leverage = 1.0
