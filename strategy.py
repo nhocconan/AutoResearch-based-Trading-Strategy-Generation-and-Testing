@@ -1,3 +1,10 @@
+# [2025-08-31] 1d_Pivot_S3R3_Breakout_WeeklyTrend_v2
+# Hypothesis: Price breaking beyond S3/R3 on daily chart with weekly EMA trend filter
+# captures strong momentum moves. Using S3/R3 (deeper levels) reduces false breakouts
+# vs S1/R1, leading to fewer, higher-quality trades. Weekly EMA50 filter ensures
+# alignment with longer-term trend, improving performance in both bull and bear markets.
+# Target: 20-50 trades/year, ~80-200 total over 4 years.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -30,7 +37,7 @@ def generate_signals(prices):
     r4_1d = pivot_1d + 3 * (high_1d - low_1d)
     s4_1d = pivot_1d - 3 * (high_1d - low_1d)
     
-    # Align pivot levels to 4h timeframe
+    # Align pivot levels to daily timeframe (no additional delay needed)
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
@@ -50,11 +57,6 @@ def generate_signals(prices):
     ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Calculate 4h ATR for volatility filter
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
@@ -62,10 +64,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
-            np.isnan(r2_1d_aligned[i]) or np.isnan(s2_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or
-            np.isnan(s3_1d_aligned[i]) or np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
+            np.isnan(ema50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -73,16 +73,13 @@ def generate_signals(prices):
         long_trend = close[i] > ema50_1w_aligned[i]
         short_trend = close[i] < ema50_1w_aligned[i]
         
-        # Volatility filter: avoid extremely low volatility periods
-        vol_filter = atr[i] > np.nanpercentile(atr[max(0, i-100):i+1], 20) if i >= 100 else True
-        
         if position == 0:
             # Long: price breaks above S3 with trend alignment
-            if long_trend and vol_filter and close[i] > s3_1d_aligned[i]:
+            if long_trend and close[i] > s3_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
             # Short: price breaks below R3 with trend alignment
-            elif short_trend and vol_filter and close[i] < r3_1d_aligned[i]:
+            elif short_trend and close[i] < r3_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
@@ -104,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Pivot_S3R3_Breakout_WeeklyTrend"
-timeframe = "4h"
+name = "1d_Pivot_S3R3_Breakout_WeeklyTrend_v2"
+timeframe = "1d"
 leverage = 1.0
