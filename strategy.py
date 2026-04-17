@@ -1,11 +1,17 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
+"""
+Hypothesis: 4h Donchian breakout with 1d ADX trend filter and volume confirmation.
+Works in bull (breakouts catch momentum) and bear (ADX filters weak breakouts).
+Targets 20-40 trades/year to avoid fee drag.
+"""
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,7 +23,7 @@ def generate_signals(prices):
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     
-    # Calculate rolling max/min for Donchian
+    # Calculate rolling max/min for Donchian with min_periods
     upper = np.full(len(high_1w), np.nan)
     lower = np.full(len(low_1w), np.nan)
     for i in range(20, len(high_1w)):
@@ -77,7 +83,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 100
+    warmup = 50
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
@@ -135,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyDonchian20_1dVolume1.5x_ADX25_TrendBreakout"
-timeframe = "6h"
+name = "4h_WeeklyDonchian20_1dVolume1.5x_ADX25_TrendBreakout"
+timeframe = "4h"
 leverage = 1.0
