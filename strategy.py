@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,24 +13,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly EMA50 for trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Get daily data for ATR and volume
+    # Get daily data for ATR and range calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate daily ATR(14)
+    # Calculate daily true range and ATR
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -38,65 +27,64 @@ def generate_signals(prices):
     tr2[0] = np.nan
     tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma10_1d = pd.Series(atr_1d).rolling(window=10, min_periods=10).mean().values
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate daily volume average (20-period)
-    volume_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate daily range (high - low) and its 14-day average
+    daily_range = high_1d - low_1d
+    range_avg = pd.Series(daily_range).rolling(window=14, min_periods=14).mean().values
     
-    # Align weekly EMA50 to daily timeframe
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Align ATR and range average to 12h timeframe
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    range_avg_aligned = align_htf_to_ltf(prices, df_1d, range_avg)
     
-    # Align daily ATR and volume average to daily timeframe (no change needed but for consistency)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    atr_ma10_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma10_1d)
-    volume_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma20_1d)
+    # Volatility filter: current daily range > 1.2 * average range (avoid low volatility)
+    # Need to align the condition: we want to know if today's range is expanded
+    range_expanded = daily_range > (1.2 * range_avg)
+    range_expanded_aligned = align_htf_to_ltf(prices, df_1d, range_expanded.astype(float))
+    
+    # Calculate 12-period high and low for breakout levels (using 12h data directly)
+    high_roll = pd.Series(high).rolling(window=12, min_periods=12).max().values
+    low_roll = pd.Series(low).rolling(window=12, min_periods=12).min().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # Need enough data for EMA50 and ATR MA
+    start_idx = 20  # Need sufficient data for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(atr_ma10_1d_aligned[i]) or
-            np.isnan(volume_ma20_1d_aligned[i])):
+        if (np.isnan(atr_aligned[i]) or 
+            np.isnan(range_avg_aligned[i]) or 
+            np.isnan(range_expanded_aligned[i]) or
+            np.isnan(high_roll[i]) or 
+            np.isnan(low_roll[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below weekly EMA50
-        uptrend = close[i] > ema50_1w_aligned[i]
-        downtrend = close[i] < ema50_1w_aligned[i]
-        
-        # Volatility filter: ATR > 10-day average ATR (avoid low volatility)
-        volatility_filter = atr_1d_aligned[i] > atr_ma10_1d_aligned[i]
-        
-        # Volume filter: current volume > 1.5x 20-day average volume
-        volume_filter = volume[i] > (1.5 * volume_ma20_1d_aligned[i])
+        # Volatility filter: trade only when volatility is expanding
+        volatility_filter = range_expanded_aligned[i] > 0.5  # True when range > 1.2*avg
         
         if position == 0:
-            # Long: uptrend + volatility + volume
-            if uptrend and volatility_filter and volume_filter:
+            # Long: price breaks above 12-period high with expanding volatility
+            if close[i] > high_roll[i] and volatility_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + volatility + volume
-            elif downtrend and volatility_filter and volume_filter:
+            # Short: price breaks below 12-period low with expanding volatility
+            elif close[i] < low_roll[i] and volatility_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: trend reversal or volatility drops
-            if not uptrend or not volatility_filter:
+            # Exit long: price returns below 12-period low or volatility contracts
+            if close[i] < low_roll[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: trend reversal or volatility drops
-            if not downtrend or not volatility_filter:
+            # Exit short: price returns above 12-period high or volatility contracts
+            if close[i] > high_roll[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA50_Trend_Volume_Volatility"
-timeframe = "1d"
+name = "12h_VolatilityBreakout_12Period_v1"
+timeframe = "12h"
 leverage = 1.0
