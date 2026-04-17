@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_WeeklyPivot_R1_S1_Breakout_VolumeTrend_v4
-Hypothesis: Weekly pivot points (R1/S1) with volume confirmation and 1d EMA50 trend filter. Only takes long above R1 in uptrend (close>EMA50) and short below S1 in downtrend (close<EMA50). Reduces whipsaw by requiring trend alignment. Target: 20-40 trades/year to minimize fee drift.
+4h_1d_RSI_CCI_Pullback_V1
+Hypothesis: Pullback strategy in 4h trend. Uses 1d EMA50 for trend direction, RSI(14) for oversold/overbought, CCI(20) for pullback confirmation, and volume filter. Enters long in uptrend on pullback, short in downtrend on bounce. Target: 20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,50 +18,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data for EMA50 trend filter and volume average ===
+    # === 1d data for trend filter and indicators ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
     # 1d EMA50 for trend filter
     ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
+    # 1d RSI(14)
+    delta = pd.Series(close_1d).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d = rsi_1d.replace([np.inf, -np.inf], 100).fillna(100).values
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    # 1d CCI(20)
+    tp_1d = (high_1d + low_1d + close_1d) / 3
+    sma_tp = pd.Series(tp_1d).rolling(window=20, min_periods=20).mean()
+    mad = pd.Series(tp_1d).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
+    cci_1d = (tp_1d - sma_tp) / (0.015 * mad)
+    cci_1d = cci_1d.fillna(0).values
+    cci_1d_aligned = align_htf_to_ltf(prices, df_1d, cci_1d)
+    
     # 1d volume average (20-period) for confirmation
     vol_avg20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_avg20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg20_1d)
     
-    # === Weekly data for Pivot points (R1, S1) ===
-    df_1w = get_htf_data(prices, '1w')
-    high_w = df_1w['high'].values
-    low_w = df_1w['low'].values
-    close_w = df_1w['close'].values
-    
-    # Calculate Weekly Pivot Points (standard formula)
-    # Pivot = (H + L + C) / 3
-    # R1 = (2 * Pivot) - L
-    # S1 = (2 * Pivot) - H
-    pivot_w = (high_w + low_w + close_w) / 3
-    R1_w = (2 * pivot_w) - low_w
-    S1_w = (2 * pivot_w) - high_w
-    
-    # Align Weekly Pivot levels to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1w, R1_w)
-    S1_aligned = align_htf_to_ltf(prices, df_1w, S1_w)
-    
     signals = np.zeros(n)
     
-    # Warmup: covers EMA50 and volume average
-    warmup = 50
+    # Warmup: covers EMA50, RSI, CCI, and volume average
+    warmup = 60
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or 
+        if (np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(cci_1d_aligned[i]) or 
             np.isnan(vol_avg20_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
@@ -70,25 +73,25 @@ def generate_signals(prices):
         # Get current 1d volume
         vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
         
-        # Volume filter: current volume > 1.5x 20-period average
-        vol_filter = vol_1d_current > 1.5 * vol_avg20_1d_aligned[i]
+        # Volume filter: current volume > 1.3x 20-period average
+        vol_filter = vol_1d_current > 1.3 * vol_avg20_1d_aligned[i]
         
-        # Entry conditions: require trend alignment and close beyond pivot level
+        # Entry conditions: pullback in trend
         if position == 0:
-            # Long: price closes above weekly R1 + above 1d EMA50 + volume
-            if close[i] > R1_aligned[i] and close[i] > ema50_1d_aligned[i] and vol_filter:
+            # Long: uptrend (close > EMA50), RSI oversold (<30), CCI oversold (<-100), volume
+            if close[i] > ema50_1d_aligned[i] and rsi_1d_aligned[i] < 30 and cci_1d_aligned[i] < -100 and vol_filter:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price closes below weekly S1 + below 1d EMA50 + volume
-            elif close[i] < S1_aligned[i] and close[i] < ema50_1d_aligned[i] and vol_filter:
+            # Short: downtrend (close < EMA50), RSI overbought (>70), CCI overbought (>100), volume
+            elif close[i] < ema50_1d_aligned[i] and rsi_1d_aligned[i] > 70 and cci_1d_aligned[i] > 100 and vol_filter:
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit conditions: reverse when price returns to opposite weekly pivot level
+        # Exit conditions: reverse when RSI returns to neutral zone
         elif position == 1:
-            if close[i] < S1_aligned[i]:  # exit long when price closes below S1
+            if rsi_1d_aligned[i] > 50:  # exit long when RSI crosses above 50
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -96,7 +99,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            if close[i] > R1_aligned[i]:  # exit short when price closes above R1
+            if rsi_1d_aligned[i] < 50:  # exit short when RSI crosses below 50
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -105,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WeeklyPivot_R1_S1_Breakout_VolumeTrend_v4"
+name = "4h_1d_RSI_CCI_Pullback_V1"
 timeframe = "4h"
 leverage = 1.0
