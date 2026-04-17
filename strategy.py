@@ -1,3 +1,9 @@
+# Hypothesis: 4h 12h/1d pivot breakout with volume confirmation and 12h EMA trend filter
+# Uses 12h/1d pivot levels as strong support/resistance zones. Long when price breaks above R1 with volume and above 12h EMA34.
+# Short when price breaks below S1 with volume and below 12h EMA34. Designed for fewer trades (target 20-50/year) with clear structure.
+# Works in bull/bear: pivot levels adapt to volatility, EMA filter avoids counter-trend trades, volume confirms breakout strength.
+# Target: 0.25 position size, max 0.40.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,38 +19,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 12h data for pivot calculation (more stable than daily)
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate daily pivot points (not weekly - more frequent updates)
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    daily_range = high_1d - low_1d
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    r2 = pivot + daily_range
-    s2 = pivot - daily_range
+    # Calculate 12h pivot points (standard formula)
+    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
+    range_12h = high_12h - low_12h
+    r1_12h = 2 * pivot_12h - low_12h
+    s1_12h = 2 * pivot_12h - high_12h
+    r2_12h = pivot_12h + range_12h
+    s2_12h = pivot_12h - range_12h
     
-    # Align daily pivot levels to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    # Align 12h pivot levels to 4h
+    pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    r2_12h_aligned = align_htf_to_ltf(prices, df_12h, r2_12h)
+    s2_12h_aligned = align_htf_to_ltf(prices, df_12h, s2_12h)
     
-    # Volume filter: current volume > 1.3x 20-period average
+    # Get 12h EMA34 for trend filter
+    close_12h_series = pd.Series(close_12h)
+    ema34_12h = close_12h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    
+    # Volume filter: current volume > 2.0x 20-period average (strict to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.3)
-    
-    # ATR(14) for volatility filter and stop
-    high_low = high - low
-    high_close = np.abs(high - np.roll(close, 1))
-    low_close = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    tr[0] = high_low[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    volume_filter = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -53,33 +56,33 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(pivot_12h_aligned[i]) or np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or
+            np.isnan(r2_12h_aligned[i]) or np.isnan(s2_12h_aligned[i]) or
+            np.isnan(ema34_12h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with volume and above pivot
-            if close[i] > r1_aligned[i] and volume_filter[i] and close[i] > pivot_aligned[i]:
+            # Long: price breaks above R1 with volume and above 12h EMA34
+            if close[i] > r1_12h_aligned[i] and volume_filter[i] and close[i] > ema34_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume and below pivot
-            elif close[i] < s1_aligned[i] and volume_filter[i] and close[i] < pivot_aligned[i]:
+            # Short: price breaks below S1 with volume and below 12h EMA34
+            elif close[i] < s1_12h_aligned[i] and volume_filter[i] and close[i] < ema34_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below S1 OR ATR-based stop
-            if close[i] < s1_aligned[i] or close[i] < (high[max(0, i-1)] - 1.5 * atr[i]):
+            # Exit long: price breaks below pivot OR below S1
+            if close[i] < pivot_12h_aligned[i] or close[i] < s1_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above R1 OR ATR-based stop
-            if close[i] > r1_aligned[i] or close[i] > (low[max(0, i-1)] + 1.5 * atr[i]):
+            # Exit short: price breaks above pivot OR above R1
+            if close[i] > pivot_12h_aligned[i] or close[i] > r1_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_DailyPivot_R1S1_Volume_ATR"
-timeframe = "12h"
+name = "4h_12hPivot_R1S1_Volume_EMA34"
+timeframe = "4h"
 leverage = 1.0
