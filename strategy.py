@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla R1/S1 breakout with volume confirmation and 1d ADX trend filter.
-Long when price breaks above Camarilla R1 AND volume > 1.5x average AND ADX > 25 (trending).
-Short when price breaks below Camarilla S1 AND volume > 1.5x average AND ADX > 25.
-Exit when price reverts to Camarilla midpoint (PP) OR ADX < 20 (range market).
-Uses 12h for Camarilla calculation and 1d for ADX filter to reduce whipsaw.
-Target: 50-150 total trades over 4 years (12-37/year). Camarilla pivot levels provide
-intraday support/resistance, volume confirmation filters fakeouts, ADX filter avoids
-ranging markets. Works in bull markets (captures uptrends) and bear markets (captures
-downtrends).
+Hypothesis: 4h Camarilla R1/S1 breakout with volume confirmation and 1d chop regime filter.
+Long when price breaks above Camarilla R1 AND volume > 1.3x average AND CHOP > 61.8 (ranging).
+Short when price breaks below Camarilla S1 AND volume > 1.3x average AND CHOP > 61.8.
+Exit when price reverts to Camarilla midpoint (PP) OR CHOP < 38.2 (trending).
+Uses 4h for Camarilla calculation and 1d for CHOP filter to avoid whipsaw in strong trends.
+Target: 75-200 total trades over 4 years (19-50/year). Camarilla levels provide precise intraday
+support/resistance, volume confirmation filters breakout validity, CHOP filter ensures mean-reversion
+edge works best in ranging markets while avoiding strong trending periods where breakouts fail.
 """
 
 import numpy as np
@@ -25,28 +24,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla calculation
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Get 4h data for Camarilla calculation
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate Camarilla levels on 12h timeframe (based on previous bar)
-    # Camarilla: PP = (H+L+C)/3, R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    typical_price_12h = (high_12h + low_12h + close_12h) / 3.0
-    range_12h = high_12h - low_12h
-    camarilla_pp = typical_price_12h
-    camarilla_r1 = close_12h + range_12h * 1.1 / 12.0
-    camarilla_s1 = close_12h - range_12h * 1.1 / 12.0
-    camarilla_mid = camarilla_pp  # midpoint for exit
+    # Calculate Camarilla levels on 4h timeframe (based on previous day)
+    # Camarilla uses previous period's high, low, close
+    prev_high = np.roll(high_4h, 1)
+    prev_low = np.roll(low_4h, 1)
+    prev_close = np.roll(close_4h, 1)
+    # First value will be NaN due to roll, handled by min_periods later
     
-    # Get 1d data for ADX filter
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    
+    # Camarilla levels
+    r1 = pivot + (range_hl * 1.1 / 12)
+    s1 = pivot - (range_hl * 1.1 / 12)
+    r2 = pivot + (range_hl * 1.1 / 6)
+    s2 = pivot - (range_hl * 1.1 / 6)
+    r3 = pivot + (range_hl * 1.1 / 4)
+    s3 = pivot - (range_hl * 1.1 / 4)
+    r4 = pivot + (range_hl * 1.1 / 2)
+    s4 = pivot - (range_hl * 1.1 / 2)
+    pp = pivot  # Camarilla midpoint
+    
+    # Get 1d data for CHOP filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ADX on 1d timeframe (14-period)
+    # Calculate CHOP (Choppiness Index) on 1d timeframe (14-period)
     high_1d_series = pd.Series(high_1d)
     low_1d_series = pd.Series(low_1d)
     close_1d_series = pd.Series(close_1d)
@@ -58,37 +69,36 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # first period
     
-    # Plus Directional Movement (+DM)
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # ATR (14-period)
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Smooth TR, +DM, -DM (14-period)
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    # Highest high and lowest low over 14 periods
+    hh_14 = high_1d_series.rolling(window=14, min_periods=14).max().values
+    ll_14 = low_1d_series.rolling(window=14, min_periods=14).min().values
     
-    # Calculate +DI and -DI
-    plus_di = 100 * (plus_dm_smooth / np.where(atr != 0, atr, np.inf))
-    minus_di = 100 * (minus_dm_smooth / np.where(atr != 0, atr, np.inf))
+    # CHOP formula: 100 * log10(sum(ATR14) / (HH14 - LL14)) / log10(14)
+    # Avoid division by zero
+    range_14 = hh_14 - ll_14
+    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
     
-    # Calculate DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) != 0, (plus_di + minus_di), np.inf)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    chop = np.zeros_like(close_1d)
+    mask = (range_14 > 0) & (~np.isnan(range_14)) & (~np.isnan(sum_atr_14))
+    chop[mask] = 100 * np.log10(sum_atr_14[mask] / range_14[mask]) / np.log10(14)
+    # For invalid cases, set to 50 (neutral)
+    chop[~mask] = 50.0
     
-    # Align 12h Camarilla to 12h timeframe (no alignment needed)
-    camarilla_r1_aligned = camarilla_r1
-    camarilla_s1_aligned = camarilla_s1
-    camarilla_mid_aligned = camarilla_mid
+    # Align 4h Camarilla to 4h timeframe (no alignment needed)
+    r1_aligned = r1
+    s1_aligned = s1
+    pp_aligned = pp
     
-    # Align 1d ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align 1d CHOP to 4h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Volume average (20-period) on 12h
-    volume_12h = df_12h['volume'].values
-    volume_ma = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_12h, volume_ma)
+    # Volume average (20-period) on 4h
+    volume_4h = df_4h['volume'].values
+    volume_ma = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    volume_ma_aligned = align_htf_to_ltf(prices, df_4h, volume_ma)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -97,41 +107,40 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(camarilla_mid_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(volume_ma_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(pp_aligned[i]) or 
+            np.isnan(chop_aligned[i]) or np.isnan(volume_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        r1 = camarilla_r1_aligned[i]
-        s1 = camarilla_s1_aligned[i]
-        mid = camarilla_mid_aligned[i]
-        adx_val = adx_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        pp_val = pp_aligned[i]
+        chop_val = chop_aligned[i]
         vol_ma = volume_ma_aligned[i]
         vol = volume[i]
         price = close[i]
         
         if position == 0:
-            # Long: price > Camarilla R1 AND volume > 1.5x avg AND ADX > 25 (trending)
-            if price > r1 and vol > 1.5 * vol_ma and adx_val > 25:
+            # Long: price > Camarilla R1 AND volume > 1.3x avg AND CHOP > 61.8 (ranging)
+            if price > r1_val and vol > 1.3 * vol_ma and chop_val > 61.8:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < Camarilla S1 AND volume > 1.5x avg AND ADX > 25 (trending)
-            elif price < s1 and vol > 1.5 * vol_ma and adx_val > 25:
+            # Short: price < Camarilla S1 AND volume > 1.3x avg AND CHOP > 61.8 (ranging)
+            elif price < s1_val and vol > 1.3 * vol_ma and chop_val > 61.8:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price < Camarilla midpoint OR ADX < 20 (range market)
-            if price < mid or adx_val < 20:
+            # Exit long: price < Camarilla PP OR CHOP < 38.2 (trending)
+            if price < pp_val or chop_val < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price > Camarilla midpoint OR ADX < 20 (range market)
-            if price > mid or adx_val < 20:
+            # Exit short: price > Camarilla PP OR CHOP < 38.2 (trending)
+            if price > pp_val or chop_val < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -139,6 +148,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Volume_ADX_Filter"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Volume_CHOP_Filter"
+timeframe = "4h"
 leverage = 1.0
