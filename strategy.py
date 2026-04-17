@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d volume surge and ADX trend filter
+# Hypothesis: 4h Donchian(20) breakout with 1d volume surge and ADX trend filter
 # Breakouts capture momentum in trending markets; volume surge confirms institutional interest.
 # ADX > 25 filters chop, ensuring trades only in trending conditions.
 # Works in bull/bear by trading breakouts in direction of 1d trend.
