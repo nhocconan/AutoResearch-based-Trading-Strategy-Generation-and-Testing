@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,13 +24,13 @@ def generate_signals(prices):
     r1_1d = 2 * pivot_1d - low_1d
     s1_1d = 2 * pivot_1d - high_1d
     
-    # Align daily pivot levels to 4h timeframe (use previous day's levels)
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align daily pivot levels to 1d timeframe (use previous day's levels)
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Volume filter: current volume > 1.5 * 20-period average (moderate to reduce trades)
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume filter: current volume > 2.0 * 50-period average (stricter to reduce trades)
+    volume_ma50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
     # Choppiness index filter (trending market filter)
     atr_period = 14
@@ -48,34 +48,34 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 20  # Need sufficient data for volume MA and chop
+    start_idx = 50  # Need sufficient data for volume MA and chop
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
-            np.isnan(volume_ma20[i]) or np.isnan(chop[i])):
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
+            np.isnan(volume_ma50[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        volume_filter = volume[i] > (2.0 * volume_ma50[i])
         
         # Choppiness filter: only trade in trending markets (CHOP < 38.2)
         trend_filter = chop[i] < 38.2
         
         if position == 0:
             # Long breakout: price breaks above R1 with volume and trend filter
-            if close[i] > r1_4h[i] and volume_filter and trend_filter:
+            if close[i] > r1_1d_aligned[i] and volume_filter and trend_filter:
                 signals[i] = 0.25
                 position = 1
             # Short breakdown: price breaks below S1 with volume and trend filter
-            elif close[i] < s1_4h[i] and volume_filter and trend_filter:
+            elif close[i] < s1_1d_aligned[i] and volume_filter and trend_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit long: price falls below S1
-            if close[i] < s1_4h[i]:
+            if close[i] < s1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -83,7 +83,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit short: price rises above R1
-            if close[i] > r1_4h[i]:
+            if close[i] > r1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyPivot_Breakout_Volume_TrendFilter_Strict"
-timeframe = "4h"
+name = "1d_DailyPivot_Breakout_Volume_TrendFilter_Strict"
+timeframe = "1d"
 leverage = 1.0
