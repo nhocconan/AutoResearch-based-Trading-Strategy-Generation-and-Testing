@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout with Daily Trend Filter
-Long: Price breaks above Donchian(20) high + 1d EMA(34) rising
-Short: Price breaks below Donchian(20) low + 1d EMA(34) falling
-Exit: Opposite Donchian break or price crosses EMA(34)
-Designed to capture trend continuations with clear breakouts.
-Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe
+4h Bollinger Band Squeeze Breakout with 12h EMA Trend Filter
+Long: Price breaks above upper BB after squeeze (BBW < 20th percentile) + price > 12h EMA34
+Short: Price breaks below lower BB after squeeze + price < 12h EMA34
+Exit: Opposite BB break or price crosses 12h EMA
+Designed to capture volatility expansion after low volatility periods in both bull and bear markets.
+Target: 80-150 total trades over 4 years (20-38/year)
 """
 
 import numpy as np
@@ -14,65 +14,71 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     
-    # Donchian channels on 12h
-    period20_high = pd.Series(high).rolling(window=20, min_periods=20).max()
-    period20_low = pd.Series(low).rolling(window=20, min_periods=20).min()
-    donchian_high = period20_high.values
-    donchian_low = period20_low.values
+    # Bollinger Bands (20, 2)
+    close_series = pd.Series(close)
+    basis = close_series.rolling(window=20, min_periods=20).mean()
+    dev = close_series.rolling(window=20, min_periods=20).std()
+    upper = basis + 2 * dev
+    lower = basis - 2 * dev
     
-    # Get 1d data for trend filter (EMA34)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Bollinger Band Width for squeeze detection
+    bbw = (upper - lower) / basis
+    bbw_series = pd.Series(bbw)
+    # 20th percentile lookback for squeeze definition
+    bbw_percentile = bbw_series.rolling(window=50, min_periods=20).quantile(0.20)
+    squeeze = bbw < bbw_percentile.values
     
-    # Calculate 1d EMA(34)
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Breakout detection
+    breakout_up = (close > upper) & (close_series.shift(1) <= upper.shift(1))
+    breakout_down = (close < lower) & (close_series.shift(1) >= lower.shift(1))
     
-    # Align 1d EMA(34) to 12h
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Get 12h data for trend filter (EMA34)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 20  # need Donchian calculations
+    start_idx = 50  # need BB and EMA calculations
     
     for i in range(start_idx, n):
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(ema_34_1d_aligned[i]):
+        if (np.isnan(basis[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or
+            np.isnan(ema_34_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper = donchian_high[i]
-        lower = donchian_low[i]
-        ema34 = ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long: break above Donchian high + EMA34 rising
-            if price > upper and ema34 > ema_34_1d_aligned[i-1]:
+            # Long: squeeze breakout up + price > 12h EMA34
+            if squeeze[i] and breakout_up[i] and price > ema_34_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian low + EMA34 falling
-            elif price < lower and ema34 < ema_34_1d_aligned[i-1]:
+            # Short: squeeze breakout down + price < 12h EMA34
+            elif squeeze[i] and breakout_down[i] and price < ema_34_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: break below Donchian low OR price crosses below EMA34
-            if price < lower or price < ema34:
+            # Long exit: breakout down OR price crosses below 12h EMA34
+            if breakout_down[i] or price < ema_34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: break above Donchian high OR price crosses above EMA34
-            if price > upper or price > ema34:
+            # Short exit: breakout up OR price crosses above 12h EMA34
+            if breakout_up[i] or price > ema_34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -80,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_DailyTrend"
-timeframe = "12h"
+name = "4h_BB_Squeeze_Breakout_12hEMA34"
+timeframe = "4h"
 leverage = 1.0
