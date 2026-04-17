@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h strategy using weekly pivot points (R1/S1) with 1d EMA50 trend filter and volume confirmation.
-- Long when price closes above weekly R1 + volume > 1.5x 20-period 6h volume MA + price above 1d EMA50
-- Short when price closes below weekly S1 + volume > 1.5x 20-period 6h volume MA + price below 1d EMA50
+Hypothesis: 12h strategy using weekly pivot points (R1/S1) with 1d EMA50 trend filter and volume confirmation.
+- Long when price closes above weekly R1 + volume > 1.5x 20-period 12h volume MA + price above 1d EMA50
+- Short when price closes below weekly S1 + volume > 1.5x 20-period 12h volume MA + price below 1d EMA50
 - Fixed position size 0.25 to limit fee churn and manage drawdown
 - ATR-based trailing stop (2.0x ATR) to lock in profits
 - Weekly pivot points derived from prior week's OHLC (no look-ahead)
@@ -43,31 +43,31 @@ def generate_signals(prices):
     r1_1w = 2 * pivot_1w - low_1w
     s1_1w = 2 * pivot_1w - high_1w
     
-    # Align weekly pivot points to 6h timeframe
+    # Align weekly pivot points to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
     s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
     
-    # Get 6h data for volume confirmation and ATR (primary timeframe)
-    df_6h = get_htf_data(prices, '6h')
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
-    volume_6h = df_6h['volume'].values
+    # Get 12h data for volume confirmation and ATR (primary timeframe)
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Volume average (20-period) on 6h for confirmation
-    volume_ma_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    # Volume average (20-period) on 12h for confirmation
+    volume_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
     
-    # ATR (10-period) on 6h for stoploss
-    tr1 = high_6h - low_6h
-    tr2 = np.abs(high_6h - np.roll(close_6h, 1))
-    tr3 = np.abs(low_6h - np.roll(close_6h, 1))
+    # ATR (10-period) on 12h for stoploss
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # first period
     atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # Align all indicators to 6h timeframe (primary)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_6h, volume_ma_20)
-    atr_aligned = align_htf_to_ltf(prices, df_6h, atr_10)
+    # Align all indicators to 12h timeframe (primary)
+    volume_ma_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_20)
+    atr_aligned = align_htf_to_ltf(prices, df_12h, atr_10)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -128,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R1S1_1dEMA50_VolumeSpike_ATRTrail"
-timeframe = "6h"
+name = "12h_WeeklyPivot_R1S1_1dEMA50_VolumeSpike_ATRTrail"
+timeframe = "12h"
 leverage = 1.0
