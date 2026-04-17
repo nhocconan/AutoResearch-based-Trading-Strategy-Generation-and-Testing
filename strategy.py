@@ -12,8 +12,12 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time']
     
-    # Get daily data for pivot points
+    # Pre-calculate hours for session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    
+    # Get daily data for pivot points and EMA trend
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -24,32 +28,15 @@ def generate_signals(prices):
     daily_r1 = 2 * daily_pivot - low_1d
     daily_s1 = 2 * daily_pivot - high_1d
     
-    # Align daily pivot levels to 4h timeframe
-    daily_pivot_4h = align_htf_to_ltf(prices, df_1d, daily_pivot)
-    daily_r1_4h = align_htf_to_ltf(prices, df_1d, daily_r1)
-    daily_s1_4h = align_htf_to_ltf(prices, df_1d, daily_s1)
+    # Align daily pivot levels to 1h timeframe
+    daily_pivot_1h = align_htf_to_ltf(prices, df_1d, daily_pivot)
+    daily_r1_1h = align_htf_to_ltf(prices, df_1d, daily_r1)
+    daily_s1_1h = align_htf_to_ltf(prices, df_1d, daily_s1)
     
-    # Get 12h data for trend filter (HMA)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    
-    # Calculate Hull Moving Average (HMA) on 12h close
-    def hma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        half = period // 2
-        sqrt = int(np.sqrt(period))
-        wma2 = np.convolve(arr, np.arange(1, half + 1), 'valid') / (half * (half + 1) / 2)
-        wma1 = np.convolve(arr, np.arange(1, period + 1), 'valid') / (period * (period + 1) / 2)
-        raw = 2 * wma2 - wma1
-        hma_vals = np.convolve(raw, np.arange(1, sqrt + 1), 'valid') / (sqrt * (sqrt + 1) / 2)
-        # Pad to original length
-        result = np.full_like(arr, np.nan)
-        result[period-1:period-1+len(hma_vals)] = hma_vals
-        return result
-    
-    hma_12h = hma(close_12h, 20)
-    hma_12h_4h = align_htf_to_ltf(prices, df_12h, hma_12h)
+    # Calculate daily EMA50 for trend filter (stronger trend filter)
+    close_1d_series = pd.Series(close_1d)
+    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Volume filter: current volume > 1.5 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -57,14 +44,19 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 30  # Need daily pivot, 12h HMA, volume MA
+    start_idx = 50  # Need daily EMA50 and other indicators
     
     for i in range(start_idx, n):
+        # Session filter: only trade 08-20 UTC
+        if not (8 <= hours[i] <= 20):
+            signals[i] = 0.0
+            continue
+        
         # Skip if any required data is not available
-        if (np.isnan(daily_pivot_4h[i]) or 
-            np.isnan(daily_r1_4h[i]) or 
-            np.isnan(daily_s1_4h[i]) or 
-            np.isnan(hma_12h_4h[i]) or 
+        if (np.isnan(daily_pivot_1h[i]) or 
+            np.isnan(daily_r1_1h[i]) or 
+            np.isnan(daily_s1_1h[i]) or 
+            np.isnan(ema50_1h[i]) or 
             np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
@@ -72,42 +64,42 @@ def generate_signals(prices):
         # Volume filter
         volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
-        # Trend filter: price above/below 12h HMA
-        price_above_hma = close[i] > hma_12h_4h[i]
-        price_below_hma = close[i] < hma_12h_4h[i]
+        # Trend filter: price above/below daily EMA50
+        price_above_ema = close[i] > ema50_1h[i]
+        price_below_ema = close[i] < ema50_1h[i]
         
         # Price relative to daily pivot levels
-        price_above_r1 = close[i] > daily_r1_4h[i]
-        price_below_s1 = close[i] < daily_s1_4h[i]
+        price_above_r1 = close[i] > daily_r1_1h[i]
+        price_below_s1 = close[i] < daily_s1_1h[i]
         
         if position == 0:
-            # Long: Price breaks above daily R1 with volume and above 12h HMA
-            if (price_above_r1 and price_above_hma and volume_filter):
-                signals[i] = 0.25
+            # Long: Price breaks above daily R1 with volume and above daily EMA50
+            if (price_above_r1 and price_above_ema and volume_filter):
+                signals[i] = 0.20
                 position = 1
-            # Short: Price breaks below daily S1 with volume and below 12h HMA
-            elif (price_below_s1 and price_below_hma and volume_filter):
-                signals[i] = -0.25
+            # Short: Price breaks below daily S1 with volume and below daily EMA50
+            elif (price_below_s1 and price_below_ema and volume_filter):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: Price crosses below daily pivot OR below 12h HMA
-            if (close[i] < daily_pivot_4h[i]) or (close[i] < hma_12h_4h[i]):
+            # Exit long: Price crosses below daily pivot OR below daily EMA50
+            if (close[i] < daily_pivot_1h[i]) or (close[i] < ema50_1h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: Price crosses above daily pivot OR above 12h HMA
-            if (close[i] > daily_pivot_4h[i]) or (close[i] > hma_12h_4h[i]):
+            # Exit short: Price crosses above daily pivot OR above daily EMA50
+            if (close[i] > daily_pivot_1h[i]) or (close[i] > ema50_1h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_DailyPivot_Breakout_HMA12h_Volume"
-timeframe = "4h"
+name = "1h_DailyPivot_Breakout_EMA50_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
