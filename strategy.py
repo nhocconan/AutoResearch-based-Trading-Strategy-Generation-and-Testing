@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h timeframe with 1d HMA(21) trend filter + Donchian(20) breakout + volume confirmation.
-Long when price breaks above 20-period high with 1d HMA > previous HMA (uptrend) and volume > 1.5x 20-period volume average.
-Short when price breaks below 20-period low with 1d HMA < previous HMA (downtrend) and volume > 1.5x 20-period volume average.
-Uses HMA for smooth trend detection and Donchian for structure breakouts, designed to work in both bull and bear markets by following the trend direction from higher timeframe.
-Target trades: 20-50/year to avoid fee drag while capturing significant moves.
+Hypothesis: 4h timeframe with 1d ATR-based volatility expansion filter + Donchian(20) breakout + volume confirmation.
+Long when price breaks above 20-day high with ATR(7)/ATR(30) > 1.5 (volatility expansion) and volume > 1.5x 20-period volume average.
+Short when price breaks below 20-day low with ATR(7)/ATR(30) > 1.5 and volume > 1.5x 20-period volume average.
+Volatility expansion helps capture strong momentum moves after consolidation, working in both bull and bear markets.
+ATR stoploss exits when price retraces 2*ATR from extreme.
+Designed for fewer, higher-quality trades to avoid fee drag.
 """
 
 import numpy as np
@@ -21,101 +22,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HMA trend filter and volume average
+    # Get 1d data for ATR calculation
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d HMA(21) - Hull Moving Average
-    def hull_moving_avg(values, window):
-        if len(values) < window:
-            return np.full_like(values, np.nan)
-        half_window = window // 2
-        sqrt_window = int(np.sqrt(window))
-        
-        # WMA of half period
-        weights_half = np.arange(1, half_window + 1)
-        wma_half = np.convolve(values, weights_half, mode='valid') / weights_half.sum()
-        wma_half = np.concatenate([np.full(half_window-1, np.nan), wma_half])
-        
-        # WMA of full period
-        weights_full = np.arange(1, window + 1)
-        wma_full = np.convolve(values, weights_full, mode='valid') / weights_full.sum()
-        wma_full = np.concatenate([np.full(window-1, np.nan), wma_full])
-        
-        # Raw HMA: 2*WMA(half) - WMA(full)
-        raw_hma = 2 * wma_half - wma_full
-        
-        # Final WMA of raw_hma with sqrt period
-        if len(raw_hma) < sqrt_window:
-            return np.full_like(values, np.nan)
-        weights_sqrt = np.arange(1, sqrt_window + 1)
-        wma_sqrt = np.convolve(raw_hma, weights_sqrt, mode='valid') / weights_sqrt.sum()
-        wma_sqrt = np.concatenate([np.full(sqrt_window-1, np.nan), wma_sqrt])
-        
-        return wma_sqrt
+    # Calculate 1d ATR(7) and ATR(30)
+    def atr(high_vals, low_vals, close_vals, window):
+        tr1 = high_vals - low_vals
+        tr2 = np.abs(high_vals - np.roll(close_vals, 1))
+        tr3 = np.abs(low_vals - np.roll(close_vals, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # first period TR is just high-low
+        atr_vals = pd.Series(tr).ewm(span=window, adjust=False, min_periods=window).mean().values
+        return atr_vals
     
-    hma_21_1d = hull_moving_avg(close_1d, 21)
+    atr_7_1d = atr(high_1d, low_1d, close_1d, 7)
+    atr_30_1d = atr(high_1d, low_1d, close_1d, 30)
     
-    # Calculate 4h Donchian(20) channels
+    # Calculate 1d Donchian(20) channels
     def donchian_channel(high_vals, low_vals, window):
         upper = pd.Series(high_vals).rolling(window=window, min_periods=window).max().values
         lower = pd.Series(low_vals).rolling(window=window, min_periods=window).min().values
         return upper, lower
     
-    donchian_upper, donchian_lower = donchian_channel(high, low, 20)
+    donchian_upper, donchian_lower = donchian_channel(high_1d, low_1d, 20)
     
-    # Calculate 4h volume 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d volume 20-period average
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
     # Align all to primary timeframe (4h)
-    hma_21_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_21_1d)
+    atr_7_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_7_1d)
+    atr_30_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_30_1d)
     donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
     donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
+    atr_multiplier = 2.0  # ATR multiplier for stoploss
+    long_extreme = 0.0    # track highest high since entering long
+    short_extreme = 0.0   # track lowest low since entering short
     
-    start_idx = 50  # need enough for HMA and Donchian
+    start_idx = 40  # need enough for ATR and Donchian
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(hma_21_1d_aligned[i]) or 
+        if (np.isnan(atr_7_1d_aligned[i]) or 
+            np.isnan(atr_30_1d_aligned[i]) or 
             np.isnan(donchian_upper_aligned[i]) or 
             np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(vol_ma_20_aligned[i])):
+            np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Volatility expansion: ATR(7) > 1.5 * ATR(30)
+        vol_expansion = atr_7_1d_aligned[i] > 1.5 * atr_30_1d_aligned[i]
+        
         # Volume confirmation: current 4h volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20_aligned[i]
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20_1d_aligned[i]
         
         if position == 0:
-            # Long: price breaks above 20-period high with 1d HMA uptrend and volume
+            # Long: price breaks above 20-day high with vol expansion and volume
             if (close[i] > donchian_upper_aligned[i] and 
-                hma_21_1d_aligned[i] > hma_21_1d_aligned[i-1] and 
+                vol_expansion and 
                 volume_confirmed):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 20-period low with 1d HMA downtrend and volume
+                long_extreme = high[i]  # initialize extreme to current high
+            # Short: price breaks below 20-day low with vol expansion and volume
             elif (close[i] < donchian_lower_aligned[i] and 
-                  hma_21_1d_aligned[i] < hma_21_1d_aligned[i-1] and 
+                  vol_expansion and 
                   volume_confirmed):
                 signals[i] = -0.25
                 position = -1
+                short_extreme = low[i]  # initialize extreme to current low
         
         elif position == 1:
-            # Exit long: price falls back below 20-period low (opposite side of channel)
-            if close[i] < donchian_lower_aligned[i]:
+            # Update long extreme
+            long_extreme = max(long_extreme, high[i])
+            # ATR stoploss: exit if price retraces 2*ATR from extreme
+            if close[i] < long_extreme - atr_multiplier * atr_7_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above 20-period high (opposite side of channel)
-            if close[i] > donchian_upper_aligned[i]:
+            # Update short extreme
+            short_extreme = min(short_extreme, low[i])
+            # ATR stoploss: exit if price rallies 2*ATR from extreme
+            if close[i] > short_extreme + atr_multiplier * atr_7_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -123,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dHMA21_Donchian20_Breakout_Volume_Confirm"
+name = "4h_1dATRratio_VolatilityExpansion_Donchian20_Breakout_Volume_Confirm"
 timeframe = "4h"
 leverage = 1.0
