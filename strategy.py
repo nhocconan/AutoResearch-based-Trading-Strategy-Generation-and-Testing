@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h momentum with 4h trend filter and volume confirmation.
-Long when price > 4h EMA50, RSI(14) > 55, and volume > 1.5x 20-bar average.
-Short when price < 4h EMA50, RSI(14) < 45, and volume > 1.5x 20-bar average.
-Exit when RSI returns to neutral zone (45-55) or opposite signal.
-Uses 4h for trend direction to reduce whipsaw, 1h for precise entry/exit.
-Target: 20-40 trades/year per symbol with controlled risk.
+Hypothesis: On the 6-hour timeframe, price respects 1-week and 1-day key support/resistance levels.
+We use 1-week high/low with a 1-day EMA34 trend filter and volume confirmation to capture breakouts.
+Long when price breaks above prior 1-week high with volume > 1.5x average and price above 1-day EMA34.
+Short when price breaks below prior 1-week low with volume > 1.5x average and price below 1-day EMA34.
+Exit when price returns to the prior 1-week midpoint or on opposite breakout.
+Designed for 6h to work in trending (breakouts) and ranging (mean reversion to mid-point) markets with ~15-25 trades per year.
 """
 
 import numpy as np
@@ -22,69 +22,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1w data for prior period's high/low
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h EMA50 for trend filter
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Prior 1w high and low (use shift(1) to avoid look-ahead: use completed period's levels)
+    pwhigh = df_1w['high'].shift(1).values
+    pwlow = df_1w['low'].shift(1).values
+    pwclose = df_1w['close'].values
     
-    # Calculate 1h RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # neutral when undefined
+    # Prior 1w midpoint for mean reversion exit
+    pwmid = (pwhigh + pwlow) / 2
     
-    # Volume confirmation: 20-bar average
+    # Get 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    pclose_1d = df_1d['close'].values
+    
+    # Calculate 1d EMA34 for trend filter (use prior period's close to avoid look-ahead)
+    ema_34_1d = pd.Series(pclose_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align all levels to 6h timeframe (waits for bars to close)
+    pwhigh_6h = align_htf_to_ltf(prices, df_1w, pwhigh)
+    pwlow_6h = align_htf_to_ltf(prices, df_1w, pwlow)
+    pwmid_6h = align_htf_to_ltf(prices, df_1w, pwmid)
+    ema_34_6h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume confirmation: 20-period volume MA on 6h
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # warmup for EMA50 and RSI
+    start_idx = 50  # warmup for EMA34 and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_4h_aligned[i]) or np.isnan(volume_ma_20.iloc[i]):
+        if (np.isnan(pwhigh_6h[i]) or np.isnan(pwlow_6h[i]) or np.isnan(pwmid_6h[i]) or
+            np.isnan(ema_34_6h[i]) or np.isnan(volume_ma_20.iloc[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = volume_ma_20.iloc[i]
-        rsi_val = rsi[i]
         
         if position == 0:
-            # Long: price above 4h EMA50, bullish momentum, volume confirmation
-            if price > ema_50_4h_aligned[i] and rsi_val > 55 and vol > 1.5 * vol_ma:
-                signals[i] = 0.20
+            # Long: price breaks above prior 1w high with volume spike and above 1d EMA34
+            if price > pwhigh_6h[i] and vol > 1.5 * vol_ma and price > ema_34_6h[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price below 4h EMA50, bearish momentum, volume confirmation
-            elif price < ema_50_4h_aligned[i] and rsi_val < 45 and vol > 1.5 * vol_ma:
-                signals[i] = -0.20
+            # Short: price breaks below prior 1w low with volume spike and below 1d EMA34
+            elif price < pwlow_6h[i] and vol > 1.5 * vol_ma and price < ema_34_6h[i]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI returns to neutral or bearish reversal
-            if rsi_val < 45:  # momentum broken
+            # Long exit: price returns to prior 1w midpoint (mean reversion) OR breaks below prior 1w low (invalidates breakout)
+            if price < pwmid_6h[i] or price < pwlow_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI returns to neutral or bullish reversal
-            if rsi_val > 55:  # momentum broken
+            # Short exit: price returns to prior 1w midpoint (mean reversion) OR breaks above prior 1w high (invalidates breakout)
+            if price > pwmid_6h[i] or price > pwhigh_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_EMA50_RSI_Volume_Momentum"
-timeframe = "1h"
+name = "6h_Prior1W_HL_Breakout_MeanRev"
+timeframe = "6h"
 leverage = 1.0
