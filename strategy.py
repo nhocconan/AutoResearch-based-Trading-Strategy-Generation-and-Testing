@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d strategy using Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation.
-- Long when price closes above 20-day Donchian high + volume > 1.5x 20-day volume MA + price above 1w EMA34
-- Short when price closes below 20-day Donchian low + volume > 1.5x 20-day volume MA + price below 1w EMA34
+Hypothesis: 6h strategy using 1d Bollinger Bands with volume spike and ATR filter.
+- Long when price breaks above upper BB(20,2) with volume > 2x 20-period 6h volume MA and ATR(14) > 0.5 * price
+- Short when price breaks below lower BB(20,2) with volume > 2x 20-period 6h volume MA and ATR(14) > 0.5 * price
 - Fixed position size 0.25 to limit fee churn and manage drawdown
 - ATR-based trailing stop (2.0x ATR) to lock in profits
-- Weekly EMA34 derived from prior week's close (no look-ahead)
-- Designed for very low trade frequency (target: 30-100 trades over 4 years) to avoid fee drag
-- Works in bull markets (buying breakouts with 1w EMA34 uptrend) and bear markets (selling breakdowns with 1w EMA34 downtrend)
+- Bollinger Bands calculated on 1d timeframe (no look-ahead)
+- Designed for low trade frequency (target: 50-150 trades over 4 years) to avoid fee drag
+- Works in bull markets (buying breakouts with volume and volatility confirmation) and bear markets (selling breakdowns)
 """
 
 import numpy as np
@@ -24,41 +24,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian(20) and volume confirmation
+    # Get 1d data for Bollinger Bands (HTF)
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 20-day Donchian channels
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d Bollinger Bands (20,2)
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
     
-    # Calculate 20-day volume MA for confirmation
-    volume_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Align Bollinger Bands to 6h timeframe
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
     
-    # Calculate ATR (10-period) for stoploss
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # Get 6h data for volume confirmation and ATR (primary timeframe)
+    df_6h = get_htf_data(prices, '6h')
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    volume_6h = df_6h['volume'].values
+    
+    # Volume average (20-period) on 6h for confirmation
+    volume_ma_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR (14-period) on 6h for volatility filter and stoploss
+    tr1 = high_6h - low_6h
+    tr2 = np.abs(high_6h - np.roll(close_6h, 1))
+    tr3 = np.abs(low_6h - np.roll(close_6h, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # first period
-    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Get 1w data for EMA34 trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate 1w EMA34
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Align all indicators to 1d timeframe (primary)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_10)
+    # Align all indicators to 6h timeframe (primary)
+    volume_ma_aligned = align_htf_to_ltf(prices, df_6h, volume_ma_20)
+    atr_aligned = align_htf_to_ltf(prices, df_6h, atr_14)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -68,30 +70,28 @@ def generate_signals(prices):
     start_idx = 100  # warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(volume_ma_aligned[i]) or np.isnan(atr_aligned[i]) or 
-            np.isnan(ema_34_1w_aligned[i])):
+        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
+            np.isnan(volume_ma_aligned[i]) or np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             continue
         
-        donch_high = donchian_high_aligned[i]
-        donch_low = donchian_low_aligned[i]
+        upper_val = upper_bb_aligned[i]
+        lower_val = lower_bb_aligned[i]
         vol_ma = volume_ma_aligned[i]
         atr_val = atr_aligned[i]
-        ema_34_val = ema_34_1w_aligned[i]
         vol = volume[i]
         price = close[i]
         
         if position == 0:
-            # Look for breakouts with volume confirmation and 1w EMA34 trend filter
-            # Long: price closes above Donchian high + volume spike + price above 1w EMA34
-            if price > donch_high and vol > 1.5 * vol_ma and price > ema_34_val:
+            # Look for Bollinger Band breakouts with volume and volatility confirmation
+            # Long: price breaks above upper BB + volume spike + sufficient volatility
+            if price > upper_val and vol > 2.0 * vol_ma and atr_val > 0.5 * price:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 atr_stop = entry_price - 2.0 * atr_val
-            # Short: price closes below Donchian low + volume spike + price below 1w EMA34
-            elif price < donch_low and vol > 1.5 * vol_ma and price < ema_34_val:
+            # Short: price breaks below lower BB + volume spike + sufficient volatility
+            elif price < lower_val and vol > 2.0 * vol_ma and atr_val > 0.5 * price:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -119,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wEMA34_VolumeSpike_ATRTrail"
-timeframe = "1d"
+name = "6h_BollingerBreakout_VolumeSpike_ATRFilter"
+timeframe = "6h"
 leverage = 1.0
