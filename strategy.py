@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: On the 12-hour timeframe, price respects the daily high/low as key support/resistance levels.
-We combine this with a 1-day EMA50 trend filter and volume confirmation to capture breakouts.
-Long when price breaks above prior daily high with volume > 2x average and price above 1-day EMA50.
-Short when price breaks below prior daily low with volume > 2x average and price below 1-day EMA50.
-Exit when price returns to the prior daily midpoint (mean reversion) or on opposite breakout.
-Designed for 12h to work in trending (breakouts) and ranging (mean reversion to mid-point) markets with ~10-25 trades per year.
+Hypothesis: On the 1-day timeframe, price respects the weekly high/low as key support/resistance levels.
+We combine this with a 1-week EMA34 trend filter and volume confirmation to capture breakouts.
+Long when price breaks above prior weekly high with volume > 1.8x average and price above 1-week EMA34.
+Short when price breaks below prior weekly low with volume > 1.8x average and price below 1-week EMA34.
+Exit when price returns to the prior weekly midpoint (mean reversion) or on opposite breakout.
+Designed for 1d to work in trending (breakouts) and ranging (mean reversion to mid-point) markets with ~10-25 trades per year.
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,37 +22,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for prior period's high/low and EMA50
-    df_1d = get_htf_data(prices, '1d')
+    # Get 1w data for prior period's high/low and EMA34
+    df_1w = get_htf_data(prices, '1w')
     
-    # Prior 1d high and low (use shift(1) to avoid look-ahead: use completed period's levels)
-    phigh = df_1d['high'].shift(1).values
-    plow = df_1d['low'].shift(1).values
-    pclose = df_1d['close'].values
+    # Prior 1w high and low (use shift(1) to avoid look-ahead: use completed period's levels)
+    phigh = df_1w['high'].shift(1).values
+    plow = df_1w['low'].shift(1).values
+    pclose = df_1w['close'].values
     
-    # Prior 1d midpoint for mean reversion exit
+    # Prior 1w midpoint for mean reversion exit
     pmid = (phigh + plow) / 2
     
-    # Calculate 1d EMA50 for trend filter (use prior period's close to avoid look-ahead)
-    ema_50 = pd.Series(pclose).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1w EMA34 for trend filter (use prior period's close to avoid look-ahead)
+    ema_34 = pd.Series(pclose).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align all 1d levels to 12h timeframe (waits for 1d bar to close)
-    phigh_12h = align_htf_to_ltf(prices, df_1d, phigh)
-    plow_12h = align_htf_to_ltf(prices, df_1d, plow)
-    pmid_12h = align_htf_to_ltf(prices, df_1d, pmid)
-    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Align all 1w levels to 1d timeframe (waits for 1w bar to close)
+    phigh_1d = align_htf_to_ltf(prices, df_1w, phigh)
+    plow_1d = align_htf_to_ltf(prices, df_1w, plow)
+    pmid_1d = align_htf_to_ltf(prices, df_1w, pmid)
+    ema_34_1d = align_htf_to_ltf(prices, df_1w, ema_34)
     
-    # Volume confirmation: 20-period volume MA on 12h
+    # Volume confirmation: 20-period volume MA on 1d
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # warmup for EMA50 and volume MA
+    start_idx = 40  # warmup for EMA34 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(phigh_12h[i]) or np.isnan(plow_12h[i]) or np.isnan(pmid_12h[i]) or
-            np.isnan(ema_50_12h[i]) or np.isnan(volume_ma_20.iloc[i])):
+        if (np.isnan(phigh_1d[i]) or np.isnan(plow_1d[i]) or np.isnan(pmid_1d[i]) or
+            np.isnan(ema_34_1d[i]) or np.isnan(volume_ma_20.iloc[i])):
             signals[i] = 0.0
             continue
         
@@ -61,26 +61,26 @@ def generate_signals(prices):
         vol_ma = volume_ma_20.iloc[i]
         
         if position == 0:
-            # Long: price breaks above prior 1d high with volume spike and above 1d EMA50
-            if price > phigh_12h[i] and vol > 2.0 * vol_ma and price > ema_50_12h[i]:
+            # Long: price breaks above prior 1w high with volume spike and above 1w EMA34
+            if price > phigh_1d[i] and vol > 1.8 * vol_ma and price > ema_34_1d[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below prior 1d low with volume spike and below 1d EMA50
-            elif price < plow_12h[i] and vol > 2.0 * vol_ma and price < ema_50_12h[i]:
+            # Short: price breaks below prior 1w low with volume spike and below 1w EMA34
+            elif price < plow_1d[i] and vol > 1.8 * vol_ma and price < ema_34_1d[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to prior 1d midpoint (mean reversion) OR breaks below prior 1d low (invalidates breakout)
-            if price < pmid_12h[i] or price < plow_12h[i]:
+            # Long exit: price returns to prior 1w midpoint (mean reversion) OR breaks below prior 1w low (invalidates breakout)
+            if price < pmid_1d[i] or price < plow_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to prior 1d midpoint (mean reversion) OR breaks above prior 1d high (invalidates breakout)
-            if price > pmid_12h[i] or price > phigh_12h[i]:
+            # Short exit: price returns to prior 1w midpoint (mean reversion) OR breaks above prior 1w high (invalidates breakout)
+            if price > pmid_1d[i] or price > phigh_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Prior1D_HL_Breakout_MeanRev"
-timeframe = "12h"
+name = "1d_Prior1W_HL_Breakout_MeanRev"
+timeframe = "1d"
 leverage = 1.0
