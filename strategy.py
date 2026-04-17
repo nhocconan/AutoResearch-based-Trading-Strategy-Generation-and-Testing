@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_RSI_Extreme_TrendFilter_V1
-Strategy: 4h RSI(14) extremes with daily EMA50 trend filter and volume confirmation.
-Long: RSI < 30 + price > daily EMA50 + volume > 1.5x 20-period average
-Short: RSI > 70 + price < daily EMA50 + volume > 1.5x 20-period average
-Exit: Opposite RSI extreme or trend reversal
+4h_Camarilla_R1_S1_Breakout_Volume_V1
+Strategy: 4h Camarilla pivot R1/S1 breakout with volume confirmation and daily EMA34 trend filter.
+Long: Price breaks above R1 + volume > 1.5x 20-period avg + price > daily EMA34
+Short: Price breaks below S1 + volume > 1.5x 20-period avg + price < daily EMA34
+Exit: Opposite pivot level touch or trend reversal
 Position size: 0.25
-Designed to capture mean-reversion in ranging markets while respecting trend.
+Designed to capture breakouts in trending markets while avoiding false signals in ranging conditions.
 Timeframe: 4h
 """
 
@@ -24,28 +24,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate RSI(14)
-    def rsi(close, window=14):
-        delta = np.diff(close, prepend=close[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = pd.Series(gain).rolling(window=window, min_periods=window).mean().values
-        avg_loss = pd.Series(loss).rolling(window=window, min_periods=window).mean().values
-        
-        rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, 0), where=avg_loss!=0)
-        rsi_out = 100 - (100 / (1 + rs))
-        return rsi_out
+    # Calculate Camarilla pivot levels for current day using previous day's OHLC
+    def calculate_camarilla(high, low, close):
+        # Typical price
+        pp = (high + low + close) / 3
+        # Range
+        range_ = high - low
+        # Camarilla levels
+        r1 = pp + range_ * 1.1 / 12
+        s1 = pp - range_ * 1.1 / 12
+        return r1, s1
     
-    rsi_val = rsi(close, 14)
+    # Need previous day's data to calculate today's levels
+    # We'll calculate for each bar using previous day's OHLC
+    r1 = np.full(n, np.nan)
+    s1 = np.full(n, np.nan)
     
-    # Calculate daily EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Convert to pandas for easier date handling
+    df = prices.copy()
+    df['date'] = pd.to_datetime(df['open_time']).dt.date
+    
+    # Group by date to get daily OHLC
+    daily = df.groupby('date').agg({
+        'high': 'max',
+        'low': 'min',
+        'close': 'last'
+    }).reset_index()
+    
+    if len(daily) < 2:
         return np.zeros(n)
     
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate Camarilla levels for each day (using previous day's data)
+    daily['r1'] = np.nan
+    daily['s1'] = np.nan
+    
+    for i in range(1, len(daily)):
+        prev_high = daily.iloc[i-1]['high']
+        prev_low = daily.iloc[i-1]['low']
+        prev_close = daily.iloc[i-1]['close']
+        r1_val, s1_val = calculate_camarilla(prev_high, prev_low, prev_close)
+        daily.iloc[i, daily.columns.get_loc('r1')] = r1_val
+        daily.iloc[i, daily.columns.get_loc('s1')] = s1_val
+    
+    # Map daily levels back to 4h bars
+    date_map = dict(zip(daily['date'], zip(daily['r1'], daily['s1'])))
+    for i in range(n):
+        bar_date = pd.to_datetime(df.iloc[i]['open_time']).date()
+        if bar_date in date_map:
+            r1[i], s1[i] = date_map[bar_date]
+    
+    # Calculate daily EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate 4h volume average (20-period)
     df_4h = get_htf_data(prices, '4h')
@@ -66,7 +100,7 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is not available
-        if (np.isnan(rsi_val[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+        if (np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(volume_ma20_4h_aligned[i])):
             signals[i] = 0.0
             continue
@@ -75,32 +109,36 @@ def generate_signals(prices):
         vol_4h_current = align_htf_to_ltf(prices, df_4h, volume_4h)[i]
         volume_filter = vol_4h_current > (1.5 * volume_ma20_4h_aligned[i])
         
-        # Trend filter: price above/below daily EMA50
-        trend_up = close[i] > ema_50_1d_aligned[i]
-        trend_down = close[i] < ema_50_1d_aligned[i]
+        # Trend filter: price above/below daily EMA34
+        trend_up = close[i] > ema_34_1d_aligned[i]
+        trend_down = close[i] < ema_34_1d_aligned[i]
+        
+        # Breakout conditions
+        breakout_up = close[i] > r1[i]
+        breakout_down = close[i] < s1[i]
         
         # Entry signals
         if position == 0:
-            # Long: RSI < 30 (oversold) + volume filter + trend up
-            if rsi_val[i] < 30 and volume_filter and trend_up:
+            # Long: breakout above R1 + volume filter + trend up
+            if breakout_up and volume_filter and trend_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI > 70 (overbought) + volume filter + trend down
-            elif rsi_val[i] > 70 and volume_filter and trend_down:
+            # Short: breakout below S1 + volume filter + trend down
+            elif breakout_down and volume_filter and trend_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI > 70 (overbought) or trend down
-            if rsi_val[i] > 70 or not trend_up:
+            # Exit long: price touches S1 or trend down
+            if close[i] <= s1[i] or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI < 30 (oversold) or trend up
-            if rsi_val[i] < 30 or not trend_down:
+            # Exit short: price touches R1 or trend up
+            if close[i] >= r1[i] or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -108,6 +146,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI_Extreme_TrendFilter_V1"
+name = "4h_Camarilla_R1_S1_Breakout_Volume_V1"
 timeframe = "4h"
 leverage = 1.0
