@@ -37,15 +37,15 @@ def generate_signals(prices):
     low_4h = df_4h['low'].values
     volume_4h = df_4h['volume'].values
     
-    # 4h Donchian channels (15-period) for breakouts
-    donch_high_15 = pd.Series(high_4h).rolling(window=15, min_periods=15).max().values
-    donch_low_15 = pd.Series(low_4h).rolling(window=15, min_periods=15).min().values
-    donch_high_15_aligned = align_htf_to_ltf(prices, df_4h, donch_high_15)
-    donch_low_15_aligned = align_htf_to_ltf(prices, df_4h, donch_low_15)
+    # 4h Donchian channels (20-period) for breakouts
+    donch_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donch_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donch_high_20_aligned = align_htf_to_ltf(prices, df_4h, donch_high_20)
+    donch_low_20_aligned = align_htf_to_ltf(prices, df_4h, donch_low_20)
     
-    # 4h volume average (15-period) for volume confirmation
-    vol_avg15_4h = pd.Series(volume_4h).rolling(window=15, min_periods=15).mean().values
-    vol_avg15_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_avg15_4h)
+    # 4h volume average (20-period) for volume confirmation
+    vol_avg20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_avg20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_avg20_4h)
     
     signals = np.zeros(n)
     
@@ -58,9 +58,9 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # Skip if any data is NaN
         if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(donch_high_15_aligned[i]) or 
-            np.isnan(donch_low_15_aligned[i]) or
-            np.isnan(vol_avg15_4h_aligned[i]) or
+            np.isnan(donch_high_20_aligned[i]) or 
+            np.isnan(donch_low_20_aligned[i]) or
+            np.isnan(vol_avg20_4h_aligned[i]) or
             np.isnan(atr34_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
@@ -69,13 +69,13 @@ def generate_signals(prices):
         # Get current 4h values
         vol_4h_current = align_htf_to_ltf(prices, df_4h, volume_4h)[i]
         
-        # Volume filter: current volume > 1.3x average
-        vol_filter = vol_4h_current > 1.3 * vol_avg15_4h_aligned[i]
+        # Volume filter: current volume > 1.5x average
+        vol_filter = vol_4h_current > 1.5 * vol_avg20_4h_aligned[i]
         
         # Entry conditions
         if position == 0:
             # Long: price breaks above Donchian high + 1d uptrend + volume confirmation
-            breakout_up = close[i] > donch_high_15_aligned[i]
+            breakout_up = close[i] > donch_high_20_aligned[i]
             uptrend = close[i] > ema34_1d_aligned[i]
             
             if breakout_up and uptrend and vol_filter:
@@ -84,7 +84,7 @@ def generate_signals(prices):
                 continue
             
             # Short: price breaks below Donchian low + 1d downtrend + volume confirmation
-            breakout_down = close[i] < donch_low_15_aligned[i]
+            breakout_down = close[i] < donch_low_20_aligned[i]
             downtrend = close[i] < ema34_1d_aligned[i]
             
             if breakout_down and downtrend and vol_filter:
@@ -95,7 +95,7 @@ def generate_signals(prices):
         # Exit conditions: opposite breakout or loss of trend
         elif position == 1:
             # Exit long when price breaks below Donchian low or trend turns down
-            breakout_down = close[i] < donch_low_15_aligned[i]
+            breakout_down = close[i] < donch_low_20_aligned[i]
             trend_down = close[i] < ema34_1d_aligned[i]
             
             if breakout_down or trend_down:
@@ -107,7 +107,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit short when price breaks above Donchian high or trend turns up
-            breakout_up = close[i] > donch_high_15_aligned[i]
+            breakout_up = close[i] > donch_high_20_aligned[i]
             trend_up = close[i] > ema34_1d_aligned[i]
             
             if breakout_up or trend_up:
@@ -119,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian15_1dEMA34_VolumeFilter"
+name = "4h_Donchian20_1dEMA34_VolumeFilter"
 timeframe = "4h"
 leverage = 1.0
