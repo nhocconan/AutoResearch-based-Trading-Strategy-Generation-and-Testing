@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points and ATR
+    # Get daily data for pivot points
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -25,22 +25,30 @@ def generate_signals(prices):
     s1_1d = 2 * pivot_1d - high_1d
     r2_1d = pivot_1d + (high_1d - low_1d)
     s2_1d = pivot_1d - (high_1d - low_1d)
+    r3_1d = high_1d + 2 * (pivot_1d - low_1d)
+    s3_1d = low_1d - 2 * (high_1d - pivot_1d)
     
     # Use previous day's pivots (avoid look-ahead)
     r1_1d_prev = np.roll(r1_1d, 1)
     s1_1d_prev = np.roll(s1_1d, 1)
     r2_1d_prev = np.roll(r2_1d, 1)
     s2_1d_prev = np.roll(s2_1d, 1)
+    r3_1d_prev = np.roll(r3_1d, 1)
+    s3_1d_prev = np.roll(s3_1d, 1)
     r1_1d_prev[0] = np.nan
     s1_1d_prev[0] = np.nan
     r2_1d_prev[0] = np.nan
     s2_1d_prev[0] = np.nan
+    r3_1d_prev[0] = np.nan
+    s3_1d_prev[0] = np.nan
     
-    # Align daily pivot levels to 12h timeframe
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1_1d_prev)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1_1d_prev)
-    r2_12h = align_htf_to_ltf(prices, df_1d, r2_1d_prev)
-    s2_12h = align_htf_to_ltf(prices, df_1d, s2_1d_prev)
+    # Align daily pivot levels to 6h timeframe
+    r1_6h = align_htf_to_ltf(prices, df_1d, r1_1d_prev)
+    s1_6h = align_htf_to_ltf(prices, df_1d, s1_1d_prev)
+    r2_6h = align_htf_to_ltf(prices, df_1d, r2_1d_prev)
+    s2_6h = align_htf_to_ltf(prices, df_1d, s2_1d_prev)
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3_1d_prev)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3_1d_prev)
     
     # Volume confirmation: current volume > 1.5 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -59,17 +67,19 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 30  # Need volume MA20, ATR MA10
+    start_idx = 50  # Need volume MA20, ATR MA10
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(volume_ma20[i]) or 
             np.isnan(atr[i]) or 
             np.isnan(atr_ma10[i]) or 
-            np.isnan(r1_12h[i]) or 
-            np.isnan(s1_12h[i]) or
-            np.isnan(r2_12h[i]) or
-            np.isnan(s2_12h[i])):
+            np.isnan(r1_6h[i]) or 
+            np.isnan(s1_6h[i]) or
+            np.isnan(r2_6h[i]) or
+            np.isnan(s2_6h[i]) or
+            np.isnan(r3_6h[i]) or
+            np.isnan(s3_6h[i])):
             signals[i] = 0.0
             continue
         
@@ -79,18 +89,26 @@ def generate_signals(prices):
         volatility_filter = atr[i] > atr_ma10[i]
         
         if position == 0:
-            # Long: price breaks above R2 with volume and volatility
-            if (close[i] > r2_12h[i] and volume_filter and volatility_filter):
+            # Long: price breaks above R2 with volume and volatility (breakout continuation)
+            if (close[i] > r2_6h[i] and volume_filter and volatility_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S2 with volume and volatility
-            elif (close[i] < s2_12h[i] and volume_filter and volatility_filter):
+            # Short: price breaks below S2 with volume and volatility (breakout continuation)
+            elif (close[i] < s2_6h[i] and volume_filter and volatility_filter):
                 signals[i] = -0.25
+                position = -1
+            # Long mean reversion: price touches S3 with volume and volatility
+            elif (close[i] < s3_6h[i] and volume_filter and volatility_filter):
+                signals[i] = 0.20
+                position = 1
+            # Short mean reversion: price touches R3 with volume and volatility
+            elif (close[i] > r3_6h[i] and volume_filter and volatility_filter):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
             # Exit long: price returns below R1 or volatility drops
-            if close[i] < r1_12h[i] or not volatility_filter:
+            if close[i] < r1_6h[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,7 +116,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit short: price returns above S1 or volatility drops
-            if close[i] > s1_12h[i] or not volatility_filter:
+            if close[i] > s1_6h[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R2_S2_Breakout_Volume"
-timeframe = "12h"
+name = "6h_Camarilla_R2_S2_Breakout_Volume"
+timeframe = "6h"
 leverage = 1.0
