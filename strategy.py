@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla pivot R1/S1 breakout with volume confirmation and 1d ADX trend filter.
+Hypothesis: 12h Camarilla R1/S1 breakout with volume confirmation and 1d ADX trend filter.
 Long when price breaks above Camarilla R1 AND volume > 1.5x average AND ADX > 25 (trending).
 Short when price breaks below Camarilla S1 AND volume > 1.5x average AND ADX > 25.
-Exit when price reverts to Camarilla midpoint (close) OR ADX < 20 (range market).
-Uses 4h for price and volume, 1d for Camarilla pivot calculation and ADX filter.
-Target: 75-200 total trades over 4 years (19-50/year). Camarilla pivots provide structured support/resistance,
-volume confirmation filters fakeouts, ADX filter avoids ranging markets.
+Exit when price reverts to Camarilla H5/L5 (mean) OR ADX < 20 (range market).
+Uses 12h for Camarilla calculation and 1d for ADX filter to reduce whipsaw.
+Target: 50-150 total trades over 4 years (12-37/year). Camarilla pivot levels provide
+intraday support/resistance, volume confirmation filters fakeouts, ADX filter avoids ranging markets.
 Works in bull markets (captures uptrends) and bear markets (captures downtrends).
 """
 
@@ -23,22 +23,38 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
-    # Get 1d data for Camarilla pivot calculation and ADX filter
+    # Get 12h data for Camarilla calculation
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # Calculate Camarilla levels on 12h timeframe (based on previous 12h bar)
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # H5 = C + (H-L)*1.1/2, L5 = C - (H-L)*1.1/2
+    # Where C, H, L are from previous period
+    prev_close_12h = np.roll(close_12h, 1)
+    prev_high_12h = np.roll(high_12h, 1)
+    prev_low_12h = np.roll(low_12h, 1)
+    
+    # First value: use same values (no look-ahead)
+    prev_close_12h[0] = close_12h[0]
+    prev_high_12h[0] = high_12h[0]
+    prev_low_12h[0] = low_12h[0]
+    
+    range_12h = prev_high_12h - prev_low_12h
+    camarilla_r1 = prev_close_12h + range_12h * 1.1 / 12
+    camarilla_s1 = prev_close_12h - range_12h * 1.1 / 12
+    camarilla_h5 = prev_close_12h + range_12h * 1.1 / 2
+    camarilla_l5 = prev_close_12h - range_12h * 1.1 / 2
+    
+    # Get 1d data for ADX filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla pivot levels on 1d timeframe
-    # Pivot point (PP) = (High + Low + Close) / 3
-    pp = (high_1d + low_1d + close_1d) / 3
-    # R1 = Close + (High - Low) * 1.1 / 12
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    # S1 = Close - (High - Low) * 1.1 / 12
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
-    # Midpoint for exit = (R1 + S1) / 2
-    midpoint = (r1 + s1) / 2
     
     # Calculate ADX on 1d timeframe (14-period)
     high_1d_series = pd.Series(high_1d)
@@ -71,17 +87,19 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) != 0, (plus_di + minus_di), np.inf)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Align 1d Camarilla levels and ADX to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    midpoint_aligned = align_htf_to_ltf(prices, df_1d, midpoint)
+    # Align 12h Camarilla to 12h timeframe (no alignment needed)
+    camarilla_r1_aligned = camarilla_r1
+    camarilla_s1_aligned = camarilla_s1
+    camarilla_h5_aligned = camarilla_h5
+    camarilla_l5_aligned = camarilla_l5
+    
+    # Align 1d ADX to 12h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Volume average (20-period) on 4h
-    df_4h = get_htf_data(prices, '4h')
-    volume_4h = df_4h['volume'].values
-    volume_ma = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_4h, volume_ma)
+    # Volume average (20-period) on 12h
+    volume_12h = df_12h['volume'].values
+    volume_ma = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_ma_aligned = align_htf_to_ltf(prices, df_12h, volume_ma)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -90,15 +108,16 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(midpoint_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(volume_ma_aligned[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(camarilla_h5_aligned[i]) or np.isnan(camarilla_l5_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(volume_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        mp = midpoint_aligned[i]
+        r1 = camarilla_r1_aligned[i]
+        s1 = camarilla_s1_aligned[i]
+        h5 = camarilla_h5_aligned[i]
+        l5 = camarilla_l5_aligned[i]
         adx_val = adx_aligned[i]
         vol_ma = volume_ma_aligned[i]
         vol = volume[i]
@@ -106,25 +125,25 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price > Camarilla R1 AND volume > 1.5x avg AND ADX > 25 (trending)
-            if price > r1_val and vol > 1.5 * vol_ma and adx_val > 25:
+            if price > r1 and vol > 1.5 * vol_ma and adx_val > 25:
                 signals[i] = 0.25
                 position = 1
             # Short: price < Camarilla S1 AND volume > 1.5x avg AND ADX > 25 (trending)
-            elif price < s1_val and vol > 1.5 * vol_ma and adx_val > 25:
+            elif price < s1 and vol > 1.5 * vol_ma and adx_val > 25:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price < Camarilla midpoint OR ADX < 20 (range market)
-            if price < mp or adx_val < 20:
+            # Exit long: price < Camarilla H5 (mean) OR ADX < 20 (range market)
+            if price < h5 or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price > Camarilla midpoint OR ADX < 20 (range market)
-            if price > mp or adx_val < 20:
+            # Exit short: price > Camarilla L5 (mean) OR ADX < 20 (range market)
+            if price > l5 or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -132,6 +151,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Volume_ADX_Filter"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Volume_ADX_Filter"
+timeframe = "12h"
 leverage = 1.0
