@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyDonchian_Breakout_VolumeSpike_V1
-Trend-following on 1d using weekly Donchian breakout with volume confirmation.
-Long when price > weekly Donchian high + volume > 1.5x 20d avg.
-Short when price < weekly Donchian low + volume > 1.5x 20d avg.
-Exit when price crosses weekly Donchian midline or volume drops.
-Position size: 0.30. Target: 10-20 trades/year.
-Works in bull/bear: captures breakouts in trending markets, volume filter avoids false breakouts.
+6h_Camarilla_R1_S1_Breakout_VolumeATR_Filter_V1
+Breakout of Camarilla R1/S1 levels from prior 1d candle with volume surge and ATR-based volatility filter.
+Long when price breaks above R1 with volume > 1.5x 20-period average and ATR < 0.8x 20-period average.
+Short when price breaks below S1 with same filters.
+Exit on close crossing back below R1 (long) or above S1 (short).
+Position size: 0.25. Target: 20-40 trades/year.
+Works in bull/bear: breakouts capture momentum, volume filter avoids false breakouts, ATR filter avoids high volatility chop.
 """
 
 import numpy as np
@@ -23,67 +23,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly Donchian channels
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get 1d data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly Donchian high (20-period)
-    donch_high_1w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    # Weekly Donchian low (20-period)
-    donch_low_1w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    # Weekly Donchian midline
-    donch_mid_1w = (donch_high_1w + donch_low_1w) / 2
+    # Calculate Camarilla levels for each 1d bar
+    # R1 = close + 1.1*(high-low)/12
+    # S1 = close - 1.1*(high-low)/12
+    rang = high_1d - low_1d
+    r1_1d = close_1d + 1.1 * rang / 12
+    s1_1d = close_1d - 1.1 * rang / 12
     
-    # Align weekly Donchian levels to daily
-    donch_high_aligned = align_htf_to_ltf(prices, df_1w, donch_high_1w)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1w, donch_low_1w)
-    donch_mid_aligned = align_htf_to_ltf(prices, df_1w, donch_mid_1w)
+    # Align to 6h timeframe (previous day's levels)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Daily volume filter
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume filter: 20-period average on 1d
+    volume_1d = df_1d['volume'].values
+    volume_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma20_1d)
+    
+    # ATR filter: 14-period ATR on 1d
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma20_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
+    atr_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(40, n):  # warmup for weekly Donchian and volume MA
+    for i in range(40, n):  # warmup for rolling averages
         # Skip if any required data is not available
-        if np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or np.isnan(donch_mid_aligned[i]) or np.isnan(volume_ma20[i]):
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(volume_ma20_1d_aligned[i]) or np.isnan(atr_ma20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-day average
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        # Current 1d values aligned to 6h
+        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
+        atr_1d_current = align_htf_to_ltf(prices, df_1d, atr_1d)[i]
+        
+        volume_filter = vol_1d_current > (1.5 * volume_ma20_1d_aligned[i])
+        atr_filter = atr_1d_current < (0.8 * atr_ma20_1d_aligned[i])  # low volatility
         
         if position == 0:
-            # Long when price breaks above weekly Donchian high + volume spike
-            if close[i] > donch_high_aligned[i] and volume_filter:
-                signals[i] = 0.30
+            # Long breakout above R1
+            if close[i] > r1_1d_aligned[i] and volume_filter and atr_filter:
+                signals[i] = 0.25
                 position = 1
-            # Short when price breaks below weekly Donchian low + volume spike
-            elif close[i] < donch_low_aligned[i] and volume_filter:
-                signals[i] = -0.30
+            # Short breakdown below S1
+            elif close[i] < s1_1d_aligned[i] and volume_filter and atr_filter:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below weekly Donchian midline OR volume drops
-            if close[i] < donch_mid_aligned[i] or volume[i] < (1.2 * volume_ma20[i]):
+            # Exit long: close back below R1
+            if close[i] < r1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above weekly Donchian midline OR volume drops
-            if close[i] > donch_mid_aligned[i] or volume[i] < (1.2 * volume_ma20[i]):
+            # Exit short: close back above S1
+            if close[i] > s1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "1d_WeeklyDonchian_Breakout_VolumeSpike_V1"
-timeframe = "1d"
+name = "6h_Camarilla_R1_S1_Breakout_VolumeATR_Filter_V1"
+timeframe = "6h"
 leverage = 1.0
