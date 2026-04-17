@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_VolumeSpike_Regime
-Strategy: TRIX momentum with volume spike and volatility regime filter.
-Long: TRIX crosses above zero + volume > 1.5x average + ATR(14) < ATR(50) (low volatility)
-Short: TRIX crosses below zero + volume > 1.5x average + ATR(14) < ATR(50)
-Exit: TRIX crosses back through zero or volatility regime changes
+1d_WeeklyDonchian20_Breakout_Volume_Spike
+Strategy: Daily Donchian(20) breakout with weekly trend filter and volume spike.
+Long: Close breaks above 20-day high + weekly EMA10 > EMA50 + volume > 2x average
+Short: Close breaks below 20-day low + weekly EMA10 < EMA50 + volume > 2x average
+Exit: Close returns to opposite Donchian band or trend reverses
 Position size: 0.25
-Designed to capture momentum bursts in low-volatility regimes with volume confirmation.
-Timeframe: 4h
+Designed to capture weekly trend continuation with volatility expansion.
+Timeframe: 1d
 """
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,30 +24,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate TRIX (15-period EMA applied 3 times)
-    close_series = pd.Series(close)
-    ema1 = close_series.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
-    trix = 100 * (ema3.pct_change())
-    trix_values = trix.fillna(0).values
+    # Calculate weekly EMA10 and EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate TRIX signal line (9-period EMA of TRIX)
-    trix_signal = pd.Series(trix_values).ewm(span=9, adjust=False, min_periods=9).mean().values
+    close_series_1w = pd.Series(close_1w)
+    ema10_1w = close_series_1w.ewm(span=10, adjust=False, min_periods=10).mean().values
+    ema50_1w = close_series_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume confirmation (20-period average)
+    # Align weekly EMAs to daily timeframe
+    ema10_1w_aligned = align_htf_to_ltf(prices, df_1w, ema10_1w)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # Volume spike filter (20-period MA on daily)
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Volatility regime: ATR(14) < ATR(50) indicates low volatility
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    low_vol_regime = atr14 < atr50
+    # Donchian channels (20-period high/low)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -56,44 +52,40 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(trix_values[i]) or np.isnan(trix_signal[i]) or 
-            np.isnan(volume_ma20[i]) or np.isnan(atr14[i]) or np.isnan(atr50[i])):
+        if (np.isnan(ema10_1w_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(volume_ma20[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        # Volume filter: current volume > 2x 20-period average
+        volume_filter = volume[i] > (2.0 * volume_ma20[i])
         
-        # Volatility regime filter
-        vol_filter = low_vol_regime[i]
-        
-        # TRIX crossover signals
-        trix_cross_above = trix_values[i] > trix_signal[i] and trix_values[i-1] <= trix_signal[i-1]
-        trix_cross_below = trix_values[i] < trix_signal[i] and trix_values[i-1] >= trix_signal[i-1]
+        # Trend filter: weekly EMA10 > EMA50 for long, < for short
+        ema10_gt_ema50 = ema10_1w_aligned[i] > ema50_1w_aligned[i]
+        ema10_lt_ema50 = ema10_1w_aligned[i] < ema50_1w_aligned[i]
         
         # Entry conditions
         if position == 0:
-            # Long: TRIX bullish crossover + volume + low volatility
-            if trix_cross_above and volume_filter and vol_filter:
+            # Long: Close breaks above Donchian high + trend up + volume spike
+            if (close[i] > donchian_high[i] and ema10_gt_ema50 and volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX bearish crossover + volume + low volatility
-            elif trix_cross_below and volume_filter and vol_filter:
+            # Short: Close breaks below Donchian low + trend down + volume spike
+            elif (close[i] < donchian_low[i] and ema10_lt_ema50 and volume_filter):
                 signals[i] = -0.25
                 position = -1
         
-        # Exit conditions
         elif position == 1:
-            # Exit long: TRIX bearish crossover or volatility regime change
-            if trix_cross_below or not vol_filter:
+            # Exit long: Close returns to Donchian low or trend reverses
+            if close[i] < donchian_low[i] or not ema10_gt_ema50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: TRIX bullish crossover or volatility regime change
-            if trix_cross_above or not vol_filter:
+            # Exit short: Close returns to Donchian high or trend reverses
+            if close[i] > donchian_high[i] or not ema10_lt_ema50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_TRIX_VolumeSpike_Regime"
-timeframe = "4h"
+name = "1d_WeeklyDonchian20_Breakout_Volume_Spike"
+timeframe = "1d"
 leverage = 1.0
