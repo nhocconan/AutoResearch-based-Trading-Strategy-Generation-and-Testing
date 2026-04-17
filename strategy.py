@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_ADX_EMA_Crossover_v1
-Trend-following strategy using ADX(14) > 25 for trend strength and EMA(21) crossovers for entry.
-Exit when ADX drops below 20 or EMA crossover reverses.
-Designed to capture strong trends while avoiding choppy markets. Uses 1-day EMA50 as higher timeframe filter.
+4h_RSI_Overbought_Oversold_v1
+Mean reversion strategy using RSI(14) with overbought/oversold levels and volume confirmation.
+Long when RSI < 30 (oversold) and price near support with volume spike.
+Short when RSI > 70 (overbought) and price near resistance with volume spike.
+Exit when RSI returns to neutral (40-60) or opposite extreme is reached.
+Designed to work in both bull and bear markets by fading extremes.
 Target: 50-150 total trades over 4 years (12-37/year).
 """
 
@@ -21,53 +23,50 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === EMA21 for entry signal ===
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # === RSI(14) ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # === EMA8 for entry signal (faster) ===
-    ema8 = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
+    # === Bollinger Bands for support/resistance context ===
+    bb_mid = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_mid + 2 * bb_std
+    bb_lower = bb_mid - 2 * bb_std
     
-    # === ADX(14) for trend strength ===
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    
-    atr14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr14 + 1e-10)
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr14 + 1e-10)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # === Volume average for confirmation ===
+    # === Volume confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === 1d EMA50 for higher timeframe trend filter ===
+    # === 1d RSI for higher timeframe filter ===
     df_1d = get_htf_data(prices, '1d')
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    delta_1d = np.diff(df_1d['close'].values, prepend=df_1d['close'].values[0])
+    gain_1d = np.where(delta_1d > 0, delta_1d, 0)
+    loss_1d = np.where(delta_1d < 0, -delta_1d, 0)
+    avg_gain_1d = pd.Series(gain_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss_1d = pd.Series(loss_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs_1d = avg_gain_1d / (avg_loss_1d + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs_1d))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 50
+    warmrow = 50
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(warmup, n):
+    for i in range(warmrow, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema8[i]) or 
-            np.isnan(ema21[i]) or 
-            np.isnan(adx[i]) or 
+        if (np.isnan(rsi[i]) or 
+            np.isnan(bb_upper[i]) or 
+            np.isnan(bb_lower[i]) or 
             np.isnan(vol_ma[i]) or 
-            np.isnan(ema_50_1d_aligned[i])):
+            np.isnan(rsi_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -77,30 +76,28 @@ def generate_signals(prices):
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: EMA8 crosses above EMA21, ADX > 25, volume confirmed, price above 1d EMA50
-            if (ema8[i] > ema21[i] and 
-                ema8[i-1] <= ema21[i-1] and 
-                adx[i] > 25 and 
+            # Long: RSI oversold (<30), price near lower BB, volume confirmed, 1d RSI not extremely oversold
+            if (rsi[i] < 30 and 
+                close[i] <= bb_lower[i] * 1.02 and  # near or below lower BB
                 vol_confirmed and 
-                close[i] > ema_50_1d_aligned[i]):
+                rsi_1d_aligned[i] > 20):  # avoid catching falling knives in strong downtrend
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: EMA8 crosses below EMA21, ADX > 25, volume confirmed, price below 1d EMA50
-            elif (ema8[i] < ema21[i] and 
-                  ema8[i-1] >= ema21[i-1] and 
-                  adx[i] > 25 and 
+            # Short: RSI overbought (>70), price near upper BB, volume confirmed, 1d RSI not extremely overbought
+            elif (rsi[i] > 70 and 
+                  close[i] >= bb_upper[i] * 0.98 and  # near or above upper BB
                   vol_confirmed and 
-                  close[i] < ema_50_1d_aligned[i]):
+                  rsi_1d_aligned[i] < 80):  # avoid buying into strong uptrend
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic: trend weakening or EMA crossover reverses
+        # Exit logic: RSI returns to neutral or reaches opposite extreme
         elif position == 1:
-            # Exit long: ADX < 20 OR EMA8 crosses below EMA21
-            if (adx[i] < 20 or 
-                (ema8[i] < ema21[i] and ema8[i-1] >= ema21[i-1])):
+            # Exit long: RSI > 40 (recovering) OR RSI > 70 (overbought extreme)
+            if (rsi[i] > 40 or 
+                rsi[i] > 70):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -108,9 +105,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: ADX < 20 OR EMA8 crosses above EMA21
-            if (adx[i] < 20 or 
-                (ema8[i] > ema21[i] and ema8[i-1] <= ema21[i-1])):
+            # Exit short: RSI < 60 (declining) OR RSI < 30 (oversold extreme)
+            if (rsi[i] < 60 or 
+                rsi[i] < 30):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -119,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_ADX_EMA_Crossover_v1"
+name = "4h_RSI_Overbought_Oversold_v1"
 timeframe = "4h"
 leverage = 1.0
