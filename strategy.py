@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_MidPrice_MeanReversion_WeeklyTrend_Filter
-Strategy: Mean reversion to 6h mid-price (HLC/3) with weekly trend filter.
-Long: Price < mid-price by 0.5*ATR + weekly close > weekly SMA(50) + volume > 1.5x avg
-Short: Price > mid-price by 0.5*ATR + weekly close < weekly SMA(50) + volume > 1.5x avg
-Exit: Price crosses back to mid-price or ATR-based stop
+12h_WPivot_R1_S1_Breakout_VolumeFilter_v3
+Strategy: 12h weekly pivot point (R1/S1) breakout with volume filter.
+Long: Price breaks above weekly pivot R1 + volume > 1.5x 20-period avg
+Short: Price breaks below weekly pivot S1 + volume > 1.5x 20-period avg
+Exit: Opposite pivot level break
 Position size: 0.25
-Designed for mean reversion in ranging markets with trend filter to avoid fighting strong trends.
-Works in both bull and bear by using weekly trend filter to align with higher timeframe direction.
+Uses weekly pivot levels for structure, volume for confirmation.
+Designed to work in both bull and bear markets by capturing breakouts from key levels.
 """
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,27 +24,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 6h mid-price (HLC/3)
-    mid_price = (high + low + close) / 3.0
-    
-    # Calculate ATR(14) for volatility normalization
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Get weekly data for trend filter
+    # Get weekly data for pivot points
     df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 1:
+        return np.zeros(n)
+    
+    # Calculate weekly pivot points: P = (H+L+C)/3
+    # R1 = 2*P - L, S1 = 2*P - H
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
     weekly_close = df_weekly['close'].values
     
-    # Calculate weekly SMA(50) for trend filter
-    sma_50_weekly = pd.Series(weekly_close).rolling(window=50, min_periods=50).mean().values
-    sma_50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, sma_50_weekly)
+    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    r1 = 2 * pivot - weekly_low
+    s1 = 2 * pivot - weekly_high
     
-    # Calculate volume average (20-period)
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align weekly pivot levels to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
+    
+    # Calculate 12h volume average (20-period)
+    df_12h = get_htf_data(prices, '12h')
+    volume_12h = df_12h['volume'].values
+    volume_ma20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_ma20_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_ma20_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,42 +63,40 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is not available
-        if (np.isnan(mid_price[i]) or np.isnan(atr[i]) or 
-            np.isnan(sma_50_weekly_aligned[i]) or np.isnan(volume_ma20[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(volume_ma20_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        # Current 12h volume aligned to 12h
+        vol_12h_current = align_htf_to_ltf(prices, df_12h, volume_12h)[i]
+        volume_filter = vol_12h_current > (1.5 * volume_ma20_12h_aligned[i])
         
-        # Weekly trend filter
-        weekly_uptrend = weekly_close[-1] > sma_50_weekly[-1] if len(weekly_close) > 0 else False
-        weekly_downtrend = weekly_close[-1] < sma_50_weekly[-1] if len(weekly_close) > 0 else False
-        
-        # Distance from mid-price in ATR units
-        dist_from_mid = (close[i] - mid_price[i]) / atr[i] if atr[i] > 0 else 0
+        # Breakout signals
+        breakout_up = close[i] > r1_aligned[i]
+        breakout_down = close[i] < s1_aligned[i]
         
         if position == 0:
-            # Long: Price below mid-price + weekly uptrend + volume filter
-            if dist_from_mid < -0.5 and weekly_uptrend and volume_filter:
+            # Long: Breakout above R1 + volume filter
+            if breakout_up and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price above mid-price + weekly downtrend + volume filter
-            elif dist_from_mid > 0.5 and weekly_downtrend and volume_filter:
+            # Short: Breakdown below S1 + volume filter
+            elif breakout_down and volume_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price crosses back to mid-price
-            if dist_from_mid >= 0:
+            # Exit long: Breakdown below S1 (opposite level)
+            if breakout_down:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price crosses back to mid-price
-            if dist_from_mid <= 0:
+            # Exit short: Breakout above R1 (opposite level)
+            if breakout_up:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_MidPrice_MeanReversion_WeeklyTrend_Filter"
-timeframe = "6h"
+name = "12h_WPivot_R1_S1_Breakout_VolumeFilter_v3"
+timeframe = "12h"
 leverage = 1.0
