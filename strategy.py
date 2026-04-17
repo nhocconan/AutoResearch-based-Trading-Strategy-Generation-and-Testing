@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1w trend filter and volume confirmation.
-Long when price breaks above Donchian(20) high and 1w EMA34 is rising.
-Short when price breaks below Donchian(20) low and 1w EMA34 is falling.
-Exit on opposite Donchian breakout or when 1w EMA34 flips direction.
-Uses 1w for trend, 12h for entry timing and volume.
-Target: 50-150 total trades over 4 years (12-37/year).
+Hypothesis: 4h Donchian(20) breakout + 1d ADX regime filter + volume confirmation.
+Long when price breaks above Donchian(20) high AND 1d ADX > 20 AND volume > 1.5x 20-period average.
+Short when price breaks below Donchian(20) low AND 1d ADX > 20 AND volume > 1.5x 20-period average.
+Exit when price returns to Donchian midpoint OR ADX < 20 (range regime) OR volume condition fails.
+Uses 1d ADX for trend regime filtering to avoid whipsaws in sideways markets.
+Target: 75-200 total trades over 4 years (19-50/year) on BTC/ETH/SOL.
 """
 
 import numpy as np
@@ -22,76 +22,105 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get 1d data for ADX regime filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w EMA34 for trend direction
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Calculate 1d ADX (14-period) with proper Wilder smoothing
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(high[i] - high[i-1], 0)
+            minus_dm[i] = max(low[i-1] - low[i], 0)
+            if plus_dm[i] < minus_dm[i]:
+                plus_dm[i] = 0
+            if minus_dm[i] < plus_dm[i]:
+                minus_dm[i] = 0
+            if plus_dm[i] == minus_dm[i]:
+                plus_dm[i] = 0
+                minus_dm[i] = 0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Wilder's smoothing (alpha = 1/period)
+        atr = np.zeros_like(tr)
+        atr[period] = np.mean(tr[1:period+1])
+        for i in range(period+1, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        plus_di = 100 * (pd.Series(plus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr)
+        minus_di = 100 * (pd.Series(minus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr)
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+        adx = pd.Series(dx).ewm(alpha=1/period, adjust=False).mean().values
+        return adx
     
-    # Calculate 12h Donchian channels (20-period)
-    donchian_window = 20
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
+    # Calculate 1d ADX
+    adx_14 = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
     
-    for i in range(donchian_window - 1, n):
-        upper[i] = np.max(high[i - donchian_window + 1:i + 1])
-        lower[i] = np.min(low[i - donchian_window + 1:i + 1])
+    # Calculate Donchian channels (20-period) on 4h
+    lookback = 20
+    highest_high = np.full_like(high, np.nan)
+    lowest_low = np.full_like(low, np.nan)
     
-    # Calculate 12h volume spike (volume > 1.5x 20-period MA)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_ma)
+    for i in range(lookback-1, len(high)):
+        highest_high[i] = np.max(high[i-lookback+1:i+1])
+        lowest_low[i] = np.min(low[i-lookback+1:i+1])
+    
+    # Calculate volume average (20-period)
+    vol_avg = np.full_like(volume, np.nan)
+    for i in range(19, len(volume)):
+        vol_avg[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = max(50, donchian_window - 1)  # warmup
+    start_idx = max(30, 20)  # warmup for Donchian and volume avg
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper[i]) or 
-            np.isnan(lower[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or 
-            i >= len(vol_spike)):
+        if (np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or 
+            np.isnan(vol_avg[i]) or 
+            np.isnan(adx_14_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # 1w trend direction (using EMA slope)
-        if i >= 1:
-            ema34_prev = ema34_1w_aligned[i-1]
-            ema34_curr = ema34_1w_aligned[i]
-            trend_up = ema34_curr > ema34_prev
-            trend_down = ema34_curr < ema34_prev
-        else:
-            trend_up = False
-            trend_down = False
+        # Conditions
+        donchian_high = highest_high[i]
+        donchian_low = lowest_low[i]
+        donchian_mid = (donchian_high + donchian_low) / 2
+        vol_ratio = volume[i] / vol_avg[i] if vol_avg[i] > 0 else 0
+        vol_confirm = vol_ratio > 1.5
+        trend_regime = adx_14_aligned[i] > 20
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > upper[i]
-        breakout_down = close[i] < lower[i]
+        price = close[i]
         
         if position == 0:
-            # Long: bullish breakout + volume spike + 1w uptrend
-            if breakout_up and vol_spike[i] and trend_up:
+            # Long: break above Donchian high + volume confirmation + trend regime
+            if price > donchian_high and vol_confirm and trend_regime:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish breakout + volume spike + 1w downtrend
-            elif breakout_down and vol_spike[i] and trend_down:
+            # Short: break below Donchian low + volume confirmation + trend regime
+            elif price < donchian_low and vol_confirm and trend_regime:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: bearish breakout OR 1w trend turns down
-            if breakout_down or (not trend_up and trend_down):
+            # Exit long: price returns to midpoint OR trend regime ends OR volume confirmation fails
+            if price < donchian_mid or not trend_regime or not vol_confirm:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bullish breakout OR 1w trend turns up
-            if breakout_up or (not trend_down and trend_up):
+            # Exit short: price returns to midpoint OR trend regime ends OR volume confirmation fails
+            if price > donchian_mid or not trend_regime or not vol_confirm:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_1wEMA34_Volume"
-timeframe = "12h"
+name = "4h_DonchianBreakout_1dADX_Volume_Regime"
+timeframe = "4h"
 leverage = 1.0
