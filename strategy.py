@@ -13,62 +13,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR and Donchian
+    # Get daily data for trend and volatility
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Daily ATR(14) for volatility filter
+    # Daily EMA34 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Daily ATR(14) for volatility and stop
     high_low = high_1d - low_1d
     high_close = np.abs(high_1d - np.roll(close_1d, 1))
     low_close = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(high_low, np.maximum(high_close, low_close))
     tr[0] = high_low[0]
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Daily Donchian(20) channel
-    high_1d_series = pd.Series(high_1d)
-    low_1d_series = pd.Series(low_1d)
-    donch_high_20 = high_1d_series.rolling(window=20, min_periods=20).max().values
-    donch_low_20 = low_1d_series.rolling(window=20, min_periods=20).min().values
-    donch_high_20_aligned = align_htf_to_ltf(prices, df_1d, donch_high_20)
-    donch_low_20_aligned = align_htf_to_ltf(prices, df_1d, donch_low_20)
-    
-    # Weekly ADX(14) for trend strength filter
+    # Get weekly data for regime filter (choppiness)
     df_1w = get_htf_data(prices, '1w')
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate directional movement
-    up = high_1w[1:] - high_1w[:-1]
-    down = low_1w[:-1] - low_1w[1:]
-    up = np.concatenate([[0], up])
-    down = np.concatenate([down, [0]])
-    plus_dm = np.where((up > down) & (up > 0), up, 0)
-    minus_dm = np.where((down > up) & (down > 0), down, 0)
-    
-    # True range for weekly
+    # Weekly True Range and ADX-like calculation for chop filter
     high_low_w = high_1w - low_1w
     high_close_w = np.abs(high_1w - np.roll(close_1w, 1))
     low_close_w = np.abs(low_1w - np.roll(close_1w, 1))
     tr_w = np.maximum(high_low_w, np.maximum(high_close_w, low_close_w))
     tr_w[0] = high_low_w[0]
+    
+    # Calculate ATR and price range for choppiness
     atr_w = pd.Series(tr_w).rolling(window=14, min_periods=14).mean().values
+    max_high_w = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
+    min_low_w = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    range_w = max_high_w - min_low_w
     
-    # Directional indicators
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_w
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_w
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Weekly close EMA(21) for trend direction
-    close_1w_series = pd.Series(close_1w)
-    ema21_1w = close_1w_series.ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
+    # Choppiness Index: higher = more ranging, lower = more trending
+    chop_w = 100 * np.log10(atr_w * 14 / range_w) / np.log10(14)
+    chop_w_aligned = align_htf_to_ltf(prices, df_1w, chop_w)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -77,39 +63,32 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(atr_14_aligned[i]) or np.isnan(donch_high_20_aligned[i]) or 
-            np.isnan(donch_low_20_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(ema21_1w_aligned[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(chop_w_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above daily Donchian high with strong weekly uptrend
-            if (close[i] > donch_high_20_aligned[i] and 
-                adx_aligned[i] > 25 and 
-                close[i] > ema21_1w_aligned[i]):
+            # Long: price above EMA34, chop indicates trending (>50), and momentum up
+            if close[i] > ema34_1d_aligned[i] and chop_w_aligned[i] > 50 and close[i] > close[max(0, i-1)]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below daily Donchian low with strong weekly downtrend
-            elif (close[i] < donch_low_20_aligned[i] and 
-                  adx_aligned[i] > 25 and 
-                  close[i] < ema21_1w_aligned[i]):
+            # Short: price below EMA34, chop indicates trending (>50), and momentum down
+            elif close[i] < ema34_1d_aligned[i] and chop_w_aligned[i] > 50 and close[i] < close[max(0, i-1)]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below daily Donchian low OR trend weakens
-            if (close[i] < donch_low_20_aligned[i] or 
-                adx_aligned[i] < 20):
+            # Exit long: price crosses below EMA34 OR chop indicates ranging (<40)
+            if close[i] < ema34_1d_aligned[i] or chop_w_aligned[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above daily Donchian high OR trend weakens
-            if (close[i] > donch_high_20_aligned[i] or 
-                adx_aligned[i] < 20):
+            # Exit short: price crosses above EMA34 OR chop indicates ranging (<40)
+            if close[i] > ema34_1d_aligned[i] or chop_w_aligned[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -117,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_WeeklyADX21_EMATrend"
-timeframe = "12h"
+name = "4h_EMA34_ChopFilter_Trend"
+timeframe = "4h"
 leverage = 1.0
