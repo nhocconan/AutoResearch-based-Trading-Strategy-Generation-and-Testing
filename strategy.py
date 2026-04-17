@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,81 +13,103 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Bollinger Bands
+    # Get 1d data for ATR and RSI
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 20-period SMA and std dev for Bollinger Bands
-    sma20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb_1d = sma20_1d + (2 * std20_1d)
-    lower_bb_1d = sma20_1d - (2 * std20_1d)
+    # Calculate ATR(14) on daily
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr2 = np.maximum(tr1, np.abs(low_1d[1:] - close_1d[:-1]))
+    tr = np.concatenate([[np.nan], tr2])
+    atr14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align BB to 12h timeframe
-    upper_bb_12h = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
-    lower_bb_12h = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
+    # Calculate RSI(14) on daily
+    delta = np.diff(close_1d, prepend=np.nan)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = avg_gain / np.where(avg_loss == 0, np.nan, avg_loss)
+    rsi14_1d = 100 - (100 / (1 + rs))
     
-    # Get 1w data for trend filter (EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Align daily indicators to 1h
+    atr14_1h = align_htf_to_ltf(prices, df_1d, atr14_1d)
+    rsi14_1h = align_htf_to_ltf(prices, df_1d, rsi14_1d)
     
-    # Volume filter: current volume > 1.5 * 20-period average
+    # Get 4h data for trend filter (EMA50)
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1h = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    
+    # 1h volume filter: current volume > 1.5 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Session filter: 08-20 UTC
+    hour = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hour >= 8) & (hour <= 20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # Need Bollinger Bands, EMA50, volume MA
+    start_idx = 100  # Need sufficient data for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_bb_12h[i]) or 
-            np.isnan(lower_bb_12h[i]) or 
-            np.isnan(ema50_12h[i]) or 
-            np.isnan(volume_ma20[i])):
+        if (np.isnan(atr14_1h[i]) or 
+            np.isnan(rsi14_1h[i]) or 
+            np.isnan(ema50_1h[i]) or 
+            np.isnan(volume_ma20[i]) or 
+            np.isnan(session_filter[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Skip outside trading session
+        if not session_filter[i]:
             signals[i] = 0.0
             continue
         
         # Volume filter
         volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
-        # Trend filter: price above/below 1w EMA50
-        price_above_ema = close[i] > ema50_12h[i]
-        price_below_ema = close[i] < ema50_12h[i]
+        # Trend filter: price above/below 4h EMA50
+        price_above_ema = close[i] > ema50_1h[i]
+        price_below_ema = close[i] < ema50_1h[i]
+        
+        # Mean reversion condition: RSI extreme
+        rsi_oversold = rsi14_1h[i] < 30
+        rsi_overbought = rsi14_1h[i] > 70
         
         if position == 0:
-            # Long: Price touches lower Bollinger Band AND price above 1w EMA50 with volume
-            if (low[i] <= lower_bb_12h[i] and price_above_ema and volume_filter):
-                signals[i] = 0.25
+            # Long: Oversold RSI + price above 4h EMA50 + volume
+            if (rsi_oversold and price_above_ema and volume_filter):
+                signals[i] = 0.20
                 position = 1
-            # Short: Price touches upper Bollinger Band AND price below 1w EMA50 with volume
-            elif (high[i] >= upper_bb_12h[i] and price_below_ema and volume_filter):
-                signals[i] = -0.25
+            # Short: Overbought RSI + price below 4h EMA50 + volume
+            elif (rsi_overbought and price_below_ema and volume_filter):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: Price crosses above middle Bollinger Band (SMA20)
-            middle_bb_12h = sma20_1d[-1] if len(sma20_1d) > 0 else 0  # placeholder, will be updated
-            # Calculate middle BB for current day's alignment
-            # Since we don't have direct access to sma20_1d aligned, we use price crossing above lower BB as exit
-            if close[i] >= upper_bb_12h[i]:  # Exit when price reaches upper band
+            # Exit long: RSI overbought OR price crosses below 4h EMA50
+            if (rsi14_1h[i] > 70) or (close[i] < ema50_1h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: Price crosses below middle Bollinger Band (SMA20)
-            if close[i] <= lower_bb_12h[i]:  # Exit when price reaches lower band
+            # Exit short: RSI oversold OR price crosses above 4h EMA50
+            if (rsi14_1h[i] < 30) or (close[i] > ema50_1h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "12h_BollingerBands_EMA50_Trend_Volume"
-timeframe = "12h"
+name = "1h_RSI_MeanReversion_EMA50_Trend"
+timeframe = "1h"
 leverage = 1.0
