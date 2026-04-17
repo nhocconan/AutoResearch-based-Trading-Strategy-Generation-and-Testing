@@ -1,10 +1,4 @@
-# 4h_12h_HighLowBreakout_VolumeConfirmation
-# Hypothesis: Breakouts above recent 12h high/low with volume confirmation and alignment with 12h trend capture strong moves in both bull and bear markets.
-# Long when price > 12h high (lookback 24) + volume > 1.5x 10-period average + 12h close > 12h EMA34.
-# Short when price < 12h low (lookback 24) + volume > 1.5x 10-period average + 12h close < 12h EMA34.
-# Exit on opposite signal or trend reversal. Position size: ±0.25.
-# Uses 4h for entry/exit and 12h for trend filter and breakout levels.
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -18,9 +12,6 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    
-    # Volume confirmation (10-period MA on 4h)
-    volume_ma10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     
     # Get 12h data for trend filter and breakout levels
     df_12h = get_htf_data(prices, '12h')
@@ -44,6 +35,9 @@ def generate_signals(prices):
     # Align 12h high/low to 4h timeframe
     high_24_12h_aligned = align_htf_to_ltf(prices, df_12h, high_24_12h)
     low_24_12h_aligned = align_htf_to_ltf(prices, df_12h, low_24_12h)
+    
+    # Volume confirmation (10-period MA on 4h)
+    volume_ma10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
