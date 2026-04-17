@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-12h Prior Day High/Low Breakout with Volume Spike and Trend Filter
-Long: Close breaks above prior day high AND volume > 2x 12h volume SMA(20) AND price > 1d EMA(50)
-Short: Close breaks below prior day low AND volume > 2x 12h volume SMA(20) AND price < 1d EMA(50)
-Exit: Close crosses back below prior day high (long) or above prior day low (short)
-Targets 15-25 trades/year per symbol (60-100 total over 4 years)
+4h Williams Alligator with Volume and Volume Oscillator Filter
+Long: Price above Alligator teeth (SMA13) AND Alligator lines aligned bullish (jaw<teeth<lips) AND volume > 1.5x volume SMA(20) AND volume oscillator positive
+Short: Price below Alligator teeth AND Alligator lines aligned bearish (jaw>teeth>lips) AND volume > 1.5x volume SMA(20) AND volume oscillator negative
+Exit: Price crosses back below/above teeth or Alligator alignment breaks
+Uses Williams Alligator for trend/filter, volume for confirmation, volume oscillator for momentum
+Target: 20-50 trades/year per symbol (80-200 total over 4 years)
 """
 
 import numpy as np
@@ -21,61 +22,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for prior day levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get 4h data for Williams Alligator
+    df_4h = get_htf_data(prices, '4h')
     
-    # Prior day high and low
-    prior_high = df_1d['high'].values
-    prior_low = df_1d['low'].values
-    prior_high_aligned = align_htf_to_ltf(prices, df_1d, prior_high)
-    prior_low_aligned = align_htf_to_ltf(prices, df_1d, prior_low)
+    # Calculate Williams Alligator on 4h: Jaw (SMA13), Teeth (SMA8), Lips (SMA5)
+    jaw_4h = pd.Series(df_4h['close'].values).rolling(window=13, min_periods=13).mean().values
+    teeth_4h = pd.Series(df_4h['close'].values).rolling(window=8, min_periods=8).mean().values
+    lips_4h = pd.Series(df_4h['close'].values).rolling(window=5, min_periods=5).mean().values
     
-    # 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align Alligator lines to 1h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_4h, jaw_4h)
+    teeth_aligned = align_htf_to_ltf(prices, df_4h, teeth_4h)
+    lips_aligned = align_htf_to_ltf(prices, df_4h, lips_4h)
     
-    # 12h volume SMA(20) for volume filter
-    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate volume oscillator on 1h: (fast vol SMA - slow vol SMA) / slow vol SMA
+    vol_fast = pd.Series(volume).rolling(window=5, min_periods=5).mean().values
+    vol_slow = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_osc = (vol_fast - vol_slow) / vol_slow  # positive = increasing volume momentum
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = max(50, 20)  # EMA50 and SMA20 warmup
+    start_idx = max(20, 13)  # Need enough data for slow vol SMA and jaw
     
     for i in range(start_idx, n):
-        if (np.isnan(prior_high_aligned[i]) or np.isnan(prior_low_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_sma[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+            np.isnan(vol_osc[i]) or np.isnan(vol_slow[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_sma_val = vol_sma[i]
-        prior_high_val = prior_high_aligned[i]
-        prior_low_val = prior_low_aligned[i]
-        ema_1d_val = ema_50_1d_aligned[i]
+        vol_slow_val = vol_slow[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        osc_val = vol_osc[i]
         
         if position == 0:
-            # Long: break above prior day high + volume spike + price > 1d EMA50
-            if price > prior_high_val and vol > 2.0 * vol_sma_val and price > ema_1d_val:
+            # Long: Price above teeth AND bullish alignment (jaw < teeth < lips) AND volume > 1.5x slow vol SMA AND vol osc positive
+            if price > teeth_val and jaw_val < teeth_val and teeth_val < lips_val and vol > 1.5 * vol_slow_val and osc_val > 0:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below prior day low + volume spike + price < 1d EMA50
-            elif price < prior_low_val and vol > 2.0 * vol_sma_val and price < ema_1d_val:
+            # Short: Price below teeth AND bearish alignment (jaw > teeth > lips) AND volume > 1.5x slow vol SMA AND vol osc negative
+            elif price < teeth_val and jaw_val > teeth_val and teeth_val > lips_val and vol > 1.5 * vol_slow_val and osc_val < 0:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses back below prior day high
-            if price < prior_high_val:
+            # Long exit: Price crosses below teeth OR bullish alignment breaks
+            if price < teeth_val or not (jaw_val < teeth_val and teeth_val < lips_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back above prior day low
-            if price > prior_low_val:
+            # Short exit: Price crosses above teeth OR bearish alignment breaks
+            if price > teeth_val or not (jaw_val > teeth_val and teeth_val > lips_val):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -83,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Prior1D_HL_Breakout_VolumeSpike_TrendFilter"
-timeframe = "12h"
+name = "4h_WilliamsAlligator_VolumeOsc"
+timeframe = "4h"
 leverage = 1.0
