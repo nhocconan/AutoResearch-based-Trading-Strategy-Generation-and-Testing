@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Williams Alligator + 1d volume spike + 1d ADX trend filter.
-Long when price > Alligator Jaw (13-period SMA shifted 8 bars) with volume > 2.0x 20-period 1d avg volume AND 1d ADX > 25.
-Short when price < Alligator Jaw with same conditions.
-Exit on opposite Jaw touch or ADX < 20 (trend weakening).
-Designed for low-frequency, high-conviction trades in both bull and bear markets.
-Target: 12-25 trades/year per symbol (50-100 total over 4 years).
+Hypothesis: 4h Williams %R(14) extreme reversal with 1d volume confirmation and ADX trend filter.
+Long when Williams %R crosses above -80 (oversold) with volume > 1.5x 20-period 1d average volume AND 1d ADX > 20.
+Short when Williams %R crosses below -20 (overbought) with volume > 1.5x 20-period 1d average volume AND 1d ADX > 20.
+Exit when Williams %R crosses below -50 for long or above -50 for short.
+Uses 4h for primary signals and 1d for volume/ADX confirmation. Designed to catch reversals in both bull and bear markets with low trade frequency.
+Target: 20-40 trades/year per symbol (80-160 total over 4 years).
 """
 
 import numpy as np
@@ -22,7 +22,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume MA, Alligator, and ADX
+    # Get 1d data for volume MA and ADX
     df_1d = get_htf_data(prices, '1d')
     volume_1d = df_1d['volume'].values
     high_1d = df_1d['high'].values
@@ -32,19 +32,6 @@ def generate_signals(prices):
     # 20-period volume moving average
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
-    
-    # Williams Alligator: Jaw (13-period SMA shifted 8), Teeth (8-period SMA shifted 5), Lips (5-period SMA shifted 3)
-    def calculate_alligator(high, low, close):
-        typical_price = (high + low + close) / 3
-        jaw = pd.Series(typical_price).rolling(window=13, min_periods=13).mean().shift(8).values
-        teeth = pd.Series(typical_price).rolling(window=8, min_periods=8).mean().shift(5).values
-        lips = pd.Series(typical_price).rolling(window=5, min_periods=5).mean().shift(3).values
-        return jaw, teeth, lips
-    
-    jaw_1d, teeth_1d, lips_1d = calculate_alligator(high_1d, low_1d, close_1d)
-    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
-    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
-    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
     
     # ADX calculation (14-period)
     def calculate_adx(high, low, close, period=14):
@@ -79,6 +66,15 @@ def generate_signals(prices):
     adx_14 = calculate_adx(high_1d, low_1d, close_1d, 14)
     adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
     
+    # Williams %R calculation (14-period) on 4h data
+    def calculate_williams_r(high, low, close, period=14):
+        highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+        lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+        wr = -100 * (highest_high - close) / (highest_high - lowest_low)
+        return wr
+    
+    wr_14 = calculate_williams_r(high, low, close, 14)
+    
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
@@ -87,39 +83,44 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(vol_ma_20_aligned[i]) or 
-            np.isnan(jaw_1d_aligned[i]) or 
-            np.isnan(adx_14_aligned[i])):
+            np.isnan(adx_14_aligned[i]) or
+            np.isnan(wr_14[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0x 20-period 1d average volume
-        volume_confirmed = volume[i] > 2.0 * vol_ma_20_aligned[i]
+        # Volume confirmation: current volume > 1.5x 20-period 1d average volume
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20_aligned[i]
         
-        # Trend filter: ADX > 25 indicates strong trend
-        trending = adx_14_aligned[i] > 25
-        trend_weakening = adx_14_aligned[i] < 20  # exit condition
+        # Trend filter: ADX > 20 indicates sufficient trend strength
+        trending = adx_14_aligned[i] > 20
+        
+        # Williams %R signals
+        wr_cross_above_80 = wr_14[i] > -80 and wr_14[i-1] <= -80
+        wr_cross_below_20 = wr_14[i] < -20 and wr_14[i-1] >= -20
+        wr_cross_below_50 = wr_14[i] < -50 and wr_14[i-1] >= -50
+        wr_cross_above_50 = wr_14[i] > -50 and wr_14[i-1] <= -50
         
         if position == 0:
-            # Long: price > Jaw with volume confirmation and trending market
-            if (close[i] > jaw_1d_aligned[i] and volume_confirmed and trending):
+            # Long: Williams %R crosses above -80 (oversold reversal) with volume confirmation and trend
+            if (wr_cross_above_80 and volume_confirmed and trending):
                 signals[i] = 0.25
                 position = 1
-            # Short: price < Jaw with volume confirmation and trending market
-            elif (close[i] < jaw_1d_aligned[i] and volume_confirmed and trending):
+            # Short: Williams %R crosses below -20 (overbought reversal) with volume confirmation and trend
+            elif (wr_cross_below_20 and volume_confirmed and trending):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price touches Jaw OR trend weakening
-            if (close[i] <= jaw_1d_aligned[i]) or trend_weakening:
+            # Exit long: Williams %R crosses below -50
+            if wr_cross_below_50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price touches Jaw OR trend weakening
-            if (close[i] >= jaw_1d_aligned[i]) or trend_weakening:
+            # Exit short: Williams %R crosses above -50
+            if wr_cross_above_50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -127,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsAlligator_Volume_1dADX25_Trend"
-timeframe = "12h"
+name = "4h_WilliamsR_Volume_1dADX20_Reversal"
+timeframe = "4h"
 leverage = 1.0
