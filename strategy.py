@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h timeframe with 1d Williams %R mean reversion and volume confirmation.
-Long when 1d Williams %R < -80 (oversold) with volume spike and price > 12h KAMA (trend filter).
-Short when 1d Williams %R > -20 (overbought) with volume spike and price < 12h KAMA.
-Williams %R identifies exhaustion points, KAMA adapts to market noise, volume confirms conviction.
-Designed to work in ranging markets (mean reversion) and weak trends (pullbacks to KAMA).
-Uses discrete position sizing (0.25) to minimize fee churn and maximize Sharpe.
+Hypothesis: 4h timeframe with 12h Donchian(20) breakout + volume confirmation + trend filter (price > 4h EMA34).
+Long when price breaks above 12h Donchian upper channel with volume confirmation and price > 4h EMA34 (uptrend).
+Short when price breaks below 12h Donchian lower channel with volume confirmation and price < 4h EMA34 (downtrend).
+Exit when price returns to the 12h Donchian midpoint (mean reversion to channel center).
+Designed to capture medium-term breakouts with institutional volume while avoiding false breakouts in choppy markets.
+Uses 12h timeframe for structure (reduces noise) and 4h for entry timing and trend filter.
 """
 
 import numpy as np
@@ -22,85 +22,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams %R calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 12h data for Donchian channel calculation
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate 1d Williams %R: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    # Using 14-period lookback
-    period = 14
-    highest_high = pd.Series(high_1d).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=period, min_periods=period).min().values
-    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
-    # Handle division by zero (when high == low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate 12h Donchian(20) channels
+    # Upper = max(high, lookback=20)
+    # Lower = min(low, lookback=20)
+    # Mid = (Upper + Lower) / 2
+    lookback = 20
+    upper_12h = pd.Series(high_12h).rolling(window=lookback, min_periods=lookback).max().values
+    lower_12h = pd.Series(low_12h).rolling(window=lookback, min_periods=lookback).min().values
+    mid_12h = (upper_12h + lower_12h) / 2.0
     
-    # Calculate 12h KAMA for trend filter (adaptive to market noise)
+    # Calculate 4h EMA34 for trend filter
     close_s = pd.Series(close)
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(close_s.diff(10))
-    volatility = close_s.diff().abs().rolling(window=10, min_periods=1).sum()
-    er = change / volatility
-    er = np.where(volatility == 0, 0, er)  # avoid division by zero
-    # Smoothing constants: fastest SC=2/(2+1)=0.67, slowest SC=2/(30+1)=0.0645
-    sc = (er * (0.67 - 0.0645) + 0.0645) ** 2
-    # Initialize KAMA
-    kama = np.full_like(close, np.nan, dtype=float)
-    kama[9] = close_s.iloc[9]  # seed with first value
-    for i in range(10, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    ema34 = close_s.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 12h volume 20-period average for confirmation
+    # Calculate 4h volume 20-period average for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align 1d Williams %R to 12h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Align 12h Donchian levels to 4h timeframe
+    upper_12h_aligned = align_htf_to_ltf(prices, df_12h, upper_12h)
+    lower_12h_aligned = align_htf_to_ltf(prices, df_12h, lower_12h)
+    mid_12h_aligned = align_htf_to_ltf(prices, df_12h, mid_12h)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 20  # need enough for Williams %R (14) + volume MA (20) + KAMA seed (10)
+    start_idx = 50  # need enough for EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(williams_r_aligned[i]) or 
-            np.isnan(kama[i]) or 
+        if (np.isnan(upper_12h_aligned[i]) or 
+            np.isnan(lower_12h_aligned[i]) or 
+            np.isnan(mid_12h_aligned[i]) or 
+            np.isnan(ema34[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x 20-period average
+        # Volume confirmation: current 4h volume > 1.5x 20-period average
         volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) with volume and price > KAMA (bullish bias)
-            if (williams_r_aligned[i] < -80 and 
+            # Long: price breaks above 12h Donchian upper with volume and uptrend (price > EMA34)
+            if (close[i] > upper_12h_aligned[i] and 
                 volume_confirmed and 
-                close[i] > kama[i]):
+                close[i] > ema34[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (> -20) with volume and price < KAMA (bearish bias)
-            elif (williams_r_aligned[i] > -20 and 
+            # Short: price breaks below 12h Donchian lower with volume and downtrend (price < EMA34)
+            elif (close[i] < lower_12h_aligned[i] and 
                   volume_confirmed and 
-                  close[i] < kama[i]):
+                  close[i] < ema34[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Williams %R returns to neutral (> -50) or price < KAMA
-            if (williams_r_aligned[i] > -50 or 
-                close[i] < kama[i]):
+            # Exit long: price returns to or below 12h Donchian midpoint
+            if close[i] <= mid_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Williams %R returns to neutral (< -50) or price > KAMA
-            if (williams_r_aligned[i] < -50 or 
-                close[i] > kama[i]):
+            # Exit short: price returns to or above 12h Donchian midpoint
+            if close[i] >= mid_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -108,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dWilliamsR_MeanReversion_Volume_KAMA_Trend"
-timeframe = "12h"
+name = "4h_12hDonchian20_Breakout_Volume_EMA34_Trend"
+timeframe = "4h"
 leverage = 1.0
