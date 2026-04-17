@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_Pivot_R1_S1_Breakout_Volume_Spike_v1
-Breakout above Camarilla R1 or below S1 with volume spike and volume ratio filter.
-Uses 1d timeframe for pivot calculation.
-Exit when price returns to H4/L4 levels or volume drops.
-Target: 50-150 total trades over 4 years (12-37/year).
+1d_Keltner_Squeeze_RSI_v1
+Keltner squeeze (BBW/KCW < 0.7) + RSI(14) > 60 for long, < 40 for short.
+Uses 1w EMA50 as trend filter: long only when price > 1w EMA50, short only when price < 1w EMA50.
+Exit when squeeze releases (BBW/KCW >= 1.0) or RSI crosses midline (40-60).
+Designed to capture volatility expansion moves with momentum confirmation in both bull and bear markets.
+Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
@@ -13,87 +14,88 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
+    close_series = pd.Series(close)
     
-    # === Volume spike filter (20-period) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / (vol_ma + 1e-10)
+    # === Bollinger Bands (20, 2) ===
+    bb_mid = close_series.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_mid + 2 * bb_std
+    bb_lower = bb_mid - 2 * bb_std
+    bb_width = (bb_upper - bb_lower) / bb_mid
     
-    # === 1d Camarilla pivot levels ===
-    df_1d = get_htf_data(prices, '1d')
-    # Calculate pivots from previous day's OHLC
-    phigh = df_1d['high'].values
-    plow = df_1d['low'].values
-    pclose = df_1d['close'].values
+    # === Keltner Channel (20, 1.5) ===
+    typical_price = (high + low + close) / 3.0
+    tp_series = pd.Series(typical_price)
+    kc_mid = tp_series.rolling(window=20, min_periods=20).mean().values
+    tp_ma = tp_series.rolling(window=20, min_periods=20).mean()
+    tp_dev = (tp_series - tp_ma).abs()
+    kc_dev = tp_dev.rolling(window=20, min_periods=20).mean().values
+    kc_upper = kc_mid + 1.5 * kc_dev
+    kc_lower = kc_mid - 1.5 * kc_dev
+    kc_width = (kc_upper - kc_lower) / kc_mid
     
-    # Camarilla formula
-    range_ = phigh - plow
-    R4 = pclose + range_ * 1.1 / 2
-    R3 = pclose + range_ * 1.1 / 4
-    R2 = pclose + range_ * 1.1 / 6
-    R1 = pclose + range_ * 1.1 / 12
-    S1 = pclose - range_ * 1.1 / 12
-    S2 = pclose - range_ * 1.1 / 6
-    S3 = pclose - range_ * 1.1 / 4
-    S4 = pclose - range_ * 1.1 / 2
+    # === Squeeze indicator (BBW / KCW) ===
+    squeeze = bb_width / kc_width
     
-    # Align to 4h timeframe (previous day's pivots)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, (pclose + range_ * 1.1 / 2) * 0)  # Placeholder, will use R4/S4 for exit
-    L4_aligned = align_htf_to_ltf(prices, df_1d, (pclose - range_ * 1.1 / 2) * 0)  # Placeholder
+    # === RSI(14) ===
+    delta = close_series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = (100 - (100 / (1 + rs))).values
     
-    # Actually compute R4 and S4 for exit
-    R4_val = pclose + range_ * 1.1 / 2
-    S4_val = pclose - range_ * 1.1 / 2
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4_val)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4_val)
+    # === 1w EMA50 for trend filter ===
+    df_1w = get_htf_data(prices, '1w')
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 30
+    warmup = 50
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(vol_ratio[i]) or 
-            np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or
-            np.isnan(R4_aligned[i]) or
-            np.isnan(S4_aligned[i])):
+        if (np.isnan(squeeze[i]) or 
+            np.isnan(rsi[i]) or 
+            np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price breaks above R1 with volume spike (vol_ratio > 1.5)
-            if (close[i] > R1_aligned[i] and 
-                vol_ratio[i] > 1.5):
+            # Long: squeeze < 0.7, RSI > 60, price above 1w EMA50
+            if (squeeze[i] < 0.7 and 
+                rsi[i] > 60 and 
+                close[i] > ema_50_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price breaks below S1 with volume spike (vol_ratio > 1.5)
-            elif (close[i] < S1_aligned[i] and 
-                  vol_ratio[i] > 1.5):
+            # Short: squeeze < 0.7, RSI < 40, price below 1w EMA50
+            elif (squeeze[i] < 0.7 and 
+                  rsi[i] < 40 and 
+                  close[i] < ema_50_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price returns to H4 (R4) level OR volume drops (vol_ratio < 1.0)
-            if (close[i] >= R4_aligned[i] or 
-                vol_ratio[i] < 1.0):
+            # Exit long: squeeze >= 1.0 OR RSI < 40
+            if (squeeze[i] >= 1.0 or 
+                rsi[i] < 40):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -101,9 +103,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to L4 (S4) level OR volume drops (vol_ratio < 1.0)
-            if (close[i] <= S4_aligned[i] or 
-                vol_ratio[i] < 1.0):
+            # Exit short: squeeze >= 1.0 OR RSI > 60
+            if (squeeze[i] >= 1.0 or 
+                rsi[i] > 60):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -112,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_Pivot_R1_S1_Breakout_Volume_Spike_v1"
-timeframe = "4h"
+name = "1d_Keltner_Squeeze_RSI_v1"
+timeframe = "1d"
 leverage = 1.0
