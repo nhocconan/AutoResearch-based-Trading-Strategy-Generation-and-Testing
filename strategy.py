@@ -13,92 +13,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculation
+    # Get daily data for ATR and range calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot points (standard formula)
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
+    # Calculate daily range (high - low)
+    daily_range = high_1d - low_1d
     
-    # Shift to use previous day's pivots (avoid look-ahead)
-    r1_prev = np.roll(r1, 1)
-    s1_prev = np.roll(s1, 1)
-    r2_prev = np.roll(r2, 1)
-    s2_prev = np.roll(s2, 1)
-    r1_prev[0] = np.nan
-    s1_prev[0] = np.nan
-    r2_prev[0] = np.nan
-    s2_prev[0] = np.nan
-    
-    # Align daily pivot levels to 12h timeframe
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1_prev)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1_prev)
-    r2_12h = align_htf_to_ltf(prices, df_1d, r2_prev)
-    s2_12h = align_htf_to_ltf(prices, df_1d, s2_prev)
-    
-    # Volume confirmation: current volume > 1.5 * 6-period average (12h * 6 = 72h)
-    volume_ma6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
-    
-    # ATR filter to avoid low volatility environments
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # Calculate 10-day ATR of daily ranges (volatility filter)
+    tr1 = daily_range
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr1[0] = np.nan
     tr2[0] = np.nan
     tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma10 = pd.Series(atr).rolling(window=10, min_periods=10).mean().values
+    tr_daily = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_daily = pd.Series(tr_daily).rolling(window=10, min_periods=10).mean().values
+    
+    # Calculate 5-day average of daily ATR (to avoid division by zero and smooth)
+    atr_daily_ma5 = pd.Series(atr_daily).rolling(window=5, min_periods=5).mean().values
+    
+    # Align daily ATR and its 5-day MA to 4h timeframe
+    atr_daily_aligned = align_htf_to_ltf(prices, df_1d, atr_daily)
+    atr_daily_ma5_aligned = align_htf_to_ltf(prices, df_1d, atr_daily_ma5)
+    
+    # Calculate 4-hour ATR for entry/exit logic
+    tr1_4h = high - low
+    tr2_4h = np.abs(high - np.roll(close, 1))
+    tr3_4h = np.abs(low - np.roll(close, 1))
+    tr1_4h[0] = np.nan
+    tr2_4h[0] = np.nan
+    tr3_4h[0] = np.nan
+    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
+    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate 20-period SMA of 4h ATR for volatility regime filter
+    atr_ma20 = pd.Series(atr_4h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 20  # Need R2/S2 and ATR MA10
+    start_idx = 30  # Need sufficient data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(volume_ma6[i]) or 
-            np.isnan(atr[i]) or 
-            np.isnan(atr_ma10[i]) or 
-            np.isnan(r2_12h[i]) or 
-            np.isnan(s2_12h[i]) or
-            np.isnan(r1_12h[i]) or 
-            np.isnan(s1_12h[i])):
+        if (np.isnan(atr_daily_aligned[i]) or 
+            np.isnan(atr_daily_ma5_aligned[i]) or
+            np.isnan(atr_4h[i]) or 
+            np.isnan(atr_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 6-period average
-        volume_filter = volume[i] > (1.5 * volume_ma6[i])
-        # Volatility filter: ATR > ATR MA10 (avoid low volatility)
-        volatility_filter = atr[i] > atr_ma10[i]
+        # Volatility regime filter: daily ATR > 5-day MA of daily ATR (avoid low volatility periods)
+        vol_regime_filter = atr_daily_aligned[i] > atr_daily_ma5_aligned[i]
+        # 4h volatility filter: current ATR > 20-period MA of ATR (avoid choppy 4h periods)
+        vol_4h_filter = atr_4h[i] > atr_ma20[i]
         
         if position == 0:
-            # Long: price breaks above R2 with volume and volatility (strong breakout)
-            if close[i] > r2_12h[i] and volume_filter and volatility_filter:
+            # Long: bullish momentum in high volatility regime
+            if vol_regime_filter and vol_4h_filter and close[i] > close[i-1]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S2 with volume and volatility (strong breakdown)
-            elif close[i] < s2_12h[i] and volume_filter and volatility_filter:
+            # Short: bearish momentum in high volatility regime
+            elif vol_regime_filter and vol_4h_filter and close[i] < close[i-1]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns below R1 or volatility drops
-            if close[i] < r1_12h[i] or not volatility_filter:
+            # Exit long: momentum fails or volatility drops
+            if close[i] <= close[i-1] or not vol_4h_filter:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns above S1 or volatility drops
-            if close[i] > s1_12h[i] or not volatility_filter:
+            # Exit short: momentum fails or volatility drops
+            if close[i] >= close[i-1] or not vol_4h_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_R2_S2_Breakout_Vol_v5"
-timeframe = "12h"
+name = "4h_VolRegime_Momentum_Simple"
+timeframe = "4h"
 leverage = 1.0
