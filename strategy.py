@@ -13,111 +13,104 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend context
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly EMA for trend filter
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
-    
-    # Get daily data for pivot points
+    # Get daily data for calculations
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot points (standard formula)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
-    r2_1d = pivot_1d + (high_1d - low_1d)
-    s2_1d = pivot_1d - (high_1d - low_1d)
-    
-    # Use previous day's pivots (avoid look-ahead)
-    r1_1d_prev = np.roll(r1_1d, 1)
-    s1_1d_prev = np.roll(s1_1d, 1)
-    r2_1d_prev = np.roll(r2_1d, 1)
-    s2_1d_prev = np.roll(s2_1d, 1)
-    r1_1d_prev[0] = np.nan
-    s1_1d_prev[0] = np.nan
-    r2_1d_prev[0] = np.nan
-    s2_1d_prev[0] = np.nan
-    
-    # Align daily pivot levels to 12h timeframe
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1_1d_prev)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1_1d_prev)
-    r2_12h = align_htf_to_ltf(prices, df_1d, r2_1d_prev)
-    s2_12h = align_htf_to_ltf(prices, df_1d, s2_1d_prev)
-    
-    # Volume confirmation: current volume > 1.8 * 20-period average
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR filter to avoid low volatility environments
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # Calculate daily volatility (ATR-like)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr1[0] = np.nan
     tr2[0] = np.nan
     tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma10 = pd.Series(atr).rolling(window=10, min_periods=10).mean().values
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate daily EMA of close
+    ema_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+    
+    # Align daily EMA to 1d timeframe (no additional delay needed for EMA)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Calculate price position relative to EMA (normalized by ATR)
+    # Positive = price above EMA, Negative = price below EMA
+    price_vs_ema = (close_1d - ema_1d) / atr_1d
+    price_vs_ema[0:21] = np.nan  # Not enough data for EMA
+    
+    # Align the normalized price position to 1d
+    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
+    
+    # Calculate 10-day RSI on daily close
+    delta = pd.Series(close_1d).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=10, min_periods=10).mean()
+    avg_loss = loss.rolling(window=10, min_periods=10).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d = rsi_1d.values
+    rsi_1d[0:10] = np.nan
+    
+    # Align RSI to 1d
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    # Volume confirmation: today's volume > 1.5x 20-day average
+    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # Need volume MA20, ATR MA10
+    start_idx = 30  # Need EMA21, RSI10, volume MA20
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(volume_ma20[i]) or 
-            np.isnan(atr[i]) or 
-            np.isnan(atr_ma10[i]) or 
-            np.isnan(r1_12h[i]) or 
-            np.isnan(s1_12h[i]) or
-            np.isnan(r2_12h[i]) or
-            np.isnan(s2_12h[i]) or
-            np.isnan(ema_21_1w_aligned[i])):
+            np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(price_vs_ema_aligned[i]) or
+            np.isnan(rsi_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.8x 20-period average
-        volume_filter = volume[i] > (1.8 * volume_ma20[i])
-        # Volatility filter: ATR > ATR MA10 (avoid low volatility)
-        volatility_filter = atr[i] > atr_ma10[i]
-        # Trend filter: price above/below weekly EMA21
-        trend_filter_long = close[i] > ema_21_1w_aligned[i]
-        trend_filter_short = close[i] < ema_21_1w_aligned[i]
+        # Volume filter: current volume > 1.5x 20-day average
+        volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
         if position == 0:
-            # Long: price breaks above R1 with volume, volatility and trend
-            if (close[i] > r1_12h[i] and volume_filter and volatility_filter and trend_filter_long):
-                signals[i] = 0.30
+            # Long: price above EMA (uptrend) AND RSI oversold (<30) AND volume confirmation
+            if (price_vs_ema_aligned[i] > 0 and 
+                rsi_1d_aligned[i] < 30 and 
+                volume_filter):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume, volatility and trend
-            elif (close[i] < s1_12h[i] and volume_filter and volatility_filter and trend_filter_short):
-                signals[i] = -0.30
+            # Short: price below EMA (downtrend) AND RSI overbought (>70) AND volume confirmation
+            elif (price_vs_ema_aligned[i] < 0 and 
+                  rsi_1d_aligned[i] > 70 and 
+                  volume_filter):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns below S1 or volatility drops
-            if close[i] < s1_12h[i] or not volatility_filter:
+            # Exit long: price crosses below EMA OR RSI overbought (>70)
+            if (price_vs_ema_aligned[i] < 0 or 
+                rsi_1d_aligned[i] > 70):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns above R1 or volatility drops
-            if close[i] > r1_12h[i] or not volatility_filter:
+            # Exit short: price crosses above EMA OR RSI oversold (<30)
+            if (price_vs_ema_aligned[i] > 0 or 
+                rsi_1d_aligned[i] < 30):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_WeeklyTrend_V1"
-timeframe = "12h"
+name = "1d_EMA_RSI_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
