@@ -1,43 +1,24 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-6h_1d12h_Ichimoku_Cloud_Trend
-Hypothesis: On 6h timeframe, trade Ichimoku cloud breakouts with daily/12h filters to capture strong trends. Uses 12h Kumo (cloud) as trend filter and 1d volume confirmation to avoid false signals. Designed for low trade frequency (15-35/year) to minimize fee drift while working in both bull and bear markets by requiring cloud alignment and volume confirmation.
+6h_WeeklyPivot_Donchian_Breakout_V2
+Hypothesis: Use weekly pivot levels (R1/S1) as key support/resistance on 6h timeframe.
+Breakouts above R1 with volume confirmation signal long positions; breakdowns below S1 with volume confirmation signal short positions.
+Uses Donchian channel (20) on 1d to filter breakouts in trending markets only. Designed for low trade frequency (15-30/year) and works in both bull/bear markets by requiring breakout confirmation.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_ichimoku(high, low, close, tenkan=9, kijun=26, senkou=52):
-    """
-    Calculate Ichimoku components:
-    Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
-    Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    """
-    # Tenkan-sen
-    high_tenkan = pd.Series(high).rolling(window=tenkan, min_periods=tenkan).max()
-    low_tenkan = pd.Series(low).rolling(window=tenkan, min_periods=tenkan).min()
-    tenkan_sen = (high_tenkan + low_tenkan) / 2
-    
-    # Kijun-sen
-    high_kijun = pd.Series(high).rolling(window=kijun, min_periods=kijun).max()
-    low_kijun = pd.Series(low).rolling(window=kijun, min_periods=kijun).min()
-    kijun_sen = (high_kijun + low_kijun) / 2
-    
-    # Senkou Span A
-    senkou_a = ((tenkan_sen + kijun_sen) / 2).shift(kijun)
-    
-    # Senkou Span B
-    high_senkou = pd.Series(high).rolling(window=senkou, min_periods=senkou).max()
-    low_senkou = pd.Series(low).rolling(window=senkou, min_periods=senkou).min()
-    senkou_b = ((high_senkou + low_senkou) / 2).shift(kijun)
-    
-    # Current Chikou Span (lagging line) - not used for entry but for completeness
-    # chikou_span = close.shift(-kijun)
-    
-    return tenkan_sen.values, kijun_sen.values, senkou_a.values, senkou_b.values
+def calculate_weekly_pivot(high, low, close):
+    """Calculate weekly pivot points: P, R1, S1, R2, S2"""
+    pivot = (high + low + close) / 3
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    return pivot, r1, s1, r2, s2
 
 def generate_signals(prices):
     n = len(prices)
@@ -49,82 +30,91 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 12h Data (HTF for Ichimoku cloud - trend filter) ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # === Weekly data for pivot points ===
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 10:
+        return np.zeros(n)
     
-    # Ichimoku on 12h
-    tenkan_12h, kijun_12h, senkou_a_12h, senkou_b_12h = calculate_ichimoku(high_12h, low_12h, close_12h)
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # Align Ichimoku components
-    tenkan_12h_aligned = align_htf_to_ltf(prices, df_12h, tenkan_12h)
-    kijun_12h_aligned = align_htf_to_ltf(prices, df_12h, kijun_12h)
-    senkou_a_12h_aligned = align_htf_to_ltf(prices, df_12h, senkou_a_12h)
-    senkou_b_12h_aligned = align_htf_to_ltf(prices, df_12h, senkou_b_12h)
+    # Calculate weekly pivots
+    _, weekly_r1, weekly_s1, _, _ = calculate_weekly_pivot(weekly_high, weekly_low, weekly_close)
     
-    # Cloud top and bottom
-    cloud_top_12h = np.maximum(senkou_a_12h_aligned, senkou_b_12h_aligned)
-    cloud_bottom_12h = np.minimum(senkou_a_12h_aligned, senkou_b_12h_aligned)
+    # Align weekly pivot levels to 6h
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
     
-    # === 1d Data (for volume filter) ===
-    df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
+    # === Daily Donchian channel for trend filter ===
+    df_daily = get_htf_data(prices, '1d')
+    daily_high = df_daily['high'].values
+    daily_low = df_daily['low'].values
     
-    # Daily average volume (20-period)
-    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    # Donchian channel (20)
+    dc_high = pd.Series(daily_high).rolling(window=20, min_periods=20).max().values
+    dc_low = pd.Series(daily_low).rolling(window=20, min_periods=20).min().values
+    
+    dc_high_aligned = align_htf_to_ltf(prices, df_daily, dc_high)
+    dc_low_aligned = align_htf_to_ltf(prices, df_daily, dc_low)
+    
+    # === Volume filter ===
+    # Daily volume average (20)
+    daily_volume = df_daily['volume'].values
+    vol_avg_daily = pd.Series(daily_volume).rolling(window=20, min_periods=20).mean().values
+    vol_avg_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_avg_daily)
+    
+    # Current daily volume for confirmation
+    daily_volume_aligned = align_htf_to_ltf(prices, df_daily, daily_volume)
     
     signals = np.zeros(n)
     
-    # Warmup period - need enough data for Ichimoku calculations
-    warmup = 52 + 26  # senkou period + kijun period for full Ichimoku
+    # Warmup: need enough data for weekly pivot and daily Donchian
+    warmup = 20  # Donchian period
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(tenkan_12h_aligned[i]) or 
-            np.isnan(kijun_12h_aligned[i]) or
-            np.isnan(cloud_top_12h[i]) or
-            np.isnan(cloud_bottom_12h[i]) or
-            np.isnan(vol_avg_1d_aligned[i])):
+        if (np.isnan(weekly_r1_aligned[i]) or 
+            np.isnan(weekly_s1_aligned[i]) or
+            np.isnan(dc_high_aligned[i]) or
+            np.isnan(dc_low_aligned[i]) or
+            np.isnan(vol_avg_daily_aligned[i]) or
+            np.isnan(daily_volume_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Get current daily bar's volume for confirmation
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
+        # Volume filter: current daily volume > 1.3x average
+        vol_filter = daily_volume_aligned[i] > 1.3 * vol_avg_daily_aligned[i]
         
-        # Volume filter: current volume > 1.5x daily average volume
-        vol_filter = vol_1d_current > 1.5 * vol_avg_1d_aligned[i]
+        # Breakout conditions
+        # Long: price breaks above weekly R1 AND above daily Donchian high (trend confirmation)
+        long_breakout = (close[i] > weekly_r1_aligned[i]) and (close[i] > dc_high_aligned[i])
         
-        # Ichimoku trend filters
-        # Bullish: price above cloud AND Tenkan > Kijun
-        bullish_trend = (close[i] > cloud_top_12h[i]) and (tenkan_12h_aligned[i] > kijun_12h_aligned[i])
-        
-        # Bearish: price below cloud AND Tenkan < Kijun
-        bearish_trend = (close[i] < cloud_bottom_12h[i]) and (tenkan_12h_aligned[i] < kijun_12h_aligned[i])
+        # Short: price breaks below weekly S1 AND below daily Donchian low (trend confirmation)
+        short_breakout = (close[i] < weekly_s1_aligned[i]) and (close[i] < dc_low_aligned[i])
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: bullish trend + volume filter
-            if bullish_trend and vol_filter:
+            # Long: breakout above R1 with volume and trend confirmation
+            if long_breakout and vol_filter:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: bearish trend + volume filter
-            elif bearish_trend and vol_filter:
+            # Short: breakdown below S1 with volume and trend confirmation
+            elif short_breakout and vol_filter:
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit when price closes below cloud OR Tenkan < Kijun (trend change)
-            if (close[i] < cloud_top_12h[i]) or (tenkan_12h_aligned[i] < kijun_12h_aligned[i]):
+            # Exit when price closes below weekly pivot OR below Donchian low
+            weekly_pivot = (weekly_r1_aligned[i] + weekly_s1_aligned[i]) / 2  # approximate pivot
+            if (close[i] < weekly_pivot) or (close[i] < dc_low_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -132,8 +122,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price closes above cloud OR Tenkan > Kijun (trend change)
-            if (close[i] > cloud_bottom_12h[i]) or (tenkan_12h_aligned[i] > kijun_12h_aligned[i]):
+            # Exit when price closes above weekly pivot OR above Donchian high
+            weekly_pivot = (weekly_r1_aligned[i] + weekly_s1_aligned[i]) / 2  # approximate pivot
+            if (close[i] > weekly_pivot) or (close[i] > dc_high_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -142,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d12h_Ichimoku_Cloud_Trend"
+name = "6h_WeeklyPivot_Donchian_Breakout_V2"
 timeframe = "6h"
 leverage = 1.0
