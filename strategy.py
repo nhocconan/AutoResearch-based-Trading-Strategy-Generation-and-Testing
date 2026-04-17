@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h Prior 1D High/Low Breakout with Volume and Trend Confirmation
-Long: Price breaks above prior 1D high + volume > 1.5x 12h volume MA + price > 12h EMA50
-Short: Price breaks below prior 1D low + volume > 1.5x 12h volume MA + price < 12h EMA50
-Exit: Opposite break of prior 1D level
-Target: 15-25 trades/year per symbol, avoids overtrading via strict breakout and volume filters
+4h 1D Close Reversion with Volume Spike and Trend Filter
+Long: Price < 1d close AND volume > 2x 4h volume MA(20) AND price > 4h EMA34
+Short: Price > 1d close AND volume > 2x 4h volume MA(20) AND price < 4h EMA34
+Exit: Price crosses 1d close or opposite signal
+Designed for mean reversion in ranging markets with trend filter to avoid whipsaw.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,61 +21,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get prior 1D high and low (using 1d data)
+    # Get 1d close (mean reversion target)
     df_1d = get_htf_data(prices, '1d')
-    prior_1d_high = df_1d['high'].shift(1)  # Prior day's high
-    prior_1d_low = df_1d['low'].shift(1)    # Prior day's low
-    prior_1d_high_aligned = align_htf_to_ltf(prices, df_1d, prior_1d_high.values)
-    prior_1d_low_aligned = align_htf_to_ltf(prices, df_1d, prior_1d_low.values)
+    close_1d = df_1d['close']
+    close_1d_shifted = close_1d.shift(1)  # Previous day's close
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d_shifted.values)
     
-    # 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    ema_50 = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h = align_htf_to_ltf(prices, df_12h, ema_50)
+    # 4h EMA34 for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    ema_34 = pd.Series(df_4h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_4h, ema_34)
     
-    # 12h volume moving average (24-period for confirmation)
-    volume_ma_24 = pd.Series(df_12h['volume']).rolling(window=24, min_periods=24).mean()
-    volume_ma_24_12h = align_htf_to_ltf(prices, df_12h, volume_ma_24.values)
+    # 4h volume moving average (20-period)
+    volume_ma_20 = pd.Series(df_4h['volume']).rolling(window=20, min_periods=20).mean()
+    volume_ma_20_aligned = align_htf_to_ltf(prices, df_4h, volume_ma_20.values)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
-    entry_price = 0.0
     
-    start_idx = 50  # warmup
+    start_idx = 40  # warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(prior_1d_high_aligned[i]) or np.isnan(prior_1d_low_aligned[i]) or 
-            np.isnan(ema_50_12h[i]) or np.isnan(volume_ma_24_12h[i])):
+        if (np.isnan(close_1d_aligned[i]) or np.isnan(ema_34_aligned[i]) or 
+            np.isnan(volume_ma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = volume_ma_24_12h[i]
+        vol_ma = volume_ma_20_aligned[i]
+        target_close = close_1d_aligned[i]
+        trend = ema_34_aligned[i]
         
         if position == 0:
-            # Long: break above prior 1D high + volume + trend
-            if price > prior_1d_high_aligned[i] and vol > 1.5 * vol_ma and price > ema_50_12h[i]:
+            # Long: price below 1d close (oversold) + volume spike + above trend
+            if price < target_close and vol > 2.0 * vol_ma and price > trend:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-            # Short: break below prior 1D low + volume + trend
-            elif price < prior_1d_low_aligned[i] and vol > 1.5 * vol_ma and price < ema_50_12h[i]:
+            # Short: price above 1d close (overbought) + volume spike + below trend
+            elif price > target_close and vol > 2.0 * vol_ma and price < trend:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
         
         elif position == 1:
-            # Long exit: break below prior 1D low
-            if price < prior_1d_low_aligned[i]:
+            # Exit long: price crosses above 1d close (mean reversion complete)
+            if price >= target_close:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: break above prior 1D high
-            if price > prior_1d_high_aligned[i]:
+            # Exit short: price crosses below 1d close (mean reversion complete)
+            if price <= target_close:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -83,6 +81,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Prior1D_HL_Breakout_Volume_Trend"
-timeframe = "12h"
+name = "4h_1DClose_Reversion_VolumeSpike_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
