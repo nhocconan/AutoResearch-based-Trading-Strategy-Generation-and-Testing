@@ -1,13 +1,8 @@
+# NOTE: This strategy has been retired. See strategy.py for the current version.
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: Breakouts above recent 4h high/low with volume confirmation and alignment with 1d trend capture strong moves in both bull and bear markets.
-# Long when price > 4h high (lookback 20) + volume > 1.5x 10-period average + 1d close > 1d EMA50.
-# Short when price < 4h low (lookback 20) + volume > 1.5x 10-period average + 1d close < 1d EMA50.
-# Exit on opposite signal or trend reversal. Position size: ±0.25.
-# Uses 4h for entry/exit and 1d for trend filter and breakout levels.
+from mts_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,36 +17,40 @@ def generate_signals(prices):
     # Volume confirmation (10-period MA on 4h)
     volume_ma10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     
-    # Get 1d data for trend filter and breakout levels
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Get 12h data for trend filter and breakout levels
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate 1d EMA50 for trend filter
-    close_series_1d = pd.Series(close_1d)
-    ema50_1d = close_series_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 12h EMA34 for trend filter
+    close_series_12h = pd.Series(close_12h)
+    ema34_12h = close_series_12h.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA to 4h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align 12h EMA to 4h timeframe
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
-    # Calculate 4h rolling high (20 periods) and low (20 periods)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    high_20 = high_series.rolling(window=20, min_periods=20).max().values
-    low_20 = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate 12h rolling high (24 periods) and low (24 periods)
+    high_12h_series = pd.Series(high_12h)
+    low_12h_series = pd.Series(low_12h)
+    high_24_12h = high_12h_series.rolling(window=24, min_periods=24).max().values
+    low_24_12h = low_12h_series.rolling(window=24, min_periods=24).min().values
+    
+    # Align 12h high/low to 4h timeframe
+    high_24_12h_aligned = align_htf_to_ltf(prices, df_12h, high_24_12h)
+    low_24_12h_aligned = align_htf_to_ltf(prices, df_12h, low_24_12h)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = max(10, 20, 50)  # volume MA10, 4h high/low lookback, EMA50
+    start_idx = max(10, 24, 34)  # volume MA10, 12h high/low lookback, EMA34
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(volume_ma10[i]) or 
-            np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or 
-            np.isnan(ema50_1d_aligned[i])):
+            np.isnan(high_24_12h_aligned[i]) or 
+            np.isnan(low_24_12h_aligned[i]) or 
+            np.isnan(ema34_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -59,26 +58,26 @@ def generate_signals(prices):
         volume_filter = volume[i] > (1.5 * volume_ma10[i])
         
         if position == 0:
-            # Long: price > 4h high (20) + volume filter + 1d uptrend
-            if close[i] > high_20[i] and volume_filter and close[i] > ema50_1d_aligned[i]:
+            # Long: price > 12h high (24) + volume filter + 12h uptrend
+            if close[i] > high_24_12h_aligned[i] and volume_filter and close[i] > ema34_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < 4h low (20) + volume filter + 1d downtrend
-            elif close[i] < low_20[i] and volume_filter and close[i] < ema50_1d_aligned[i]:
+            # Short: price < 12h low (24) + volume filter + 12h downtrend
+            elif close[i] < low_24_12h_aligned[i] and volume_filter and close[i] < ema34_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price < 4h low (20) or 1d trend turns down
-            if close[i] < low_20[i] or close[i] < ema50_1d_aligned[i]:
+            # Exit long: price < 12h low (24) or 12h trend turns down
+            if close[i] < low_24_12h_aligned[i] or close[i] < ema34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price > 4h high (20) or 1d trend turns up
-            if close[i] > high_20[i] or close[i] > ema50_1d_aligned[i]:
+            # Exit short: price > 12h high (24) or 12h trend turns up
+            if close[i] > high_24_12h_aligned[i] or close[i] > ema34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -86,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_HighLowBreakout_VolumeConfirmation"
+name = "4h_12h_HighLowBreakout_VolumeConfirmation"
 timeframe = "4h"
 leverage = 1.0
