@@ -1,13 +1,19 @@
+# NOTE: This strategy was developed but did not pass evaluation in the latest round.
+# It is kept in the history for reference and learning.
+# Final metrics: train_sharpe=0.583, test_sharpe=-0.141
+# Strategy: 4h_PriceAction_Momentum_Consolidation_Breakout
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Williams Alligator with 12-hour volume confirmation and 1-day ADX trend filter
-# Williams Alligator (13,8,5 SMAs) identifies trend direction and strength
-# In strong trends (ADX > 25), trade Alligator crossovers with volume confirmation
-# Volume spike filters low-conviction moves; ADX filter avoids whipsaws in ranging markets
-# Target: 20-35 trades/year to minimize fee decay while capturing strong trends
+# Hypothesis: 4-hour price action momentum with consolidation breakout detection
+# Strategy identifies periods of low volatility (consolidation) followed by
+# momentum breakouts in the direction of the 12-hour trend.
+# Uses Bollinger Band width for consolidation detection and RSI for momentum.
+# In strong trends (ADX > 25), trades breakouts with volume confirmation.
+# Designed to work in both bull and bear markets by following the trend.
+# Target: 20-35 trades/year to minimize fee decay while capturing strong moves.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,106 +25,109 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h Williams Alligator (13,8,5 SMAs) ===
+    # === 12h Trend Indicators ===
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Jaw (13-period SMA)
-    jaw_12h = pd.Series(close_12h).rolling(window=13, min_periods=13).mean().values
-    # Teeth (8-period SMA)
-    teeth_12h = pd.Series(close_12h).rolling(window=8, min_periods=8).mean().values
-    # Lips (5-period SMA)
-    lips_12h = pd.Series(close_12h).rolling(window=5, min_periods=5).mean().values
+    # 12h EMA34 for trend direction
+    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
-    jaw_12h_aligned = align_htf_to_ltf(prices, df_12h, jaw_12h)
-    teeth_12h_aligned = align_htf_to_ltf(prices, df_12h, teeth_12h)
-    lips_12h_aligned = align_htf_to_ltf(prices, df_12h, lips_12h)
-    
-    # === 12h Volume Spike (vs 20-period average) ===
-    volume_12h = df_12h['volume'].values
-    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
-    
-    # === 1-day ADX (14-period) for trend strength ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    # 12h ADX for trend strength
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.concatenate([[close_12h[0]], close_12h[:-1]]))
+    tr3 = np.abs(low_12h - np.concatenate([[close_12h[0]], close_12h[:-1]]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_12h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Directional Movement
-    up_move = high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])
-    down_move = np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d
+    up_move = high_12h - np.concatenate([[high_12h[0]], high_12h[:-1]])
+    down_move = np.concatenate([[low_12h[0]], low_12h[:-1]]) - low_12h
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Smoothed DM
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Directional Indicators
-    plus_di_1d = 100 * plus_dm_smooth / atr_1d
-    minus_di_1d = 100 * minus_dm_smooth / atr_1d
+    plus_di = 100 * plus_dm_smooth / (atr_12h + 1e-10)
+    minus_di = 100 * minus_dm_smooth / (atr_12h + 1e-10)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx_12h = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
     
-    # DX and ADX
-    dx = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d + 1e-10)
-    adx_1d = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # === 4h Consolidation and Momentum ===
+    # Bollinger Bands for volatility squeeze detection
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
+    bb_width = (upper_bb - lower_bb) / sma_20
+    
+    # RSI for momentum
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 100
+    warmup = 50
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(jaw_12h_aligned[i]) or np.isnan(teeth_12h_aligned[i]) or 
-            np.isnan(lips_12h_aligned[i]) or np.isnan(vol_ma_20_12h_aligned[i]) or
-            np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(ema34_12h_aligned[i]) or np.isnan(adx_12h_aligned[i]) or 
+            np.isnan(bb_width[i]) or np.isnan(rsi[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Get current 12h volume (avoid calling get_htf_data in loop)
-        volume_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_12h)
+        # Consolidation: Bollinger Band width in lowest 20% of last 50 periods
+        bb_width_low = bb_width[i] < np.percentile(bb_width[max(0, i-50):i+1], 20)
         
-        # Volume spike: current 12h volume > 1.5x 20-period average
-        vol_spike = volume_12h_aligned[i] > vol_ma_20_12h_aligned[i] * 1.5
+        # Momentum: RSI > 55 for bullish, < 45 for bearish
+        mom_bullish = rsi[i] > 55
+        mom_bearish = rsi[i] < 45
         
-        # Trend filter: ADX > 25 indicates strong trend
-        strong_trend = adx_1d_aligned[i] > 25
+        # Trend filter: 12h trend direction and strength
+        uptrend = close_12h[-1] > ema34_12h[-1] if len(close_12h) > 0 else False  # Use last known 12h value
+        strong_trend = adx_12h_aligned[i] > 25
         
-        # Alligator signals
-        # Bullish: Lips > Teeth > Jaw (green alignment)
-        bullish_aligned = (lips_12h_aligned[i] > teeth_12h_aligned[i]) and (teeth_12h_aligned[i] > jaw_12h_aligned[i])
-        # Bearish: Lips < Teeth < Jaw (red alignment)
-        bearish_aligned = (lips_12h_aligned[i] < teeth_12h_aligned[i]) and (teeth_12h_aligned[i] < jaw_12h_aligned[i])
+        # Volume confirmation: current volume > 1.3x average
+        vol_confirm = volume[i] > vol_ma_20[i] * 1.3
+        
+        # Breakout: price outside Bollinger Bands
+        breakout_up = close[i] > upper_bb[i]
+        breakout_down = close[i] < lower_bb[i]
         
         # Entry logic: only enter when flat
         if position == 0:
-            if strong_trend and vol_spike:
-                if bullish_aligned:
+            # Need consolidation breakout with momentum and trend alignment
+            if bb_width_low and vol_confirm and strong_trend:
+                if mom_bullish and breakout_up and uptrend:
                     signals[i] = 0.25
                     position = 1
                     continue
-                elif bearish_aligned:
+                elif mom_bearish and breakout_down and not uptrend:
                     signals[i] = -0.25
                     position = -1
                     continue
         
-        # Exit logic: exit when Alligator alignment breaks or trend weakens
+        # Exit logic: exit when momentum reverses or volatility expands
         elif position == 1:
-            # Exit long if bearish alignment forms or trend weakens
-            if bearish_aligned or not strong_trend:
+            # Exit long if bearish momentum or volatility expansion
+            if mom_bearish or bb_width[i] > np.percentile(bb_width[max(0, i-20):i+1], 80):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -126,8 +135,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short if bullish alignment forms or trend weakens
-            if bullish_aligned or not strong_trend:
+            # Exit short if bullish momentum or volatility expansion
+            if mom_bullish or bb_width[i] > np.percentile(bb_width[max(0, i-20):i+1], 80):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -136,6 +145,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsAlligator_ADXTrend_VolumeFilter"
+name = "4h_PriceAction_Momentum_Consolidation_Breakout"
 timeframe = "4h"
 leverage = 1.0
