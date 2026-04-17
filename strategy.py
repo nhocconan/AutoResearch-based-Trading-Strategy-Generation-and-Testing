@@ -1,3 +1,9 @@
+# 12h Pivot Breakout with Volume and Trend Filter
+# Hypothesis: 12h timeframe reduces trade frequency to avoid fee drag while capturing significant moves.
+# Uses daily pivot points (R1/S1) for breakout levels, volume surge for confirmation,
+# and daily EMA50 for trend filter. Works in bull markets (breakouts continue) and bear
+# markets (breakouts fail quickly, limiting losses). Target: 12-37 trades/year.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,17 +30,17 @@ def generate_signals(prices):
     daily_r1 = 2 * daily_pivot - low_1d
     daily_s1 = 2 * daily_pivot - high_1d
     
-    # Align daily pivot levels to 6h timeframe
-    daily_pivot_6h = align_htf_to_ltf(prices, df_1d, daily_pivot)
-    daily_r1_6h = align_htf_to_ltf(prices, df_1d, daily_r1)
-    daily_s1_6h = align_htf_to_ltf(prices, df_1d, daily_s1)
+    # Align daily pivot levels to 12h timeframe
+    daily_pivot_12h = align_htf_to_ltf(prices, df_1d, daily_pivot)
+    daily_r1_12h = align_htf_to_ltf(prices, df_1d, daily_r1)
+    daily_s1_12h = align_htf_to_ltf(prices, df_1d, daily_s1)
     
     # Calculate daily EMA50 for trend filter
     close_1d_series = pd.Series(close_1d)
     ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema50_12h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume filter: current volume > 1.5 * 20-period average
+    # Volume filter: current volume > 2.0 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -44,24 +50,24 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(daily_pivot_6h[i]) or 
-            np.isnan(daily_r1_6h[i]) or 
-            np.isnan(daily_s1_6h[i]) or 
-            np.isnan(ema50_6h[i]) or 
+        if (np.isnan(daily_pivot_12h[i]) or 
+            np.isnan(daily_r1_12h[i]) or 
+            np.isnan(daily_s1_12h[i]) or 
+            np.isnan(ema50_12h[i]) or 
             np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        volume_filter = volume[i] > (2.0 * volume_ma20[i])
         
         # Trend filter: price above/below daily EMA50
-        price_above_ema = close[i] > ema50_6h[i]
-        price_below_ema = close[i] < ema50_6h[i]
+        price_above_ema = close[i] > ema50_12h[i]
+        price_below_ema = close[i] < ema50_12h[i]
         
         # Price relative to daily pivot levels
-        price_above_r1 = close[i] > daily_r1_6h[i]
-        price_below_s1 = close[i] < daily_s1_6h[i]
+        price_above_r1 = close[i] > daily_r1_12h[i]
+        price_below_s1 = close[i] < daily_s1_12h[i]
         
         if position == 0:
             # Long: Price breaks above daily R1 with volume and above daily EMA50
@@ -75,7 +81,7 @@ def generate_signals(prices):
         
         elif position == 1:
             # Exit long: Price crosses below daily pivot OR below daily EMA50
-            if (close[i] < daily_pivot_6h[i]) or (close[i] < ema50_6h[i]):
+            if (close[i] < daily_pivot_12h[i]) or (close[i] < ema50_12h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -83,7 +89,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit short: Price crosses above daily pivot OR above daily EMA50
-            if (close[i] > daily_pivot_6h[i]) or (close[i] > ema50_6h[i]):
+            if (close[i] > daily_pivot_12h[i]) or (close[i] > ema50_12h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_DailyPivot_Breakout_EMA50_Volume"
-timeframe = "6h"
+name = "12h_DailyPivot_Breakout_EMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
