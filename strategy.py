@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h timeframe with 1d ADX trend filter + 1w Camarilla pivot breakout + volume confirmation.
-Long when price breaks above weekly Camarilla R3 level with 1d ADX > 25 and volume > 1.5x 20-period 1d volume average.
-Short when price breaks below weekly Camarilla S3 level with 1d ADX > 25 and volume > 1.5x 20-period 1d volume average.
-Uses discrete position sizing 0.25 to limit fee drag. Target: 50-150 total trades over 4 years.
-Weekly pivots provide structural levels; ADX filters for trending markets only; volume confirms participation.
+Hypothesis: 4h timeframe with 12h Supertrend trend filter + 1d Camarilla R4/S4 breakout + volume confirmation.
+Long when price breaks above daily Camarilla R4 level with 12h Supertrend uptrend and volume > 2.0x 20-period 4h volume average.
+Short when price breaks below daily Camarilla S4 level with 12h Supertrend downtrend and volume > 2.0x 20-period 4h volume average.
+Uses discrete position sizing 0.25 to limit fee drag. Target: 75-200 total trades over 4 years.
+Supertrend filters whipsaws; Camarilla R4/S4 are strong breakout levels; volume confirms institutional participation.
 Designed to work in bull markets (breakout continuation) and bear markets (strong trend continuation).
 """
 
@@ -22,114 +22,130 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend and volume
+    # Get 4h data for volume average
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
+    
+    # Get 12h data for Supertrend
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Get 1w data for Camarilla pivots
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 4h volume 20-period average
+    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d ADX (14-period)
+    # Calculate 12h Supertrend (ATR=10, multiplier=3.0)
     # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])  # align with index 0
     
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
+    atr_12h = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Smoothed TR, +DM, -DM (Wilder's smoothing = EMA with alpha=1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            # first value is simple average
-            result[period-1] = np.nanmean(data[:period])
-            # subsequent values: Wilder's smoothing
-            for i in range(period, len(data)):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Supertrend calculation
+    hl2 = (high_12h + low_12h) / 2
+    upperband = hl2 + (3.0 * atr_12h)
+    lowerband = hl2 - (3.0 * atr_12h)
     
-    atr = wilders_smoothing(tr, 14)
-    plus_di = 100 * wilders_smoothing(plus_dm, 14) / atr
-    minus_di = 100 * wilders_smoothing(minus_dm, 14) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilders_smoothing(dx, 14)
+    # Initialize Supertrend
+    supertrend = np.full_like(close_12h, np.nan)
+    direction = np.full_like(close_12h, np.nan)  # 1 for uptrend, -1 for downtrend
     
-    # Calculate 1d volume 20-period average
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # First valid value
+    start_idx = 10
+    if len(close_12h) > start_idx:
+        supertrend[start_idx] = upperband[start_idx]
+        direction[start_idx] = 1  # start with uptrend
+        
+        for i in range(start_idx + 1, len(close_12h)):
+            if close_12h[i] > supertrend[i-1]:
+                direction[i] = 1
+            elif close_12h[i] < supertrend[i-1]:
+                direction[i] = -1
+            else:
+                direction[i] = direction[i-1]
+            
+            if direction[i] == 1 and direction[i-1] == -1:
+                supertrend[i] = lowerband[i]
+            elif direction[i] == -1 and direction[i-1] == 1:
+                supertrend[i] = upperband[i]
+            elif direction[i] == 1:
+                supertrend[i] = max(supertrend[i-1], lowerband[i])
+            else:  # direction[i] == -1
+                supertrend[i] = min(supertrend[i-1], upperband[i])
     
-    # Calculate weekly Camarilla levels
-    # Camarilla: R3 = C + ((H-L) * 1.1/4), S3 = C - ((H-L) * 1.1/4)
-    camarilla_r3 = close_1w + ((high_1w - low_1w) * 1.1 / 4)
-    camarilla_s3 = close_1w - ((high_1w - low_1w) * 1.1 / 4)
+    # Calculate daily Camarilla levels
+    # Camarilla: R4 = C + ((H-L) * 1.1/2), S4 = C - ((H-L) * 1.1/2)
+    camarilla_r4 = close_1d + ((high_1d - low_1d) * 1.1 / 2)
+    camarilla_s4 = close_1d - ((high_1d - low_1d) * 1.1 / 2)
     
-    # Align all to 12h
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
+    # Align all to primary timeframe (4h)
+    vol_ma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
+    supertrend_aligned = align_htf_to_ltf(prices, df_12h, supertrend)
+    direction_aligned = align_htf_to_ltf(prices, df_12h, direction)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # need enough for ADX and volume MA
+    start_idx = 50  # need enough for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(adx_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or 
-            np.isnan(volume_1d_aligned[i])):
+        if (np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i]) or 
+            np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or 
+            np.isnan(vol_ma_20_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x 20-period average
-        volume_confirmed = volume_1d_aligned[i] > 1.5 * vol_ma_20_1d_aligned[i]
-        # Trend filter: ADX > 25 indicates strong trend
-        strong_trend = adx_aligned[i] > 25
+        # Volume confirmation: current 4h volume > 2.0x 20-period average
+        volume_confirmed = volume[i] > 2.0 * vol_ma_20_4h_aligned[i]
+        # Trend filter: Supertrend direction
+        uptrend = direction_aligned[i] == 1
+        downtrend = direction_aligned[i] == -1
         
         if position == 0:
-            # Long: price breaks above weekly Camarilla R3 with strong trend and volume
-            if (close[i] > camarilla_r3_aligned[i] and 
-                strong_trend and 
+            # Long: price breaks above daily Camarilla R4 with uptrend and volume
+            if (close[i] > camarilla_r4_aligned[i] and 
+                uptrend and 
                 volume_confirmed):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly Camarilla S3 with strong trend and volume
-            elif (close[i] < camarilla_s3_aligned[i] and 
-                  strong_trend and 
+            # Short: price breaks below daily Camarilla S4 with downtrend and volume
+            elif (close[i] < camarilla_s4_aligned[i] and 
+                  downtrend and 
                   volume_confirmed):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below weekly Camarilla R2 level
-            camarilla_r2 = close_1w + ((high_1w - low_1w) * 1.1/6)
-            camarilla_r2_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r2)
-            if close[i] < camarilla_r2_aligned[i]:
+            # Exit long: price falls back below daily Camarilla R3 level
+            camarilla_r3 = close_1d + ((high_1d - low_1d) * 1.1/4)
+            camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+            if close[i] < camarilla_r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above weekly Camarilla S2 level
-            camarilla_s2 = close_1w - ((high_1w - low_1w) * 1.1/6)
-            camarilla_s2_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s2)
-            if close[i] > camarilla_s2_aligned[i]:
+            # Exit short: price rises back above daily Camarilla S3 level
+            camarilla_s3 = close_1d - ((high_1d - low_1d) * 1.1/4)
+            camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+            if close[i] > camarilla_s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -137,6 +153,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dADX_1wCamarilla_S3R3_Volume_Confirm"
-timeframe = "12h"
+name = "4h_12hSupertrend_1dCamarilla_R4S4_Volume_Confirm"
+timeframe = "4h"
 leverage = 1.0
