@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h strategy using weekly pivot points (R1/S1) with 1d EMA34 trend filter and volume confirmation.
-- Long when price closes above weekly R1 + volume > 1.5x 20-period 12h volume MA + price above 1d EMA34
-- Short when price closes below weekly S1 + volume > 1.5x 20-period 12h volume MA + price below 1d EMA34
+Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume confirmation.
+- Long when price closes above Camarilla H3 + volume > 1.5x 20-period 4h volume MA + price above 1d EMA34
+- Short when price closes below Camarilla L3 + volume > 1.5x 20-period 4h volume MA + price below 1d EMA34
 - Fixed position size 0.25 to limit fee churn and manage drawdown
 - ATR-based trailing stop (2.0x ATR) to lock in profits
-- Weekly pivot points derived from prior week's OHLC (no look-ahead)
-- Designed for very low trade frequency (target: 50-150 trades over 4 years) to avoid fee drag
-- Works in bull markets (buying above weekly R1 with 1d EMA34 uptrend) and bear markets (selling below weekly S1 with 1d EMA34 downtrend)
-- Uses 12h primary timeframe as requested in experiment #56128
+- Uses 1d HTF for EMA34 trend filter and 1w HTF for Camarilla pivot calculation
+- Designed for low trade frequency (target: 75-200 trades over 4 years) to avoid fee drag
+- Works in bull markets (buying above H3 with 1d EMA34 uptrend) and bear markets (selling below L3 with 1d EMA34 downtrend)
 """
 
 import numpy as np
@@ -33,42 +32,43 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Get 1w data for weekly pivot points (HTF)
+    # Get 1w data for Camarilla pivot points (HTF)
     df_1w = get_htf_data(prices, '1w')
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
+    # Calculate Camarilla pivot levels for weekly timeframe
+    # Camarilla: H3 = C + (H-L)*1.1/4, L3 = C - (H-L)*1.1/4
+    range_1w = high_1w - low_1w
+    camarilla_h3 = close_1w + range_1w * 1.1 / 4.0
+    camarilla_l3 = close_1w - range_1w * 1.1 / 4.0
     
-    # Align weekly pivot points to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    # Align Camarilla levels to 4h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
     
-    # Get 12h data for volume confirmation and ATR (primary timeframe)
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    # Get 4h data for volume confirmation and ATR (primary timeframe)
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
     
-    # Volume average (20-period) on 12h for confirmation
-    volume_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    # Volume average (20-period) on 4h for confirmation
+    volume_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     
-    # ATR (10-period) on 12h for stoploss
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    # ATR (10-period) on 4h for stoploss
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # first period
     atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # Align all indicators to 12h timeframe (primary)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_20)
-    atr_aligned = align_htf_to_ltf(prices, df_12h, atr_10)
+    # Align all indicators to 4h timeframe (primary)
+    volume_ma_aligned = align_htf_to_ltf(prices, df_4h, volume_ma_20)
+    atr_aligned = align_htf_to_ltf(prices, df_4h, atr_10)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -78,14 +78,14 @@ def generate_signals(prices):
     start_idx = 100  # warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
             np.isnan(volume_ma_aligned[i]) or np.isnan(atr_aligned[i]) or 
             np.isnan(ema_34_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
+        h3_val = h3_aligned[i]
+        l3_val = l3_aligned[i]
         vol_ma = volume_ma_aligned[i]
         atr_val = atr_aligned[i]
         ema_34_val = ema_34_1d_aligned[i]
@@ -94,14 +94,14 @@ def generate_signals(prices):
         
         if position == 0:
             # Look for breakouts with volume confirmation and 1d EMA34 trend filter
-            # Long: price closes above weekly R1 + volume spike + price above 1d EMA34
-            if price > r1_val and vol > 1.5 * vol_ma and price > ema_34_val:
+            # Long: price closes above Camarilla H3 + volume spike + price above 1d EMA34
+            if price > h3_val and vol > 1.5 * vol_ma and price > ema_34_val:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 atr_stop = entry_price - 2.0 * atr_val
-            # Short: price closes below weekly S1 + volume spike + price below 1d EMA34
-            elif price < s1_val and vol > 1.5 * vol_ma and price < ema_34_val:
+            # Short: price closes below Camarilla L3 + volume spike + price below 1d EMA34
+            elif price < l3_val and vol > 1.5 * vol_ma and price < ema_34_val:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -129,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WeeklyPivot_R1S1_1dEMA34_VolumeSpike_ATRTrail"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_1dEMA34_VolumeSpike_ATRTrail"
+timeframe = "4h"
 leverage = 1.0
