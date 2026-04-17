@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-12h Camarilla Pivot + 1d EMA200 Trend + Volume Spike + ATR Stop
-Hypothesis: Camarilla pivot levels from daily charts act as strong support/resistance.
-In trending markets (price above/below 1d EMA200), price often reacts at these levels.
-Volume spike confirms institutional interest. Works in both bull (buying dips at S1/S2) 
-and bear (selling rallies at R1/R2) markets. Low-frequency trading to avoid fee drag.
+Hypothesis: 1h RSI(2) mean reversion with 4h trend filter and session filter.
+In strong 4h trends (above/below 200 EMA), extreme 1h RSI readings often reverse.
+Uses 4h EMA200 for trend direction, 1h RSI(2) for entry timing, and 08-20 UTC session filter.
+Designed for low trade frequency (target: 15-30/year) to avoid fee drag.
+Works in both bull and bear markets by following 4h trend while fading short-term extremes.
 """
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -15,110 +16,77 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla pivot and EMA200
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
-        return np.zeros(n)
-    
-    # Calculate Camarilla levels (using previous day's OHLC)
-    # Typical Camarilla: H4 = C + 1.1*(H-L), L4 = C - 1.1*(H-L)
-    #                    H3 = C + 1.1*(H-L)/2, L3 = C - 1.1*(H-L)/2
-    #                    H2 = C + 1.1*(H-L)/4, L2 = C - 1.1*(H-L)/4
-    #                    H1 = C + 1.1*(H-L)/6, L1 = C - 1.1*(H-L)/6
-    # We'll use H3, L3, H4, L4 as key levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate daily range
-    daily_range = high_1d - low_1d
-    
-    # Camarilla levels (based on previous close)
-    H3 = close_1d + 1.1 * daily_range / 2
-    L3 = close_1d - 1.1 * daily_range / 2
-    H4 = close_1d + 1.1 * daily_range
-    L4 = close_1d - 1.1 * daily_range
-    
-    # Align to 12h timeframe (these levels are valid for the entire day)
-    H3_12h = align_htf_to_ltf(prices, df_1d, H3)
-    L3_12h = align_htf_to_ltf(prices, df_1d, L3)
-    H4_12h = align_htf_to_ltf(prices, df_1d, H4)
-    L4_12h = align_htf_to_ltf(prices, df_1d, L4)
-    
-    # 1d EMA200 for trend filter
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_12h = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    
-    # Volume confirmation: 24-period volume MA on 12h (2 days)
-    volume_ma_24 = pd.Series(prices['volume'].values).rolling(window=24, min_periods=24).mean()
-    
-    # ATR for stop loss and position sizing
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 4h EMA200 for trend direction
+    df_4h = get_htf_data(prices, '4h')
+    ema200_4h = pd.Series(df_4h['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
+    
+    # 1h RSI(2) for mean reversion signals
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing (same as RSI)
+    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    # Start after warmup period
-    start_idx = 200  # enough for EMA200
+    start_idx = 50  # warmup for RSI and EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(H3_12h[i]) or np.isnan(L3_12h[i]) or np.isnan(H4_12h[i]) or 
-            np.isnan(L4_12h[i]) or np.isnan(ema_200_12h[i]) or 
-            np.isnan(volume_ma_24.iloc[i]) or np.isnan(atr[i])):
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
+            
+        price = close[i]
+        rsi_val = rsi_values[i]
+        ema200 = ema200_4h_aligned[i]
+        
+        if np.isnan(rsi_val) or np.isnan(ema200):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        vol = prices['volume'].iloc[i]
-        vol_ma = volume_ma_24.iloc[i]
-        
-        # Volume spike filter: at least 1.5x average volume
-        volume_ok = vol > 1.5 * vol_ma
-        
         if position == 0:
-            # Long conditions: price near support levels in uptrend
-            # Uptrend: price above 1d EMA200
-            if price > ema_200_12h[i] and volume_ok:
-                # Buy near L3 or L4 with some tolerance
-                if abs(price - L3_12h[i]) / price < 0.005 or abs(price - L4_12h[i]) / price < 0.005:
-                    signals[i] = 0.25
-                    position = 1
-            
-            # Short conditions: price near resistance levels in downtrend
-            # Downtrend: price below 1d EMA200
-            elif price < ema_200_12h[i] and volume_ok:
-                # Sell near H3 or H4 with some tolerance
-                if abs(price - H3_12h[i]) / price < 0.005 or abs(price - H4_12h[i]) / price < 0.005:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: Uptrend (price > EMA200) + oversold RSI(2) < 10
+            if price > ema200 and rsi_val < 10:
+                signals[i] = 0.20
+                position = 1
+            # Short: Downtrend (price < EMA200) + overbought RSI(2) > 90
+            elif price < ema200 and rsi_val > 90:
+                signals[i] = -0.20
+                position = -1
         
         elif position == 1:
-            # Long exit: price reaches resistance or trend changes
-            if price >= H3_12h[i] or price < ema_200_12h[i]:
+            # Exit long: RSI returns to neutral (> 50) or trend reversal
+            if rsi_val > 50 or price < ema200:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price reaches support or trend changes
-            if price <= L3_12h[i] or price > ema_200_12h[i]:
+            # Exit short: RSI returns to neutral (< 50) or trend reversal
+            if rsi_val < 50 or price > ema200:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "12h_Camarilla_Pivot_EMA200_Trend_Volume"
-timeframe = "12h"
+name = "1h_RSI2_TrendFilter_Session"
+timeframe = "1h"
 leverage = 1.0
