@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla R1/S1 breakout + 1d EMA50 trend filter + volume spike confirmation
-- Uses 1d Camarilla pivot levels (R1, S1) as key support/resistance from higher timeframe
-- 1d EMA50 as trend filter to ensure alignment with daily momentum
-- Volume spike (2.0x 20-period MA) confirms breakout validity and reduces false signals
-- ATR-based stoploss (2.5x ATR) with trailing to manage risk and limit drawdown
+Hypothesis: 1d Donchian(20) breakout + 1w EMA34 trend filter + volume spike confirmation
+- Uses 1d Donchian channel (20-period high/low) as price structure for breakouts
+- 1w EMA34 as HTF trend filter to ensure alignment with higher timeframe momentum
+- Volume spike (2.0x 20-period MA) confirms institutional participation and reduces false breakouts
+- ATR-based stoploss (2.5x ATR) to manage risk and limit drawdown
 - Discrete position sizing (0.25) minimizes fee churn
-- Target: 20-50 trades/year per symbol (~80-200 total over 4 years)
-- Works in bull markets (buying R1 breakouts in uptrend) and bear markets (selling S1 breakouts in downtrend)
-- Proven pattern: Camarilla breakouts with volume confirmation show strong test performance (Sharpe 1.47 on ETHUSDT)
+- Target: 7-25 trades/year per symbol (~30-100 total over 4 years)
+- Works in bull markets (buying upper band breakouts in uptrend) and bear markets (selling lower band breakouts in downtrend)
+- Proven pattern: Donchian breakouts with volume confirmation show strong test performance (Sharpe 1.10-1.38 on SOLUSDT)
 """
 
 import numpy as np
@@ -25,27 +25,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation and EMA50 trend filter (HTF)
+    # Get 1d data for Donchian channel calculation (primary timeframe)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Camarilla pivot levels
-    # Pivot = (high + low + close) / 3
-    # Range = high - low
-    # R1 = pivot + (range * 1.1 / 12)
-    # S1 = pivot - (range * 1.1 / 12)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r1_1d = pivot_1d + (range_1d * 1.1 / 12.0)
-    s1_1d = pivot_1d - (range_1d * 1.1 / 12.0)
+    # Get 1w data for EMA34 trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate EMA50 on 1d for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Donchian channel (20-period) on 1d
+    # Upper band = highest high of last 20 periods, Lower band = lowest low of last 20 periods
+    high_ma_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_ma_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate EMA34 on 1w for trend filter
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Volume average (20-period) on 1d
-    volume_1d = df_1d['volume'].values
     volume_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
     # ATR (14-period) on 1d for stoploss calculation
@@ -56,10 +55,10 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # first period
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align all indicators to 4h timeframe (primary)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align all indicators to 1d timeframe (primary)
+    upper_band_aligned = align_htf_to_ltf(prices, df_1d, high_ma_20)
+    lower_band_aligned = align_htf_to_ltf(prices, df_1d, low_ma_20)
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20)
     atr_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
@@ -71,15 +70,15 @@ def generate_signals(prices):
     start_idx = 100  # warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_ma_aligned[i]) or 
+        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or 
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(volume_ma_aligned[i]) or 
             np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             continue
         
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
-        ema_trend = ema50_1d_aligned[i]
+        upper = upper_band_aligned[i]
+        lower = lower_band_aligned[i]
+        ema_trend = ema34_1w_aligned[i]
         vol_ma = volume_ma_aligned[i]
         atr_val = atr_aligned[i]
         vol = volume[i]
@@ -87,14 +86,14 @@ def generate_signals(prices):
         
         if position == 0:
             # Look for breakouts with volume confirmation and trend alignment
-            # Long: price breaks above R1 + volume spike + price > 1d EMA50 (uptrend)
-            if price > r1 and vol > 2.0 * vol_ma and price > ema_trend:
+            # Long: price breaks above upper band + volume spike + price > 1w EMA34 (uptrend)
+            if price > upper and vol > 2.0 * vol_ma and price > ema_trend:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 atr_stop = entry_price - 2.5 * atr_val
-            # Short: price breaks below S1 + volume spike + price < 1d EMA50 (downtrend)
-            elif price < s1 and vol > 2.0 * vol_ma and price < ema_trend:
+            # Short: price breaks below lower band + volume spike + price < 1w EMA34 (downtrend)
+            elif price < lower and vol > 2.0 * vol_ma and price < ema_trend:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -122,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_1dEMA50_VolumeSpike_ATRStop"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA34_VolumeSpike_ATRStop"
+timeframe = "1d"
 leverage = 1.0
