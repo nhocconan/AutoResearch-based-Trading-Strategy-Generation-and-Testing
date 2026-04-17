@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d timeframe with 1w Williams Fractal breakout and volume confirmation.
-Trade breakouts of weekly Williams Fractal levels with volume spike (>2x 20-period average).
-Use 1d ADX > 20 to filter for trending markets.
-In trending markets: buy breakouts above weekly bearish fractal, sell breakdowns below weekly bullish fractal.
-In ranging markets (ADX <= 20): fade the fractal levels with smaller position.
-Position sizing: 0.30 for breakouts in trend, 0.15 for mean reversion in range, 0 for exit.
-Target: 30-100 total trades over 4 years (7-25/year).
+Hypothesis: 6h timeframe with 1d Williams %R (14) mean reversion and volume confirmation.
+Trade reversals when Williams %R reaches extreme levels (<-80 for long, >-20 for short)
+with volume spike (>1.3x 20-period average). Use 1d ADX < 20 to filter for ranging markets
+(avoid trending whipsaws). In ranging markets: buy oversold dips, sell overbought rallies.
+Position sizing: 0.25 for entries, 0 for exits.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,14 +22,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX and volume MA
+    # Get 1d data for Williams %R and ADX
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate ADX (14) on 1d
+    # Calculate Williams %R (14)
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    # Handle division by zero (when highest_high == lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # Calculate ADX (14) for ranging market filter
     plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
                        np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
     minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
@@ -49,88 +55,61 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Volume filter: 2.0x 20-period average
+    # Volume filter: 1.3x 20-period average
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Get 1w data for Williams Fractals
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # Calculate Williams Fractals
-    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1w, low_1w)
-    # Williams fractals need 2 extra bars for confirmation (center bar + 2 after)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bullish_fractal, additional_delay_bars=2)
-    
-    # Align 1d indicators to lower timeframe
+    # Align all to 6h
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
-    plus_di_aligned = align_htf_to_ltf(prices, df_1d, plus_di)
-    minus_di_aligned = align_htf_to_ltf(prices, df_1d, minus_di)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or
-            np.isnan(plus_di_aligned[i]) or np.isnan(minus_di_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(vol_ma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend direction and strength
-        uptrend = plus_di_aligned[i] > minus_di_aligned[i]
-        downtrend = plus_di_aligned[i] < minus_di_aligned[i]
-        strong_trend = adx_aligned[i] > 20
+        # Range market condition: ADX < 20 (low trend strength)
+        ranging_market = adx_aligned[i] < 20
         
         if position == 0:
-            # In strong trend: trade breakouts of weekly fractals
-            if strong_trend:
-                # Long: price breaks above weekly bearish fractal with volume spike
-                if (close[i] > bearish_fractal_aligned[i] and 
-                    volume[i] > vol_ma_20_aligned[i] * 2.0):
-                    signals[i] = 0.30
-                    position = 1
-                # Short: price breaks below weekly bullish fractal with volume spike
-                elif (close[i] < bullish_fractal_aligned[i] and 
-                      volume[i] > vol_ma_20_aligned[i] * 2.0):
-                    signals[i] = -0.30
-                    position = -1
-            # In ranging market: fade the fractal levels (mean reversion)
-            else:
-                # Long: price near weekly bullish fractal (support) with volume
-                if (close[i] <= bullish_fractal_aligned[i] * 1.02 and  # within 2% above
-                    volume[i] > vol_ma_20_aligned[i] * 1.5):
-                    signals[i] = 0.15
-                    position = 1
-                # Short: price near weekly bearish fractal (resistance) with volume
-                elif (close[i] >= bearish_fractal_aligned[i] * 0.98 and  # within 2% below
-                      volume[i] > vol_ma_20_aligned[i] * 1.5):
-                    signals[i] = -0.15
-                    position = -1
+            # Long: Williams %R oversold (<-80), volume spike, ranging market
+            if (williams_r_aligned[i] <= -80 and 
+                volume[i] > vol_ma_20_aligned[i] * 1.3 and 
+                ranging_market):
+                signals[i] = 0.25
+                position = 1
+            # Short: Williams %R overbought (>-20), volume spike, ranging market
+            elif (williams_r_aligned[i] >= -20 and 
+                  volume[i] > vol_ma_20_aligned[i] * 1.3 and 
+                  ranging_market):
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit long: price crosses below weekly bullish fractal or ADX drops
-            if close[i] < bullish_fractal_aligned[i] or adx_aligned[i] < 15:
+            # Exit long: Williams %R returns above -50 (mean reversion) or volume drops
+            if williams_r_aligned[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30 if strong_trend else 0.15
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above weekly bearish fractal or ADX drops
-            if close[i] > bearish_fractal_aligned[i] or adx_aligned[i] < 15:
+            # Exit short: Williams %R returns below -50 (mean reversion) or volume drops
+            if williams_r_aligned[i] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30 if strong_trend else -0.15
+                signals[i] = -0.25
     
     return signals
 
-name = "1d_WilliamsFractal_Breakout_Volume_ADX"
-timeframe = "1d"
+name = "6h_WilliamsR14_Range_Volume"
+timeframe = "6h"
 leverage = 1.0
