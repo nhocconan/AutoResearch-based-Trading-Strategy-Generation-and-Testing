@@ -1,3 +1,10 @@
+# Hypothesis: 4h Camarilla R1/S1 breakout with volume confirmation and RSI filter
+# Uses daily pivot points from previous day to avoid look-ahead
+# Breakouts above R1 or below S1 with volume > 1.5x 20-period average and RSI(14) > 50 (long) or < 50 (short)
+# Exit when price returns to pivot level
+# Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets
+# Target: 20-50 trades/year per symbol to avoid fee drag
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -23,82 +30,69 @@ def generate_signals(prices):
     pivot_1d = (high_1d + low_1d + close_1d) / 3.0
     r1_1d = 2 * pivot_1d - low_1d
     s1_1d = 2 * pivot_1d - high_1d
-    r2_1d = pivot_1d + (high_1d - low_1d)
-    s2_1d = pivot_1d - (high_1d - low_1d)
     
     # Use previous day's pivots (avoid look-ahead)
     r1_1d_prev = np.roll(r1_1d, 1)
     s1_1d_prev = np.roll(s1_1d, 1)
-    r2_1d_prev = np.roll(r2_1d, 1)
-    s2_1d_prev = np.roll(s2_1d, 1)
     r1_1d_prev[0] = np.nan
     s1_1d_prev[0] = np.nan
-    r2_1d_prev[0] = np.nan
-    s2_1d_prev[0] = np.nan
     
-    # Align daily pivot levels to 12h timeframe
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1_1d_prev)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1_1d_prev)
-    r2_12h = align_htf_to_ltf(prices, df_1d, r2_1d_prev)
-    s2_12h = align_htf_to_ltf(prices, df_1d, s2_1d_prev)
+    # Align daily pivot levels to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1_1d_prev)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1_1d_prev)
     
     # Volume confirmation: current volume > 1.5 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR filter to avoid low volatility environments
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = np.nan
-    tr2[0] = np.nan
-    tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma10 = pd.Series(atr).rolling(window=10, min_periods=10).mean().values
+    # RSI filter
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / np.where(avg_loss == 0, 1e-10, avg_loss)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # Need volume MA20, ATR MA10
+    start_idx = 34  # Need RSI (14+20), volume MA20
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(volume_ma20[i]) or 
-            np.isnan(atr[i]) or 
-            np.isnan(atr_ma10[i]) or 
-            np.isnan(r1_12h[i]) or 
-            np.isnan(s1_12h[i]) or
-            np.isnan(r2_12h[i]) or
-            np.isnan(s2_12h[i])):
+            np.isnan(rsi[i]) or 
+            np.isnan(r1_4h[i]) or 
+            np.isnan(s1_4h[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter: current volume > 1.5x 20-period average
         volume_filter = volume[i] > (1.5 * volume_ma20[i])
-        # Volatility filter: ATR > ATR MA10 (avoid low volatility)
-        volatility_filter = atr[i] > atr_ma10[i]
         
         if position == 0:
-            # Long: price breaks above R2 with volume and volatility (breakout continuation)
-            if (close[i] > r2_12h[i] and volume_filter and volatility_filter):
+            # Long: price breaks above R1 with volume and RSI > 50
+            if (close[i] > r1_4h[i] and volume_filter and rsi[i] > 50):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S2 with volume and volatility (breakout continuation)
-            elif (close[i] < s2_12h[i] and volume_filter and volatility_filter):
+            # Short: price breaks below S1 with volume and RSI < 50
+            elif (close[i] < s1_4h[i] and volume_filter and rsi[i] < 50):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns below R1 or volatility drops
-            if close[i] < r1_12h[i] or not volatility_filter:
+            # Exit long: price returns to pivot level
+            pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+            if close[i] < pivot_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns above S1 or volatility drops
-            if close[i] > s1_12h[i] or not volatility_filter:
+            # Exit short: price returns to pivot level
+            pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+            if close[i] > pivot_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R2_S2_Breakout_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_Volume_RSI"
+timeframe = "4h"
 leverage = 1.0
