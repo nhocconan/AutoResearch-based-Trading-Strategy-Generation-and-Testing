@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-12h_1D_WeeklyPivot_R1S1_Breakout_Volume_Spike_v1
-Hypothesis: In BTC/ETH, price often reacts strongly at weekly pivot levels (R1/S1) during low-volume accumulation phases.
-A breakout above R1 or below S1 with a volume spike (2x average) signals institutional interest, especially when the 1d trend is aligned.
-Exit on reversal at opposite pivot level (S1 for longs, R1 for shorts) or when volume drops below average.
-Timeframe: 12h allows fewer trades (target 15-30/year) while capturing multi-day moves.
-Works in bull (breakouts continue) and bear (fades at resistance) via pivot mean-reversion logic.
+1d_WeeklyDonchian_Breakout_Volume_Regime_v1
+Daily Donchian channel breakout with weekly trend filter, volume confirmation,
+and chop regime filter. Long when price breaks above weekly Donchian high in trending market,
+short when breaks below weekly Donchian low in trending market. Uses volume spike
+to confirm breakout strength. Designed for 1d timeframe to capture multi-week trends.
+Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_hlf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,91 +22,113 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1d data for weekly pivots ===
-    df_1d = get_htf_data(prices, '1d')
-    # Weekly high, low, close from prior week (using Friday's close as weekly close)
-    # We'll approximate weekly pivot using daily high/low/close of the last 5 days
-    # Simpler: use prior week's high, low, close (5-day aggregation)
-    # Since we don't have actual weekly data, we'll use 5-day high/low/close as proxy
-    # But per rules: must use actual HTF data. So we'll use 1d and compute weekly pivot from 1d
-    # However, we don't have weekly aggregation in get_htf_data. So we'll use 1d close for trend and 1d pivot points?
-    # Let's use 1d high/low/close to calculate daily pivot, but that's not weekly.
-    # Change plan: use 1d close for trend, and for pivot, we'll use a simpler method: 
-    # Since we can't get weekly, we'll use monthly? No.
-    # Actually, we can use 1d data and resample? NO - per rules, cannot resample.
-    # So we must use what's available: 1d, 4h, etc. Let's use 1d and calculate pivot from prior day? Not weekly.
-    # New idea: use 1d close for trend, and for entry, use 12h Donchian breakout with volume spike.
-    # But the instruction says to use weekly pivot. Since we can't get weekly data via get_htf_data, we'll approximate.
-    # However, to follow rules strictly, we should use only available HTF: 1d.
-    # Let's use 1d high, low, close to calculate a daily pivot, but that defeats the purpose.
-    # Alternative: use 1d close only for trend, and for entry use 12h price action with volume.
-    # Given the constraints, I'll pivot to a proven 12h strategy: Donchian breakout with volume and 1d trend filter.
-    # This aligns with the "what works" section: Donchian breakout + volume + trend.
+    # === Daily ATR(14) for stop and filters ===
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Let's restart with a simpler, compliant approach.
+    # === Weekly Donchian channels (20-period) ===
+    df_1w = get_htf_data(prices, '1w')
+    donch_high = pd.Series(df_1w['high'].values).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(df_1w['low'].values).rolling(window=20, min_periods=20).min().values
+    donch_high_aligned = align_htf_to_ltf(prices, df_1w, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1w, donch_low)
     
-    # === 12h Donchian(20) breakout ===
-    # We need 12h high/low for Donchian. Use get_htf_data for 12h? But 12h is our timeframe.
-    # Actually, we are already on 12h timeframe, so we can use the price data directly.
-    # Donchian(20) uses 20 periods of high/low.
+    # === Weekly ADX(14) for trend strength ===
+    # Calculate ADX on weekly data
+    w_high = df_1w['high'].values
+    w_low = df_1w['low'].values
+    w_close = df_1w['close'].values
     
-    # Calculate Donchian channels on 12h data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # True Range for weekly
+    w_tr1 = w_high - w_low
+    w_tr2 = np.abs(w_high - np.roll(w_close, 1))
+    w_tr3 = np.abs(w_low - np.roll(w_close, 1))
+    w_tr = np.maximum(w_tr1, np.maximum(w_tr2, w_tr3))
+    w_tr[0] = w_tr1[0]
+    w_atr = pd.Series(w_tr).rolling(window=14, min_periods=14).mean().values
     
-    # === Volume spike (2x 20-period average) ===
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2 * avg_volume)
+    # Directional Movement
+    w_plus_dm = np.where((w_high[1:] - w_high[:-1]) > (w_low[:-1] - w_low[1:]), 
+                         np.maximum(w_high[1:] - w_high[:-1], 0), 0)
+    w_minus_dm = np.where((w_low[:-1] - w_low[1:]) > (w_high[1:] - w_high[:-1]), 
+                          np.maximum(w_low[:-1] - w_low[1:], 0), 0)
+    w_plus_dm = np.concatenate([[0], w_plus_dm])
+    w_minus_dm = np.concatenate([[0], w_minus_dm])
     
-    # === 1d trend filter: EMA50 > EMA200 for long, < for short ===
-    df_1d = get_htf_data(prices, '1d')
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    w_plus_di = 100 * pd.Series(w_plus_dm).rolling(window=14, min_periods=14).sum().values / (w_atr * 14)
+    w_minus_di = 100 * pd.Series(w_minus_dm).rolling(window=14, min_periods=14).sum().values / (w_atr * 14)
+    w_dx = 100 * np.abs(w_plus_di - w_minus_di) / (w_plus_di + w_minus_di + 1e-10)
+    w_adx = pd.Series(w_dx).rolling(window=14, min_periods=14).mean().values
+    w_adx_aligned = align_htf_to_ltf(prices, df_1w, w_adx)
     
-    # Trend: 1 = uptrend (EMA50 > EMA200), -1 = downtrend
-    trend = np.where(ema_50_1d_aligned > ema_200_1d_aligned, 1, -1)
+    # === Weekly Chopiness Index (14) for regime filter ===
+    # Chop = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(n)
+    w_sum_atr = pd.Series(w_atr).rolling(window=14, min_periods=14).sum().values
+    w_max_high = pd.Series(w_high).rolling(window=14, min_periods=14).max().values
+    w_min_low = pd.Series(w_low).rolling(window=14, min_periods=14).min().values
+    w_range = w_max_high - w_min_low
+    # Avoid division by zero
+    w_range_safe = np.where(w_range == 0, 1e-10, w_range)
+    w_chop = 100 * np.log10(w_sum_atr / w_range_safe) / np.log10(14)
+    w_chop_aligned = align_htf_to_ltf(prices, df_1w, w_chop)
+    
+    # === Volume spike detector (daily) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / (vol_ma + 1e-10)
     
     signals = np.zeros(n)
     
-    # Warmup
-    warmup = 50
+    # Warmup period
+    warmup = 60
     
-    # Position tracking
+    # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
-        # Skip if any data is NaN
-        if (np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(ema_200_1d_aligned[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(donch_high_aligned[i]) or 
+            np.isnan(donch_low_aligned[i]) or 
+            np.isnan(w_adx_aligned[i]) or 
+            np.isnan(w_chop_aligned[i]) or 
+            np.isnan(atr[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Entry logic
+        # Entry logic: only enter when flat
         if position == 0:
-            # Long: price breaks above Donchian high + volume spike + uptrend
-            if (high[i] > highest_high[i] and 
-                volume_spike[i] and 
-                trend[i] == 1):
+            # Volatility filter: avoid extremely low volatility days
+            if atr[i] < 0.5 * np.nanmedian(atr[max(0, i-50):i+1]):
+                signals[i] = 0.0
+                continue
+                
+            # Long: price breaks above weekly Donchian high, strong trend, not choppy, volume spike
+            if (close[i] > donch_high_aligned[i] and 
+                w_adx_aligned[i] > 25 and 
+                w_chop_aligned[i] < 61.8 and  # Trending regime (chop < 61.8)
+                vol_ratio[i] > 1.5):          # Volume spike
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price breaks below Donchian low + volume spike + downtrend
-            elif (low[i] < lowest_low[i] and 
-                  volume_spike[i] and 
-                  trend[i] == -1):
+            # Short: price breaks below weekly Donchian low, strong trend, not choppy, volume spike
+            elif (close[i] < donch_low_aligned[i] and 
+                  w_adx_aligned[i] > 25 and 
+                  w_chop_aligned[i] < 61.8 and  # Trending regime
+                  vol_ratio[i] > 1.5):          # Volume spike
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price breaks below Donchian low (reversal) OR volume drops
-            if low[i] < lowest_low[i]:
+            # Exit long: price breaks below weekly Donchian low OR trend weakens OR chop increases
+            if (close[i] < donch_low_aligned[i] or 
+                w_adx_aligned[i] < 20 or 
+                w_chop_aligned[i] > 61.8):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -114,8 +136,10 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above Donchian high (reversal) OR volume drops
-            if high[i] > highest_high[i]:
+            # Exit short: price breaks above weekly Donchian high OR trend weakens OR chop increases
+            if (close[i] > donch_high_aligned[i] or 
+                w_adx_aligned[i] < 20 or 
+                w_chop_aligned[i] > 61.8):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -124,6 +148,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_VolumeSpike_TrendFilter_v1"
-timeframe = "12h"
+name = "1d_WeeklyDonchian_Breakout_Volume_Regime_v1"
+timeframe = "1d"
 leverage = 1.0
