@@ -1,20 +1,11 @@
 #!/usr/bin/env python3
-"""
-1h_DailyPivot_Breakout_VolumeFilter
-Hypothesis: 1-hour breakouts above/below daily pivot levels (R1/S1) with volume confirmation.
-In bull markets, buy breakouts above R1; in bear markets, sell breakdowns below S1.
-Volume filter ensures conviction. Uses daily pivot from prior day (no look-ahead).
-Trades only during active session (08-20 UTC) to avoid low-volume noise.
-Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag.
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -29,73 +20,69 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate daily pivot points (standard formula)
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L
-    # S1 = 2*P - H
     pivot_1d = (high_1d + low_1d + close_1d) / 3.0
     r1_1d = 2 * pivot_1d - low_1d
     s1_1d = 2 * pivot_1d - high_1d
     
-    # Align daily pivot levels to 1h timeframe (use previous day's levels)
-    pivot_1h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align daily pivot levels to 12h timeframe (use previous day's levels)
+    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # Calculate 12h EMA20 for trend filter (faster for 12h)
+    close_series = pd.Series(close)
+    ema20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
     # Volume filter: current volume > 1.5 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_mask = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # Need sufficient data for volume MA
+    start_idx = 60  # Need sufficient data for EMA20 and daily alignment
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_1h[i]) or np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or
-            np.isnan(volume_ma20[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Apply session filter
-        if not session_mask[i]:
+        if (np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or
+            np.isnan(ema20[i]) or np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter
         volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
+        # Trend filter: price relative to EMA20
+        price_above_ema = close[i] > ema20[i]
+        price_below_ema = close[i] < ema20[i]
+        
         if position == 0:
-            # Long breakout: price breaks above R1 with volume
-            if close[i] > r1_1h[i] and volume_filter:
-                signals[i] = 0.20
+            # Long breakout: price breaks above R1 with volume and above EMA20
+            if (close[i] > r1_12h[i] and volume_filter and price_above_ema):
+                signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below S1 with volume
-            elif close[i] < s1_1h[i] and volume_filter:
-                signals[i] = -0.20
+            # Short breakdown: price breaks below S1 with volume and below EMA20
+            elif (close[i] < s1_12h[i] and volume_filter and price_below_ema):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls below pivot
-            if close[i] < pivot_1h[i]:
+            # Exit long: price falls below pivot or EMA20
+            if close[i] < pivot_12h[i] or close[i] < ema20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises above pivot
-            if close[i] > pivot_1h[i]:
+            # Exit short: price rises above pivot or EMA20
+            if close[i] > pivot_12h[i] or close[i] > ema20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_DailyPivot_Breakout_VolumeFilter"
-timeframe = "1h"
+name = "12h_DailyPivot_Breakout_EMA20_Volume"
+timeframe = "12h"
 leverage = 1.0
