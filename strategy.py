@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_R1_S1_Breakout_VolumeTrend
-Hypothesis: On 6h timeframe, price breaks out from weekly pivot R1/S1 levels with volume confirmation.
-Long when price > weekly R1 with volume > 1.5x average. Short when price < weekly S1 with volume > 1.5x average.
-Weekly pivots provide structural support/resistance that works in both bull and bear markets.
-Volume confirms institutional participation. Trend filter avoids counter-trend entries.
-Target: 20-50 trades/year, holding period 2-5 days. Survives 2022 crash via trend alignment.
+12h_RSI_VWAP_Trend_Follow
+Hypothesis: On 12h timeframe, follow the trend using 1d EMA34, with entries triggered by RSI(14) pullbacks in the direction of the trend.
+Volume confirmation via VWAP > price for longs and VWAP < price for shorts.
+Works in both bull and bear markets by only taking trend-aligned trades.
+Designed for low trade frequency (target: 20-40 trades/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,69 +21,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Weekly data for pivot calculation ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === 1d data for EMA trend, RSI, and VWAP ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate weekly pivot points (using prior week's OHLC)
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_close_1w = np.roll(close_1w, 1)
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Handle first week
-    prev_high_1w[0] = high_1w[0]
-    prev_low_1w[0] = low_1w[0]
-    prev_close_1w[0] = close_1w[0]
+    # 1d RSI(14) for entry signals
+    delta = pd.Series(close_1d).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d = rsi_1d.values
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Weekly pivot calculation (standard floor pivot)
-    pivot_1w = (prev_high_1w + prev_low_1w + prev_close_1w) / 3.0
-    weekly_range = prev_high_1w - prev_low_1w
-    
-    # Weekly R1 and S1 levels
-    weekly_r1 = 2 * pivot_1w - prev_low_1w
-    weekly_s1 = 2 * pivot_1w - prev_high_1w
-    
-    # Align weekly levels to 6h timeframe
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
-    
-    # 6-day EMA for trend filter (avoid counter-trend trades)
-    ema6 = pd.Series(close).ewm(span=6, min_periods=6, adjust=False).mean().values
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > 1.5 * vol_ma20
+    # 1d VWAP (volume-weighted average price)
+    # Typical price = (H+L+C)/3
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
+    vp = typical_price_1d * volume_1d
+    cum_vp = np.nancumsum(vp)
+    cum_vol = np.nancumsum(volume_1d)
+    vwap_1d = np.divide(cum_vp, cum_vol, out=np.zeros_like(cum_vp), where=cum_vol!=0)
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
     signals = np.zeros(n)
     
-    # Warmup covers EMA6, volume MA20, and weekly rollouts
-    warmup = 50
+    # Warmup: covers EMA34 and RSI
+    warmup = 40
+    
+    # Track position
+    position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(weekly_r1_aligned[i]) or 
-            np.isnan(weekly_s1_aligned[i]) or 
-            np.isnan(ema6[i]) or 
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(vwap_1d_aligned[i])):
             signals[i] = 0.0
+            position = 0
             continue
         
-        # Long conditions: price breaks above weekly R1 with volume and uptrend
-        if close[i] > weekly_r1_aligned[i] and vol_filter[i] and close[i] > ema6[i]:
-            signals[i] = 0.25
+        # Trend filter: price above/below EMA34
+        bullish_trend = close[i] > ema34_1d_aligned[i]
+        bearish_trend = close[i] < ema34_1d_aligned[i]
         
-        # Short conditions: price breaks below weekly S1 with volume and downtrend
-        elif close[i] < weekly_s1_aligned[i] and vol_filter[i] and close[i] < ema6[i]:
-            signals[i] = -0.25
+        # VWAP filter: price above VWAP for longs, below for shorts
+        price_above_vwap = close[i] > vwap_1d_aligned[i]
+        price_below_vwap = close[i] < vwap_1d_aligned[i]
         
-        # Otherwise flat
-        else:
-            signals[i] = 0.0
+        # RSI conditions for pullback entries
+        rsi_oversold = rsi_1d_aligned[i] < 30
+        rsi_overbought = rsi_1d_aligned[i] > 70
+        
+        if position == 0:
+            # Long: bullish trend + price above VWAP + RSI oversold
+            if bullish_trend and price_above_vwap and rsi_oversold:
+                signals[i] = 0.25
+                position = 1
+                continue
+            
+            # Short: bearish trend + price below VWAP + RSI overbought
+            if bearish_trend and price_below_vwap and rsi_overbought:
+                signals[i] = -0.25
+                position = -1
+                continue
+        
+        # Exit conditions: trend reversal or RSI returns to neutral
+        elif position == 1:
+            # Exit long when trend turns bearish or RSI reaches overbought
+            if not bullish_trend or rsi_1d_aligned[i] > 70:
+                signals[i] = 0.0
+                position = 0
+                continue
+            else:
+                signals[i] = 0.25
+        
+        elif position == -1:
+            # Exit short when trend turns bullish or RSI reaches oversold
+            if not bearish_trend or rsi_1d_aligned[i] < 30:
+                signals[i] = 0.0
+                position = 0
+                continue
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "6h_WeeklyPivot_R1_S1_Breakout_VolumeTrend"
-timeframe = "6h"
+name = "12h_RSI_VWAP_Trend_Follow"
+timeframe = "12h"
 leverage = 1.0
