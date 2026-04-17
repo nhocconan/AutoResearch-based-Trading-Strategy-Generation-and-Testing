@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h Volume Spike + Close Above/Below Prior Day VWAP with 1D EMA Trend Filter
-Long: Close > prior day VWAP + volume > 2x 4h volume MA(20) + close > 1D EMA50
-Short: Close < prior day VWAP + volume > 2x 4h volume MA(20) + close < 1D EMA50
-Exit: Close crosses back below/above prior day VWAP
-Uses VWAP for intraday mean reversion edge and volume surge for momentum confirmation
-Target: 25-35 trades/year per symbol
+1D Weekly Range Breakout with Volume Spike and ADX Trend Filter
+Long: Price breaks above prior weekly high + volume > 2x 1d volume mean + ADX > 25
+Short: Price breaks below prior weekly low + volume > 2x 1d volume mean + ADX > 25
+Exit: Opposite break of prior weekly level
+Uses ADX to filter choppy markets and volume spike to confirm breakout strength
+Target: 10-20 trades/year per symbol
 """
 
 import numpy as np
@@ -22,62 +22,105 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for VWAP and trend filter
+    # Get weekly data for prior high/low
+    df_weekly = get_htf_data(prices, '1w')
+    prior_weekly_high = df_weekly['high'].shift(1)  # Prior week's high
+    prior_weekly_low = df_weekly['low'].shift(1)    # Prior week's low
+    
+    prior_weekly_high_aligned = align_htf_to_ltf(prices, df_weekly, prior_weekly_high.values)
+    prior_weekly_low_aligned = align_htf_to_ltf(prices, df_weekly, prior_weekly_low.values)
+    
+    # ADX(14) on 1d timeframe for trend strength
     df_1d = get_htf_data(prices, '1d')
-    # Calculate VWAP for each 1D bar: cumulative (price * volume) / cumulative volume
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    vwap = (typical_price * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
-    # Shift by 1 to get prior day's VWAP (not current forming day)
-    prior_vwap = vwap.shift(1)
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    prior_vwap_aligned = align_htf_to_ltf(prices, df_1d, prior_vwap.values)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
     
-    # 4h volume moving average (20-period for confirmation)
-    df_4h = get_htf_data(prices, '4h')
-    volume_ma_20 = pd.Series(df_4h['volume']).rolling(window=20, min_periods=20).mean()
-    volume_ma_20_4h = align_htf_to_ltf(prices, df_4h, volume_ma_20.values)
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    def smooth_series(arr, period):
+        result = np.full_like(arr, np.nan, dtype=float)
+        if len(arr) < period:
+            return result
+        result[period-1] = np.nansum(arr[:period])
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
+    
+    atr = smooth_series(tr, 14)
+    dm_plus_smooth = smooth_series(dm_plus, 14)
+    dm_minus_smooth = smooth_series(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr > 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr > 0, 100 * dm_minus_smooth / atr, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = smooth_series(dx, 14)
+    
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume mean on 1d for spike detection
+    volume_1d = df_1d['volume'].values
+    volume_mean_1d = np.full_like(volume_1d, np.nan, dtype=float)
+    for i in range(len(volume_1d)):
+        if i >= 20:
+            volume_mean_1d[i] = np.mean(volume_1d[max(0, i-20):i])
+    
+    volume_mean_aligned = align_htf_to_ltf(prices, df_1d, volume_mean_1d)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
-    entry_price = 0.0
     
     start_idx = 50  # warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(prior_vwap_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(volume_ma_20_4h[i])):
+        if (np.isnan(prior_weekly_high_aligned[i]) or np.isnan(prior_weekly_low_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(volume_mean_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = volume_ma_20_4h[i]
+        vol_mean = volume_mean_aligned[i]
+        adx_val = adx_aligned[i]
         
         if position == 0:
-            # Long: close above prior day VWAP + volume spike + 1D uptrend
-            if price > prior_vwap_aligned[i] and vol > 2.0 * vol_ma and price > ema_50_1d_aligned[i]:
+            # Long: break above prior weekly high + volume spike + ADX > 25
+            if price > prior_weekly_high_aligned[i] and vol > 2.0 * vol_mean and adx_val > 25:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-            # Short: close below prior day VWAP + volume spike + 1D downtrend
-            elif price < prior_vwap_aligned[i] and vol > 2.0 * vol_ma and price < ema_50_1d_aligned[i]:
+            # Short: break below prior weekly low + volume spike + ADX > 25
+            elif price < prior_weekly_low_aligned[i] and vol > 2.0 * vol_mean and adx_val > 25:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
         
         elif position == 1:
-            # Long exit: close back below prior day VWAP (mean reversion)
-            if price < prior_vwap_aligned[i]:
+            # Long exit: break below prior weekly low
+            if price < prior_weekly_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: close back above prior day VWAP (mean reversion)
-            if price > prior_vwap_aligned[i]:
+            # Short exit: break above prior weekly high
+            if price > prior_weekly_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -85,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_VolumeSpike_PriorVWAP_1DEMA50"
-timeframe = "4h"
+name = "1D_WeeklyRange_Breakout_Volume_ADX"
+timeframe = "1d"
 leverage = 1.0
