@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_VolumeSpike_Regime_v2
-TRIX(12) crossing zero line as momentum signal.
-Volume spike > 2x 20-period average for confirmation.
-Choppiness regime filter: CHOP(14) < 38.2 = trending (follow TRIX), CHOP > 61.8 = range (avoid).
-Exit when TRIX crosses back or volume drops below average.
-Designed to capture momentum bursts in trending regimes with volume confirmation.
-Target: 80-160 total trades over 4 years (20-40/year).
+1d_RSI_VWAP_Reversion_v1
+Daily RSI(14) mean reversion with VWAP filter and weekly trend filter.
+- Long: RSI < 30, price > VWAP, price above weekly EMA50
+- Short: RSI > 70, price < VWAP, price below weekly EMA50
+- Exit: RSI crosses back to 50 or weekly trend changes
+Designed to work in both bull and bear markets by fading extremes in direction of weekly trend.
+Target: 50-100 total trades over 4 years (12-25/year).
 """
 
 import numpy as np
@@ -23,80 +23,73 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === TRIX(12) ===
-    # Triple EMA of closing price
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # TRIX = 100 * (ema3_today - ema3_yesterday) / ema3_yesterday
-    trix = np.zeros_like(close)
-    trix[1:] = 100 * (ema3[1:] - ema3[:-1]) / (ema3[:-1] + 1e-10)
+    # === RSI(14) ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # === Volume Spike (2x 20-period average) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_ma)
+    # === VWAP (daily reset) ===
+    typical_price = (high + low + close) / 3.0
+    tpv = typical_price * volume
+    cum_tpv = np.zeros(n)
+    cum_vol = np.zeros(n)
+    running_tpv = 0
+    running_vol = 0
+    for i in range(n):
+        running_tpv += tpv[i]
+        running_vol += volume[i]
+        cum_tpv[i] = running_tpv
+        cum_vol[i] = running_vol
+    vwap = cum_tpv / (cum_vol + 1e-10)
     
-    # === Choppiness Index (14) ===
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    # Sum of TR over 14 periods
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Chop = 100 * log10(tr_sum / (hh - ll)) / log10(14)
-    # Avoid division by zero
-    hh_ll = hh - ll
-    hh_ll = np.where(hh_ll == 0, 1e-10, hh_ll)
-    chop = 100 * np.log10(tr_sum / hh_ll) / np.log10(14)
+    # === Weekly EMA50 for trend filter ===
+    df_1w = get_htf_data(prices, '1w')
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmrow = 30
+    warmup = 50
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(warmrow, n):
+    for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(trix[i]) or 
-            np.isnan(vol_ma[i]) or 
-            np.isnan(chop[i])):
+        if (np.isnan(rsi[i]) or 
+            np.isnan(vwap[i]) or 
+            np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: TRIX crosses above zero, volume spike, trending regime (CHOP < 38.2)
-            if (trix[i] > 0 and trix[i-1] <= 0 and 
-                vol_spike[i] and 
-                chop[i] < 38.2):
+            # Long: RSI < 30, price > VWAP, price above weekly EMA50
+            if (rsi[i] < 30 and 
+                close[i] > vwap[i] and 
+                close[i] > ema_50_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: TRIX crosses below zero, volume spike, trending regime (CHOP < 38.2)
-            elif (trix[i] < 0 and trix[i-1] >= 0 and 
-                  vol_spike[i] and 
-                  chop[i] < 38.2):
+            # Short: RSI > 70, price < VWAP, price below weekly EMA50
+            elif (rsi[i] > 70 and 
+                  close[i] < vwap[i] and 
+                  close[i] < ema_50_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: TRIX crosses below zero OR volume drops below average OR ranging regime (CHOP > 61.8)
-            if (trix[i] < 0 and trix[i-1] >= 0 or 
-                volume[i] < vol_ma[i] or 
-                chop[i] > 61.8):
+            # Exit long: RSI > 50 OR price below weekly EMA50 (trend change)
+            if (rsi[i] > 50 or 
+                close[i] < ema_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -104,10 +97,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: TRIX crosses above zero OR volume drops below average OR ranging regime (CHOP > 61.8)
-            if (trix[i] > 0 and trix[i-1] <= 0 or 
-                volume[i] < vol_ma[i] or 
-                chop[i] > 61.8):
+            # Exit short: RSI < 50 OR price above weekly EMA50 (trend change)
+            if (rsi[i] < 50 or 
+                close[i] > ema_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -116,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_TRIX_VolumeSpike_Regime_v2"
-timeframe = "4h"
+name = "1d_RSI_VWAP_Reversion_v1"
+timeframe = "1d"
 leverage = 1.0
