@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_WRMS_TrendFollow_VolumeConfirm
-Strategy: Wave Root Mean Square trend detection with volume confirmation.
-Long: WRMS > threshold + volume > 1.5x average
-Short: WRMS < -threshold + volume > 1.5x average
-Exit: WRMS crosses zero
+4h_Camarilla_R1_S1_Breakout_Volume_TrendFilter
+Strategy: 4h Camarilla pivot breakout with volume confirmation and 1d trend filter.
+Long: Price breaks above daily S1 + price above 1d EMA34 + volume > 1.5x average
+Short: Price breaks below daily S1 + price below 1d EMA34 + volume > 1.5x average
+Exit: Price moves back inside daily pivot range
 Position size: 0.25
-Designed to capture trending moves with volume confirmation while avoiding choppy markets.
-Timeframe: 12h
+Designed to capture breakouts from daily pivot levels with trend alignment and volume confirmation.
+Timeframe: 4h
 """
 
 import numpy as np
@@ -16,31 +16,35 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate WRMS (Wave Root Mean Square) - detrended price momentum
-    # WRMS = sqrt(mean((price - SMA)^2)) * sign(price - SMA)
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    detrended = close - sma_20
-    squared = detrended ** 2
-    mean_squared = pd.Series(squared).rolling(window=10, min_periods=10).mean().values
-    wrms = np.sqrt(mean_squared) * np.sign(detrended)
+    # Calculate daily EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Volume confirmation (20-period MA)
+    close_series_1d = pd.Series(close_1d)
+    ema34_1d = close_series_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align 1d EMA to 4h timeframe
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume confirmation (20-period MA on 4h)
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # SMA20 + WRMS10
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(wrms[i]) or 
+        if (np.isnan(ema34_1d_aligned[i]) or 
             np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
@@ -48,41 +52,71 @@ def generate_signals(prices):
         # Volume filter: current volume > 1.5x 20-period average
         volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
-        # WRMS thresholds for trend detection
-        wrms_threshold = 0.02  # 2% of price level
+        # Trend filter: price above/below 1d EMA34
+        price_above_ema = close[i] > ema34_1d_aligned[i]
+        price_below_ema = close[i] < ema34_1d_aligned[i]
         
-        wrms_above = wrms[i] > wrms_threshold
-        wrms_below = wrms[i] < -wrms_threshold
-        wrms_cross_zero = wrms[i] * wrms[i-1] <= 0 if i > 0 else False  # crossed zero
-        
-        if position == 0:
-            # Long: WRMS above threshold + volume filter
-            if wrms_above and volume_filter:
-                signals[i] = 0.25
-                position = 1
-            # Short: WRMS below threshold + volume filter
-            elif wrms_below and volume_filter:
-                signals[i] = -0.25
-                position = -1
-        
-        elif position == 1:
-            # Exit long: WRMS crosses below zero
-            if wrms_cross_zero and wrms[i] < 0:
-                signals[i] = 0.0
-                position = 0
+        # Calculate daily pivot and S1 from previous day
+        if i >= 6:  # Need at least 6 4h bars (1 day) to get previous day
+            # Get daily data for S1 calculation
+            df_1d_pivot = get_htf_data(prices, '1d')
+            
+            # Find previous day's index in 1d data
+            current_time = prices['open_time'].iloc[i]
+            prev_day = current_time - pd.Timedelta(days=1)
+            
+            # Get previous day's OHLC from 1d data
+            day_mask = df_1d_pivot['open_time'].dt.date == prev_day.date()
+            if day_mask.any():
+                prev_day_data = df_1d_pivot[day_mask].iloc[0]
+                prev_high = prev_day_data['high']
+                prev_low = prev_day_data['low']
+                prev_close = prev_day_data['close']
+                
+                # Calculate daily pivot and S1
+                pivot = (prev_high + prev_low + prev_close) / 3
+                range_val = prev_high - prev_low
+                if range_val > 0:
+                    s1 = pivot - (range_val * 1.1 / 12)
+                    
+                    # Entry conditions: price breaks above/below S1
+                    price_above_s1 = close[i] > s1
+                    price_below_s1 = close[i] < s1
+                    
+                    if position == 0:
+                        # Long: breaks above S1 + price above EMA + volume filter
+                        if price_above_s1 and price_above_ema and volume_filter:
+                            signals[i] = 0.25
+                            position = 1
+                        # Short: breaks below S1 + price below EMA + volume filter
+                        elif price_below_s1 and price_below_ema and volume_filter:
+                            signals[i] = -0.25
+                            position = -1
+                    
+                    elif position == 1:
+                        # Exit long: price moves back inside pivot range
+                        if close[i] < pivot:
+                            signals[i] = 0.0
+                            position = 0
+                        else:
+                            signals[i] = 0.25
+                    
+                    elif position == -1:
+                        # Exit short: price moves back inside pivot range
+                        if close[i] > pivot:
+                            signals[i] = 0.0
+                            position = 0
+                        else:
+                            signals[i] = -0.25
+                else:
+                    signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             else:
-                signals[i] = 0.25
-        
-        elif position == -1:
-            # Exit short: WRMS crosses above zero
-            if wrms_cross_zero and wrms[i] > 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+                signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        else:
+            signals[i] = 0.0
     
     return signals
 
-name = "12h_WRMS_TrendFollow_VolumeConfirm"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_Volume_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
