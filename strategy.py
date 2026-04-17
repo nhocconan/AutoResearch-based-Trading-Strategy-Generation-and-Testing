@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h timeframe with 1d Williams %R oscillator for mean reversion in ranging markets.
-Long when 1d Williams %R crosses above -80 (oversold) with volume confirmation and price > 4h EMA200 (trend filter).
-Short when 1d Williams %R crosses below -20 (overbought) with volume confirmation and price < 4h EMA200.
-Uses 1d Williams %R for institutional-grade overbought/oversold levels, EMA200 for trend alignment,
-and volume to confirm reversal strength. Designed to work in ranging markets (chop) and avoid strong trends.
+Hypothesis: 12h timeframe with 1d Williams %R for mean reversion + volume confirmation + ADX regime filter.
+Long when price pulls back to oversold Williams %R (< -80) with volume > 1.5x 24-period average and ADX < 25 (range market).
+Short when price rallies to overbought Williams %R (> -20) with volume confirmation and ADX < 25.
+Uses Williams %R from 1d for institutional overbought/oversold levels, volume to confirm mean reversion pressure,
+and ADX to ensure we're in a ranging market where mean reversion works. Designed to work in both bull (buy pullbacks in uptrend within range) 
+and bear (sell rallies in downtrend within range) markets by requiring range regime (ADX < 25).
 """
 
 import numpy as np
@@ -13,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,69 +28,96 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Williams %R: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    # Using 14-period lookback
-    period = 14
-    highest_high = pd.Series(high_1d).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=period, min_periods=period).min().values
-    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid division by zero
+    # Calculate 1d Williams %R (14-period)
+    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14) * -100
+    # Replace division by zero with -50 (neutral)
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
     
-    # Calculate 4h EMA200 for trend filter
-    close_s = pd.Series(close)
-    ema200 = close_s.ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate 12h ADX (14-period) for regime filter
+    # ADX requires +DI and -DI calculation
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    # Pad first element
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
     
-    # Calculate 4h volume 20-period average for confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[0], tr])
     
-    # Align 1d Williams %R to 4h timeframe
+    # Smooth with Wilder's smoothing (alpha = 1/period)
+    def wilders_smooth(data, period):
+        alpha = 1.0 / period
+        result = np.zeros_like(data)
+        result[period-1] = np.mean(data[:period])  # seed with SMA
+        for i in range(period, len(data)):
+            result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+        return result
+    
+    period_adx = 14
+    atr = wilders_smooth(tr, period_adx)
+    plus_di = 100 * wilders_smooth(plus_dm, period_adx) / (atr + 1e-10)
+    minus_di = 100 * wilders_smooth(minus_dm, period_adx) / (atr + 1e-10)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = wilders_smooth(dx, period_adx)
+    
+    # Calculate 12h volume 24-period average for confirmation
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    
+    # Align 1d Williams %R and ADX to 12h timeframe
     williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 200  # need enough for EMA200 and Williams %R
+    start_idx = max(30, 24)  # need enough for Williams %R, ADX, and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(williams_r_aligned[i]) or 
-            np.isnan(ema200[i]) or 
-            np.isnan(vol_ma_20[i])):
+            np.isnan(adx_aligned[i]) or 
+            np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume confirmation: current 12h volume > 1.5x 24-period average
+        volume_confirmed = volume[i] > 1.5 * vol_ma_24[i]
         
-        # Williams %R signals: cross above -80 (oversold) or below -20 (overbought)
-        wr_prev = williams_r_aligned[i-1] if i > 0 else -50
-        wr_curr = williams_r_aligned[i]
+        # Range regime: ADX < 25 (not trending)
+        range_regime = adx_aligned[i] < 25
         
         if position == 0:
-            # Long: Williams %R crosses above -80 from below (exiting oversold) with volume and mild uptrend (price > EMA200)
-            if (wr_prev <= -80 and wr_curr > -80 and 
+            # Long: price pulls back to oversold Williams %R (< -80) with volume and range regime
+            if (williams_r_aligned[i] < -80 and 
                 volume_confirmed and 
-                close[i] > ema200[i]):
+                range_regime):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R crosses below -20 from above (exiting overbought) with volume and mild downtrend (price < EMA200)
-            elif (wr_prev >= -20 and wr_curr < -20 and 
+            # Short: price rallies to overbought Williams %R (> -20) with volume and range regime
+            elif (williams_r_aligned[i] > -20 and 
                   volume_confirmed and 
-                  close[i] < ema200[i]):
+                  range_regime):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Williams %R crosses below -50 (momentum loss) or price breaks above EMA200 too strongly
-            if williams_r_aligned[i] < -50:
+            # Exit long: Williams %R returns to neutral (> -50) or stops oversold
+            if williams_r_aligned[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Williams %R crosses above -50 (momentum loss) or price breaks below EMA200 too strongly
-            if williams_r_aligned[i] > -50:
+            # Exit short: Williams %R returns to neutral (< -50) or stops overbought
+            if williams_r_aligned[i] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dWilliamsR_MeanReversion_Volume_EMA200_TrendFilter"
-timeframe = "4h"
+name = "12h_1dWilliamsR_MeanReversion_Volume_ADXRange"
+timeframe = "12h"
 leverage = 1.0
