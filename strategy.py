@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d timeframe with 1w Williams %R mean reversion + volume spike + chop regime filter.
-Long when weekly Williams %R < -80 (oversold) + daily volume > 2x 20-day average + chop > 61.8 (ranging market).
-Short when weekly Williams %R > -20 (overbought) + daily volume > 2x 20-day average + chop > 61.8 (ranging market).
-Exit when Williams %R returns to -50 (mean reversion) or chop < 38.2 (trending market begins).
-Designed to capture mean reversion in ranging markets during bear/range conditions (2025+) while avoiding chop whipsaws.
-Williams %R identifies extreme oversold/overbought conditions; volume confirms participation; chop filter ensures ranging regime.
+Hypothesis: 6h timeframe with 1d Williams %R mean reversion + volume confirmation + 12h EMA34 trend filter.
+Long when Williams %R(14) crosses above -80 (oversold) with volume confirmation and price > 12h EMA34 (uptrend).
+Short when Williams %R(14) crosses below -20 (overbought) with volume confirmation and price < 12h EMA34 (downtrend).
+Exit when Williams %R returns to -50 (mean) or reverses with volume.
+Williams %R identifies extreme momentum exhaustion, effective in both trending and ranging markets.
+Volume confirmation filters low-conviction moves. 12h EMA34 provides intermediate trend filter.
+Designed for 6h to balance trade frequency and capture multi-session reversals.
 """
 
 import numpy as np
@@ -22,81 +23,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams %R and chop calculation
+    # Get 1d data for Williams %R calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 14-period Williams %R on daily data
+    # Calculate 1d Williams %R(14)
     # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = ((highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)) * -100
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate 1d chopiness index (chop) for regime filter
-    # Chop = 100 * log10(sum(ATR(1) over 14) / log10((max(high14) - min(low14)) * sqrt(14)))
-    tr1 = np.maximum(high_1d[1:] - low_1d[:-1], np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), np.abs(low_1d[:-1] - close_1d[1:])))
-    tr1 = np.concatenate([[np.nan], tr1])  # align with close index
-    atr1 = pd.Series(tr1).rolling(window=1, min_periods=1).sum().values  # ATR(1) = TR
-    sum_atr1_14 = pd.Series(atr1).rolling(window=14, min_periods=14).sum().values
-    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(sum_atr1_14 / ((max_high_14 - min_low_14) * np.sqrt(14))) / np.log10(14)
+    # Calculate 12h EMA34 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    close_12h_series = pd.Series(close_12h)
+    ema34_12h = close_12h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate daily volume 20-period average for confirmation
+    # Calculate 6h volume 20-period average for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align 1d indicators to 1d timeframe (no alignment needed as prices is already 1d)
-    williams_r_aligned = williams_r  # already on 1d timeframe
-    chop_aligned = chop  # already on 1d timeframe
+    # Align 1d and 12h indicators to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 30  # need enough for Williams %R and chop calculations
+    start_idx = 50  # need enough for Williams %R and EMA34
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(williams_r_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or 
+            np.isnan(ema34_12h_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 2x 20-period average
-        volume_confirmed = volume[i] > 2.0 * vol_ma_20[i]
+        # Volume confirmation: current 6h volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Chop regime filter: only trade in ranging markets (chop > 61.8)
-        chop_filter = chop_aligned[i] > 61.8
+        # Williams %R signals: cross above -80 (long), cross below -20 (short)
+        # Use previous bar to detect cross
+        prev_williams = williams_r_aligned[i-1] if i > 0 else williams_r_aligned[i]
+        curr_williams = williams_r_aligned[i]
+        
+        williams_long_signal = prev_williams <= -80 and curr_williams > -80
+        williams_short_signal = prev_williams >= -20 and curr_williams < -20
+        williams_exit_signal = (prev_williams < -50 and curr_williams >= -50) or \
+                               (prev_williams > -50 and curr_williams <= -50)
         
         if position == 0:
-            # Long: Williams %R < -80 (oversold) + volume confirmation + chop regime
-            if (williams_r_aligned[i] < -80 and 
+            # Long: Williams %R crosses above -80 with volume and uptrend (price > EMA34)
+            if (williams_long_signal and 
                 volume_confirmed and 
-                chop_filter):
+                close[i] > ema34_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R > -20 (overbought) + volume confirmation + chop regime
-            elif (williams_r_aligned[i] > -20 and 
+            # Short: Williams %R crosses below -20 with volume and downtrend (price < EMA34)
+            elif (williams_short_signal and 
                   volume_confirmed and 
-                  chop_filter):
+                  close[i] < ema34_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Williams %R returns to -50 OR chop < 38.2 (trending begins)
-            if (williams_r_aligned[i] >= -50 or 
-                chop_aligned[i] < 38.2):
+            # Exit long: Williams %R returns to -50 OR reverses with volume
+            if (williams_exit_signal or 
+                (curr_williams < -20 and volume_confirmed)):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Williams %R returns to -50 OR chop < 38.2 (trending begins)
-            if (williams_r_aligned[i] <= -50 or 
-                chop_aligned[i] < 38.2):
+            # Exit short: Williams %R returns to -50 OR reverses with volume
+            if (williams_exit_signal or 
+                (curr_williams > -80 and volume_confirmed)):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1wWilliamsR_MeanReversion_Volume_Chop_Regime"
-timeframe = "1d"
+name = "6h_1dWilliamsR_MeanReversion_Volume_EMA34_Trend"
+timeframe = "6h"
 leverage = 1.0
