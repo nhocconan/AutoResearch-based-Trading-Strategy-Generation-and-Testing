@@ -1,83 +1,60 @@
 #!/usr/bin/env python3
 """
-4h_ADX_TRIX_Signal_V1
-Strategy: 4h TRIX signal cross + ADX trend filter + volume confirmation.
-Long: TRIX crosses above signal line + ADX > 25 + volume > 1.5x 20-bar avg
-Short: TRIX crosses below signal line + ADX > 25 + volume > 1.5x 20-bar avg
-Exit: TRIX crosses back through signal line (mean reversion within trend)
-Position size: 0.25
-Uses TRIX(12) for momentum, ADX(14) for trend strength, volume for confirmation.
-Designed to work in both bull and bear markets by requiring trending conditions (ADX > 25).
+1h_HMA21_Cross_4hTrend_1dVolumeFilter
+Strategy: 1h HMA(21) cross with 4h trend filter and 1d volume spike confirmation.
+Long: HMA(21) crosses above price + 4h close > 4h HMA(21) + 1d volume > 1.5x 20-day avg
+Short: HMA(21) crosses below price + 4h close < 4h HMA(21) + 1d volume > 1.5x 20-day avg
+Exit: Opposite HMA cross
+Position size: 0.20
+Uses HMA for smooth trend following, 4h for trend direction, 1d volume for conviction.
+Avoids whipsaws by requiring alignment across timeframes and volume confirmation.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def hull_moving_average(series, period):
+    """Calculate Hull Moving Average"""
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
+    
+    wma1 = pd.Series(series).rolling(window=half_period, min_periods=half_period).mean()
+    wma2 = pd.Series(series).rolling(window=period, min_periods=period).mean()
+    raw_hma = 2 * wma1 - wma2
+    hma = pd.Series(raw_hma).rolling(window=sqrt_period, min_periods=sqrt_period).mean()
+    return hma.values
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Calculate TRIX(12) on close prices
-    # TRIX = EMA(EMA(EMA(close, 12), 12), 12)
-    # Signal line = EMA(TRIX, 9)
-    ema1 = pd.Series(close).ewm(span=12, adjust=False).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False).mean().values
-    trix = 100 * (pd.Series(ema3).ewm(span=12, adjust=False).mean().values - 
-                  np.roll(pd.Series(ema3).ewm(span=12, adjust=False).mean().values, 1)) / \
-           np.roll(pd.Series(ema3).ewm(span=12, adjust=False).mean().values, 1)
-    trix[0] = 0  # first value has no previous
-    
-    # Signal line: EMA of TRIX
-    signal_line = pd.Series(trix).ewm(span=9, adjust=False).mean().values
-    
-    # Calculate ADX(14)
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    plus_dm = np.where((high - prev_high) > (prev_low - low), np.maximum(high - prev_high, 0), 0)
-    minus_dm = np.where((prev_low - low) > (high - prev_high), np.maximum(prev_low - low, 0), 0)
-    tr = np.maximum(np.maximum(high - low, np.abs(high - prev_close)), np.abs(low - prev_close))
+    # Get 1d data for volume filter
+    df_1d = get_htf_data(prices, '1d')
+    volume_1d = df_1d['volume'].values
     
-    # Wilder's smoothing
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            result[period-1] = np.nansum(data[:period])
-            for i in range(period, len(data)):
-                result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
+    # Calculate HMA(21) on 1h
+    hma_21 = hull_moving_average(close, 21)
     
-    tr14 = wilders_smooth(tr, 14)
-    plus_dm14 = wilders_smooth(plus_dm, 14)
-    minus_dm14 = wilders_smooth(minus_dm, 14)
+    # Calculate HMA(21) on 4h for trend filter
+    hma_21_4h = hull_moving_average(close_4h, 21)
     
-    plus_di14 = np.where(tr14 != 0, 100 * plus_dm14 / tr14, 0)
-    minus_di14 = np.where(tr14 != 0, 100 * minus_dm14 / tr14, 0)
-    dx = np.where((plus_di14 + minus_di14) != 0, 
-                  100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14), 0)
-    adx = wilders_smooth(dx, 14)
+    # Calculate 20-day average volume on 1d
+    volume_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Volume confirmation: 20-period moving average
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Align indicators to ensure proper timing
-    trix_aligned = align_htf_to_ltf(prices, prices, trix)
-    signal_line_aligned = align_htf_to_ltf(prices, prices, signal_line)
-    adx_aligned = align_htf_to_ltf(prices, prices, adx)
-    volume_ma20_aligned = align_htf_to_ltf(prices, prices, volume_ma20)
+    # Align indicators to 1h timeframe
+    hma_21_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_21_4h)
+    volume_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -85,54 +62,58 @@ def generate_signals(prices):
     # Precompute session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    for i in range(40, n):  # warmup for TRIX and ADX
+    for i in range(50, n):  # warmup for HMA calculations
         # Session filter: 08-20 UTC
         if not (8 <= hours[i] <= 20):
             signals[i] = 0.0
             continue
         
         # Skip if any required data is not available
-        if (np.isnan(trix_aligned[i]) or np.isnan(signal_line_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(volume_ma20_aligned[i])):
+        if (np.isnan(hma_21[i]) or np.isnan(hma_21_4h_aligned[i]) or 
+            np.isnan(volume_ma20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter
-        volume_filter = volume[i] > (1.5 * volume_ma20_aligned[i])
-        trend_filter = adx_aligned[i] > 25  # trending market
+        # Current 1d volume aligned to 1h
+        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
+        volume_filter = vol_1d_current > (1.5 * volume_ma20_1d_aligned[i])
         
-        # TRIX cross signals
-        trix_cross_up = trix_aligned[i] > signal_line_aligned[i] and trix_aligned[i-1] <= signal_line_aligned[i-1]
-        trix_cross_down = trix_aligned[i] < signal_line_aligned[i] and trix_aligned[i-1] >= signal_line_aligned[i-1]
+        # Trend filter: 4h close vs 4h HMA(21)
+        uptrend_4h = close_4h[-1] > hma_21_4h[-1] if len(close_4h) > 0 else False
+        downtrend_4h = close_4h[-1] < hma_21_4h[-1] if len(close_4h) > 0 else False
+        
+        # HMA cross signals
+        hma_cross_up = close[i] > hma_21[i] and close[i-1] <= hma_21[i-1]
+        hma_cross_down = close[i] < hma_21[i] and close[i-1] >= hma_21[i-1]
         
         if position == 0:
-            # Long: TRIX crosses above signal + volume + trend
-            if trix_cross_up and volume_filter and trend_filter:
-                signals[i] = 0.25
+            # Long: HMA cross up + 4h uptrend + volume spike
+            if hma_cross_up and uptrend_4h and volume_filter:
+                signals[i] = 0.20
                 position = 1
-            # Short: TRIX crosses below signal + volume + trend
-            elif trix_cross_down and volume_filter and trend_filter:
-                signals[i] = -0.25
+            # Short: HMA cross down + 4h downtrend + volume spike
+            elif hma_cross_down and downtrend_4h and volume_filter:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: TRIX crosses back below signal line
-            if trix_cross_down:
+            # Exit long: HMA cross down
+            if hma_cross_down:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: TRIX crosses back above signal line
-            if trix_cross_up:
+            # Exit short: HMA cross up
+            if hma_cross_up:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_ADX_TRIX_Signal_V1"
-timeframe = "4h"
+name = "1h_HMA21_Cross_4hTrend_1dVolumeFilter"
+timeframe = "1h"
 leverage = 1.0
