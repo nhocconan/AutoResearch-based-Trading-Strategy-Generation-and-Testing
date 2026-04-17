@@ -1,9 +1,3 @@
-# 4h_Pivot_R1_S1_Breakout_Volume_Filter
-# Pivot point breakout with volume confirmation for trend following in both bull and bear markets
-# Uses daily pivot levels (R1, S1) from prior day with volume filter
-# Entry on break of pivot levels with volume confirmation, exit on reversal
-# Target: 20-50 trades/year to minimize fee drag, works in trending and ranging markets
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -11,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,37 +13,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for trend filter (EMA34)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Calculate daily pivot points: P = (H + L + C)/3
-    # R1 = 2*P - L, S1 = 2*P - H
+    # Get daily data for Donchian channel (20-day)
+    df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
+    # Calculate Donchian upper/lower bands (20-period)
+    high_max_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_upper = align_htf_to_ltf(prices, df_1d, high_max_20)
+    donchian_lower = align_htf_to_ltf(prices, df_1d, low_min_20)
     
-    # Align pivot levels to 4h timeframe (previous day's levels)
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # Volume filter: current volume > 1.5 * 20-period average
+    # Volume filter: current volume > 1.5 * 20-day average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 20  # Need volume MA
+    start_idx = 40  # Need weekly EMA, daily Donchian, volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_4h[i]) or 
-            np.isnan(r1_4h[i]) or 
-            np.isnan(s1_4h[i]) or 
+        if (np.isnan(ema34_1w_aligned[i]) or 
+            np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or 
             np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
@@ -58,26 +51,26 @@ def generate_signals(prices):
         volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
         if position == 0:
-            # Long: Break above R1 with volume
-            if close[i] > r1_4h[i] and volume_filter:
+            # Long: Price breaks above Donchian upper AND above weekly EMA34 with volume
+            if (close[i] > donchian_upper[i] and close[i] > ema34_1w_aligned[i] and volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S1 with volume
-            elif close[i] < s1_4h[i] and volume_filter:
+            # Short: Price breaks below Donchian lower AND below weekly EMA34 with volume
+            elif (close[i] < donchian_lower[i] and close[i] < ema34_1w_aligned[i] and volume_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price falls back below pivot point
-            if close[i] < pivot_4h[i]:
+            # Exit long: Price closes below Donchian lower
+            if close[i] < donchian_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price rises back above pivot point
-            if close[i] > pivot_4h[i]:
+            # Exit short: Price closes above Donchian upper
+            if close[i] > donchian_upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -85,6 +78,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Pivot_R1_S1_Breakout_Volume_Filter"
-timeframe = "4h"
+name = "1d_Donchian20_WeeklyEMA34_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
