@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Pivot_R1_S1_Breakout_VolumeSpike_v1
-Trades Camarilla pivot levels (R1/S1) from daily high/low/close with volume spike confirmation.
-Long when price breaks above R1 with volume > 1.5x 20-period average.
-Short when price breaks below S1 with volume > 1.5x 20-period average.
-Exit when price returns to daily pivot (PP) or reverses to opposite level.
-Uses daily Camarilla levels for structure, 4h for entry timing.
-Target: 20-50 trades/year to stay under fee drag threshold.
+6h_Camarilla_R1_S1_Breakout_Volume_Momentum_v1
+Breakout at Camarilla R1/S1 with volume confirmation and momentum filter (ROC).
+Uses 12h trend filter: price above/below 12h EMA34.
+Exit when price crosses back below/above R1/S1 or momentum weakens.
+Designed to capture breakouts with institutional volume and trend alignment.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -23,30 +22,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Daily Camarilla Pivot Levels ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # === Camarilla Pivot Levels from previous day ===
+    # Calculate using previous day's OHLC
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    # First bar: use current values as fallback
+    prev_close[0] = close[0]
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
     
-    # Calculate Camarilla levels from previous day
-    ph = df_1d['high'].values
-    pl = df_1d['low'].values
-    pc = df_1d['close'].values
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_ = prev_high - prev_low
+    r1 = pivot + (range_ * 1.1 / 12)
+    s1 = pivot - (range_ * 1.1 / 12)
+    r4 = pivot + (range_ * 1.1 / 2)
+    s4 = pivot - (range_ * 1.1 / 2)
     
-    # Pivot point
-    pp = (ph + pl + pc) / 3
-    # R1 and S1 levels
-    r1 = pc + (ph - pl) * 1.1 / 12
-    s1 = pc - (ph - pl) * 1.1 / 12
+    # === ROC(10) for momentum ===
+    roc = np.zeros_like(close)
+    roc[10:] = (close[10:] - close[:-10]) / close[:-10] * 100
     
-    # Align to 4h timeframe (use previous day's levels)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # === Volume Spike Filter ===
+    # === Volume spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / (vol_ma + 1e-10)
+    
+    # === 12h EMA34 for trend filter ===
+    df_12h = get_htf_data(prices, '12h')
+    ema_34_12h = pd.Series(df_12h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
     signals = np.zeros(n)
     
@@ -58,34 +62,37 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(pp_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(r1[i]) or np.isnan(s1[i]) or 
+            np.isnan(roc[i]) or np.isnan(vol_ratio[i]) or 
+            np.isnan(ema_34_12h_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price breaks above R1 with volume spike
-            if (close[i] > r1_aligned[i] and 
-                vol_ratio[i] > 1.5):
+            # Long: price breaks above R1, volume spike, positive momentum, above 12h EMA34
+            if (close[i] > r1[i] and 
+                vol_ratio[i] > 1.5 and 
+                roc[i] > 0 and 
+                close[i] > ema_34_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price breaks below S1 with volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  vol_ratio[i] > 1.5):
+            # Short: price breaks below S1, volume spike, negative momentum, below 12h EMA34
+            elif (close[i] < s1[i] and 
+                  vol_ratio[i] > 1.5 and 
+                  roc[i] < 0 and 
+                  close[i] < ema_34_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price returns to pivot PP or breaks below S1
-            if (close[i] <= pp_aligned[i] or 
-                close[i] < s1_aligned[i]):
+            # Exit long: price crosses back below R1 OR momentum turns negative
+            if (close[i] < r1[i] or 
+                roc[i] < 0):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -93,9 +100,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to pivot PP or breaks above R1
-            if (close[i] >= pp_aligned[i] or 
-                close[i] > r1_aligned[i]):
+            # Exit short: price crosses back above S1 OR momentum turns positive
+            if (close[i] > s1[i] or 
+                roc[i] > 0):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -104,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Pivot_R1_S1_Breakout_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_Camarilla_R1_S1_Breakout_Volume_Momentum_v1"
+timeframe = "6h"
 leverage = 1.0
