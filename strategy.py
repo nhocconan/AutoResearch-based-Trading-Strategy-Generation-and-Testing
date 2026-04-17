@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray (Bull/Bear Power) + 12h EMA50 regime filter + volume spike confirmation.
-Long when Bull Power > 0 AND EMA50 rising AND volume > 2x average.
-Short when Bear Power < 0 AND EMA50 falling AND volume > 2x average.
-Exit when Elder Power reverses OR volume drops below average.
-Uses 6h for Elder Ray calculation and 12h for EMA50 regime filter to reduce whipsaw.
-Target: 50-150 total trades over 4 years (12-37/year). Elder Ray measures bull/bear strength,
-volume confirms conviction, EMA50 regime ensures trading with higher timeframe trend.
-Works in bull markets (captures strength on dips) and bear markets (captures weakness on rallies).
+Hypothesis: 12h Donchian(20) breakout + 1d volume confirmation + 1d choppiness regime filter.
+Long when price breaks above Donchian upper band AND volume > 1.3x average AND chop < 61.8 (trending).
+Short when price breaks below Donchian lower band AND volume > 1.3x average AND chop < 61.8.
+Exit when price reverts to Donchian middle (20-period mean) or chop > 61.8 (choppy market).
+Uses 12h for price action and 1d for volume/chop filters to reduce noise and whipsaw.
+Target: 50-150 total trades over 4 years (12-37/year). Donchian breakouts capture trends,
+volume confirmation filters fakeouts, chop filter avoids ranging markets.
+Works in bull markets (captures uptrends) and bear markets (captures downtrends).
 """
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,80 +24,106 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 6h data for Elder Ray calculation
-    df_6h = get_htf_data(prices, '6h')
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
-    volume_6h = df_6h['volume'].values
-    
-    # Get 12h data for EMA50 regime filter
+    # Get 12h data for Donchian calculation (primary timeframe)
     df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     
-    # Calculate EMA13 and EMA (for Elder Ray)
-    close_6h_series = pd.Series(close_6h)
-    ema13 = close_6h_series.ewm(span=13, adjust=False, min_periods=13).mean().values
-    # Bear Power = Low - EMA13
-    bear_power = low_6h - ema13
-    # Bull Power = High - EMA13
-    bull_power = high_6h - ema13
+    # Calculate Donchian channels on 12h timeframe (20-period)
+    high_12h_series = pd.Series(high_12h)
+    low_12h_series = pd.Series(low_12h)
+    donchian_upper = high_12h_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_12h_series.rolling(window=20, min_periods=20).min().values
+    donchian_middle = ((donchian_upper + donchian_lower) / 2).values
     
-    # Calculate EMA50 on 12h
-    close_12h_series = pd.Series(close_12h)
-    ema50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Get 1d data for volume and choppiness filters (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Align 6h Elder Power to 6h timeframe (no alignment needed)
-    bull_power_aligned = bull_power
-    bear_power_aligned = bear_power
+    # Calculate 1d volume average (20-period)
+    volume_1d_series = pd.Series(volume_1d)
+    volume_ma_1d = volume_1d_series.rolling(window=20, min_periods=20).mean().values
     
-    # Align 12h EMA50 to 6h timeframe
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Calculate choppiness index on 1d timeframe (14-period)
+    high_1d_series = pd.Series(high_1d)
+    low_1d_series = pd.Series(low_1d)
+    close_1d_series = pd.Series(close_1d)
     
-    # Volume average (20-period) on 6h
-    volume_ma = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_6h, volume_ma)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    
+    # ATR (14-period)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Highest high and lowest low over 14 periods
+    hh = high_1d_series.rolling(window=14, min_periods=14).max().values
+    ll = low_1d_series.rolling(window=14, min_periods=14).min().values
+    
+    # Chop = 100 * log10(sum(atr)/log(hh/ll)) / log10(14)
+    sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    ratio = hh / ll
+    ratio = np.where(ratio <= 1, 1.001, ratio)  # avoid division by zero or log<=0
+    chop = 100 * (np.log10(sum_atr) - np.log10(ratio)) / np.log10(14)
+    
+    # Align 12h Donchian to 12h timeframe (no alignment needed)
+    donchian_upper_aligned = donchian_upper
+    donchian_lower_aligned = donchian_lower
+    donchian_middle_aligned = donchian_middle
+    
+    # Align 1d volume MA and chop to 12h timeframe
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 100  # warmup for indicators
+    start_idx = 50  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(volume_ma_aligned[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(donchian_middle_aligned[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(volume_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        bp = bull_power_aligned[i]
-        br = bear_power_aligned[i]
-        ema50 = ema50_12h_aligned[i]
+        du = donchian_upper_aligned[i]
+        dl = donchian_lower_aligned[i]
+        dm = donchian_middle_aligned[i]
+        chop_val = chop_aligned[i]
         vol_ma = volume_ma_aligned[i]
         vol = volume[i]
-        prev_ema50 = ema50_12h_aligned[i-1] if i > 0 else ema50
+        price = close[i]
         
         if position == 0:
-            # Long: Bull Power > 0 AND EMA50 rising AND volume > 2x average
-            if bp > 0 and ema50 > prev_ema50 and vol > 2.0 * vol_ma:
+            # Long: price > Donchian upper AND volume > 1.3x avg AND chop < 61.8 (trending)
+            if price > du and vol > 1.3 * vol_ma and chop_val < 61.8:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 AND EMA50 falling AND volume > 2x average
-            elif br < 0 and ema50 < prev_ema50 and vol > 2.0 * vol_ma:
+            # Short: price < Donchian lower AND volume > 1.3x avg AND chop < 61.8 (trending)
+            elif price < dl and vol > 1.3 * vol_ma and chop_val < 61.8:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Bull Power < 0 OR EMA50 falling OR volume drops below average
-            if bp < 0 or ema50 < prev_ema50 or vol < vol_ma:
+            # Exit long: price < Donchian middle OR chop > 61.8 (choppy market)
+            if price < dm or chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Bear Power > 0 OR EMA50 rising OR volume drops below average
-            if br > 0 or ema50 > prev_ema50 or vol < vol_ma:
+            # Exit short: price > Donchian middle OR chop > 61.8 (choppy market)
+            if price > dm or chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_12hEMA50_Regime_VolumeSpike"
-timeframe = "6h"
+name = "12h_Donchian20_Volume_Chop_Filter"
+timeframe = "12h"
 leverage = 1.0
