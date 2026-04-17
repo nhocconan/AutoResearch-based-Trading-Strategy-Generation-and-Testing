@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_1d_Pivot_R1_S1_Breakout_Volume_MR
-Strategy: 12h Camarilla Pivot (R1/S1) breakout with volume confirmation and mean-reversion filter.
-- Long when price breaks above R1 + volume > 1.8x 12-period avg + price < S1 (mean-reversion setup)
-- Short when price breaks below S1 + volume > 1.8x 12-period avg + price > R1 (mean-reversion setup)
-- Exit when price reaches opposite pivot level (S1 for long, R1 for short) or midpoint
+4h_Keltner_Channel_20_MeanReversion
+Strategy: Mean reversion at Keltner Channel bands with volume confirmation and 1D trend filter.
+- Long when price touches lower Keltner Channel (20, 2.0) + volume > 1.5x 20-period avg + 1D close > 1D EMA50
+- Short when price touches upper Keltner Channel (20, 2.0) + volume > 1.5x 20-period avg + 1D close < 1D EMA50
+- Exit when price returns to 20-period EMA or opposite touch occurs
 - Position size: ±0.25
-- Uses 12h timeframe as primary with 1d for Pivot levels
+- Uses 4h timeframe as primary with 1D for trend filter
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,74 +23,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Pivot levels (Camarilla)
+    # Calculate EMA20 for Keltner middle line
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Calculate ATR(20) for Keltner width
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr20 = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Keltner Channel bands
+    kc_upper = ema20 + (2.0 * atr20)
+    kc_lower = ema20 - (2.0 * atr20)
+    
+    # Volume confirmation (20-period MA)
+    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Get 1D data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for 1d
-    # Pivot = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    # Calculate 1D EMA50 for trend filter
+    close_series_1d = pd.Series(close_1d)
+    ema50_1d = close_series_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d Pivot levels to 12h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # Volume confirmation (12-period MA on 12h)
-    volume_ma12 = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    # Align 1D EMA to 4h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = max(12, 12)  # volume MA12, 1d data
+    start_idx = max(20, 20, 50)  # EMA20, ATR20, volume MA20, EMA50
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_1d_aligned[i]) or 
-            np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(volume_ma12[i])):
+        if (np.isnan(ema20[i]) or 
+            np.isnan(kc_upper[i]) or 
+            np.isnan(kc_lower[i]) or 
+            np.isnan(volume_ma20[i]) or 
+            np.isnan(ema50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.8x 12-period average
-        volume_filter = volume[i] > (1.8 * volume_ma12[i])
+        # Volume filter: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
-        # Breakout conditions
-        breakout_r1 = close[i] > r1_1d_aligned[i]  # break above R1
-        breakout_s1 = close[i] < s1_1d_aligned[i]  # break below S1
+        # Keltner Channel touch conditions
+        touch_lower = low[i] <= kc_lower[i]  # touch or penetrate lower band
+        touch_upper = high[i] >= kc_upper[i]  # touch or penetrate upper band
         
-        # Mean-reversion condition: price near opposite level
-        near_s1 = abs(close[i] - s1_1d_aligned[i]) < 0.005 * close[i]  # within 0.5% of S1
-        near_r1 = abs(close[i] - r1_1d_aligned[i]) < 0.005 * close[i]  # within 0.5% of R1
+        # Return to EMA20 for exit
+        return_to_ema = abs(close[i] - ema20[i]) < (0.001 * ema20[i])  # within 0.1% of EMA20
         
         if position == 0:
-            # Long: breakout above R1 + volume filter + price near S1 (mean-reversion setup)
-            if breakout_r1 and volume_filter and near_s1:
+            # Long: touch lower band + volume filter + 1D uptrend
+            if touch_lower and volume_filter and close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below S1 + volume filter + price near R1 (mean-reversion setup)
-            elif breakout_s1 and volume_filter and near_r1:
+            # Short: touch upper band + volume filter + 1D downtrend
+            elif touch_upper and volume_filter and close[i] < ema50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price reaches S1 or breaks below R1
-            if near_s1 or close[i] < r1_1d_aligned[i]:
+            # Exit long: return to EMA20 or opposite touch
+            if return_to_ema or touch_upper:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price reaches R1 or breaks above S1
-            if near_r1 or close[i] > s1_1d_aligned[i]:
+            # Exit short: return to EMA20 or opposite touch
+            if return_to_ema or touch_lower:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Pivot_R1_S1_Breakout_Volume_MR"
-timeframe = "12h"
+name = "4h_Keltner_Channel_20_MeanReversion"
+timeframe = "4h"
 leverage = 1.0
