@@ -3,114 +3,93 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator + Elder Ray (Bull/Bear Power) with 12h trend filter.
-# Uses Williams Alligator (3 SMAs: Jaw 13, Teeth 8, Lips 5) to identify trend absence.
-# Elder Ray measures bull/bear power via EMA13.
-# Enters long when: Alligator aligned (Lips>Teeth>Jaw) AND Bull Power > 0 AND price > 12h EMA50.
-# Enters short when: Alligator aligned (Lips<Teeth<Jaw) AND Bear Power < 0 AND price < 12h EMA50.
-# Designed to capture strong trends while avoiding whipsaws in ranging markets.
-# Works in bull markets (strong uptrends) and bear markets (strong downtrends).
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA200 trend filter and volume confirmation.
+# Enters long when price breaks above Donchian upper band with volume and above 1d EMA200.
+# Enters short when price breaks below Donchian lower band with volume and below 1d EMA200.
+# Exits when price crosses back below/above Donchian mid-band or reverses trend.
+# Designed to capture strong breakouts with low turnover (target: 19-50 trades/year).
+# Works in bull markets (breakout momentum) and bear markets (trend filter avoids false breakouts).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 12h data for Williams Alligator calculation
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Get 1d data for EMA200 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate Williams Alligator components (SMAs)
-    # Jaw: 13-period SMMA (smoothed moving average) of median price
-    # Teeth: 8-period SMMA of median price
-    # Lips: 5-period SMMA of median price
-    median_price_12h = (high_12h + low_12h) / 2
+    # Calculate 1d EMA200 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # SMMA calculation (similar to Wilder's smoothing)
-    def smma(arr, period):
-        result = np.full_like(arr, np.nan, dtype=float)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: (prev*(period-1) + current) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Align 1d EMA200 to 4h timeframe
+    ema200_4h = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    jaw = smma(median_price_12h, 13)
-    teeth = smma(median_price_12h, 8)
-    lips = smma(median_price_12h, 5)
+    # Calculate Donchian channels (20-period) on 4h data
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_upper = high_roll
+    donchian_lower = low_roll
+    donchian_middle = (donchian_upper + donchian_lower) / 2
     
-    # Calculate Elder Ray (Bull/Bear Power) using EMA13
-    close_12h_series = pd.Series(close_12h)
-    ema13_12h = close_12h_series.ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    bull_power = high_12h - ema13_12h  # Bull Power = High - EMA13
-    bear_power = low_12h - ema13_12h   # Bear Power = Low - EMA13
-    
-    # Calculate 12h EMA50 for trend filter
-    ema50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 12h indicators to 6h timeframe
-    jaw_6h = align_htf_to_ltf(prices, df_12h, jaw)
-    teeth_6h = align_htf_to_ltf(prices, df_12h, teeth)
-    lips_6h = align_htf_to_ltf(prices, df_12h, lips)
-    bull_power_6h = align_htf_to_ltf(prices, df_12h, bull_power)
-    bear_power_6h = align_htf_to_ltf(prices, df_12h, bear_power)
-    ema50_12h_6h = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Volume filter: current volume > 1.8 * 20-period average
+    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 60  # Need sufficient data for all indicators
+    start_idx = 200  # Need sufficient data for EMA200
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(jaw_6h[i]) or np.isnan(teeth_6h[i]) or np.isnan(lips_6h[i]) or
-            np.isnan(bull_power_6h[i]) or np.isnan(bear_power_6h[i]) or np.isnan(ema50_12h_6h[i])):
+        if (np.isnan(ema200_4h[i]) or 
+            np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or 
+            np.isnan(donchian_middle[i]) or 
+            np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Williams Alligator alignment signals
-        alligator_long = (lips_6h[i] > teeth_6h[i]) and (teeth_6h[i] > jaw_6h[i])  # Lips > Teeth > Jaw
-        alligator_short = (lips_6h[i] < teeth_6h[i]) and (teeth_6h[i] < jaw_6h[i])  # Lips < Teeth < Jaw
+        # Volume filter: spike > 1.8x average (strict to reduce trades)
+        volume_filter = volume[i] > (1.8 * volume_ma20[i])
         
-        # Elder Ray signals
-        bull_power_positive = bull_power_6h[i] > 0
-        bear_power_negative = bear_power_6h[i] < 0
+        # Trend filter: price above/below 1d EMA200
+        price_above_ema = close[i] > ema200_4h[i]
+        price_below_ema = close[i] < ema200_4h[i]
         
-        # Price relative to 12h EMA50
-        price_above_ema = close[i] > ema50_12h_6h[i]
-        price_below_ema = close[i] < ema50_12h_6h[i]
+        # Price relative to Donchian channels
+        price_above_upper = close[i] > donchian_upper[i]
+        price_below_lower = close[i] < donchian_lower[i]
+        price_above_middle = close[i] > donchian_middle[i]
+        price_below_middle = close[i] < donchian_middle[i]
         
         if position == 0:
-            # Long: Alligator aligned up AND Bull Power positive AND price above EMA50
-            if alligator_long and bull_power_positive and price_above_ema:
+            # Long: Price breaks above Donchian upper band with volume and above 1d EMA200
+            if (price_above_upper and price_above_ema and volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: Alligator aligned down AND Bear Power negative AND price below EMA50
-            elif alligator_short and bear_power_negative and price_below_ema:
+            # Short: Price breaks below Donchian lower band with volume and below 1d EMA200
+            elif (price_below_lower and price_below_ema and volume_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Alligator alignment breaks OR Bear Power turns negative
-            if not alligator_long or bear_power_6h[i] >= 0:
+            # Exit long: Price crosses below Donchian middle OR below 1d EMA200
+            if (price_below_middle) or (not price_above_ema):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Alligator alignment breaks OR Bull Power turns positive
-            if not alligator_short or bull_power_6h[i] <= 0:
+            # Exit short: Price crosses above Donchian middle OR above 1d EMA200
+            if (price_above_middle) or (not price_below_ema):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -118,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsAlligator_ElderRay_12hEMA50"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA200_Volume"
+timeframe = "4h"
 leverage = 1.0
