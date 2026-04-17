@@ -3,6 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 12h Camarilla pivot breakout with volume and volatility filters
+# Pivot levels act as strong support/resistance; breakouts with volume confirm institutional interest
+# Volatility filter avoids low-volatility false breakouts
+# Works in bull/bear: breakouts capture momentum in trends, reversals capture mean reversion in ranges
+# Target: 50-150 total trades over 4 years (12-37/year)
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -13,84 +19,107 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Elder Ray calculation
+    # Get daily data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA13 of daily close for Elder Ray
-    close_1d_series = pd.Series(close_1d)
-    ema13_1d = close_1d_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate daily Camarilla pivot levels
+    # Camarilla: R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, R2 = C + (H-L)*1.1/6, R1 = C + (H-L)*1.1/12
+    # S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
+    # Using R3/S3 and R1/S1 for breakout/reversal signals
+    hl_range = high_1d - low_1d
+    r1 = close_1d + (hl_range * 1.1 / 12)
+    r2 = close_1d + (hl_range * 1.1 / 6)
+    r3 = close_1d + (hl_range * 1.1 / 4)
+    r4 = close_1d + (hl_range * 1.1 / 2)
+    s1 = close_1d - (hl_range * 1.1 / 12)
+    s2 = close_1d - (hl_range * 1.1 / 6)
+    s3 = close_1d - (hl_range * 1.1 / 4)
+    s4 = close_1d - (hl_range * 1.1 / 2)
     
-    # Calculate Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power_1d = high_1d - ema13_1d
-    bear_power_1d = low_1d - ema13_1d
+    # Shift to use previous day's pivots (avoid look-ahead)
+    r1_prev = np.roll(r1, 1)
+    s1_prev = np.roll(s1, 1)
+    r3_prev = np.roll(r3, 1)
+    s3_prev = np.roll(s3, 1)
+    r1_prev[0] = np.nan
+    s1_prev[0] = np.nan
+    r3_prev[0] = np.nan
+    s3_prev[0] = np.nan
     
-    # Align Elder Ray components to 6h timeframe (use previous day's values to avoid look-ahead)
-    bull_power_1d_prev = np.roll(bull_power_1d, 1)
-    bear_power_1d_prev = np.roll(bear_power_1d, 1)
-    bull_power_1d_prev[0] = np.nan
-    bear_power_1d_prev[0] = np.nan
+    # Align daily pivot levels to 12h timeframe
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1_prev)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1_prev)
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3_prev)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3_prev)
     
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d_prev)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d_prev)
+    # Volume confirmation: current volume > 1.5 * 4-period average (12h * 4 = 24h)
+    volume_ma4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
-    # Calculate 6-period RSI on 6h close for momentum confirmation
-    close_series = pd.Series(close)
-    delta = close_series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/6, adjust=False, min_periods=6).mean()
-    avg_loss = loss.ewm(alpha=1/6, adjust=False, min_periods=6).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
-    
-    # Volume filter: current volume > 1.3 * 20-period average
-    volume_series = pd.Series(volume)
-    volume_ma20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    # Volatility filter: ATR > 10-period ATR average (avoid low volatility)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = np.nan
+    tr2[0] = np.nan
+    tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma10 = pd.Series(atr).rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 20  # Need volume MA20 and RSI warmup
+    start_idx = 14  # Need ATR and ATR MA10
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(volume_ma20[i])):
+        if (np.isnan(volume_ma4[i]) or 
+            np.isnan(atr[i]) or 
+            np.isnan(atr_ma10[i]) or 
+            np.isnan(r1_12h[i]) or 
+            np.isnan(s1_12h[i]) or
+            np.isnan(r3_12h[i]) or 
+            np.isnan(s3_12h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.3x 20-period average
-        volume_filter = volume[i] > (1.3 * volume_ma20[i])
-        # RSI filter: avoid extremes (30 < RSI < 70) to reduce whipsaw
-        rsi_filter = (rsi[i] > 30) & (rsi[i] < 70)
+        # Volume filter: current volume > 1.5x 4-period average
+        volume_filter = volume[i] > (1.5 * volume_ma4[i])
+        # Volatility filter: ATR > ATR MA10 (avoid low volatility)
+        volatility_filter = atr[i] > atr_ma10[i]
         
         if position == 0:
-            # Long: Bull Power > 0 (bullish momentum) with volume and RSI filter
-            if bull_power_aligned[i] > 0 and volume_filter and rsi_filter:
+            # Long: price breaks above R3 with volume and volatility (strong breakout)
+            if close[i] > r3_12h[i] and volume_filter and volatility_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 (bearish momentum) with volume and RSI filter
-            elif bear_power_aligned[i] < 0 and volume_filter and rsi_filter:
+            # Short: price breaks below S3 with volume and volatility (strong breakdown)
+            elif close[i] < s3_12h[i] and volume_filter and volatility_filter:
+                signals[i] = -0.25
+                position = -1
+            # Long reversal: price rejects S1 and moves back above it (bullish rejection)
+            elif close[i] > s1_12h[i] and low[i] < s1_12h[i] and volume_filter and volatility_filter:
+                signals[i] = 0.25
+                position = 1
+            # Short reversal: price rejects R1 and moves back below it (bearish rejection)
+            elif close[i] < r1_12h[i] and high[i] > r1_12h[i] and volume_filter and volatility_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Bull Power turns negative or volume/RSI filter fails
-            if bull_power_aligned[i] <= 0 or not volume_filter or not rsi_filter:
+            # Exit long: price returns below R1 or volatility drops
+            if close[i] < r1_12h[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Bear Power turns positive or volume/RSI filter fails
-            if bear_power_aligned[i] >= 0 or not volume_filter or not rsi_filter:
+            # Exit short: price returns above S1 or volatility drops
+            if close[i] > s1_12h[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_RSI_VolumeFilter"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_Rejection_Vol"
+timeframe = "12h"
 leverage = 1.0
