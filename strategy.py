@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-1h Volume-Weighted MACD with 4h Trend Filter
-Long: MACD histogram crosses above zero AND price above 4h EMA(20) AND volume > 1.5x 1h volume SMA(20)
-Short: MACD histogram crosses below zero AND price below 4h EMA(20) AND volume > 1.5x 1h volume SMA(20)
-Exit: MACD histogram crosses back to opposite side of zero
-Uses 4h EMA for trend direction, MACD for momentum, volume for confirmation
-Target: 15-30 trades/year per symbol (60-120 total over 4 years)
+12h Prior Day High/Low Breakout with Volume Spike and Trend Filter
+Long: Close breaks above prior day high AND volume > 2x 12h volume SMA(20) AND price > 1d EMA(50)
+Short: Close breaks below prior day low AND volume > 2x 12h volume SMA(20) AND price < 1d EMA(50)
+Exit: Close crosses back below prior day high (long) or above prior day low (short)
+Targets 15-25 trades/year per symbol (60-100 total over 4 years)
 """
 
 import numpy as np
@@ -22,69 +21,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1d data for prior day levels and trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 4h EMA(20) for trend direction
-    ema_20_4h = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # Prior day high and low
+    prior_high = df_1d['high'].values
+    prior_low = df_1d['low'].values
+    prior_high_aligned = align_htf_to_ltf(prices, df_1d, prior_high)
+    prior_low_aligned = align_htf_to_ltf(prices, df_1d, prior_low)
     
-    # Calculate MACD (12,26,9) on 1h data
-    ema_fast = pd.Series(close).ewm(span=12, adjust=False).mean().values
-    ema_slow = pd.Series(close).ewm(span=26, adjust=False).mean().values
-    macd_line = ema_fast - ema_slow
-    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False).mean().values
-    macd_hist = macd_line - signal_line
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 1h volume SMA(20) for volume filter
+    # 12h volume SMA(20) for volume filter
     vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = max(30, 26 + 9)  # MACD needs 26+9 bars for signal line
+    start_idx = max(50, 20)  # EMA50 and SMA20 warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_20_4h_aligned[i]) or np.isnan(macd_hist[i]) or 
-            np.isnan(macd_hist[i-1]) or np.isnan(vol_sma[i])):
+        if (np.isnan(prior_high_aligned[i]) or np.isnan(prior_low_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_sma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_sma_val = vol_sma[i]
-        ema_4h_val = ema_20_4h_aligned[i]
-        macd_h = macd_hist[i]
-        macd_h_prev = macd_hist[i-1]
+        prior_high_val = prior_high_aligned[i]
+        prior_low_val = prior_low_aligned[i]
+        ema_1d_val = ema_50_1d_aligned[i]
         
         if position == 0:
-            # Long: MACD hist crosses above zero + price above 4h EMA + volume > 1.5x SMA
-            if macd_h_prev <= 0 and macd_h > 0 and price > ema_4h_val and vol > 1.5 * vol_sma_val:
-                signals[i] = 0.20
+            # Long: break above prior day high + volume spike + price > 1d EMA50
+            if price > prior_high_val and vol > 2.0 * vol_sma_val and price > ema_1d_val:
+                signals[i] = 0.25
                 position = 1
-            # Short: MACD hist crosses below zero + price below 4h EMA + volume > 1.5x SMA
-            elif macd_h_prev >= 0 and macd_h < 0 and price < ema_4h_val and vol > 1.5 * vol_sma_val:
-                signals[i] = -0.20
+            # Short: break below prior day low + volume spike + price < 1d EMA50
+            elif price < prior_low_val and vol > 2.0 * vol_sma_val and price < ema_1d_val:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: MACD hist crosses below zero
-            if macd_h_prev >= 0 and macd_h < 0:
+            # Long exit: price crosses back below prior day high
+            if price < prior_high_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: MACD hist crosses above zero
-            if macd_h_prev <= 0 and macd_h > 0:
+            # Short exit: price crosses back above prior day low
+            if price > prior_low_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_VolWeighted_MACD_4hEMA20"
-timeframe = "1h"
+name = "12h_Prior1D_HL_Breakout_VolumeSpike_TrendFilter"
+timeframe = "12h"
 leverage = 1.0
