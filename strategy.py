@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Donchian_Breakout_Volume_Trend_v1
-Donchian(20) breakout + volume confirmation + EMA34 trend filter on 12h.
-Breakouts in direction of higher timeframe trend (1d EMA34).
-Volume filter requires 1.5x average volume to avoid false breakouts.
-Designed for low trade frequency (~20-40 trades/year) to minimize fee drag.
-Works in both bull and bear markets by following the trend.
+1d_Weekly_Pivot_Breakout_VolumeFilter_v3
+Weekly Pivot Point breakout with volume confirmation and trend filter.
+Uses weekly pivot levels (R1, S1) from 1w timeframe for breakout entries,
+volume spike for confirmation, and 1d EMA200 for trend alignment.
+Designed to capture breakouts in both bull and bear markets with low trade frequency.
+Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
@@ -22,63 +22,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d EMA34 for trend filter ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_34 = np.zeros_like(close_1d)
-    ema_34[:] = np.nan
-    alpha = 2 / (34 + 1)
-    for i in range(len(close_1d)):
-        if i == 0:
-            ema_34[i] = close_1d[i]
-        elif not np.isnan(close_1d[i]):
-            if np.isnan(ema_34[i-1]):
-                ema_34[i] = close_1d[i]
-            else:
-                ema_34[i] = close_1d[i] * alpha + ema_34[i-1] * (1 - alpha)
+    # === 1w data for weekly pivot points ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # === 12h Donchian channels (20-period) ===
-    donch_high = np.full_like(high, np.nan)
-    donch_low = np.full_like(low, np.nan)
-    for i in range(n):
-        if i >= 19:
-            donch_high[i] = np.max(high[i-19:i+1])
-            donch_low[i] = np.min(low[i-19:i+1])
-        elif i > 0:
-            donch_high[i] = np.max(high[0:i+1])
-            donch_low[i] = np.min(low[0:i+1])
-        else:
-            donch_high[i] = high[i]
-            donch_low[i] = low[i]
+    # Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
+    pp = (high_1w + low_1w + close_1w) / 3.0
+    r1 = 2 * pp - low_1w
+    s1 = 2 * pp - high_1w
     
-    # === 12h Volume confirmation (20-period average) ===
+    # Align weekly pivot levels to daily timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    
+    # === 1d EMA200 for trend filter ===
+    close_series = pd.Series(close)
+    ema200 = close_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # === Daily volume confirmation (20-period average) ===
     vol_ma_20 = np.full_like(volume, np.nan)
     for i in range(len(volume)):
-        if i >= 19:
+        if i >= 20:
             vol_ma_20[i] = np.mean(volume[i-19:i+1])
         elif i > 0:
-            vol_ma_20[i] = np.mean(volume[0:i+1])
+            vol_ma_20[i] = np.mean(volume[max(0, i-9):i+1])
         else:
-            vol_ma_20[i] = volume[i]
+            vol_ma_20[i] = volume[0]
     
     vol_confirm = volume > vol_ma_20 * 1.5  # volume spike: 1.5x average
-    
-    # Align 1d EMA34 to 12h timeframe
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 50
+    warmup = 200
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(donch_high[i]) or 
-            np.isnan(donch_low[i]) or 
-            np.isnan(ema_34_aligned[i]) or 
+        if (np.isnan(pp_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(ema200[i]) or 
             np.isnan(vol_confirm[i])):
             signals[i] = 0.0
             position = 0
@@ -86,25 +75,26 @@ def generate_signals(prices):
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price breaks above Donchian high AND above 1d EMA34 (uptrend) AND volume confirmation
-            if (close[i] > donch_high[i] and 
-                close[i] > ema_34_aligned[i] and 
-                vol_confirm[i]):
+            # Long: price breaks above R1 with volume confirmation AND above EMA200 (uptrend)
+            if (close[i] > r1_aligned[i] and 
+                vol_confirm[i] and 
+                close[i] > ema200[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price breaks below Donchian low AND below 1d EMA34 (downtrend) AND volume confirmation
-            elif (close[i] < donch_low[i] and 
-                  close[i] < ema_34_aligned[i] and 
-                  vol_confirm[i]):
+            # Short: price breaks below S1 with volume confirmation AND below EMA200 (downtrend)
+            elif (close[i] < s1_aligned[i] and 
+                  vol_confirm[i] and 
+                  close[i] < ema200[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price crosses below Donchian low
-            if close[i] < donch_low[i]:
+            # Exit long: price crosses below pivot point (PP) OR volume drops
+            if (close[i] < pp_aligned[i] or 
+                not vol_confirm[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -112,8 +102,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above Donchian high
-            if close[i] > donch_high[i]:
+            # Exit short: price crosses above pivot point (PP) OR volume drops
+            if (close[i] > pp_aligned[i] or 
+                not vol_confirm[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -122,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_Volume_Trend_v1"
-timeframe = "12h"
+name = "1d_Weekly_Pivot_Breakout_VolumeFilter_v3"
+timeframe = "1d"
 leverage = 1.0
