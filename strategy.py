@@ -1,13 +1,13 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 """
-4h_Donchian20_12hTrend_VolumeConfirm
-Strategy: 4h Donchian(20) breakout with 12h trend filter and volume confirmation.
-Long: Price breaks above 20-period high + 12h close > 12h EMA(34) + volume > 1.5x 20-period avg
-Short: Price breaks below 20-period low + 12h close < 12h EMA(34) + volume > 1.5x 20-period avg
-Exit: Opposite breakout or ATR-based stop
+4h_Camarilla_R1_S1_Breakout_Volume_Momentum
+Strategy: 4h Camarilla R1/S1 breakout with 12h momentum filter and volume confirmation.
+Long: Price breaks above R1 + 12h RSI > 50 + volume > 1.3x 20-period average
+Short: Price breaks below S1 + 12h RSI < 50 + volume > 1.3x 20-period average
+Exit: Opposite breakout or RSI reversal
 Position size: 0.25
-Uses Donchian for breakout signals, 12h EMA for trend filter, volume for confirmation.
-Designed to work in both bull and bear markets by requiring trend alignment.
+Uses Camarilla pivot levels for intraday support/resistance, 12h RSI for momentum filter, volume for confirmation.
+Designed to work in both bull and bear markets by requiring momentum alignment.
 """
 
 import numpy as np
@@ -24,28 +24,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
+    # Get 12h data for momentum filter
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
     
-    # Calculate 12h EMA(34) for trend filter
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Calculate 12h RSI(14) for momentum filter
+    delta = pd.Series(close_12h).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_14_12h = (100 - (100 / (1 + rs))).values
+    rsi_14_12h[:14] = np.nan  # Set first 14 values to NaN
+    rsi_14_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_14_12h)
     
-    # Calculate 4h Donchian channels (20-period)
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Calculate daily Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Donchian upper and lower bands
-    upper_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lower_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Camarilla levels: R1 = Close + (High - Low) * 1.1/12, S1 = Close - (High - Low) * 1.1/12
+    rng = high_1d - low_1d
+    r1 = close_1d + rng * 1.1 / 12
+    s1 = close_1d - rng * 1.1 / 12
     
-    # Align Donchian bands to 4h timeframe (they are already on 4h)
-    upper_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_4h)
-    lower_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_4h)
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # Calculate 4h volume average (20-period)
+    df_4h = get_htf_data(prices, '4h')
     volume_4h = df_4h['volume'].values
     volume_ma20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     volume_ma20_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_ma20_4h)
@@ -63,44 +73,44 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is not available
-        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(upper_4h_aligned[i]) or 
-            np.isnan(lower_4h_aligned[i]) or np.isnan(volume_ma20_4h_aligned[i])):
+        if (np.isnan(rsi_14_12h_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(volume_ma20_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Current 4h volume aligned to 4h
         vol_4h_current = align_htf_to_ltf(prices, df_4h, volume_4h)[i]
-        volume_filter = vol_4h_current > (1.5 * volume_ma20_4h_aligned[i])
+        volume_filter = vol_4h_current > (1.3 * volume_ma20_4h_aligned[i])
         
-        # Trend filter: 12h close vs 12h EMA(34)
-        uptrend_12h = close_12h[-1] > ema_34_12h[-1] if len(close_12h) > 0 else False
-        downtrend_12h = close_12h[-1] < ema_34_12h[-1] if len(close_12h) > 0 else False
+        # Momentum filter: 12h RSI > 50 for long, < 50 for short
+        rsi_long = rsi_14_12h_aligned[i] > 50
+        rsi_short = rsi_14_12h_aligned[i] < 50
         
-        # Donchian breakout signals
-        breakout_up = close[i] > upper_4h_aligned[i]
-        breakout_down = close[i] < lower_4h_aligned[i]
+        # Camarilla breakout signals
+        breakout_up = close[i] > r1_aligned[i]
+        breakout_down = close[i] < s1_aligned[i]
         
         if position == 0:
-            # Long: Donchian breakout up + 12h uptrend + volume filter
-            if breakout_up and uptrend_12h and volume_filter:
+            # Long: Camarilla R1 breakout + 12h RSI > 50 + volume filter
+            if breakout_up and rsi_long and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Donchian breakout down + 12h downtrend + volume filter
-            elif breakout_down and downtrend_12h and volume_filter:
+            # Short: Camarilla S1 breakout + 12h RSI < 50 + volume filter
+            elif breakout_down and rsi_short and volume_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Donchian breakout down
-            if breakout_down:
+            # Exit long: Camarilla S1 break or RSI < 40
+            if breakout_down or rsi_14_12h_aligned[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Donchian breakout up
-            if breakout_up:
+            # Exit short: Camarilla R1 break or RSI > 60
+            if breakout_up or rsi_14_12h_aligned[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -108,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_12hTrend_VolumeConfirm"
+name = "4h_Camarilla_R1_S1_Breakout_Volume_Momentum"
 timeframe = "4h"
 leverage = 1.0
