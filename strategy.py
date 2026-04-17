@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,18 +13,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d RSI (14-period) ===
+    # === 1d RSI (14-period) - Wilder's smoothing ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate RSI using Wilder's smoothing with proper seeding
     delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
-    # Wilder's smoothing with proper seeding
-    avg_gain = np.full_like(gain, np.nan)
-    avg_loss = np.full_like(loss, np.nan)
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
     period = 14
     for i in range(len(gain)):
         if i < period:
@@ -83,38 +82,38 @@ def generate_signals(prices):
         else:
             bb_width_percentile[i] = 50.0
     
-    # === Align indicators to 4h timeframe ===
+    # === Align indicators to daily timeframe ===
     bb_width_percentile_aligned = align_htf_to_ltf(prices, df_1d, bb_width_percentile)
     rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
     lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
-    sma_20_aligned = align_htf_to_ltf(prices, df_1d, sma_20)
     
-    # === 4h Volume confirmation ===
-    df_4h = get_htf_data(prices, '4h')
-    volume_4h = df_4h['volume'].values
+    # === Weekly Volume Confirmation ===
+    df_1w = get_htf_data(prices, '1w')
+    volume_1w = df_1w['volume'].values
     
-    # Calculate 20-period average volume on 4h timeframe
-    vol_ma_20 = np.full_like(volume_4h, np.nan)
-    for i in range(len(volume_4h)):
-        if i >= 19:
-            vol_ma_20[i] = np.mean(volume_4h[i-19:i+1])
+    # Calculate 4-week average volume on weekly timeframe
+    vol_ma_4 = np.full_like(volume_1w, np.nan)
+    for i in range(len(volume_1w)):
+        if i >= 3:
+            vol_ma_4[i] = np.mean(volume_1w[i-3:i+1])
         elif i > 0:
-            vol_ma_20[i] = np.mean(volume_4h[max(0, i-9):i+1])
+            vol_ma_4[i] = np.mean(volume_1w[max(0, i-1):i+1])
         else:
-            vol_ma_20[i] = volume_4h[0]
+            vol_ma_4[i] = volume_1w[0]
     
-    # Volume confirmation: current 4h volume > 1.5x 20-period average
-    vol_confirm = volume_4h > vol_ma_20 * 1.5
+    # Volume confirmation: current weekly volume > 1.5x 4-week average
+    vol_confirm_1w = volume_1w > vol_ma_4 * 1.5
+    vol_confirm_aligned = align_htf_to_ltf(prices, df_1w, vol_confirm_1w)
     
-    # === 4h Session filter (08-20 UTC) ===
+    # === Session filter (08-20 UTC) ===
     hours = prices.index.hour
     session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 50
+    warmup = 100
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
@@ -125,8 +124,7 @@ def generate_signals(prices):
             np.isnan(rsi_1d_aligned[i]) or 
             np.isnan(upper_bb_aligned[i]) or 
             np.isnan(lower_bb_aligned[i]) or 
-            np.isnan(sma_20_aligned[i]) or 
-            np.isnan(vol_confirm[i])):
+            np.isnan(vol_confirm_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -146,7 +144,7 @@ def generate_signals(prices):
             if (rsi_1d_aligned[i] < 30 and 
                 is_squeeze and 
                 close[i] <= lower_bb_aligned[i] * 1.02 and  # within 2% of lower BB
-                vol_confirm[i]):
+                vol_confirm_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
@@ -154,7 +152,7 @@ def generate_signals(prices):
             elif (rsi_1d_aligned[i] > 70 and 
                   is_squeeze and 
                   close[i] >= upper_bb_aligned[i] * 0.98 and  # within 2% of upper BB
-                  vol_confirm[i]):
+                  vol_confirm_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -162,8 +160,7 @@ def generate_signals(prices):
         # Exit logic
         elif position == 1:
             # Exit long: RSI crosses above 50 OR price reaches middle BB
-            if (rsi_1d_aligned[i] > 50 or 
-                close[i] >= sma_20_aligned[i]):
+            if rsi_1d_aligned[i] > 50:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -172,8 +169,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit short: RSI crosses below 50 OR price reaches middle BB
-            if (rsi_1d_aligned[i] < 50 or 
-                close[i] <= sma_20_aligned[i]):
+            if rsi_1d_aligned[i] < 50:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -182,6 +178,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_BB_Squeeze_RSI_MeanReversion_VolumeFilter_v3"
-timeframe = "4h"
+name = "1d_BB_Squeeze_RSI_MeanReversion_WeeklyVolumeFilter_v1"
+timeframe = "1d"
 leverage = 1.0
