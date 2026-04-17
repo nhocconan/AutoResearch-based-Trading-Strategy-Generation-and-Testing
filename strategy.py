@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-4h Camarilla Pivot Breakout + Volume Spike + ADX Trend Filter
-Long: Close breaks above R4 + volume > 1.5x 20-bar volume SMA + ADX > 25
-Short: Close breaks below S4 + volume > 1.5x 20-bar volume SMA + ADX > 25
-Exit: Close returns inside (R3, S3) range
-Camarilla pivots provide institutional support/resistance levels.
-Volume confirms institutional participation.
-ADX ensures we only trade in trending regimes to avoid whipsaws.
-Designed for 4h timeframe with 12h trend filter.
+12h Donchian Breakout + 1d Volume Confirmation + ADX Trend Filter
+Long: Price breaks above Donchian(20) high + volume > 1.5x 12h volume SMA(20) + ADX(1d) > 25
+Short: Price breaks below Donchian(20) low + volume > 1.5x 12h volume SMA(20) + ADX(1d) > 25
+Exit: Opposite Donchian break or ADX < 20
+Uses price channel breakouts with volume and trend confirmation.
+Designed to capture trends in both bull and bear markets with controlled trade frequency.
 Target: 50-150 total trades over 4 years (12-37/year)
 """
 
@@ -25,150 +23,111 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for ADX trend filter
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Calculate ADX(14) on 12h
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]  # first period
-        
-        # Directional Movement
-        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                           np.maximum(high - np.roll(high, 1), 0), 0)
-        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                            np.maximum(np.roll(low, 1) - low, 0), 0)
-        dm_plus[0] = 0
-        dm_minus[0] = 0
-        
-        # Smooth with Wilder's smoothing (alpha = 1/period)
-        atr = np.zeros_like(tr)
-        dm_plus_smooth = np.zeros_like(dm_plus)
-        dm_minus_smooth = np.zeros_like(dm_minus)
-        
-        atr[0] = tr[0]
-        dm_plus_smooth[0] = dm_plus[0]
-        dm_minus_smooth[0] = dm_minus[0]
-        
-        for i in range(1, len(tr)):
-            atr[i] = atr[i-1] - (atr[i-1] / period) + tr[i]
-            dm_plus_smooth[i] = dm_plus_smooth[i-1] - (dm_plus_smooth[i-1] / period) + dm_plus[i]
-            dm_minus_smooth[i] = dm_minus_smooth[i-1] - (dm_minus_smooth[i-1] / period) + dm_minus[i]
-        
-        # Avoid division by zero
-        dm_plus_di = 100 * dm_plus_smooth / (atr + 1e-10)
-        dm_minus_di = 100 * dm_minus_smooth / (atr + 1e-10)
-        
-        dx = np.abs(dm_plus_di - dm_minus_di) / (dm_plus_di + dm_minus_di + 1e-10) * 100
-        
-        # Smooth DX to get ADX
-        adx = np.zeros_like(dx)
-        adx[0] = dx[0]
-        for i in range(1, len(dx)):
-            adx[i] = adx[i-1] - (adx[i-1] / period) + dx[i]
-        
-        # Set first 'period' values to NaN
-        adx[:period] = np.nan
-        return adx
-    
-    adx_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
-    
-    # Calculate Camarilla levels from previous day
-    # We'll use daily OHLC from 1d data
+    # Get 1d data for ADX filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla multipliers
-    camarilla_mult = [1.1/12, 1.1/6, 1.1/4, 1.1/2]  # for R1,S1 to R4,S4
+    # Calculate ADX(14) on 1d
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(high[i] - high[i-1], 0)
+            minus_dm[i] = max(low[i-1] - low[i], 0)
+            if plus_dm[i] == minus_dm[i]:
+                plus_dm[i] = 0
+                minus_dm[i] = 0
+            elif plus_dm[i] < minus_dm[i]:
+                plus_dm[i] = 0
+            else:
+                minus_dm[i] = 0
+            
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        atr = np.zeros_like(high)
+        atr[period] = np.mean(tr[1:period+1])
+        for i in range(period+1, len(high)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        plus_di = np.zeros_like(high)
+        minus_di = np.zeros_like(high)
+        dx = np.zeros_like(high)
+        
+        for i in range(period, len(high)):
+            if atr[i] > 0:
+                plus_di[i] = 100 * (np.mean(plus_dm[i-period+1:i+1]) / atr[i])
+                minus_di[i] = 100 * (np.mean(minus_dm[i-period+1:i+1]) / atr[i])
+                if plus_di[i] + minus_di[i] > 0:
+                    dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+        
+        adx = np.zeros_like(high)
+        adx[2*period-1] = np.mean(dx[period:2*period])
+        for i in range(2*period, len(high)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    # Calculate pivots for each bar using previous day's data
-    pivots_r4 = np.full(n, np.nan)
-    pivots_s4 = np.full(n, np.nan)
-    pivots_r3 = np.full(n, np.nan)
-    pivots_s3 = np.full(n, np.nan)
+    adx_14_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_14_1d = np.where(np.isnan(adx_14_1d), 0, adx_14_1d)
+    adx_14_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_14_1d)
     
-    # For each bar, get previous day's OHLC
-    for i in range(n):
-        # Find index of previous day in 1d data
-        # Since we're on 4h timeframe, we need to map to daily
-        # Simplified: use the most recent completed day
-        if i >= 6:  # at least 6*4h = 24h = 1 day back
-            # Get previous day's data (assuming 6 bars per day on 4h)
-            day_idx = i // 6
-            if day_idx > 0:
-                prev_day_idx = day_idx - 1
-                if prev_day_idx < len(high_1d):
-                    ph = high_1d[prev_day_idx]
-                    pl = low_1d[prev_day_idx]
-                    pc = close_1d[prev_day_idx]
-                    rng = ph - pl
-                    
-                    pivots_r4[i] = pc + rng * camarilla_mult[3]  # R4
-                    pivots_s4[i] = pc - rng * camarilla_mult[3]  # S4
-                    pivots_r3[i] = pc + rng * camarilla_mult[2]  # R3
-                    pivots_s3[i] = pc - rng * camarilla_mult[2]  # S3
+    # Calculate Donchian channels (20-period) on 12h
+    def donchian_channels(high, low, period):
+        upper = np.full_like(high, np.nan)
+        lower = np.full_like(high, np.nan)
+        for i in range(period-1, len(high)):
+            upper[i] = np.max(high[i-period+1:i+1])
+            lower[i] = np.min(low[i-period+1:i+1])
+        return upper, lower
     
-    # Volume confirmation
-    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    donchian_upper, donchian_lower = donchian_channels(high, low, 20)
+    
+    # Calculate 12h volume SMA(20)
+    vol_sma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = max(30, 20)  # need enough data for calculations
+    start_idx = max(30, 20)  # need sufficient data
     
     for i in range(start_idx, n):
-        if (np.isnan(adx_12h_aligned[i]) or np.isnan(pivots_r4[i]) or 
-            np.isnan(pivots_s4[i]) or np.isnan(pivots_r3[i]) or 
-            np.isnan(pivots_s3[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(adx_14_1d_aligned[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(vol_sma_12h[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_sma_val = vol_sma_20[i]
-        adx_val = adx_12h_aligned[i]
-        r4 = pivots_r4[i]
-        s4 = pivots_s4[i]
-        r3 = pivots_r3[i]
-        s3 = pivots_s3[i]
-        
-        # Volume spike condition
-        vol_spike = vol > 1.5 * vol_sma_val
-        
-        # ADX trend filter
-        trending = adx_val > 25
+        vol_sma_val = vol_sma_12h[i]
+        adx_val = adx_14_1d_aligned[i]
+        upper = donchian_upper[i]
+        lower = donchian_lower[i]
         
         if position == 0:
-            # Long: Break above R4 + volume spike + trending
-            if price > r4 and vol_spike and trending:
+            # Long: Price breaks above Donchian upper + volume spike + ADX > 25
+            if price > upper and vol > 1.5 * vol_sma_val and adx_val > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S4 + volume spike + trending
-            elif price < s4 and vol_spike and trending:
+            # Short: Price breaks below Donchian lower + volume spike + ADX > 25
+            elif price < lower and vol > 1.5 * vol_sma_val and adx_val > 25:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns inside R3
-            if price < r3:
+            # Long exit: Price breaks below Donchian lower or ADX < 20
+            if price < lower or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns inside S3
-            if price > s3:
+            # Short exit: Price breaks above Donchian upper or ADX < 20
+            if price > upper or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -176,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_Pivot_Breakout_Volume_ADX"
-timeframe = "4h"
+name = "12h_Donchian_Breakout_1dVolume_ADX"
+timeframe = "12h"
 leverage = 1.0
