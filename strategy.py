@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Chaikin_Oscillator_Plus_Volume
-Hypothesis: Chaikin Oscillator (3,10) combined with volume confirmation and ATR-based trend filter
-works in both bull and bear markets by capturing institutional money flow with volume validation.
-Designed for low trade frequency (15-30/year) on 4h timeframe to minimize fee drag.
+12h_Donchian_Breakout_Volume_Trend_Filter
+Hypothesis: Use 12-hour Donchian breakout with volume confirmation and 1-day ADX trend filter.
+Long when price breaks above 20-period Donchian high with volume > 1.5x 20-period average and ADX > 25.
+Short when price breaks below 20-period Donchian low with volume > 1.5x 20-period average and ADX > 25.
+Designed for low trade frequency (12-37/year) to capture trending moves while avoiding chop.
 """
 
 import numpy as np
@@ -20,67 +21,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Chaikin Oscillator components (daily) ===
-    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
-    # Avoid division by zero
-    hl_range = high - low
-    hl_range = np.where(hl_range == 0, 1e-10, hl_range)
-    mfm = ((close - low) - (high - close)) / hl_range
-    # Money Flow Volume = Money Flow Multiplier * Volume
-    mfv = mfm * volume
+    # === 20-period Donchian channels (12h) ===
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Accumulation/Distribution Line
-    adl = np.cumsum(mfv)
-    
-    # Chaikin Oscillator = EMA(3, ADL) - EMA(10, ADL)
-    adl_series = pd.Series(adl)
-    ema3 = adl_series.ewm(span=3, adjust=False, min_periods=3).mean().values
-    ema10 = adl_series.ewm(span=10, adjust=False, min_periods=10).mean().values
-    chaikin = ema3 - ema10
-    
-    # === Volume confirmation (daily average) ===
+    # === Volume confirmation (12h) ===
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > 1.5 * vol_avg_20
     
-    # === Trend filter: 4h EMA34 (avoid whipsaw) ===
-    close_series = pd.Series(close)
-    ema34 = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # === ADX trend filter (1d) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    dx = np.where((di_plus + di_minus) == 0, 0, dx)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align ADX to 12h
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     
-    # Warmup period: enough for EMA10 and EMA34
-    warmup = 40
+    # Warmup period: enough for Donchian and ADX
+    warmup = 50  # Covers 20 + 14 + 14 periods
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(chaikin[i]) or np.isnan(vol_avg_20[i]) or 
-            np.isnan(ema34[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(vol_avg_20[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Volume filter: current volume > 1.3x 20-period average
-        vol_filter = volume[i] > 1.3 * vol_avg_20[i]
-        
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: Chaikin crosses above zero + volume filter + price above EMA34
-            if chaikin[i] > 0 and chaikin[i-1] <= 0 and vol_filter and close[i] > ema34[i]:
+            # Long: Break above Donchian high + volume filter + ADX > 25
+            if close[i] > donch_high[i] and vol_filter[i] and adx_aligned[i] > 25:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: Chaikin crosses below zero + volume filter + price below EMA34
-            elif chaikin[i] < 0 and chaiken[i-1] >= 0 and vol_filter and close[i] < ema34[i]:
+            # Short: Break below Donchian low + volume filter + ADX > 25
+            elif close[i] < donch_low[i] and vol_filter[i] and adx_aligned[i] > 25:
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic: reverse signal or trend deterioration
+        # Exit logic: reverse signal
         elif position == 1:
-            # Exit when Chaikin crosses below zero OR price falls below EMA34
-            if chaikin[i] < 0 and chaikin[i-1] >= 0 or close[i] < ema34[i]:
+            # Exit when price breaks below Donchian low
+            if close[i] < donch_low[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -88,8 +107,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when Chaikin crosses above zero OR price rises above EMA34
-            if chaikin[i] > 0 and chaikin[i-1] <= 0 or close[i] > ema34[i]:
+            # Exit when price breaks above Donchian high
+            if close[i] > donch_high[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -98,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Chaikin_Oscillator_Plus_Volume"
-timeframe = "4h"
+name = "12h_Donchian_Breakout_Volume_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
