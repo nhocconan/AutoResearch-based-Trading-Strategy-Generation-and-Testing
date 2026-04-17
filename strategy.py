@@ -1,22 +1,11 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-"""
-Hypothesis: 4h Donchian breakout with volume confirmation and ATR-based volatility filter.
-- Uses 20-period Donchian channels (highest high/lowest low) as breakout levels.
-- Requires volume > 1.5x 20-period average to confirm breakout strength.
-- Uses ATR > 20-period ATR mean to avoid low-volatility false breakouts.
-- Position size: 0.25 (25% of capital) to balance risk and return.
-- Designed to work in both bull and bear markets by capturing strong directional moves
-  with volume confirmation, reducing false signals in choppy conditions.
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,9 +13,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period highest high and lowest low)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get 1d data for daily range calculation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate previous day's range (high - low)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    daily_range = prev_high - prev_low
+    
+    # Define breakout levels: today's open +/- 0.5 * previous day's range
+    # We use today's open as reference point for breakout
+    daily_open = np.roll(close_1d, 1)  # Previous day's close is today's open in crypto
+    daily_open[0] = np.nan
+    upper_break = daily_open + 0.5 * daily_range
+    lower_break = daily_open - 0.5 * daily_range
+    
+    # Align daily breakout levels to 12h timeframe
+    upper_break_12h = align_htf_to_ltf(prices, df_1d, upper_break)
+    lower_break_12h = align_htf_to_ltf(prices, df_1d, lower_break)
     
     # Volume confirmation: current volume > 1.5 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -45,15 +54,15 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 20  # Need Donchian, volume MA20, and ATR MA20
+    start_idx = 20  # Need volume MA20 and ATR MA20
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or 
-            np.isnan(volume_ma20[i]) or 
+        if (np.isnan(volume_ma20[i]) or 
             np.isnan(atr[i]) or 
-            np.isnan(atr_ma20[i])):
+            np.isnan(atr_ma20[i]) or 
+            np.isnan(upper_break_12h[i]) or 
+            np.isnan(lower_break_12h[i])):
             signals[i] = 0.0
             continue
         
@@ -63,26 +72,26 @@ def generate_signals(prices):
         volatility_filter = atr[i] > atr_ma20[i]
         
         if position == 0:
-            # Long: price breaks above Donchian high with volume and volatility
-            if close[i] > highest_high[i] and volume_filter and volatility_filter:
+            # Long: price breaks above upper level with volume and volatility
+            if close[i] > upper_break_12h[i] and volume_filter and volatility_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low with volume and volatility
-            elif close[i] < lowest_low[i] and volume_filter and volatility_filter:
+            # Short: price breaks below lower level with volume and volatility
+            elif close[i] < lower_break_12h[i] and volume_filter and volatility_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns below Donchian high or volatility drops
-            if close[i] < highest_high[i] or not volatility_filter:
+            # Exit long: price returns below the breakout level or volatility drops
+            if close[i] < upper_break_12h[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns above Donchian low or volatility drops
-            if close[i] > lowest_low[i] or not volatility_filter:
+            # Exit short: price returns above the breakout level or volatility drops
+            if close[i] > lower_break_12h[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_VolVol"
-timeframe = "4h"
+name = "12h_DailyRangeBreakout_VolVol"
+timeframe = "12h"
 leverage = 1.0
