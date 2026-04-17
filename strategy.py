@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h 1D High/Low Breakout with Volume and 1D Trend Filter
-Long: Price breaks above prior 1D high + volume > 1.5x 6h volume MA + price > 1D EMA50
-Short: Price breaks below prior 1D low + volume > 1.5x 6h volume MA + price < 1D EMA50
-Exit: Opposite break of prior 1D level
-Uses 1D EMA50 to align with longer-term bias and reduce false breakouts in chop
-Target: 20-30 trades/year per symbol
+4h Volume Spike + Close Above/Below Prior Day VWAP with 1D EMA Trend Filter
+Long: Close > prior day VWAP + volume > 2x 4h volume MA(20) + close > 1D EMA50
+Short: Close < prior day VWAP + volume > 2x 4h volume MA(20) + close < 1D EMA50
+Exit: Close crosses back below/above prior day VWAP
+Uses VWAP for intraday mean reversion edge and volume surge for momentum confirmation
+Target: 25-35 trades/year per symbol
 """
 
 import numpy as np
@@ -22,20 +22,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for prior high/low and trend filter
+    # Get 1D data for VWAP and trend filter
     df_1d = get_htf_data(prices, '1d')
-    prior_1d_high = df_1d['high'].shift(1)  # Prior day's high
-    prior_1d_low = df_1d['low'].shift(1)    # Prior day's low
+    # Calculate VWAP for each 1D bar: cumulative (price * volume) / cumulative volume
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    vwap = (typical_price * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    # Shift by 1 to get prior day's VWAP (not current forming day)
+    prior_vwap = vwap.shift(1)
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    prior_1d_high_aligned = align_htf_to_ltf(prices, df_1d, prior_1d_high.values)
-    prior_1d_low_aligned = align_htf_to_ltf(prices, df_1d, prior_1d_low.values)
+    prior_vwap_aligned = align_htf_to_ltf(prices, df_1d, prior_vwap.values)
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 6h volume moving average (4-period for confirmation)
-    df_6h = get_htf_data(prices, '6h')
-    volume_ma_4 = pd.Series(df_6h['volume']).rolling(window=4, min_periods=4).mean()
-    volume_ma_4_6h = align_htf_to_ltf(prices, df_6h, volume_ma_4.values)
+    # 4h volume moving average (20-period for confirmation)
+    df_4h = get_htf_data(prices, '4h')
+    volume_ma_20 = pd.Series(df_4h['volume']).rolling(window=20, min_periods=20).mean()
+    volume_ma_20_4h = align_htf_to_ltf(prices, df_4h, volume_ma_20.values)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
@@ -44,38 +46,38 @@ def generate_signals(prices):
     start_idx = 50  # warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(prior_1d_high_aligned[i]) or np.isnan(prior_1d_low_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ma_4_6h[i])):
+        if (np.isnan(prior_vwap_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(volume_ma_20_4h[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = volume_ma_4_6h[i]
+        vol_ma = volume_ma_20_4h[i]
         
         if position == 0:
-            # Long: break above prior 1D high + volume + 1D trend
-            if price > prior_1d_high_aligned[i] and vol > 1.5 * vol_ma and price > ema_50_1d_aligned[i]:
+            # Long: close above prior day VWAP + volume spike + 1D uptrend
+            if price > prior_vwap_aligned[i] and vol > 2.0 * vol_ma and price > ema_50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: break below prior 1D low + volume + 1D trend
-            elif price < prior_1d_low_aligned[i] and vol > 1.5 * vol_ma and price < ema_50_1d_aligned[i]:
+            # Short: close below prior day VWAP + volume spike + 1D downtrend
+            elif price < prior_vwap_aligned[i] and vol > 2.0 * vol_ma and price < ema_50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Long exit: break below prior 1D low
-            if price < prior_1d_low_aligned[i]:
+            # Long exit: close back below prior day VWAP (mean reversion)
+            if price < prior_vwap_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: break above prior 1D high
-            if price > prior_1d_high_aligned[i]:
+            # Short exit: close back above prior day VWAP (mean reversion)
+            if price > prior_vwap_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -83,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Prior1D_HL_Breakout_Volume_1DTrend"
-timeframe = "6h"
+name = "4h_VolumeSpike_PriorVWAP_1DEMA50"
+timeframe = "4h"
 leverage = 1.0
