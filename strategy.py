@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout + 1d Volume Spike + Volatility Filter
-Long: Price > Donchian High(20) + 1d volume > 1.5x 20-period avg + ATR(14) < 0.03 * price
-Short: Price < Donchian Low(20) + 1d volume > 1.5x 20-period avg + ATR(14) < 0.03 * price
-Exit: Opposite Donchian break or ATR(14) > 0.05 * price (high volatility)
-Designed to capture strong breakouts with volume confirmation in both bull and bear markets.
+4h Camarilla Pivot + 1d EMA Trend + Volume Spike
+Long: Price > Camarilla H3 + price > 1d EMA(34) + volume > 1.5x 4h volume SMA(20)
+Short: Price < Camarilla L3 + price < 1d EMA(34) + volume > 1.5x 4h volume SMA(20)
+Exit: Price crosses back through Camarilla H3/L3 or EMA(34) flip
+Uses Camarilla levels for institutional support/resistance, EMA for trend filter, volume for confirmation.
+Designed to capture breakouts with institutional levels in both bull and bear markets.
 Target: 50-150 total trades over 4 years (12-37/year)
 """
 
@@ -22,65 +23,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume filter
+    # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    vol_1d = df_1d['volume'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d volume SMA(20)
-    vol_sma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_sma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_1d)
+    # Calculate 1d EMA(34)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate ATR(14) for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate 4h volume SMA(20) for volume filter
+    vol_sma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 20  # need Donchian and ATR
+    start_idx = max(34, 20)  # need EMA and volume SMA
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(vol_sma_1d_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_sma_4h[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_1d_val = vol_1d[i]
-        vol_sma_val = vol_sma_1d_aligned[i]
-        atr_val = atr[i]
+        high_val = high[i]
+        low_val = low[i]
+        vol = volume[i]
+        vol_sma_val = vol_sma_4h[i]
+        ema_val = ema_34_1d_aligned[i]
+        
+        # Calculate Camarilla levels from previous day's range
+        # Need previous day's high, low, close
+        if i >= 1:
+            # Get indices for previous day's data (assuming 24h periods)
+            # Since we're on 4h timeframe, previous day = 6 bars ago
+            prev_day_idx = max(0, i - 6)
+            if prev_day_idx < len(high):
+                prev_high = high[prev_day_idx]
+                prev_low = low[prev_day_idx]
+                prev_close = close[prev_day_idx]
+            else:
+                # Use available data
+                prev_high = high[0]
+                prev_low = low[0]
+                prev_close = close[0]
+            
+            # Camarilla levels
+            range_val = prev_high - prev_low
+            if range_val > 0:
+                H3 = prev_close + range_val * 1.1 / 4
+                L3 = prev_close - range_val * 1.1 / 4
+                H4 = prev_close + range_val * 1.1 / 2
+                L4 = prev_close - range_val * 1.1 / 2
+            else:
+                H3 = L3 = H4 = L4 = prev_close
+        else:
+            H3 = L3 = H4 = L4 = close[0]
         
         if position == 0:
-            # Long: Price > Donchian High + 1d volume spike + low volatility
-            if price > donchian_high[i] and vol_1d_val > 1.5 * vol_sma_val and atr_val < 0.03 * price:
+            # Long: Price > H3 + price > EMA(34) + volume spike
+            if price > H3 and price > ema_val and vol > 1.5 * vol_sma_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price < Donchian Low + 1d volume spike + low volatility
-            elif price < donchian_low[i] and vol_1d_val > 1.5 * vol_sma_val and atr_val < 0.03 * price:
+            # Short: Price < L3 + price < EMA(34) + volume spike
+            elif price < L3 and price < ema_val and vol > 1.5 * vol_sma_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price < Donchian Low or high volatility
-            if price < donchian_low[i] or atr_val > 0.05 * price:
+            # Long exit: Price < H3 or price < EMA(34)
+            if price < H3 or price < ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price > Donchian High or high volatility
-            if price > donchian_high[i] or atr_val > 0.05 * price:
+            # Short exit: Price > L3 or price > EMA(34)
+            if price > L3 or price > ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_1dVol_Spike_VolatilityFilter"
-timeframe = "12h"
+name = "4h_Camarilla_Pivot_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
