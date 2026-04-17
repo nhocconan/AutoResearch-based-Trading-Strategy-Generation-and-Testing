@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_GoldenCross_Reverse_v1
-Golden Cross (EMA20 > EMA50) + RSI(14) < 30 for long, Death Cross + RSI > 70 for short.
-Uses 1d timeframe for regime filter: only trade when price > 1d EMA200 (bull regime) for longs,
-price < 1d EMA200 (bear regime) for shorts.
-Exit when RSI crosses back to 50 or EMA cross reverses.
-Designed to catch mean-reversion within the trend, avoiding counter-trend trades.
-Target: 20-60 total trades over 4 years (5-15/year).
+6h_WeeklyPivot_R1S1_FadeWithTrend
+Fade at weekly pivot R1/S1 with trend filter from 1d EMA200.
+Long: price < weekly S1 and price > 1d EMA200 (buy dip in uptrend).
+Short: price > weekly R1 and price < 1d EMA200 (sell rally in downtrend).
+Exit when price crosses 1d EMA200 or reaches opposite pivot level (R2/S2).
+Targets 15-30 trades/year (~60-120 total over 4 years).
 """
 
 import numpy as np
@@ -15,30 +14,37 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     
-    # === EMA20 and EMA50 ===
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # === Weekly pivot points (using prior week's OHLC) ===
+    df_1w = get_htf_data(prices, '1w')
+    # Calculate pivots from prior week's data
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # === RSI(14) ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    pivot_point = (weekly_high + weekly_low + weekly_close) / 3.0
+    r1 = 2 * pivot_point - weekly_low
+    s1 = 2 * pivot_point - weekly_high
+    r2 = pivot_point + (weekly_high - weekly_low)
+    s2 = pivot_point - (weekly_high - weekly_low)
     
-    # === 1d EMA200 for regime filter ===
+    # Align weekly pivots to 6h timeframe (wait for weekly close)
+    pivot_point_aligned = align_htf_to_ltf(prices, df_1w, pivot_point)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    
+    # === 1d EMA200 for trend filter ===
     df_1d = get_htf_data(prices, '1d')
-    ema200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     signals = np.zeros(n)
     
@@ -50,36 +56,36 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema20[i]) or 
-            np.isnan(ema50[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(ema200_1d_aligned[i])):
+        if (np.isclose(pivot_point_aligned[i], 0) or 
+            np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(r2_aligned[i]) or 
+            np.isnan(s2_aligned[i]) or 
+            np.isnan(ema_200_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Golden Cross + Oversold in bull regime: EMA20 > EMA50, RSI < 30, price > 1d EMA200
-            if (ema20[i] > ema50[i] and 
-                rsi[i] < 30 and 
-                close[i] > ema200_1d_aligned[i]):
+            # Long: price below S1 (support) AND above 1d EMA200 (uptrend filter)
+            if (low[i] <= s1_aligned[i] and 
+                close[i] > ema_200_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Death Cross + Overbought in bear regime: EMA20 < EMA50, RSI > 70, price < 1d EMA200
-            elif (ema20[i] < ema50[i] and 
-                  rsi[i] > 70 and 
-                  close[i] < ema200_1d_aligned[i]):
+            # Short: price above R1 (resistance) AND below 1d EMA200 (downtrend filter)
+            elif (high[i] >= r1_aligned[i] and 
+                  close[i] < ema_200_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: EMA cross reverses OR RSI > 50
-            if (ema20[i] < ema50[i] or 
-                rsi[i] > 50):
+            # Exit long: price crosses above EMA200 OR reaches R2 (next resistance)
+            if (close[i] >= ema_200_1d_aligned[i] or 
+                high[i] >= r2_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -87,9 +93,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: EMA cross reverses OR RSI < 50
-            if (ema20[i] > ema50[i] or 
-                rsi[i] < 50):
+            # Exit short: price crosses below EMA200 OR reaches S2 (next support)
+            if (close[i] <= ema_200_1d_aligned[i] or 
+                low[i] <= s2_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -98,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_GoldenCross_Reverse_v1"
-timeframe = "4h"
+name = "6h_WeeklyPivot_R1S1_FadeWithTrend"
+timeframe = "6h"
 leverage = 1.0
