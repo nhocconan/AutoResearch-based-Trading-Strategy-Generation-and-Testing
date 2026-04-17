@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyBreakout_Volume_Trend
-Hypothesis: On the daily timeframe, weekly high/low breaks with volume confirmation and weekly trend filter capture sustained moves in both bull and bear markets. 
-Weekly high/low acts as institutional support/resistance; volume confirms institutional participation; weekly EMA34 ensures trend alignment.
-Designed for 1d to capture multi-day trends with ~10-25 trades per year, avoiding overtrading via strict breakout conditions.
+12h Donchian(20) breakout with 1d ATR filter and volume confirmation.
+Trades breakouts only when ATR(10) > 0.8 * ATR(30) (volatility filter).
+Long when price breaks above 20-period 12h high + volume > 1.5x 20-period volume MA.
+Short when price breaks below 20-period 12h low + volume > 1.5x 20-period volume MA.
+Exit on opposite breakout or when ATR(10) < 0.6 * ATR(30) (low volatility).
+Designed for 12h to capture strong moves while avoiding chop.
+Target: 15-25 trades/year per symbol.
 """
 
 import numpy as np
@@ -12,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,32 +23,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for prior week's high/low and EMA34 trend
-    df_1w = get_htf_data(prices, '1w')
+    # Get 12h data
+    df_12h = get_htf_data(prices, '12h')
     
-    # Prior weekly high and low (use shift(1) to avoid look-ahead: use completed week's levels)
-    pweekly_high = df_1w['high'].shift(1).values
-    pweekly_low = df_1w['low'].shift(1).values
-    pweekly_close = df_1w['close'].values
+    # 12h Donchian channels (20-period)
+    donch_high = pd.Series(df_12h['high']).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(df_12h['low']).rolling(window=20, min_periods=20).min().values
     
-    # Calculate weekly EMA34 for trend filter (use prior week's close)
-    ema_34_1w = pd.Series(pweekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Shift to avoid look-ahead (use completed period's levels)
+    donch_high = np.roll(donch_high, 1)
+    donch_low = np.roll(donch_low, 1)
+    donch_high[0] = np.nan
+    donch_low[0] = np.nan
     
-    # Align all weekly levels to daily timeframe (waits for weekly bar to close)
-    pweekly_high_d = align_htf_to_ltf(prices, df_1w, pweekly_high)
-    pweekly_low_d = align_htf_to_ltf(prices, df_1w, pweekly_low)
-    ema_34_1w_d = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # 1d ATR for volatility filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume confirmation: 20-period volume MA on daily
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = tr2[0] = tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    atr_30 = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
+    
+    # Align 12h levels and 1d ATR to 12h timeframe (already aligned, but ensure no look-ahead)
+    donch_high_12h = align_htf_to_ltf(prices, df_12h, donch_high)
+    donch_low_12h = align_htf_to_ltf(prices, df_12h, donch_low)
+    atr_10_12h = align_htf_to_ltf(prices, df_1d, atr_10)
+    atr_30_12h = align_htf_to_ltf(prices, df_1d, atr_30)
+    
+    # Volume confirmation: 20-period volume MA on 12h
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # warmup for EMA34 and volume MA
+    start_idx = 60  # warmup for Donchian and ATR
     
     for i in range(start_idx, n):
-        if (np.isnan(pweekly_high_d[i]) or np.isnan(pweekly_low_d[i]) or np.isnan(ema_34_1w_d[i]) or
+        if (np.isnan(donch_high_12h[i]) or np.isnan(donch_low_12h[i]) or
+            np.isnan(atr_10_12h[i]) or np.isnan(atr_30_12h[i]) or
             np.isnan(volume_ma_20.iloc[i])):
             signals[i] = 0.0
             continue
@@ -54,27 +75,30 @@ def generate_signals(prices):
         vol = volume[i]
         vol_ma = volume_ma_20.iloc[i]
         
+        # Volatility filter: only trade when ATR(10) > 0.8 * ATR(30)
+        vol_filter = atr_10_12h[i] > 0.8 * atr_30_12h[i]
+        
         if position == 0:
-            # Long: price breaks above prior weekly high with volume spike and above weekly EMA34
-            if price > pweekly_high_d[i] and vol > 2.0 * vol_ma and price > ema_34_1w_d[i]:
+            # Long: price breaks above 12h Donchian high with volume spike and vol filter
+            if price > donch_high_12h[i] and vol > 1.5 * vol_ma and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below prior weekly low with volume spike and below weekly EMA34
-            elif price < pweekly_low_d[i] and vol > 2.0 * vol_ma and price < ema_34_1w_d[i]:
+            # Short: price breaks below 12h Donchian low with volume spike and vol filter
+            elif price < donch_low_12h[i] and vol > 1.5 * vol_ma and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to prior weekly low (trailing stop) or opposite breakout
-            if price < pweekly_low_d[i] or price < pweekly_high_d[i] * 0.98:  # 2% buffer from weekly high
+            # Long exit: price breaks below 12h Donchian low OR vol filter fails
+            if price < donch_low_12h[i] or not vol_filter:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to prior weekly high (trailing stop) or opposite breakout
-            if price > pweekly_high_d[i] or price > pweekly_low_d[i] * 1.02:  # 2% buffer from weekly low
+            # Short exit: price breaks above 12h Donchian high OR vol filter fails
+            if price > donch_high_12h[i] or not vol_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -82,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyBreakout_Volume_Trend"
-timeframe = "1d"
+name = "12h_Donchian20_Volume_ATRFilter"
+timeframe = "12h"
 leverage = 1.0
