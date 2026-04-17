@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout + 12h EMA34 Trend + Volume Spike
-Long: Close breaks above Donchian(20) high + price > 12h EMA34 + volume > 1.5x 4h volume SMA(20)
-Short: Close breaks below Donchian(20) low + price < 12h EMA34 + volume > 1.5x 4h volume SMA(20)
-Exit: Opposite breakout or trailing stop via ATR(10)*3
-Uses price channel breakouts for trend capture, filtered by higher timeframe trend and volume.
-Designed to work in trending markets with confirmation from higher timeframe and volume.
-Target: 75-200 total trades over 4 years (19-50/year)
+1h EMA13 Trend + 4h RSI(14) Filter + Volume Spike
+Long: EMA13 rising + 4h RSI > 50 + volume > 1.5x 1h volume SMA(20)
+Short: EMA13 falling + 4h RSI < 50 + volume > 1.5x 1h volume SMA(20)
+Exit: Opposite EMA13 direction or RSI crosses 50
+Uses EMA for fast trend filtering with 4h RSI to avoid counter-trend trades.
+Volume spike confirms momentum. Designed for 1h timeframe with controlled trade frequency.
+Target: 60-150 total trades over 4 years (15-37/year)
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,94 +23,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA34 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Get 4h data for RSI filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # Calculate 12h EMA34
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Calculate 4h RSI(14)
+    delta = pd.Series(close_4h).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_14_4h = 100 - (100 / (1 + rs))
+    rsi_14_4h = rsi_14_4h.fillna(50).values  # neutral when undefined
+    rsi_14_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_14_4h)
     
-    # Calculate 4h Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate EMA13 for trend
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate 4h volume SMA(20) for volume filter
-    vol_sma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate ATR(10) for trailing stop
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Calculate 1h volume SMA(20)
+    vol_sma_1h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    start_idx = max(34, 20)  # need EMA34 and Donchian
+    start_idx = max(20, 13)  # need volume SMA and EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_sma_4h[i]) or np.isnan(atr[i])):
+        if (np.isnan(rsi_14_4h_aligned[i]) or np.isnan(vol_sma_1h[i]) or
+            np.isnan(ema13[i]) or np.isnan(ema13[i-1])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_sma_val = vol_sma_4h[i]
-        donch_high = donchian_high[i]
-        donch_low = donchian_low[i]
-        ema_12h = ema_34_12h_aligned[i]
-        atr_val = atr[i]
+        vol_sma_val = vol_sma_1h[i]
+        rsi_val = rsi_14_4h_aligned[i]
+        ema_val = ema13[i]
+        ema_prev = ema13[i-1]
         
         if position == 0:
-            # Long: break above Donchian high + above 12h EMA + volume spike
-            if price > donch_high and price > ema_12h and vol > 1.5 * vol_sma_val:
-                signals[i] = 0.25
+            # Long: EMA13 rising + 4h RSI > 50 + volume spike
+            if ema_val > ema_prev and rsi_val > 50 and vol > 1.5 * vol_sma_val:
+                signals[i] = 0.20
                 position = 1
-                entry_price = price
-                highest_since_entry = price
-            # Short: break below Donchian low + below 12h EMA + volume spike
-            elif price < donch_low and price < ema_12h and vol > 1.5 * vol_sma_val:
-                signals[i] = -0.25
+            # Short: EMA13 falling + 4h RSI < 50 + volume spike
+            elif ema_val < ema_prev and rsi_val < 50 and vol > 1.5 * vol_sma_val:
+                signals[i] = -0.20
                 position = -1
-                entry_price = price
-                lowest_since_entry = price
         
         elif position == 1:
-            # Update highest since entry
-            if price > highest_since_entry:
-                highest_since_entry = price
-            
-            # Exit conditions: opposite breakout or ATR trailing stop
-            if price < donch_low or price < highest_since_entry - 3.0 * atr_val:
+            # Long exit: EMA13 falling or 4h RSI < 50
+            if ema_val < ema_prev or rsi_val < 50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Update lowest since entry
-            if price < lowest_since_entry:
-                lowest_since_entry = price
-            
-            # Exit conditions: opposite breakout or ATR trailing stop
-            if price > donch_high or price > lowest_since_entry + 3.0 * atr_val:
+            # Short exit: EMA13 rising or 4h RSI > 50
+            if ema_val > ema_prev or rsi_val > 50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Donchian_Breakout_12hEMA34_VolumeSpike_ATRStop"
-timeframe = "4h"
+name = "1h_EMA13_Trend_4hRSI_VolumeSpike"
+timeframe = "1h"
 leverage = 1.0
