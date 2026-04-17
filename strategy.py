@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_R1_S1_Breakout_Volume
-Strategy: 12-hour breakout of daily Camarilla R1/S1 with volume confirmation.
-Long: Price breaks above daily R1 + volume > 1.8x 20-period avg
-Short: Price breaks below daily S1 + volume > 1.8x 20-period avg
-Exit: Opposite breakout (reverse signal)
+1d_1w_Momentum_Volume_Regime
+Strategy: Momentum breakout with volume confirmation and regime filter on daily timeframe.
+Long: Price breaks above 20-day high + volume > 1.5x 20-day avg + weekly ADX > 25 (trending)
+Short: Price breaks below 20-day low + volume > 1.5x 20-day avg + weekly ADX > 25 (trending)
+Exit: Price returns to 20-day moving average
 Position size: 0.25
-Designed to capture institutional breakout levels with volume confirmation.
-Timeframe: 12h
+Designed to capture momentum moves in trending markets while avoiding choppy conditions.
+Timeframe: 1d
 """
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,66 +24,101 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 20-day moving average for exit
+    ma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
     
-    # Camarilla R1 and S1 (daily)
-    # R1 = C + (H-L)*1.1/12
-    # S1 = C - (H-L)*1.1/12
-    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    # Calculate 20-day high/low for breakout levels
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Volume confirmation (20-period MA on 12h)
+    # Volume confirmation (20-day average)
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Get weekly data for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate weekly ADX
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # True Range
+    tr1 = np.abs(high_1w[1:] - low_1w[:-1])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
+    
+    # Directional Movement
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed values
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    
+    # DI and DX
+    di_plus = 100 * dm_plus_14 / tr14
+    di_minus = 100 * dm_minus_14 / tr14
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align weekly ADX to daily timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20
+    start_idx = max(20, 34)  # Need 20 for breakout, 34 for ADX (14+14+6)
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(volume_ma20[i])):
+        if (np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or 
+            np.isnan(volume_ma20[i]) or 
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.8x 20-period average
-        volume_filter = volume[i] > (1.8 * volume_ma20[i])
+        # Volume filter: current volume > 1.5x 20-day average
+        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        
+        # Regime filter: weekly ADX > 25 (trending market)
+        regime_filter = adx_aligned[i] > 25
         
         # Breakout conditions
-        breakout_r1 = close[i] > r1_aligned[i-1]  # break above previous day R1
-        breakout_s1 = close[i] < s1_aligned[i-1]  # break below previous day S1
+        breakout_up = close[i] > high_20[i-1]  # break above previous 20-day high
+        breakout_down = close[i] < low_20[i-1]  # break below previous 20-day low
+        
+        # Exit condition: return to 20-day moving average
+        return_to_ma = abs(close[i] - ma20[i]) < 0.01 * close[i]  # within 1% of MA20
         
         if position == 0:
-            # Long: breakout above R1 + volume filter
-            if breakout_r1 and volume_filter:
+            # Long: breakout up + volume filter + regime filter
+            if breakout_up and volume_filter and regime_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below S1 + volume filter
-            elif breakout_s1 and volume_filter:
+            # Short: breakout down + volume filter + regime filter
+            elif breakout_down and volume_filter and regime_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: breakout below S1 (reverse signal)
-            if breakout_s1:
+            # Exit long: return to MA20 or break down
+            if return_to_ma or breakout_down:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: breakout above R1 (reverse signal)
-            if breakout_r1:
+            # Exit short: return to MA20 or break up
+            if return_to_ma or breakout_up:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_R1_S1_Breakout_Volume"
-timeframe = "12h"
+name = "1d_1w_Momentum_Volume_Regime"
+timeframe = "1d"
 leverage = 1.0
