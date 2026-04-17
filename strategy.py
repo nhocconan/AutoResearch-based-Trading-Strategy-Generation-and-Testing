@@ -3,9 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Daily 20-bar Donchian channel breakout with volume confirmation and 1-week trend filter
+# Strategy logic: 
+# - Long when price breaks above 20-day high with volume > 1.5x 10-day average and weekly close > weekly SMA50
+# - Short when price breaks below 20-day low with volume > 1.5x 10-day average and weekly close < weekly SMA50
+# - Exit when price returns to 10-day SMA or volatility filter fails
+# - Designed for low trade frequency (<25/year) to minimize fee drag in bear markets
+# - Uses 1d timeframe with 1w trend filter for multi-timeframe confluence
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,67 +21,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for 200-day EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 200-day EMA on daily closes
-    ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate weekly SMA50 for trend filter
+    if len(close_1w) >= 50:
+        sma50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+        sma50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
+    else:
+        sma50_1w_aligned = np.full(n, np.nan)
     
-    # Align 200-day EMA to 4h timeframe (wait for daily close)
-    ema_200_4h = align_htf_to_ltf(prices, df_1d, ema_200)
+    # Calculate daily 20-bar Donchian channels
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 4-period RSI for entry timing
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/4, adjust=False, min_periods=4).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/4, adjust=False, min_periods=4).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate 10-day SMA for exit
+    sma10 = pd.Series(close).rolling(window=10, min_periods=10).mean().values
     
-    # Volume confirmation: current volume > 1.3 * 20-period average
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: current volume > 1.5x 10-day average
+    volume_ma10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 200  # Need EMA200
+    start_idx = 50  # Need enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if np.isnan(ema_200_4h[i]) or np.isnan(rsi[i]) or np.isnan(volume_ma20[i]):
+        if (np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or 
+            np.isnan(sma10[i]) or 
+            np.isnan(volume_ma10[i]) or
+            np.isnan(sma50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 200-day EMA
-        uptrend = close[i] > ema_200_4h[i]
-        downtrend = close[i] < ema_200_4h[i]
-        
-        # Volume filter
-        volume_filter = volume[i] > (1.3 * volume_ma20[i])
+        # Volume filter: current volume > 1.5x 10-day average
+        volume_filter = volume[i] > (1.5 * volume_ma10[i])
         
         if position == 0:
-            # Long: uptrend + RSI oversold bounce + volume
-            if uptrend and rsi[i] < 30 and rsi[i] > rsi[i-1] and volume_filter:
+            # Long: price breaks above 20-day high with volume and weekly uptrend
+            if close[i] > high_20[i] and volume_filter and close[i] > sma50_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + RSI overbought rejection + volume
-            elif downtrend and rsi[i] > 70 and rsi[i] < rsi[i-1] and volume_filter:
+            # Short: price breaks below 20-day low with volume and weekly downtrend
+            elif close[i] < low_20[i] and volume_filter and close[i] < sma50_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI overbought or trend change
-            if rsi[i] > 70 or not uptrend:
+            # Exit long: price returns to 10-day SMA or weekly trend turns down
+            if close[i] < sma10[i] or close[i] < sma50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI oversold or trend change
-            if rsi[i] < 30 or not downtrend:
+            # Exit short: price returns to 10-day SMA or weekly trend turns up
+            if close[i] > sma10[i] or close[i] > sma50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -81,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA200_RSI4_VolumeFilter"
-timeframe = "4h"
+name = "1d_Donchian20_WeeklyTrend_Filter"
+timeframe = "1d"
 leverage = 1.0
