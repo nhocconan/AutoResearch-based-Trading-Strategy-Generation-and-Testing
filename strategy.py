@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -36,13 +36,13 @@ def generate_signals(prices):
     r2_prev[0] = np.nan
     s2_prev[0] = np.nan
     
-    # Align daily pivot levels to 12h timeframe
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1_prev)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1_prev)
-    r2_12h = align_htf_to_ltf(prices, df_1d, r2_prev)
-    s2_12h = align_htf_to_ltf(prices, df_1d, s2_prev)
+    # Align daily pivot levels to 1h timeframe
+    r1_1h = align_htf_to_ltf(prices, df_1d, r1_prev)
+    s1_1h = align_htf_to_ltf(prices, df_1d, s1_prev)
+    r2_1h = align_htf_to_ltf(prices, df_1d, r2_prev)
+    s2_1h = align_htf_to_ltf(prices, df_1d, s2_prev)
     
-    # Volume confirmation: current volume > 1.5 * 10-period average (12h * 10 = 5 days)
+    # Volume confirmation: current volume > 1.5 * 10-period average (10h)
     volume_ma10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     
     # ATR filter to avoid low volatility environments
@@ -56,20 +56,24 @@ def generate_signals(prices):
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_ma10 = pd.Series(atr).rolling(window=10, min_periods=10).mean().values
     
+    # Session filter: 08:00 to 20:00 UTC
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 20  # Need sufficient data for all indicators
+    start_idx = 20  # Need R2/S2 and ATR MA10
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(volume_ma10[i]) or 
             np.isnan(atr[i]) or 
             np.isnan(atr_ma10[i]) or 
-            np.isnan(r2_12h[i]) or 
-            np.isnan(s2_12h[i]) or
-            np.isnan(r1_12h[i]) or 
-            np.isnan(s1_12h[i])):
+            np.isnan(r2_1h[i]) or 
+            np.isnan(s2_1h[i]) or
+            np.isnan(r1_1h[i]) or 
+            np.isnan(s1_1h[i])):
             signals[i] = 0.0
             continue
         
@@ -80,32 +84,32 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price breaks above R2 with volume and volatility (strong breakout)
-            if close[i] > r2_12h[i] and volume_filter and volatility_filter:
-                signals[i] = 0.25
+            if session_filter[i] and close[i] > r2_1h[i] and volume_filter and volatility_filter:
+                signals[i] = 0.30
                 position = 1
             # Short: price breaks below S2 with volume and volatility (strong breakdown)
-            elif close[i] < s2_12h[i] and volume_filter and volatility_filter:
-                signals[i] = -0.25
+            elif session_filter[i] and close[i] < s2_1h[i] and volume_filter and volatility_filter:
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
             # Exit long: price returns below R1 or volatility drops
-            if close[i] < r1_12h[i] or not volatility_filter:
+            if close[i] < r1_1h[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
             # Exit short: price returns above S1 or volatility drops
-            if close[i] > s1_12h[i] or not volatility_filter:
+            if close[i] > s1_1h[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "12h_Pivot_R2_S2_Breakout_Vol"
-timeframe = "12h"
+name = "1h_Pivot_R2_S2_Breakout_Vol_Session"
+timeframe = "1h"
 leverage = 1.0
