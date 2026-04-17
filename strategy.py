@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Williams %R(14) extreme reversal with 1d volume confirmation and ADX trend filter.
-Long when Williams %R crosses above -80 (oversold) with volume > 1.5x 20-period 1d average volume AND 1d ADX > 20.
-Short when Williams %R crosses below -20 (overbought) with volume > 1.5x 20-period 1d average volume AND 1d ADX > 20.
-Exit when Williams %R crosses below -50 for long or above -50 for short.
-Uses 4h for primary signals and 1d for volume/ADX confirmation. Designed to catch reversals in both bull and bear markets with low trade frequency.
-Target: 20-40 trades/year per symbol (80-160 total over 4 years).
+Hypothesis: 6h Elder Ray + 1d Regime Filter.
+Long when Bull Power > 0 and Bear Power < 0 with 1d ADX < 20 (range regime) or ADX > 25 with price > EMA20 (trend regime).
+Short when Bear Power > 0 and Bull Power < 0 with same regime filters.
+Exit when power signals reverse or regime changes.
+Uses 1d for ADX/EMA regime, 6h for Elder Ray (EMA13-based Bull/Bear power).
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -20,20 +20,14 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for volume MA and ADX
+    # Get 1d data for regime filters (ADX, EMA)
     df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 20-period volume moving average
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
-    
-    # ADX calculation (14-period)
+    # Calculate 1d ADX (14-period)
     def calculate_adx(high, low, close, period=14):
         plus_dm = np.zeros_like(high)
         minus_dm = np.zeros_like(high)
@@ -63,64 +57,67 @@ def generate_signals(prices):
         adx = pd.Series(dx).ewm(alpha=1/period, adjust=False).mean().values
         return adx
     
+    # Calculate 1d EMA20
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Align 1d indicators
     adx_14 = calculate_adx(high_1d, low_1d, close_1d, 14)
     adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
-    # Williams %R calculation (14-period) on 4h data
-    def calculate_williams_r(high, low, close, period=14):
-        highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-        lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-        wr = -100 * (highest_high - close) / (highest_high - lowest_low)
-        return wr
-    
-    wr_14 = calculate_williams_r(high, low, close, 14)
+    # Calculate 6h Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # warmup period
+    start_idx = 50  # warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(vol_ma_20_aligned[i]) or 
-            np.isnan(adx_14_aligned[i]) or
-            np.isnan(wr_14[i])):
+        if (np.isnan(adx_14_aligned[i]) or 
+            np.isnan(ema20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period 1d average volume
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20_aligned[i]
+        # Regime determination
+        adx_val = adx_14_aligned[i]
+        ema20_val = ema20_1d_aligned[i]
+        price = close[i]
         
-        # Trend filter: ADX > 20 indicates sufficient trend strength
-        trending = adx_14_aligned[i] > 20
+        # Range regime: ADX < 20
+        # Trend regime: ADX > 25 and price > EMA20 (for long) or price < EMA20 (for short)
+        is_range = adx_val < 20
+        is_trend_long = adx_val > 25 and price > ema20_val
+        is_trend_short = adx_val > 25 and price < ema20_val
         
-        # Williams %R signals
-        wr_cross_above_80 = wr_14[i] > -80 and wr_14[i-1] <= -80
-        wr_cross_below_20 = wr_14[i] < -20 and wr_14[i-1] >= -20
-        wr_cross_below_50 = wr_14[i] < -50 and wr_14[i-1] >= -50
-        wr_cross_above_50 = wr_14[i] > -50 and wr_14[i-1] <= -50
+        # Elder Ray signals
+        bull_signal = bull_power[i] > 0
+        bear_signal = bear_power[i] > 0
         
         if position == 0:
-            # Long: Williams %R crosses above -80 (oversold reversal) with volume confirmation and trend
-            if (wr_cross_above_80 and volume_confirmed and trending):
+            # Long: Bull Power positive AND (range regime OR trend regime long)
+            if bull_signal and (is_range or is_trend_long):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R crosses below -20 (overbought reversal) with volume confirmation and trend
-            elif (wr_cross_below_20 and volume_confirmed and trending):
+            # Short: Bear Power positive AND (range regime OR trend regime short)
+            elif bear_signal and (is_range or is_trend_short):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Williams %R crosses below -50
-            if wr_cross_below_50:
+            # Exit long: Bull Power turns negative OR regime shifts to trend short
+            if not bull_signal or is_trend_short:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Williams %R crosses above -50
-            if wr_cross_above_50:
+            # Exit short: Bear Power turns negative OR regime shifts to trend long
+            if not bear_signal or is_trend_long:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -128,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_Volume_1dADX20_Reversal"
-timeframe = "4h"
+name = "6h_ElderRay_1dADXEMA_Regime"
+timeframe = "6h"
 leverage = 1.0
