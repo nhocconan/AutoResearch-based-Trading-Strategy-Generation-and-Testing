@@ -13,83 +13,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for weekly pivot calculation (using 5 daily bars)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 12h data for trend and structure
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate weekly pivot points from daily data (5-day high/low/close)
-    high_5d = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
-    low_5d = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
-    close_5d = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values
+    # 12h Donchian channels (20-period)
+    high_20_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    low_20_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Weekly pivot points: P = (H + L + C)/3
-    weekly_pivot = (high_5d + low_5d + close_5d) / 3.0
-    # Weekly resistance and support levels
-    weekly_r1 = 2 * weekly_pivot - low_5d
-    weekly_s1 = 2 * weekly_pivot - high_5d
+    # Align 12h Donchian to 4h
+    upper_12h = align_htf_to_ltf(prices, df_12h, high_20_12h)
+    lower_12h = align_htf_to_ltf(prices, df_12h, low_20_12h)
     
-    # Align weekly pivot levels to 12h timeframe
-    weekly_pivot_12h = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-    weekly_r1_12h = align_htf_to_ltf(prices, df_1d, weekly_r1)
-    weekly_s1_12h = align_htf_to_ltf(prices, df_1d, weekly_s1)
+    # 12h EMA34 for trend filter
+    close_12h_series = pd.Series(close_12h)
+    ema34_12h = close_12h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
-    # Get daily data for trend filter (EMA34)
-    close_1d_series = pd.Series(close_1d)
-    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # 4h volume filter: current volume > 1.8 * 20-period average
+    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Volume filter: current volume > 1.5 * 30-period average
-    volume_ma30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # ATR for stop management
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # Need weekly pivot, EMA34, volume MA
+    start_idx = 50  # Need sufficient lookback
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(weekly_pivot_12h[i]) or 
-            np.isnan(weekly_r1_12h[i]) or 
-            np.isnan(weekly_s1_12h[i]) or 
-            np.isnan(ema34_12h[i]) or 
-            np.isnan(volume_ma30[i])):
+        if (np.isnan(upper_12h[i]) or 
+            np.isnan(lower_12h[i]) or 
+            np.isnan(ema34_12h_aligned[i]) or 
+            np.isnan(volume_ma20[i]) or 
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter
-        volume_filter = volume[i] > (1.5 * volume_ma30[i])
+        volume_filter = volume[i] > (1.8 * volume_ma20[i])
         
-        # Trend filter: price above/below daily EMA34
-        price_above_ema = close[i] > ema34_12h[i]
-        price_below_ema = close[i] < ema34_12h[i]
+        # Trend filter: price relative to 12h EMA34
+        price_above_ema = close[i] > ema34_12h_aligned[i]
+        price_below_ema = close[i] < ema34_12h_aligned[i]
         
-        # Price relative to weekly pivot levels
-        price_above_r1 = close[i] > weekly_r1_12h[i]
-        price_below_s1 = close[i] < weekly_s1_12h[i]
+        # Donchian breakout conditions
+        breakout_up = close[i] > upper_12h[i]
+        breakout_down = close[i] < lower_12h[i]
         
         if position == 0:
-            # Long: Price breaks above weekly R1 with volume and above daily EMA34
-            if (price_above_r1 and price_above_ema and volume_filter):
+            # Long: 12h Donchian breakout up + volume + above 12h EMA34
+            if (breakout_up and volume_filter and price_above_ema):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below weekly S1 with volume and below daily EMA34
-            elif (price_below_s1 and price_below_ema and volume_filter):
+            # Short: 12h Donchian breakout down + volume + below 12h EMA34
+            elif (breakout_down and volume_filter and price_below_ema):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price crosses below weekly pivot OR below daily EMA34
-            if (close[i] < weekly_pivot_12h[i]) or (close[i] < ema34_12h[i]):
+            # Exit conditions: stop loss or reversal
+            # Stop loss: 2 * ATR below entry (approximated by 12h EMA or lower band)
+            if (close[i] < ema34_12h_aligned[i] - 2.0 * atr[i]) or \
+               (close[i] < lower_12h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price crosses above weekly pivot OR above daily EMA34
-            if (close[i] > weekly_pivot_12h[i]) or (close[i] > ema34_12h[i]):
+            # Exit conditions: stop loss or reversal
+            # Stop loss: 2 * ATR above entry
+            if (close[i] > ema34_12h_aligned[i] + 2.0 * atr[i]) or \
+               (close[i] > upper_12h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WeeklyPivot_Breakout_EMA34_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA34_Volume_ATRStop"
+timeframe = "4h"
 leverage = 1.0
