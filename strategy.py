@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_RSI_VWAP_Reversion_v1
-Daily RSI(14) mean reversion with VWAP filter and weekly trend filter.
-- Long: RSI < 30, price > VWAP, price above weekly EMA50
-- Short: RSI > 70, price < VWAP, price below weekly EMA50
-- Exit: RSI crosses back to 50 or weekly trend changes
-Designed to work in both bull and bear markets by fading extremes in direction of weekly trend.
-Target: 50-100 total trades over 4 years (12-25/year).
+12h_1d_Pivot_R1_S1_Breakout_Volume_ATRFilter_V1
+Long when price breaks above R1 with volume > 1.5x 20-period avg, short when breaks below S1.
+Trend filter: price above/below 1d EMA50. Exit when price crosses back to pivot point.
+Uses 12h timeframe for entries, 1d for pivot levels and trend filter.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -23,33 +21,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === RSI(14) ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # === 1d Pivot Points (Classic) ===
+    df_1d = get_htf_data(prices, '1d')
+    # Ensure we have enough data
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # === VWAP (daily reset) ===
-    typical_price = (high + low + close) / 3.0
-    tpv = typical_price * volume
-    cum_tpv = np.zeros(n)
-    cum_vol = np.zeros(n)
-    running_tpv = 0
-    running_vol = 0
-    for i in range(n):
-        running_tpv += tpv[i]
-        running_vol += volume[i]
-        cum_tpv[i] = running_tpv
-        cum_vol[i] = running_vol
-    vwap = cum_tpv / (cum_vol + 1e-10)
+    # Calculate pivot points from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # === Weekly EMA50 for trend filter ===
-    df_1w = get_htf_data(prices, '1w')
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r1 = 2 * pivot - prev_low
+    s1 = 2 * pivot - prev_high
+    
+    # Align to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # === 1d EMA50 for trend filter ===
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # === Volume filter: 20-period average ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
@@ -61,35 +58,39 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi[i]) or 
-            np.isnan(vwap[i]) or 
-            np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(pivot_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             position = 0
             continue
         
+        # Volume condition: current volume > 1.5x 20-period average
+        vol_condition = volume[i] > 1.5 * vol_ma[i]
+        
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: RSI < 30, price > VWAP, price above weekly EMA50
-            if (rsi[i] < 30 and 
-                close[i] > vwap[i] and 
-                close[i] > ema_50_1w_aligned[i]):
+            # Long: price breaks above R1, volume confirmation, price above 1d EMA50
+            if (close[i] > r1_aligned[i] and 
+                vol_condition and 
+                close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: RSI > 70, price < VWAP, price below weekly EMA50
-            elif (rsi[i] > 70 and 
-                  close[i] < vwap[i] and 
-                  close[i] < ema_50_1w_aligned[i]):
+            # Short: price breaks below S1, volume confirmation, price below 1d EMA50
+            elif (close[i] < s1_aligned[i] and 
+                  vol_condition and 
+                  close[i] < ema_50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: RSI > 50 OR price below weekly EMA50 (trend change)
-            if (rsi[i] > 50 or 
-                close[i] < ema_50_1w_aligned[i]):
+            # Exit long: price crosses back below pivot point
+            if close[i] < pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -97,9 +98,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI < 50 OR price above weekly EMA50 (trend change)
-            if (rsi[i] < 50 or 
-                close[i] > ema_50_1w_aligned[i]):
+            # Exit short: price crosses back above pivot point
+            if close[i] > pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -108,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_RSI_VWAP_Reversion_v1"
-timeframe = "1d"
+name = "12h_1d_Pivot_R1_S1_Breakout_Volume_ATRFilter_V1"
+timeframe = "12h"
 leverage = 1.0
