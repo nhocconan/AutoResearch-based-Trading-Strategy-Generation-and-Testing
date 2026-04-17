@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-1h_RSI20_MultiTF_Filter_v1
-RSI(20) with multi-timeframe trend filter (4h EMA50 & 1d EMA200).
-Long: RSI < 30 + price > 4h EMA50 + price > 1d EMA200
-Short: RSI > 70 + price < 4h EMA50 + price < 1d EMA200
-Exit: RSI crosses back to neutral (40-60 range)
-Session filter: 08-20 UTC only
-Target: 60-150 total trades over 4 years (15-37/year)
+6h_Weekly_Pivot_Breakout_Volume
+Breakout above weekly pivot R1 or below S1 with volume confirmation.
+Weekly pivot provides institutional levels; volume confirms institutional interest.
+Designed to work in both bull and breakout phases of bear markets.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -21,38 +19,35 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # === RSI(20) ===
-    delta = np.diff(close)
-    delta = np.concatenate([[0], delta])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # === Weekly Pivot Points (using Monday's OHLC) ===
+    # Get weekly data
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 1:
+        return np.zeros(n)
     
-    # Use Wilder's smoothing (alpha = 1/period)
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[20] = np.mean(gain[1:21])
-    avg_loss[20] = np.mean(loss[1:21])
+    # Calculate pivot points from previous week's OHLC
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    for i in range(21, n):
-        avg_gain[i] = (avg_gain[i-1] * 19 + gain[i]) / 20
-        avg_loss[i] = (avg_loss[i-1] * 19 + loss[i]) / 20
+    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    r1 = 2 * pivot - weekly_low
+    s1 = 2 * pivot - weekly_high
     
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Align to 6h timeframe (wait for weekly bar to close)
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
     
-    # === 4h EMA50 for trend filter ===
-    df_4h = get_htf_data(prices, '4h')
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # === 1d EMA200 for higher timeframe trend ===
-    df_1d = get_htf_data(prices, '1d')
-    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    
-    # === Session filter: 08-20 UTC only ===
-    hours = prices.index.hour  # Pre-compute for efficiency
+    # === Volume Spike Detection ===
+    # Volume > 1.5x 20-period average indicates institutional interest
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     
@@ -63,59 +58,53 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            position = 0
-            continue
-        
         # Skip if any required data is NaN
-        if (np.isnan(rsi[i]) or 
-            np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(ema_200_1d_aligned[i])):
+        if (np.isnan(pivot_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: RSI < 30 (oversold) + price above both EMAs (uptrend)
-            if (rsi[i] < 30 and 
-                close[i] > ema_50_4h_aligned[i] and 
-                close[i] > ema_200_1d_aligned[i]):
-                signals[i] = 0.20
+            # Long: price breaks above R1 with volume spike
+            if (close[i] > r1_aligned[i] and 
+                volume_spike[i]):
+                signals[i] = 0.25
                 position = 1
                 continue
-            # Short: RSI > 70 (overbought) + price below both EMAs (downtrend)
-            elif (rsi[i] > 70 and 
-                  close[i] < ema_50_4h_aligned[i] and 
-                  close[i] < ema_200_1d_aligned[i]):
-                signals[i] = -0.20
+            # Short: price breaks below S1 with volume spike
+            elif (close[i] < s1_aligned[i] and 
+                  volume_spike[i]):
+                signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic
+        # Exit logic: reverse signal or volatility exhaustion
         elif position == 1:
-            # Exit long: RSI crosses back to neutral (>= 40)
-            if rsi[i] >= 40:
+            # Exit long: price breaks below pivot OR opposite signal
+            if (close[i] < pivot_aligned[i] or 
+                (close[i] < s1_aligned[i] and volume_spike[i])):
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI crosses back to neutral (<= 60)
-            if rsi[i] <= 60:
+            # Exit short: price breaks above pivot OR opposite signal
+            if (close[i] > pivot_aligned[i] or 
+                (close[i] > r1_aligned[i] and volume_spike[i])):
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_RSI20_MultiTF_Filter_v1"
-timeframe = "1h"
+name = "6h_Weekly_Pivot_Breakout_Volume"
+timeframe = "6h"
 leverage = 1.0
