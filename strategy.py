@@ -1,8 +1,4 @@
-# 4h_RSI14_1dADX25_Volume1.5x
-# Hypothesis: RSI mean reversion on 4h with 1d ADX trend filter and volume confirmation.
-# Works in bull/bear: RSI identifies overextended moves, ADX ensures trading with trend,
-# volume confirms institutional interest. Target 20-50 trades/year to avoid fee drag.
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -13,6 +9,7 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    volume = prices['volume'].values
     
     # === 4h RSI(14) ===
     delta = np.diff(close, prepend=close[0])
@@ -65,6 +62,9 @@ def generate_signals(prices):
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
+    # === 4h volume confirmation ===
+    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    
     signals = np.zeros(n)
     
     # Warmup
@@ -75,18 +75,20 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(rsi[i]) or np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20_aligned[i])):
+        if (np.isnan(rsi[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(vol_ma_20_aligned[i]) or np.isnan(vol_ma_10[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Get current 1d volume and align
+        # Get current 1d volume
         df_1d_current = get_htf_data(prices, '1d')
         volume_1d_current = df_1d_current['volume'].values
         volume_1d_aligned = align_htf_to_ltf(prices, df_1d_current, volume_1d_current)
         
-        # Volume spike: current 1d volume > 1.5x 20-period average
-        vol_spike = volume_1d_aligned[i] > vol_ma_20_aligned[i] * 1.5
+        # Volume spike: current 1d volume > 1.5x 20-period average AND 4h volume > 1.3x 10-period average
+        vol_spike_1d = volume_1d_aligned[i] > vol_ma_20_aligned[i] * 1.5
+        vol_spike_4h = volume[i] > vol_ma_10[i] * 1.3
         
         # RSI conditions
         rsi_oversold = rsi[i] < 30
@@ -99,12 +101,12 @@ def generate_signals(prices):
         # Entry logic: only enter when flat
         if position == 0:
             # Long: RSI oversold + volume spike + trending
-            if rsi_oversold and vol_spike and trending:
+            if rsi_oversold and vol_spike_1d and vol_spike_4h and trending:
                 signals[i] = 0.25
                 position = 1
                 continue
             # Short: RSI overbought + volume spike + trending
-            elif rsi_overbought and vol_spike and trending:
+            elif rsi_overbought and vol_spike_1d and vol_spike_4h and trending:
                 signals[i] = -0.25
                 position = -1
                 continue
@@ -130,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI14_1dADX25_Volume1.5x"
+name = "4h_RSI14_1dADX25_Volume1.5x_4hVol1.3x"
 timeframe = "4h"
 leverage = 1.0
