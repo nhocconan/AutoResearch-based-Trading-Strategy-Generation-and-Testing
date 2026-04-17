@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,34 +13,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d KAMA (Kaufman Adaptive Moving Average) ===
+    # === 1d Bollinger Bands (20, 2) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate efficiency ratio (ER)
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.sum(np.abs(np.diff(close_1d, prepend=close_1d[0])), axis=0) if len(close_1d) > 1 else 0
-    # More efficient calculation
-    er = np.zeros(len(close_1d))
+    # Calculate SMA and std dev for Bollinger Bands
+    sma_20 = np.zeros(len(close_1d))
+    std_20 = np.zeros(len(close_1d))
+    
     for i in range(len(close_1d)):
-        if i == 0:
-            er[i] = 1.0
+        if i >= 19:
+            sma_20[i] = np.mean(close_1d[i-19:i+1])
+            std_20[i] = np.std(close_1d[i-19:i+1])
         else:
-            price_change = np.abs(close_1d[i] - close_1d[i-10]) if i >= 10 else np.abs(close_1d[i] - close_1d[0])
-            sum_abs_change = np.sum(np.abs(np.diff(close_1d[max(0, i-9):i+1]))) if i > 0 else 0
-            er[i] = price_change / (sum_abs_change + 1e-10) if sum_abs_change > 0 else 1.0
+            sma_20[i] = np.nan
+            std_20[i] = np.nan
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1) # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama = np.zeros(len(close_1d))
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    upper_band = sma_20 + 2 * std_20
+    lower_band = sma_20 - 2 * std_20
     
     # === 1d RSI (14) ===
     delta = np.diff(close_1d, prepend=close_1d[0])
@@ -50,8 +41,8 @@ def generate_signals(prices):
     # Wilder's smoothing
     avg_gain = np.zeros(len(gain))
     avg_loss = np.zeros(len(loss))
-    avg_gain[0] = gain[0]
-    avg_loss[0] = loss[0]
+    avg_gain[0] = gain[0] if len(gain) > 0 else 0
+    avg_loss[0] = loss[0] if len(loss) > 0 else 0
     for i in range(1, len(gain)):
         avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
         avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
@@ -60,12 +51,16 @@ def generate_signals(prices):
     rsi = 100 - (100 / (1 + rs))
     
     # === 1d Volume Spike ===
-    vol_ma_20_1d = np.convolve(volume_1d, np.ones(20)/20, mode='same')
-    vol_ma_20_1d[:10] = volume_1d[:10].mean() if len(volume_1d) >= 10 else volume_1d.mean()
-    vol_ma_20_1d[-10:] = volume_1d[-10:].mean() if len(volume_1d) >= 10 else volume_1d.mean()
+    vol_ma_20_1d = np.zeros(len(volume_1d))
+    for i in range(len(volume_1d)):
+        if i >= 19:
+            vol_ma_20_1d[i] = np.mean(volume_1d[i-19:i+1])
+        else:
+            vol_ma_20_1d[i] = np.mean(volume_1d[max(0, i-9):i+1]) if i > 0 else volume_1d[0]
     
     # Align to 4h timeframe
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
+    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
     rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
@@ -79,8 +74,8 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
@@ -91,21 +86,21 @@ def generate_signals(prices):
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price above KAMA and RSI > 50 with volume confirmation
-            if close[i] > kama_1d_aligned[i] and rsi_1d_aligned[i] > 50 and vol_confirm:
+            # Long: price touches lower Bollinger Band and RSI < 30 (oversold) with volume confirmation
+            if low[i] <= lower_band_aligned[i] and rsi_1d_aligned[i] < 30 and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price below KAMA and RSI < 50 with volume confirmation
-            elif close[i] < kama_1d_aligned[i] and rsi_1d_aligned[i] < 50 and vol_confirm:
+            # Short: price touches upper Bollinger Band and RSI > 70 (overbought) with volume confirmation
+            elif high[i] >= upper_band_aligned[i] and rsi_1d_aligned[i] > 70 and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic: price crosses KAMA in opposite direction
+        # Exit logic: price crosses the middle band (SMA20) or RSI returns to neutral
         elif position == 1:
-            # Exit long: price crosses below KAMA
-            if close[i] < kama_1d_aligned[i]:
+            # Exit long: price crosses above SMA20 or RSI > 50
+            if close[i] >= sma_20_aligned[i] if 'sma_20_aligned' in locals() else False or rsi_1d_aligned[i] > 50:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -113,8 +108,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above KAMA
-            if close[i] > kama_1d_aligned[i]:
+            # Exit short: price crosses below SMA20 or RSI < 50
+            if close[i] <= sma_20_aligned[i] if 'sma_20_aligned' in locals() else False or rsi_1d_aligned[i] < 50:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -123,6 +118,20 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_RSI_VolumeConfirmation"
+# Calculate SMA20 for 1d and align it for exit condition
+df_1d = get_htf_data(prices, '1d') if 'prices' in locals() else None
+if df_1d is not None and len(df_1d) > 0:
+    close_1d = df_1d['close'].values
+    sma_20 = np.zeros(len(close_1d))
+    for i in range(len(close_1d)):
+        if i >= 19:
+            sma_20[i] = np.mean(close_1d[i-19:i+1])
+        else:
+            sma_20[i] = np.nan
+    sma_20_aligned = align_htf_to_ltf(prices, df_1d, sma_20)
+else:
+    sma_20_aligned = np.array([])
+
+name = "1d_Bollinger_RSI_VolumeReversal"
 timeframe = "4h"
 leverage = 1.0
