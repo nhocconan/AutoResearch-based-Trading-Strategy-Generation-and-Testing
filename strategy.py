@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Supertrend(ATR=10, mult=3) with 1d volume confirmation and 1w EMA200 trend filter.
-# Supertrend adapts to volatility and captures trends while avoiding whipsaws in ranging markets.
-# Volume confirmation ensures breakouts have institutional participation.
-# Weekly EMA200 filter ensures alignment with long-term trend, improving performance in both bull and bear markets.
-# Designed for low turnover (target: 12-37 trades/year) with clear entry/exit rules.
+# Hypothesis: 4h Donchian breakout with 12h EMA trend filter and volume confirmation
+# Uses 4h Donchian(20) upper/lower bands for breakout signals.
+# Enters long when price breaks above Donchian upper band with volume and above 12h EMA50.
+# Enters short when price breaks below Donchian lower band with volume and below 12h EMA50.
+# Exits on Donchian midpoint or EMA crossover.
+# Designed to capture momentum breakouts with low turnover (target: 15-30 trades/year).
+# Works in bull markets (breakout momentum) and bear markets (mean reversion via reversion to mean).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,110 +21,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR calculation and volume
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Get 1w data for EMA200 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Calculate 12h EMA50 for trend filter
+    close_12h_series = pd.Series(close_12h)
+    ema50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Calculate ATR(10) on 1d
-    tr1 = high_1d[1:] - low_1d[:-1]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # Calculate 4h Donchian(20) channels
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_middle = (donchian_upper + donchian_lower) / 2
     
-    # Calculate Supertrend components on 1d
-    hl2 = (high_1d + low_1d) / 2
-    upper_band = hl2 + (3 * atr)
-    lower_band = hl2 - (3 * atr)
-    
-    # Initialize Supertrend
-    supertrend = np.full_like(close_1d, np.nan)
-    direction = np.full_like(close_1d, np.nan)  # 1 for uptrend, -1 for downtrend
-    
-    # Set first valid value
-    start_idx = max(10, 1)  # Need at least 10 periods for ATR
-    if start_idx < len(close_1d):
-        supertrend[start_idx] = upper_band[start_idx]
-        direction[start_idx] = 1
-    
-    # Calculate Supertrend iteratively
-    for i in range(start_idx + 1, len(close_1d)):
-        if np.isnan(supertrend[i-1]) or np.isnan(direction[i-1]):
-            supertrend[i] = upper_band[i]
-            direction[i] = 1
-            continue
-            
-        if close_1d[i] <= supertrend[i-1]:
-            # Downtrend
-            supertrend[i] = max(upper_band[i], supertrend[i-1])
-            direction[i] = -1
-        else:
-            # Uptrend
-            supertrend[i] = min(lower_band[i], supertrend[i-1])
-            direction[i] = 1
-    
-    # Calculate 1d volume MA20 for confirmation
-    volume_ma20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate 1w EMA200 for long-term trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema200_1w = close_1w_series.ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Align all indicators to 12h timeframe
-    supertrend_12h = align_htf_to_ltf(prices, df_1d, supertrend)
-    direction_12h = align_htf_to_ltf(prices, df_1d, direction)
-    volume_ma20_12h = align_htf_to_ltf(prices, df_1d, volume_ma20)
-    ema200_1w_12h = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # Volume filter: current volume > 2.0 * 20-period average (strict to reduce trades)
+    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 100  # Need sufficient data for all indicators
+    start_idx = 60  # Need sufficient data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(supertrend_12h[i]) or 
-            np.isnan(direction_12h[i]) or 
-            np.isnan(volume_ma20_12h[i]) or 
-            np.isnan(ema200_1w_12h[i])):
+        if (np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or 
+            np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5 * 20-period average (moderate to balance signal quality)
-        volume_filter = volume[i] > (1.5 * volume_ma20_12h[i])
+        # Volume filter: spike > 2.0x average (strict to reduce trades)
+        volume_filter = volume[i] > (2.0 * volume_ma20[i])
         
-        # Trend filter: price above/below 1w EMA200
-        price_above_ewma = close[i] > ema200_1w_12h[i]
-        price_below_ewma = close[i] < ema200_1w_12h[i]
+        # Trend filter: price above/below 12h EMA50
+        price_above_ema = close[i] > ema50_12h_aligned[i]
+        price_below_ema = close[i] < ema50_12h_aligned[i]
+        
+        # Price relative to Donchian bands
+        price_above_upper = close[i] > donchian_upper[i]
+        price_below_lower = close[i] < donchian_lower[i]
         
         if position == 0:
-            # Long: Supertrend uptrend (direction=1) with volume confirmation and above weekly EMA200
-            if (direction_12h[i] == 1 and volume_filter and price_above_ewma):
+            # Long: Price breaks above Donchian upper band with volume and above 12h EMA50
+            if (price_above_upper and price_above_ema and volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: Supertrend downtrend (direction=-1) with volume confirmation and below weekly EMA200
-            elif (direction_12h[i] == -1 and volume_filter and price_below_ewma):
+            # Short: Price breaks below Donchian lower band with volume and below 12h EMA50
+            elif (price_below_lower and price_below_ema and volume_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Supertrend turns down OR price crosses below weekly EMA200
-            if (direction_12h[i] == -1) or (close[i] < ema200_1w_12h[i]):
+            # Exit long: Price crosses below Donchian middle OR below 12h EMA50
+            if (close[i] < donchian_middle[i]) or (close[i] < ema50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Supertrend turns up OR price crosses above weekly EMA200
-            if (direction_12h[i] == 1) or (close[i] > ema200_1w_12h[i]):
+            # Exit short: Price crosses above Donchian middle OR above 12h EMA50
+            if (close[i] > donchian_middle[i]) or (close[i] > ema50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -130,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Supertrend_ATR10_mult3_1dVolume_1wEMA200"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
