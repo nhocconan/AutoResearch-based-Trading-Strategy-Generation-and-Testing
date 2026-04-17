@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Volume-Weighted RSI with 12h EMA Trend Filter and ATR-Based Exit.
-Long when VWRSI < 30 (oversold) AND price > 12h EMA34 (uptrend).
-Short when VWRSI > 70 (overbought) AND price < 12h EMA34 (downtrend).
-Exit when VWRSI crosses 50 (mean reversion) OR ATR(14) expansion signals exhaustion.
-Uses 12h for EMA34 trend filter, 6h for VWRSI calculation.
-Target: 50-150 total trades over 4 years (12-37/year). VWRSI improves on classic RSI by weighting price by volume,
-reducing false signals in low-volume chop. ATR-based exit adapts to volatility, avoiding premature exits in strong trends.
+Hypothesis: 4h Donchian Breakout with Volume Confirmation and ATR Stop.
+Long when price breaks above Donchian(20) high AND volume > 1.5x 20-period average volume.
+Short when price breaks below Donchian(20) low AND volume > 1.5x 20-period average volume.
+Exit via ATR-based stoploss (2.5x ATR) or opposite Donchian breakout.
+Uses 1d EMA50 as trend filter: only long when price > 1d EMA50, only short when price < 1d EMA50.
+Target: 75-200 total trades over 4 years (19-50/year). Donchian provides structure, volume confirms breakout strength,
+ATR stop manages risk, and 1d EMA50 filter avoids counter-trend trades in ranging markets.
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,74 +23,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA34 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h EMA34 for trend filter
-    close_12h_series = pd.Series(close_12h)
-    ema34_12h = close_12h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1d EMA50 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Volume-Weighted RSI on 6h timeframe (period=14)
-    delta = pd.Series(close).diff()
-    up = delta.clip(lower=0)
-    down = -delta.clip(upper=0)
+    # Calculate Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Volume-weighted gains and losses
-    vol_up = (up * pd.Series(volume)).ewm(span=14, adjust=False, min_periods=14).mean()
-    vol_down = (down * pd.Series(volume)).ewm(span=14, adjust=False, min_periods=14).mean()
+    # Calculate volume average (20-period)
+    volume_series = pd.Series(volume)
+    volume_avg = volume_series.rolling(window=20, min_periods=20).mean().values
     
-    rs = vol_up / vol_down.replace(0, np.nan)
-    vwrsi = 100 - (100 / (1 + rs))
-    vwrsi = vwrsi.fillna(50).values  # neutral when no volume
+    # Calculate ATR (14-period) for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align 12h EMA34 to 6h timeframe
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
-    
-    # Calculate ATR(14) for volatility-based exit
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(abs(high - pd.Series(close).shift(1)))
-    tr3 = pd.Series(abs(low - pd.Series(close).shift(1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Align 1d EMA50 to 4h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
+    entry_price = 0.0
+    atr_at_entry = 0.0
     
-    start_idx = 50  # warmup for indicators
+    start_idx = 60  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if np.isnan(ema34_12h_aligned[i]) or np.isnan(vwrsi[i]):
+        if np.isnan(ema50_1d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(volume_avg[i]) or np.isnan(atr[i]):
             signals[i] = 0.0
             continue
         
-        rsi = vwrsi[i]
         price = close[i]
-        ema34 = ema34_12h_aligned[i]
-        volatility = atr[i]
+        vol = volume[i]
+        vol_ma = volume_avg[i]
+        upper = donchian_high[i]
+        lower = donchian_low[i]
+        ema50 = ema50_1d_aligned[i]
+        atr_val = atr[i]
         
         if position == 0:
-            # Long: VWRSI < 30 (oversold) AND price > 12h EMA34 (uptrend)
-            if rsi < 30 and price > ema34:
+            # Long: price breaks above Donchian high AND volume > 1.5x average AND price > 1d EMA50
+            if price > upper and vol > 1.5 * vol_ma and price > ema50:
                 signals[i] = 0.25
                 position = 1
-            # Short: VWRSI > 70 (overbought) AND price < 12h EMA34 (downtrend)
-            elif rsi > 70 and price < ema34:
+                entry_price = price
+                atr_at_entry = atr_val
+            # Short: price breaks below Donchian low AND volume > 1.5x average AND price < 1d EMA50
+            elif price < lower and vol > 1.5 * vol_ma and price < ema50:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
+                atr_at_entry = atr_val
         
         elif position == 1:
-            # Exit long: VWRSI crosses above 50 (mean reversion) OR ATR expansion > 1.5x (exhaustion)
-            if rsi > 50 or (i > start_idx and atr[i] > 1.5 * atr[i-1]):
+            # Exit long: price < entry - 2.5 * ATR (stoploss) OR price breaks below Donchian low (contrarian signal)
+            if price < entry_price - 2.5 * atr_at_entry or price < lower:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: VWRSI crosses below 50 (mean reversion) OR ATR expansion > 1.5x (exhaustion)
-            if rsi < 50 or (i > start_idx and atr[i] > 1.5 * atr[i-1]):
+            # Exit short: price > entry + 2.5 * ATR (stoploss) OR price breaks above Donchian high (contrarian signal)
+            if price > entry_price + 2.5 * atr_at_entry or price > upper:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_VolumeWeightedRSI_12hEMA34_ATRExit"
-timeframe = "6h"
+name = "4h_Donchian_Breakout_Volume_ATR_Stop_EMA50_Trend"
+timeframe = "4h"
 leverage = 1.0
