@@ -13,24 +13,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d SMA (20-period) for trend direction ===
+    # === 1d Donchian channels (20-period) for breakout signals ===
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    
-    # Calculate SMA with proper minimum period
-    sma_20_1d = np.full_like(close_1d, np.nan)
-    for i in range(len(close_1d)):
-        if i >= 19:
-            sma_20_1d[i] = np.mean(close_1d[i-19:i+1])
-    
-    # Align to 4h timeframe
-    sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_20_1d)
-    
-    # === 1d ATR (14-period) for volatility filter ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # True Range
+    # Calculate 20-period high and low channels
+    donch_high = np.full_like(high_1d, np.nan)
+    donch_low = np.full_like(low_1d, np.nan)
+    for i in range(len(high_1d)):
+        if i >= 19:
+            donch_high[i] = np.max(high_1d[i-19:i+1])
+            donch_low[i] = np.min(low_1d[i-19:i+1])
+        else:
+            donch_high[i] = np.max(high_1d[0:i+1]) if i > 0 else high_1d[0]
+            donch_low[i] = np.min(low_1d[0:i+1]) if i > 0 else low_1d[0]
+    
+    # === 1d ATR (14-period) for volatility filter and stoploss ===
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -39,43 +39,45 @@ def generate_signals(prices):
     tr3[0] = np.abs(low_1d[0] - close_1d[0])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Wilder's smoothing for ATR
-    atr_14_1d = np.full_like(tr, np.nan)
+    atr_14 = np.full_like(tr, np.nan)
     if len(tr) >= 14:
-        atr_14_1d[13] = np.mean(tr[:14])
+        atr_14[13] = np.mean(tr[:14])
         for i in range(14, len(tr)):
-            atr_14_1d[i] = (atr_14_1d[i-1] * 13 + tr[i]) / 14
+            atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
     
-    # Align ATR to 4h timeframe
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # === 1d RSI (14-period) for overbought/oversold filter ===
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # === 4h Donchian (20-period) for breakout detection ===
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    avg_gain = np.full_like(gain, np.nan)
+    avg_loss = np.full_like(loss, np.nan)
+    if len(gain) >= 14:
+        avg_gain[13] = np.mean(gain[:14])
+        avg_loss[13] = np.mean(loss[:14])
+        for i in range(14, len(gain)):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Calculate Donchian channels
-    upper_20_4h = np.full_like(high_4h, np.nan)
-    lower_20_4h = np.full_like(low_4h, np.nan)
-    for i in range(len(high_4h)):
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi_14 = 100 - (100 / (1 + rs))
+    
+    # === 1d Volume spike filter ===
+    vol_ma_20 = np.full_like(volume, np.nan)
+    for i in range(len(volume)):
         if i >= 19:
-            upper_20_4h[i] = np.max(high_4h[i-19:i+1])
-            lower_20_4h[i] = np.min(low_4h[i-19:i+1])
+            vol_ma_20[i] = np.mean(volume[i-19:i+1])
+        else:
+            vol_ma_20[i] = np.mean(volume[max(0, i-9):i+1]) if i > 0 else volume[0]
     
-    # Align Donchian to 4h timeframe
-    upper_20_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_20_4h)
-    lower_20_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_20_4h)
+    vol_spike = volume > vol_ma_20 * 2.0  # Volume spike: 2x average
     
-    # === 4h Volume (20-period average) for confirmation ===
-    volume_4h = df_4h['volume'].values
-    vol_ma_20_4h = np.full_like(volume_4h, np.nan)
-    for i in range(len(volume_4h)):
-        if i >= 19:
-            vol_ma_20_4h[i] = np.mean(volume_4h[i-19:i+1])
-    
-    # Volume confirmation: current > 1.5x average
-    vol_confirm_4h = volume_4h > vol_ma_20_4h * 1.5
-    vol_confirm_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_confirm_4h.astype(float))
+    # Align all indicators to daily timeframe (since we're using 1d timeframe)
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
     
     signals = np.zeros(n)
     
@@ -87,36 +89,35 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(sma_20_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(upper_20_4h_aligned[i]) or np.isnan(lower_20_4h_aligned[i]) or
-            np.isnan(vol_confirm_4h_aligned[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(atr_14_aligned[i]) or np.isnan(rsi_14_aligned[i]) or 
+            np.isnan(vol_spike_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Entry logic: only enter when flat AND in high volume regime (4h)
+        # Entry logic: only enter when flat AND volume spike
         if position == 0:
-            # Long: price breaks above upper Donchian + above SMA200 + volatility filter + volume confirmation
-            if (close[i] > upper_20_4h_aligned[i] and 
-                close[i] > sma_20_1d_aligned[i] and
-                atr_14_1d_aligned[i] > 0.005 * close[i] and  # volatility filter
-                vol_confirm_4h_aligned[i] > 0.5):  # high volume regime
+            # Long: price breaks above Donchian high + RSI not overbought + volume spike
+            if (close[i] > donch_high_aligned[i] and 
+                rsi_14_aligned[i] < 70 and  # Not overbought
+                vol_spike_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price breaks below lower Donchian + below SMA200 + volatility filter + volume confirmation
-            elif (close[i] < lower_20_4h_aligned[i] and 
-                  close[i] < sma_20_1d_aligned[i] and
-                  atr_14_1d_aligned[i] > 0.005 * close[i] and  # volatility filter
-                  vol_confirm_4h_aligned[i] > 0.5):  # high volume regime
+            # Short: price breaks below Donchian low + RSI not oversold + volume spike
+            elif (close[i] < donch_low_aligned[i] and 
+                  rsi_14_aligned[i] > 30 and  # Not oversold
+                  vol_spike_aligned[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price crosses below lower Donchian
-            if close[i] < lower_20_4h_aligned[i]:
+            # Exit long: price crosses below Donchian low OR RSI overbought
+            if (close[i] < donch_low_aligned[i] or 
+                rsi_14_aligned[i] > 70):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -124,8 +125,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above upper Donchian
-            if close[i] > upper_20_4h_aligned[i]:
+            # Exit short: price crosses above Donchian high OR RSI oversold
+            if (close[i] > donch_high_aligned[i] or 
+                rsi_14_aligned[i] < 30):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -134,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_SMA200_VolumeFilter_v1"
-timeframe = "4h"
+name = "1d_Donchian20_RSI_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
