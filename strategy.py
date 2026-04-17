@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,91 +13,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points (1d)
+    # Get weekly data for trend direction (1w)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly EMA(34) for trend
+    close_1w_series = pd.Series(close_1w)
+    ema_34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Get daily data for ATR and volatility (1d)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot points (standard formula)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
-    r2_1d = pivot_1d + (high_1d - low_1d)
-    s2_1d = pivot_1d - (high_1d - low_1d)
-    r3_1d = high_1d + 2 * (pivot_1d - low_1d)
-    s3_1d = low_1d - 2 * (high_1d - pivot_1d)
+    # Calculate true range and ATR(14) on daily data
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = high_1d - low_1d
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Align daily pivot levels to 6h timeframe (use previous day's levels)
-    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_6h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_6h = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_6h = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_6h = align_htf_to_ltf(prices, df_1d, s2_1d)
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3_1d)
+    # Calculate 12-period ATR multiplier for breakout threshold
+    atr_mult = 0.5
     
-    # Volume filter: current volume > 1.8 * 20-period average
+    # Calculate 12-period high/low for breakout levels
+    high_roll = pd.Series(high).rolling(window=12, min_periods=12).max().values
+    low_roll = pd.Series(low).rolling(window=12, min_periods=12).min().values
+    
+    # Volume filter: current volume > 1.3 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ADX filter: only trade when ADX > 25 (trending market)
-    # Calculate ADX using standard formula
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]  # First TR
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
-    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
-    
-    di_plus = 100 * dm_plus14 / tr14
-    di_minus = 100 * dm_minus14 / tr14
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 20  # Need sufficient data for volume MA and ADX
+    start_idx = 34  # Need EMA(34) warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or
-            np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or
-            np.isnan(volume_ma20[i]) or np.isnan(adx[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(volume_ma20[i]) or np.isnan(high_roll[i]) or np.isnan(low_roll[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter
-        volume_filter = volume[i] > (1.8 * volume_ma20[i])
+        volume_filter = volume[i] > (1.3 * volume_ma20[i])
         
-        # ADX filter: only trade in trending markets (ADX > 25)
-        trend_filter = adx[i] > 25
+        # Trend filter: price above/below weekly EMA34
+        price_above_ema = close[i] > ema_34_1w_aligned[i]
+        price_below_ema = close[i] < ema_34_1w_aligned[i]
         
         if position == 0:
-            # Long breakout: price breaks above R2 with volume and trend filter
-            if close[i] > r2_6h[i] and volume_filter and trend_filter:
+            # Long breakout: price breaks above 12-period high with volume and trend filter
+            if close[i] > high_roll[i] and volume_filter and price_above_ema:
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below S2 with volume and trend filter
-            elif close[i] < s2_6h[i] and volume_filter and trend_filter:
+            # Short breakdown: price breaks below 12-period low with volume and trend filter
+            elif close[i] < low_roll[i] and volume_filter and price_below_ema:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls below S3 (deeper level) OR ADX drops (trend weakening)
-            if close[i] < s3_6h[i] or adx[i] < 20:
+            # Exit long: price closes below weekly EMA34 OR ATR-based trailing stop
+            if close[i] < ema_34_1w_aligned[i] or close[i] < (high_roll[i] - atr_mult * atr_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises above R3 OR ADX drops (trend weakening)
-            if close[i] > r3_6h[i] or adx[i] < 20:
+            # Exit short: price closes above weekly EMA34 OR ATR-based trailing stop
+            if close[i] > ema_34_1w_aligned[i] or close[i] > (low_roll[i] + atr_mult * atr_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R2_S2_Breakout_Volume_ADXFilter"
-timeframe = "6h"
+name = "12h_WeeklyEMA34_Breakout_ATR_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
