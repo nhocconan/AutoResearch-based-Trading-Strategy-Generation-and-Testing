@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,66 +13,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Weekly EMA34 for trend (needs only completed weekly candle)
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # Daily Donchian channels (20-period)
+    # Get daily data for ATR and price
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Daily Donchian high/low (20-period)
-    donch_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate daily ATR(14) for volatility
+    tr = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), np.abs(low_1d - np.roll(close_1d, 1))))
+    tr[0] = high_1d[0] - low_1d[0]
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align daily Donchian levels to 1d timeframe (use previous day's levels)
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
+    # Calculate 6-period EMA of close for trend
+    ema6 = pd.Series(close).ewm(span=6, adjust=False, min_periods=6).mean().values
     
-    # Volume filter: current volume > 2.0 * 20-period average (daily)
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align daily ATR and EMA to 6h timeframe
+    atr_6h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    ema6_6h = align_htf_to_ltf(prices, df_1d, ema6)
+    
+    # Calculate 6h Bollinger Bands (20, 2) for mean reversion
+    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper = sma20 + 2 * std20
+    lower = sma20 - 2 * std20
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 40  # Need sufficient data for weekly EMA and daily Donchian
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or np.isnan(volume_ma20[i])):
+        if (np.isnan(atr_6h[i]) or np.isnan(ema6_6h[i]) or 
+            np.isnan(sma20[i]) or np.isnan(upper[i]) or np.isnan(lower[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter
-        volume_filter = volume[i] > (2.0 * volume_ma20[i])
+        # Volatility filter: only trade when ATR is above its 50-period average
+        atr_ma50 = pd.Series(atr_6h).rolling(window=50, min_periods=50).mean().values
+        vol_filter = atr_6h[i] > atr_ma50[i] if not np.isnan(atr_ma50[i]) else False
+        
+        # Trend filter: price above EMA6 = bullish, below = bearish
+        trend = close[i] > ema6_6h[i]
         
         if position == 0:
-            # Long: price breaks above daily Donchian high with volume and weekly uptrend
-            if close[i] > donch_high_aligned[i] and volume_filter and close[i] > ema34_1w_aligned[i]:
+            # Mean reversion long: price touches lower BB in uptrend
+            if close[i] <= lower[i] and trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below daily Donchian low with volume and weekly downtrend
-            elif close[i] < donch_low_aligned[i] and volume_filter and close[i] < ema34_1w_aligned[i]:
+            # Mean reversion short: price touches upper BB in downtrend
+            elif close[i] >= upper[i] and not trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls below daily Donchian low OR weekly trend turns down
-            if close[i] < donch_low_aligned[i] or close[i] < ema34_1w_aligned[i]:
+            # Exit long: price crosses above EMA6 (trend change) or hits upper BB
+            if close[i] >= ema6_6h[i] or close[i] >= upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises above daily Donchian high OR weekly trend turns up
-            if close[i] > donch_high_aligned[i] or close[i] > ema34_1w_aligned[i]:
+            # Exit short: price crosses below EMA6 (trend change) or hits lower BB
+            if close[i] <= ema6_6h[i] or close[i] <= lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -80,6 +84,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyEMA34_DailyDonchian_VolumeFilter"
-timeframe = "1d"
+name = "6h_BB_MeanReversion_EMA_Trend_VolFilter"
+timeframe = "6h"
 leverage = 1.0
