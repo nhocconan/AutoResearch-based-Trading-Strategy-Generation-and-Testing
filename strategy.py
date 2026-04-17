@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_CCI_Overbought_Oversold_R1S1_v1
-Long: CCI(20) < -100 + price touches S1 pivot from 1d + volume spike
-Short: CCI(20) > 100 + price touches R1 pivot from 1d + volume spike
-Exit: CCI crosses back within [-50, 50] OR price reaches opposite pivot (R2/S2)
-Designed to capture mean-reversion bounces at key levels with volume confirmation.
-Target: 50-150 total trades over 4 years (12-37/year).
+4h_RSI_Stoch_Divergence_v1
+RSI(14) divergence + Stochastic(14,3,3) oversold/overbought with volume confirmation.
+Long: Bullish RSI divergence + Stoch < 20 + volume > 1.5x average.
+Short: Bearish RSI divergence + Stoch > 80 + volume > 1.5x average.
+Exit when RSI crosses 50 or Stoch reverses.
+Uses 1d EMA200 for trend filter: only long when price > EMA200, short when price < EMA200.
+Designed to catch reversals in both trending and ranging markets.
+Target: 50-120 total trades over 4 years (12-30/year).
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_hlf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,38 +24,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === CCI(20) ===
-    typical_price = (high + low + close) / 3.0
-    sma_tp = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
-    mad = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-    ).values
-    cci = (typical_price - sma_tp) / (0.015 * mad)
+    # === RSI(14) ===
+    delta = np.diff(close)
+    delta = np.concatenate([[0], delta])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # === 1d Pivot Points (Classic) ===
-    df_1d = get_htf_data(prices, '1d')
-    # Calculate pivot points from previous day's OHLC
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Pivot point and support/resistance levels
-    pp = (prev_high + prev_low + prev_close) / 3.0
-    r1 = 2 * pp - prev_low
-    s1 = 2 * pp - prev_high
-    r2 = pp + (prev_high - prev_low)
-    s2 = pp - (prev_high - prev_low)
+    # === Stochastic(14,3,3) ===
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    k_percent = 100 * (close - lowest_low) / (highest_high - lowest_low + 1e-10)
+    d_percent = pd.Series(k_percent).rolling(window=3, min_periods=3).mean().values
     
-    # Align to 4h timeframe (use previous day's levels)
-    pp_aligned = align_ltf_to_hlf(prices, df_1d, pp)
-    r1_aligned = align_ltf_to_hlf(prices, df_1d, r1)
-    s1_aligned = align_ltf_to_hlf(prices, df_1d, s1)
-    r2_aligned = align_ltf_to_hlf(prices, df_1d, r2)
-    s2_aligned = align_ltf_to_hlf(prices, df_1d, s2)
-    
-    # === Volume Spike (2x 20-period average) ===
+    # === Volume average (20-period) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2 * vol_ma)
+    
+    # === 1d EMA200 for trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     signals = np.zeros(n)
     
@@ -65,41 +59,57 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(cci[i]) or 
-            np.isnan(pp_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(rsi[i]) or 
+            np.isnan(k_percent[i]) or 
+            np.isnan(d_percent[i]) or 
+            np.isnan(vol_ma[i]) or 
+            np.isnan(ema_200_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
+        # Volume confirmation: current volume > 1.5x average
+        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
+        
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: CCI < -100 (oversold), price touches S1, volume spike
-            if (cci[i] < -100 and 
-                low[i] <= s1_aligned[i] * 1.001 and  # Allow small tolerance for touch
-                high[i] >= s1_aligned[i] * 0.999 and
-                volume_spike[i]):
+            # Bullish RSI divergence: price making lower low, RSI making higher low
+            bull_div = False
+            if i >= 3:
+                # Check last 3 bars for divergence
+                if (close[i] < close[i-1] < close[i-2] and 
+                    rsi[i] > rsi[i-1] > rsi[i-2]):
+                    bull_div = True
+            
+            # Bearish RSI divergence: price making higher high, RSI making lower high
+            bear_div = False
+            if i >= 3:
+                if (close[i] > close[i-1] > close[i-2] and 
+                    rsi[i] < rsi[i-1] < rsi[i-2]):
+                    bear_div = True
+            
+            # Long: Bullish divergence + Stoch oversold + volume + price above EMA200
+            if (bull_div and 
+                k_percent[i] < 20 and 
+                vol_confirmed and 
+                close[i] > ema_200_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: CCI > 100 (overbought), price touches R1, volume spike
-            elif (cci[i] > 100 and 
-                  high[i] >= r1_aligned[i] * 0.999 and  # Allow small tolerance for touch
-                  low[i] <= r1_aligned[i] * 1.001 and
-                  volume_spike[i]):
+            # Short: Bearish divergence + Stoch overbought + volume + price below EMA200
+            elif (bear_div and 
+                  k_percent[i] > 80 and 
+                  vol_confirmed and 
+                  close[i] < ema_200_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: CCI > -50 OR price reaches R2
-            if (cci[i] > -50 or 
-                high[i] >= r2_aligned[i] * 0.999):
+            # Exit long: RSI crosses below 50 OR Stoch crosses above 50
+            if (rsi[i] < 50 or 
+                k_percent[i] > 50):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -107,9 +117,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: CCI < 50 OR price reaches S2
-            if (cci[i] < 50 or 
-                low[i] <= s2_aligned[i] * 1.001):
+            # Exit short: RSI crosses above 50 OR Stoch crosses below 50
+            if (rsi[i] > 50 or 
+                k_percent[i] < 50):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -118,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_CCI_Overbought_Oversold_R1S1_v1"
+name = "4h_RSI_Stoch_Divergence_v1"
 timeframe = "4h"
 leverage = 1.0
