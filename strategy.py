@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,87 +13,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly EMA50 for trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # Get daily data for pivot points and volume filter
+    # Get daily data for ATR-based volatility regime
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot points (classic)
-    daily_pivot = (high_1d + low_1d + close_1d) / 3.0
-    daily_r1 = 2 * daily_pivot - low_1d
-    daily_s1 = 2 * daily_pivot - high_1d
+    # Calculate daily ATR(14) for volatility regime
+    high_low_1d = high_1d - low_1d
+    high_close_1d = np.abs(high_1d - np.roll(close_1d, 1))
+    low_close_1d = np.abs(low_1d - np.roll(close_1d, 1))
+    high_close_1d[0] = high_low_1d[0]  # First value
+    low_close_1d[0] = high_low_1d[0]   # First value
+    tr_1d = np.maximum(high_low_1d, np.maximum(high_close_1d, low_close_1d))
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     
-    # Align daily pivot levels to 12h timeframe
-    daily_pivot_12h = align_htf_to_ltf(prices, df_1d, daily_pivot)
-    daily_r1_12h = align_htf_to_ltf(prices, df_1d, daily_r1)
-    daily_s1_12h = align_htf_to_ltf(prices, df_1d, daily_s1)
+    # Calculate ATR percentile rank (252-day lookback for regime)
+    atr_percentile = pd.Series(atr_1d).rolling(window=252, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
     
-    # Calculate daily EMA20 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_12h = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    # Align ATR percentile to 4h timeframe
+    atr_percentile_4h = align_htf_to_ltf(prices, df_1d, atr_percentile)
     
-    # Volume filter: current volume > 1.5 * 20-period average
+    # Calculate 4-period RSI for mean reversion signals
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/4, adjust=False, min_periods=4).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/4, adjust=False, min_periods=4).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume filter: current volume > 1.3 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # Need weekly EMA50, daily EMA20, volume MA
+    start_idx = 50  # Need sufficient data for ATR percentile
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(daily_pivot_12h[i]) or 
-            np.isnan(daily_r1_12h[i]) or 
-            np.isnan(daily_s1_12h[i]) or 
-            np.isnan(ema20_12h[i]) or 
+        if (np.isnan(atr_percentile_4h[i]) or 
+            np.isnan(rsi[i]) or 
             np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
+        # Volatility regime filter: only trade in low volatility (percentile < 30)
+        low_volatility = atr_percentile_4h[i] < 30
+        
         # Volume filter
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        volume_filter = volume[i] > (1.3 * volume_ma20[i])
         
-        # Trend filter: price above/below weekly EMA50
-        price_above_weekly_ema = close[i] > ema50_1w_aligned[i]
-        price_below_weekly_ema = close[i] < ema50_1w_aligned[i]
-        
-        # Price relative to daily pivot levels
-        price_above_r1 = close[i] > daily_r1_12h[i]
-        price_below_s1 = close[i] < daily_s1_12h[i]
+        # Mean reversion signals
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
         
         if position == 0:
-            # Long: Price breaks above daily R1 with volume and above weekly EMA50
-            if (price_above_r1 and price_above_weekly_ema and volume_filter):
+            # Long: RSI oversold in low volatility with volume
+            if (rsi_oversold and low_volatility and volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below daily S1 with volume and below weekly EMA50
-            elif (price_below_s1 and price_below_weekly_ema and volume_filter):
+            # Short: RSI overbought in low volatility with volume
+            elif (rsi_overbought and low_volatility and volume_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price crosses below daily pivot OR below daily EMA20
-            if (close[i] < daily_pivot_12h[i]) or (close[i] < ema20_12h[i]):
+            # Exit long: RSI returns to neutral (50) or volatility increases
+            if (rsi[i] >= 50) or (atr_percentile_4h[i] >= 40):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price crosses above daily pivot OR above daily EMA20
-            if (close[i] > daily_pivot_12h[i]) or (close[i] > ema20_12h[i]):
+            # Exit short: RSI returns to neutral (50) or volatility increases
+            if (rsi[i] <= 50) or (atr_percentile_4h[i] >= 40):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WeeklyEMA50_DailyPivot_R1S1_Volume"
-timeframe = "12h"
+name = "4h_RSI_MeanReversion_LowVol_Volume"
+timeframe = "4h"
 leverage = 1.0
