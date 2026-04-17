@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Elder Ray Index with 1-day ATR filter and volume confirmation.
-# Elder Ray measures bull/bear power relative to EMA. In bull markets, bull power > 0 and rising indicates strength.
-# In bear markets, bear power < 0 and falling indicates weakness. Combined with volume confirmation and ATR filter
-# to avoid false signals, this should capture sustained momentum while filtering weak moves.
-# Target: 20-40 trades/year.
+# Hypothesis: 6h Donchian breakout with daily ADX trend filter and volume confirmation.
+# Donchian channels capture breakouts from volatility contractions. ADX > 25 ensures
+# we only trade in trending markets, avoiding whipsaws in ranges. Volume confirmation
+# ensures breakouts have conviction. This combination works in both bull and bear
+# markets by capturing strong directional moves while filtering false breakouts.
+# Target: 15-30 trades/year.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,95 +20,121 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data for ATR filter ===
+    # === 1d data for ADX trend filter ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # ATR calculation on daily data (14-period)
-    def calculate_atr(high, low, close, period=14):
+    # Calculate ADX (14-period)
+    def calculate_adx(high, low, close, period=14):
+        # True Range
         tr = np.zeros_like(high)
+        tr[0] = high[0] - low[0]
         for i in range(1, len(high)):
             tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
         
+        # Directional Movement
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        for i in range(1, len(high)):
+            up_move = high[i] - high[i-1]
+            down_move = low[i-1] - low[i]
+            if up_move > down_move and up_move > 0:
+                plus_dm[i] = up_move
+            else:
+                plus_dm[i] = 0
+            if down_move > up_move and down_move > 0:
+                minus_dm[i] = down_move
+            else:
+                minus_dm[i] = 0
+        
+        # Smoothed values
         atr = np.zeros_like(high)
+        plus_di = np.zeros_like(high)
+        minus_di = np.zeros_like(high)
+        
         if len(high) > period:
+            # Initial averages
             atr[period] = np.mean(tr[1:period+1])
+            plus_dm_sum = np.sum(plus_dm[1:period+1])
+            minus_dm_sum = np.sum(minus_dm[1:period+1])
+            plus_di[period] = 100 * plus_dm_sum / atr[period] if atr[period] > 0 else 0
+            minus_di[period] = 100 * minus_dm_sum / atr[period] if atr[period] > 0 else 0
+            
+            # Smooth subsequent values
             for i in range(period+1, len(high)):
                 atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        return atr
+                plus_di[i] = 100 * ((plus_di[i-1] * (period-1)) + plus_dm[i]) / (atr[i] * period) if atr[i] > 0 else 0
+                minus_di[i] = 100 * ((minus_di[i-1] * (period-1)) + minus_dm[i]) / (atr[i] * period) if atr[i] > 0 else 0
+        
+        # Calculate DX and ADX
+        dx = np.zeros_like(high)
+        adx = np.zeros_like(high)
+        for i in range(period, len(high)):
+            if plus_di[i] + minus_di[i] > 0:
+                dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+        
+        if len(high) > 2*period:
+            adx[2*period] = np.mean(dx[period:2*period+1])
+            for i in range(2*period+1, len(high)):
+                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    atr_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # === 1d data for EMA (Elder Ray base) ===
-    ema_period = 13
-    ema_1d = np.zeros_like(close_1d)
-    if len(close_1d) > 0:
-        ema_1d[0] = close_1d[0]
-        for i in range(1, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * 2 / (ema_period + 1)) + (ema_1d[i-1] * (ema_period - 1) / (ema_period + 1))
+    # === 6h Donchian channels (20-period) ===
+    donch_period = 20
+    donch_high = np.zeros_like(high)
+    donch_low = np.zeros_like(low)
     
-    # Elder Ray components
-    bull_power_1d = high_1d - ema_1d
-    bear_power_1d = low_1d - ema_1d
+    for i in range(donch_period-1, len(high)):
+        donch_high[i] = np.max(high[i-donch_period+1:i+1])
+        donch_low[i] = np.min(low[i-donch_period+1:i+1])
     
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    
-    # === 4h data for volume confirmation ===
-    df_4h = get_htf_data(prices, '4h')
-    volume_4h = df_4h['volume'].values
-    
-    # Volume average (20-period)
-    vol_avg20_4h = np.zeros_like(volume_4h)
-    for i in range(len(volume_4h)):
-        if i >= 19:
-            vol_avg20_4h[i] = np.mean(volume_4h[i-19:i+1])
-        else:
-            vol_avg20_4h[i] = np.nan
-    
-    vol_avg20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_avg20_4h)
+    # === 6h volume confirmation (20-period average) ===
+    vol_avg20 = np.zeros_like(volume)
+    for i in range(19, len(volume)):
+        vol_avg20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0
-    warmup = 100  # Sufficient for all indicators
+    warmup = max(100, donch_period*2, 30)  # Sufficient warmup
     
     for i in range(warmup, n):
-        if (np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or
-            np.isnan(vol_avg20_4h_aligned[i])):
+        if np.isnan(adx_1d_aligned[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(vol_avg20[i]):
             signals[i] = 0.0
             continue
         
-        vol_4h_current = align_htf_to_ltf(prices, df_4h, volume_4h)[i]
-        vol_filter = vol_4h_current > 1.5 * vol_avg20_4h_aligned[i]
+        # Volume filter: current volume > 1.5x average
+        vol_filter = volume[i] > 1.5 * vol_avg20[i]
+        
+        # Trend filter: ADX > 25 indicates trending market
+        trend_filter = adx_1d_aligned[i] > 25
         
         if position == 0:
-            # Long: bull power positive and rising + sufficient volatility + volume
-            if bull_power_aligned[i] > 0 and bull_power_aligned[i] > bull_power_aligned[i-1] and \
-               atr_1d_aligned[i] > 0.005 * close[i] and vol_filter:
+            # Long: break above upper Donchian band + trend + volume
+            if close[i] > donch_high[i] and trend_filter and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: bear power negative and falling + sufficient volatility + volume
-            elif bear_power_aligned[i] < 0 and bear_power_aligned[i] < bear_power_aligned[i-1] and \
-                 atr_1d_aligned[i] > 0.005 * close[i] and vol_filter:
+            # Short: break below lower Donchian band + trend + volume
+            elif close[i] < donch_low[i] and trend_filter and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: bull power turns negative
-            if bull_power_aligned[i] <= 0:
+            # Exit long: price breaks below lower Donchian band or ADX weakens
+            if close[i] < donch_low[i] or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bear power turns positive
-            if bear_power_aligned[i] >= 0:
+            # Exit short: price breaks above upper Donchian band or ADX weakens
+            if close[i] > donch_high[i] or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -115,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_ElderRay_1dATR_VolumeFilter"
-timeframe = "4h"
+name = "6h_Donchian_ADX_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
