@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-"""
-12h_1w_Camarilla_R1S1_Breakout_VolumeFilter - Weekly Camarilla pivot breakout with volume confirmation
-Hypothesis: Weekly Camarilla R1/S1 levels act as strong support/resistance. Breaking these levels with
-volume confirmation indicates institutional interest. Works in bull (breakouts continue) and bear
-(failures at resistance/support) markets. 12h timeframe balances signal quality and trade frequency.
-Target: 15-35 trades/year (60-140 total over 4 years).
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -21,43 +13,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Weekly Camarilla Pivot Levels ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === 1d ATR for volatility regime ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each weekly bar
-    R1 = np.full_like(close_1w, np.nan)
-    S1 = np.full_like(close_1w, np.nan)
-    PP = np.full_like(close_1w, np.nan)
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    for i in range(len(close_1w)):
-        if i >= 0:  # Need at least one bar
-            typical_price = (high_1w[i] + low_1w[i] + close_1w[i]) / 3
-            range_ = high_1w[i] - low_1w[i]
-            PP[i] = typical_price
-            R1[i] = PP[i] + (range_ * 1.1 / 12)
-            S1[i] = PP[i] - (range_ * 1.1 / 12)
+    # ATR(14)
+    atr_1d = np.full_like(close_1d, np.nan)
+    if len(tr) >= 14:
+        atr_1d[13] = np.nanmean(tr[1:15])  # skip first NaN
+        for i in range(14, len(tr)):
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Align weekly levels to 12h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1w, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1w, S1)
-    PP_aligned = align_htf_to_ltf(prices, df_1w, PP)
+    # === 1d EMA(50) for trend filter ===
+    ema_50 = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 50:
+        ema_50[49] = np.mean(close_1d[:50])
+        alpha = 2 / (50 + 1)
+        for i in range(50, len(close_1d)):
+            ema_50[i] = alpha * close_1d[i] + (1 - alpha) * ema_50[i-1]
     
-    # === 12h Volume Confirmation ===
-    # 24-period average volume (2 periods of 12h = 1 day)
-    vol_ma_24 = np.full_like(volume, np.nan)
-    for i in range(len(volume)):
-        if i >= 23:
-            vol_ma_24[i] = np.mean(volume[i-23:i+1])
+    # === Align indicators to 4h timeframe ===
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    
+    # === 4h Donchian channel (20-period) ===
+    # Highest high over last 20 periods
+    highest_high = np.full_like(close, np.nan)
+    lowest_low = np.full_like(close, np.nan)
+    for i in range(len(close)):
+        if i >= 19:
+            highest_high[i] = np.max(close[i-19:i+1])
+            lowest_low[i] = np.min(close[i-19:i+1])
         elif i > 0:
-            vol_ma_24[i] = np.mean(volume[max(0, i-11):i+1])
+            highest_high[i] = np.max(close[0:i+1])
+            lowest_low[i] = np.min(close[0:i+1])
         else:
-            vol_ma_24[i] = volume[0]
+            highest_high[i] = close[0]
+            lowest_low[i] = close[0]
     
-    # Volume spike: current volume > 2.0x average
-    volume_spike = volume > vol_ma_24 * 2.0
+    # === Volume confirmation (20-period average) ===
+    vol_ma_20 = np.full_like(volume, np.nan)
+    for i in range(len(volume)):
+        if i >= 19:
+            vol_ma_20[i] = np.mean(volume[i-19:i+1])
+        elif i > 0:
+            vol_ma_20[i] = np.mean(volume[max(0, i-9):i+1])
+        else:
+            vol_ma_20[i] = volume[0]
+    
+    vol_confirm = volume > vol_ma_20 * 1.5
     
     signals = np.zeros(n)
     
@@ -69,30 +81,38 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or 
+            np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or 
+            np.isnan(vol_confirm[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: Close breaks above R1 with volume spike
-            if close[i] > R1_aligned[i] and volume_spike[i]:
+            # Long: breakout above Donchian high + ATR filter + above EMA50
+            if (close[i] > highest_high[i] and 
+                atr_1d_aligned[i] > 0 and  # volatility present
+                close[i] > ema_50_aligned[i] and
+                vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: Close breaks below S1 with volume spike
-            elif close[i] < S1_aligned[i] and volume_spike[i]:
+            # Short: breakdown below Donchian low + ATR filter + below EMA50
+            elif (close[i] < lowest_low[i] and 
+                  atr_1d_aligned[i] > 0 and  # volatility present
+                  close[i] < ema_50_aligned[i] and
+                  vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: Close crosses below weekly pivot point
-            if close[i] < PP_aligned[i]:
+            # Exit long: breakdown below Donchian low OR below EMA50
+            if close[i] < lowest_low[i] or close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -100,8 +120,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Close crosses above weekly pivot point
-            if close[i] > PP_aligned[i]:
+            # Exit short: breakout above Donchian high OR above EMA50
+            if close[i] > highest_high[i] or close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -110,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w_Camarilla_R1S1_Breakout_VolumeFilter"
-timeframe = "12h"
+name = "4h_Donchian20_ATR_VolumeFilter_EMA50"
+timeframe = "4h"
 leverage = 1.0
