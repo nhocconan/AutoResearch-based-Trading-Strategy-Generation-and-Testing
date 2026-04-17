@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d ADX trend filter.
-Long when price breaks above Donchian upper band AND volume > 1.5x average AND ADX > 25 (trending).
-Short when price breaks below Donchian lower band AND volume > 1.5x average AND ADX > 25.
-Exit when price reverts to Donchian middle (20-period mean) OR ADX < 20 (range market).
-Uses 4h for Donchian calculation and 1d for ADX filter to reduce whipsaw.
-Target: 75-200 total trades over 4 years (19-50/year). Donchian breakouts capture trends,
-volume confirmation filters fakeouts, ADX filter avoids ranging markets.
-Works in bull markets (captures uptrends) and bear markets (captures downtrends).
+Hypothesis: 4h Donchian(20) breakout with volume spike confirmation and 1d ADX trend filter.
+Long when price breaks above Donchian upper band AND volume > 2.0x average AND ADX > 25 (strong trend).
+Short when price breaks below Donchian lower band AND volume > 2.0x average AND ADX > 25.
+Exit when price crosses Donchian middle (mean reversion) OR ADX < 20 (range market).
+Uses discrete position sizing (0.0, ±0.25) to minimize fee churn. Volume spike threshold increased
+to 2.0x to reduce false breakouts and trade frequency. Target: 75-200 total trades over 4 years.
+Works in bull markets (captures uptrends) and bear markets (captures downtrends) by requiring
+strong volume confirmation and trending regime (ADX > 25).
 """
 
 import numpy as np
@@ -29,6 +29,7 @@ def generate_signals(prices):
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
     
     # Calculate Donchian channels on 4h timeframe (20-period)
     high_4h_series = pd.Series(high_4h)
@@ -83,7 +84,6 @@ def generate_signals(prices):
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Volume average (20-period) on 4h
-    volume_4h = df_4h['volume'].values
     volume_ma = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     volume_ma_aligned = align_htf_to_ltf(prices, df_4h, volume_ma)
     
@@ -109,12 +109,12 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price > Donchian upper AND volume > 1.5x avg AND ADX > 25 (trending)
-            if price > du and vol > 1.5 * vol_ma and adx_val > 25:
+            # Long: price > Donchian upper AND volume > 2.0x avg AND ADX > 25 (strong trend)
+            if price > du and vol > 2.0 * vol_ma and adx_val > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < Donchian lower AND volume > 1.5x avg AND ADX > 25 (trending)
-            elif price < dl and vol > 1.5 * vol_ma and adx_val > 25:
+            # Short: price < Donchian lower AND volume > 2.0x avg AND ADX > 25 (strong trend)
+            elif price < dl and vol > 2.0 * vol_ma and adx_val > 25:
                 signals[i] = -0.25
                 position = -1
         
@@ -136,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Volume_ADX_Filter"
+name = "4h_Donchian20_VolumeSpike_ADX_Filter"
 timeframe = "4h"
 leverage = 1.0
