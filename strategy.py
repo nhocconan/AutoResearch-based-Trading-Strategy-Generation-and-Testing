@@ -1,4 +1,13 @@
 #!/usr/bin/env python3
+"""
+Hypothesis: 6h RSI(14) reversal with 1w trend filter and volume confirmation
+- Long: RSI(14) < 30 (oversold) + price > 1w EMA50 + volume > 1.5x 20-period avg
+- Short: RSI(14) > 70 (overbought) + price < 1w EMA50 + volume > 1.5x 20-period avg
+- Exit: RSI crosses back to neutral zone (40-60)
+- Designed to work in both bull (buy dips in uptrend) and bear (sell rallies in downtrend)
+- Target: 15-30 trades/year per symbol to avoid fee drag
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -13,32 +22,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get weekly data for trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate daily pivot points (standard formula)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
+    # Calculate weekly EMA50
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Use previous day's pivots (avoid look-ahead)
-    r1_1d_prev = np.roll(r1_1d, 1)
-    s1_1d_prev = np.roll(s1_1d, 1)
-    r1_1d_prev[0] = np.nan
-    s1_1d_prev[0] = np.nan
-    
-    # Align daily pivot levels to 1h timeframe
-    r1_1h = align_htf_to_ltf(prices, df_1d, r1_1d_prev)
-    s1_1h = align_htf_to_ltf(prices, df_1d, s1_1d_prev)
-    pivot_1h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    # Align weekly EMA50 to 6h timeframe
+    ema50_6h = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     # Volume confirmation: current volume > 1.5 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # RSI filter
+    # RSI(14)
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -50,15 +47,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 34  # Need RSI (14+20), volume MA20
+    start_idx = 50  # Need weekly EMA50 (50) + RSI (14) + volume MA20 (20)
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(volume_ma20[i]) or 
             np.isnan(rsi[i]) or 
-            np.isnan(r1_1h[i]) or 
-            np.isnan(s1_1h[i]) or
-            np.isnan(pivot_1h[i])):
+            np.isnan(ema50_6h[i])):
             signals[i] = 0.0
             continue
         
@@ -66,33 +61,33 @@ def generate_signals(prices):
         volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
         if position == 0:
-            # Long: price breaks above R1 with volume and RSI > 50
-            if (close[i] > r1_1h[i] and volume_filter and rsi[i] > 50):
-                signals[i] = 0.20
+            # Long: RSI < 30 (oversold) + price > weekly EMA50 + volume
+            if (rsi[i] < 30 and close[i] > ema50_6h[i] and volume_filter):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume and RSI < 50
-            elif (close[i] < s1_1h[i] and volume_filter and rsi[i] < 50):
-                signals[i] = -0.20
+            # Short: RSI > 70 (overbought) + price < weekly EMA50 + volume
+            elif (rsi[i] > 70 and close[i] < ema50_6h[i] and volume_filter):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to pivot level
-            if close[i] < pivot_1h[i]:
+            # Exit long: RSI crosses above 40 (leaving oversold zone)
+            if rsi[i] > 40:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to pivot level
-            if close[i] > pivot_1h[i]:
+            # Exit short: RSI crosses below 60 (leaving overbought zone)
+            if rsi[i] < 60:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_R1_S1_Breakout_Volume_RSI"
-timeframe = "1h"
+name = "6h_RSI14_Reversal_WeeklyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
