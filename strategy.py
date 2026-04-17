@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_RSI_Chop_Regime_V1
-Strategy: 1-day KAMA direction + RSI(14) extremes + Choppiness Index regime filter.
-Long: KAMA rising + RSI < 30 + CHOP > 61.8 (range)
-Short: KAMA falling + RSI > 70 + CHOP > 61.8 (range)
-Exit: Opposite signal or regime shift (CHOP < 38.2)
+4h_Vortex_VortexTrend_1dFilter
+Strategy: 4h Vortex Indicator with 1d trend filter and volume confirmation.
+Long: VI+ > VI- + VI+ rising + 1d uptrend + volume > 1.5x 10-period average
+Short: VI- > VI+ + VI- rising + 1d downtrend + volume > 1.5x 10-period average
+Exit: Vortex cross reversal or trend reversal
 Position size: 0.25
-Designed for mean reversion in ranging markets, avoids trending whipsaw.
-Timeframe: 1d
+Designed to catch trend momentum while filtering chop.
+Timeframe: 4h
 """
 
 import numpy as np
@@ -16,141 +16,109 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Kaufman Adaptive Moving Average (KAMA)
-    er_period = 10
-    fast_ema = 2
-    slow_ema = 30
-    
-    # Efficiency Ratio
-    change = np.abs(close[er_period:] - close[:-er_period])
-    volatility = np.sum(np.abs(np.diff(close.reshape(-1, 1), axis=0)), axis=0)
-    volatility = np.concatenate([np.full(er_period, np.nan), volatility])
-    er = np.where(volatility != 0, change / volatility, 0)
-    er = np.concatenate([np.full(er_period, np.nan), er])
-    
-    # Smoothing constant
-    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
-    sc = np.concatenate([np.full(er_period, np.nan), sc])
-    
-    # KAMA
-    kama = np.full_like(close, np.nan)
-    kama[er_period] = close[er_period]
-    for i in range(er_period + 1, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # Calculate RSI(14)
-    rsi_period = 14
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.full_like(close, np.nan)
-    avg_loss = np.full_like(close, np.nan)
-    avg_gain[rsi_period] = np.mean(gain[:rsi_period])
-    avg_loss[rsi_period] = np.mean(loss[:rsi_period])
-    
-    for i in range(rsi_period + 1, n):
-        avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i-1]) / rsi_period
-        avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i-1]) / rsi_period
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate Choppiness Index (CHOP)
-    chop_period = 14
-    atr_period = chop_period
+    # Calculate Vortex Indicator (VI)
+    # VI+ = EMA(|High - Prev Low|, n) / EMA(True Range, n)
+    # VI- = EMA(|Low - Prev High|, n) / EMA(True Range, n)
+    vm = 10  # Vortex period
     
     # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(low, 1))
+    tr3 = np.abs(low - np.roll(high, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
     
-    # ATR
-    atr = np.full_like(close, np.nan)
-    atr[atr_period] = np.mean(tr[1:atr_period+1])
-    for i in range(atr_period + 1, n):
-        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    # Vortex movement
+    vm_plus = np.abs(high - np.roll(low, 1))
+    vm_minus = np.abs(low - np.roll(high, 1))
+    vm_plus[0] = 0
+    vm_minus[0] = 0
     
-    # Sum of ATR over chop_period
-    sum_atr = np.full_like(close, np.nan)
-    for i in range(chop_period, n):
-        sum_atr[i] = np.sum(atr[i-chop_period+1:i+1])
+    # Smooth with EMA
+    tr_ema = pd.Series(tr).ewm(span=vm, adjust=False).mean().values
+    vm_plus_ema = pd.Series(vm_plus).ewm(span=vm, adjust=False).mean().values
+    vm_minus_ema = pd.Series(vm_minus).ewm(span=vm, adjust=False).mean().values
     
-    # Max high - min low over chop_period
-    max_high = np.full_like(close, np.nan)
-    min_low = np.full_like(close, np.nan)
-    for i in range(chop_period-1, n):
-        max_high[i] = np.max(high[i-chop_period+1:i+1])
-        min_low[i] = np.min(low[i-chop_period+1:i+1])
+    # Avoid division by zero
+    vi_plus = np.where(tr_ema != 0, vm_plus_ema / tr_ema, 0)
+    vi_minus = np.where(tr_ema != 0, vm_minus_ema / tr_ema, 0)
     
-    # Chop calculation
-    chop = np.full_like(close, np.nan)
-    for i in range(chop_period-1, n):
-        if sum_atr[i] != 0 and max_high[i] != min_low[i]:
-            chop[i] = 100 * np.log10(sum_atr[i] / (max_high[i] - min_low[i])) / np.log10(chop_period)
-    
-    # Weekly trend filter (1-week close > open = uptrend)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Calculate 1d trend (close > open = uptrend, close < open = downtrend)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    trend_1w = (df_1w['close'] > df_1w['open']).astype(float).values  # 1 for up, 0 for down
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    trend_1d = (df_1d['close'] > df_1d['open']).astype(float).values  # 1 for up, 0 for down
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    
+    # Calculate 4h volume average (10-period)
+    df_4h = get_htf_data(prices, '4h')
+    volume_4h = df_4h['volume'].values
+    volume_ma10_4h = pd.Series(volume_4h).rolling(window=10, min_periods=10).mean().values
+    volume_ma10_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_ma10_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(max(er_period*2, rsi_period*2, chop_period) + 5, n):  # warmup
-        # Skip if any required data is not available
-        if (np.isnan(kama[i]) or np.isnan(kama[i-1]) or np.isnan(rsi[i]) or 
-            np.isnan(chop[i]) or np.isnan(trend_1w_aligned[i])):
+    # Precompute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    
+    for i in range(vm*2, n):  # warmup for indicators
+        # Session filter: 08-20 UTC
+        if not (8 <= hours[i] <= 20):
             signals[i] = 0.0
             continue
         
-        # KAMA direction
-        kama_rising = kama[i] > kama[i-1]
-        kama_falling = kama[i] < kama[i-1]
+        # Skip if any required data is not available
+        if (np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or np.isnan(trend_1d_aligned[i]) or 
+            np.isnan(volume_ma10_4h_aligned[i])):
+            signals[i] = 0.0
+            continue
         
-        # RSI extremes
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
+        # Current 4h volume
+        vol_4h_current = align_htf_to_ltf(prices, df_4h, volume_4h)[i]
+        volume_filter = vol_4h_current > (1.5 * volume_ma10_4h_aligned[i])
         
-        # Choppiness Index regime (range-bound)
-        chop_range = chop[i] > 61.8  # chop > 61.8 = ranging market
-        chop_trend = chop[i] < 38.2  # chop < 38.2 = trending market
+        # Trend filter: 1d bullish/bearish
+        trend_up = trend_1d_aligned[i] > 0.5  # 1d close > open
+        trend_down = trend_1d_aligned[i] < 0.5  # 1d close < open
+        
+        # Vortex signals
+        vi_cross_up = vi_plus[i-1] <= vi_minus[i-1] and vi_plus[i] > vi_minus[i]  # VI+ crosses above VI-
+        vi_cross_down = vi_minus[i-1] <= vi_plus[i-1] and vi_minus[i] > vi_plus[i]  # VI- crosses above VI+
+        vi_plus_rising = vi_plus[i] > vi_plus[i-1]  # VI+ rising
+        vi_minus_rising = vi_minus[i] > vi_minus[i-1]  # VI- rising
         
         # Entry signals
         if position == 0:
-            # Long: KAMA rising + RSI oversold + ranging market
-            if kama_rising and rsi_oversold and chop_range:
+            # Long: VI+ > VI- + VI+ rising + volume filter + 1d uptrend
+            if vi_plus[i] > vi_minus[i] and vi_plus_rising and volume_filter and trend_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA falling + RSI overbought + ranging market
-            elif kama_falling and rsi_overbought and chop_range:
+            # Short: VI- > VI+ + VI- rising + volume filter + 1d downtrend
+            elif vi_minus[i] > vi_plus[i] and vi_minus_rising and volume_filter and trend_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: KAMA falling OR RSI overbought OR trend shift
-            if kama_falling or rsi[i] > 70 or chop_trend:
+            # Exit long: VI- crosses above VI+ or 1d trend turns down
+            if vi_cross_down or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: KAMA rising OR RSI oversold OR trend shift
-            if kama_rising or rsi[i] < 30 or chop_trend:
+            # Exit short: VI+ crosses above VI- or 1d trend turns up
+            if vi_cross_up or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -158,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_RSI_Chop_Regime_V1"
-timeframe = "1d"
+name = "4h_Vortex_VortexTrend_1dFilter"
+timeframe = "4h"
 leverage = 1.0
