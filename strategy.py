@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,31 +13,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for daily range calculation
+    # Get 1d data for weekly pivot calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate previous day's range (high - low)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    daily_range = prev_high - prev_low
+    # Calculate weekly pivot points using previous week's data
+    # Group daily data into weeks (7 days per week)
+    weeks_high = []
+    weeks_low = []
+    weeks_close = []
     
-    # Define breakout levels: today's open +/- 0.5 * previous day's range
-    # We use today's open as reference point for breakout
-    daily_open = np.roll(close_1d, 1)  # Previous day's close is today's open in crypto
-    daily_open[0] = np.nan
-    upper_break = daily_open + 0.5 * daily_range
-    lower_break = daily_open - 0.5 * daily_range
+    for i in range(0, len(high_1d), 7):
+        week_high = np.max(high_1d[i:i+7]) if i+7 <= len(high_1d) else np.max(high_1d[i:])
+        week_low = np.min(low_1d[i:i+7]) if i+7 <= len(low_1d) else np.min(low_1d[i:])
+        week_close = close_1d[i+6] if i+6 < len(close_1d) else close_1d[-1]
+        weeks_high.append(week_high)
+        weeks_low.append(week_low)
+        weeks_close.append(week_close)
     
-    # Align daily breakout levels to 4h timeframe
-    upper_break_4h = align_htf_to_ltf(prices, df_1d, upper_break)
-    lower_break_4h = align_htf_to_ltf(prices, df_1d, lower_break)
+    weeks_high = np.array(weeks_high)
+    weeks_low = np.array(weeks_low)
+    weeks_close = np.array(weeks_close)
     
-    # Volume confirmation: current volume > 1.5 * 20-period average
+    # Calculate weekly pivot points: P = (H + L + C) / 3
+    weekly_pivot = (weeks_high + weeks_low + weeks_close) / 3
+    # Weekly R1 = 2*P - L, S1 = 2*P - H
+    weekly_r1 = 2 * weekly_pivot - weeks_low
+    weekly_s1 = 2 * weekly_pivot - weeks_high
+    # Weekly R2 = P + (H - L), S2 = P - (H - L)
+    weekly_r2 = weekly_pivot + (weeks_high - weeks_low)
+    weekly_s2 = weekly_pivot - (weeks_high - weeks_low)
+    
+    # Expand weekly arrays back to daily frequency
+    pivot_daily = np.repeat(weekly_pivot, 7)[:len(high_1d)]
+    r1_daily = np.repeat(weekly_r1, 7)[:len(high_1d)]
+    s1_daily = np.repeat(weekly_s1, 7)[:len(high_1d)]
+    r2_daily = np.repeat(weekly_r2, 7)[:len(high_1d)]
+    s2_daily = np.repeat(weekly_s2, 7)[:len(high_1d)]
+    
+    # Align weekly pivot levels to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot_daily)
+    r1_6h = align_htf_to_ltf(prices, df_1d, r1_daily)
+    s1_6h = align_htf_to_ltf(prices, df_1d, s1_daily)
+    r2_6h = align_htf_to_ltf(prices, df_1d, r2_daily)
+    s2_6h = align_htf_to_ltf(prices, df_1d, s2_daily)
+    
+    # Volume confirmation: current volume > 1.3 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR filter to avoid low volatility environments
@@ -61,37 +84,40 @@ def generate_signals(prices):
         if (np.isnan(volume_ma20[i]) or 
             np.isnan(atr[i]) or 
             np.isnan(atr_ma20[i]) or 
-            np.isnan(upper_break_4h[i]) or 
-            np.isnan(lower_break_4h[i])):
+            np.isnan(pivot_6h[i]) or 
+            np.isnan(r1_6h[i]) or 
+            np.isnan(s1_6h[i]) or 
+            np.isnan(r2_6h[i]) or 
+            np.isnan(s2_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        # Volume filter: current volume > 1.3x 20-period average
+        volume_filter = volume[i] > (1.3 * volume_ma20[i])
         # Volatility filter: ATR > ATR MA20 (avoid low volatility)
         volatility_filter = atr[i] > atr_ma20[i]
         
         if position == 0:
-            # Long: price breaks above upper level with volume and volatility
-            if close[i] > upper_break_4h[i] and volume_filter and volatility_filter:
+            # Long: price breaks above R1 with volume and volatility
+            if close[i] > r1_6h[i] and volume_filter and volatility_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower level with volume and volatility
-            elif close[i] < lower_break_4h[i] and volume_filter and volatility_filter:
+            # Short: price breaks below S1 with volume and volatility
+            elif close[i] < s1_6h[i] and volume_filter and volatility_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns below the breakout level or volatility drops
-            if close[i] < upper_break_4h[i] or not volatility_filter:
+            # Exit long: price returns below R1 or volatility drops
+            if close[i] < r1_6h[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns above the breakout level or volatility drops
-            if close[i] > lower_break_4h[i] or not volatility_filter:
+            # Exit short: price returns above S1 or volatility drops
+            if close[i] > s1_6h[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyRangeBreakout_VolVol"
-timeframe = "4h"
+name = "6h_WeeklyPivot_R1_S1_Breakout_VolVol"
+timeframe = "6h"
 leverage = 1.0
