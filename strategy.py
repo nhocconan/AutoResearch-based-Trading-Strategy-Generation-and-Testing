@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-Long when price breaks above 20-day high AND close > 1w EMA50 AND volume > 2.0x 20-day average.
-Short when price breaks below 20-day low AND close < 1w EMA50 AND volume > 2.0x 20-day average.
-Exit when price crosses opposite Donchian level (mean reversion) OR ATR-based stoploss hit (2.5 * ATR).
-Uses 1w HTF for trend filter to improve robustness in both bull and bear markets.
-Target: 15-25 trades/year per symbol to minimize fee drag while maintaining edge.
+Hypothesis: 6h Elder Ray + 1d ADX regime filter with volume confirmation.
+Long when Bull Power > 0 AND ADX > 25 (trending) AND volume > 1.5x 20-period average.
+Short when Bear Power < 0 AND ADX > 25 (trending) AND volume > 1.5x 20-period average.
+Exit when Elder Power reverses sign OR ADX < 20 (range) OR ATR stoploss hit (2.0).
+Uses 1d HTF for ADX regime to avoid whipsaw in sideways markets. Target: 15-30 trades/year.
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,84 +21,102 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian calculation (primary timeframe)
+    # Get 1d data for ADX regime filter (higher timeframe)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate Donchian channels (20-period) on 1d
-    def calculate_donchian(high_arr, low_arr, window):
-        """Donchian channels: upper = rolling max(high), lower = rolling min(low)"""
-        upper = pd.Series(high_arr).rolling(window=window, min_periods=window).max().values
-        lower = pd.Series(low_arr).rolling(window=window, min_periods=window).min().values
-        return upper, lower
+    # Calculate ADX (14-period) on 1d
+    def calculate_adx(high_arr, low_arr, close_arr, window=14):
+        """Average Directional Index"""
+        # True Range
+        tr1 = high_arr - low_arr
+        tr2 = np.abs(high_arr - np.roll(close_arr, 1))
+        tr3 = np.abs(low_arr - np.roll(close_arr, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]
+        
+        # Directional Movement
+        up_move = high_arr - np.roll(high_arr, 1)
+        down_move = np.roll(low_arr, 1) - low_arr
+        up_move[0] = 0
+        down_move[0] = 0
+        
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+        
+        # Smoothed values
+        tr_smooth = pd.Series(tr).ewm(span=window, adjust=False, min_periods=window).mean().values
+        plus_dm_smooth = pd.Series(plus_dm).ewm(span=window, adjust=False, min_periods=window).mean().values
+        minus_dm_smooth = pd.Series(minus_dm).ewm(span=window, adjust=False, min_periods=window).mean().values
+        
+        # Directional Indicators
+        plus_di = 100 * plus_dm_smooth / tr_smooth
+        minus_di = 100 * minus_dm_smooth / tr_smooth
+        
+        # DX and ADX
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = pd.Series(dx).ewm(span=window, adjust=False, min_periods=window).mean().values
+        return adx
     
-    # Calculate ATR (14-period) for stoploss on 1d
+    # Calculate ATR (14-period) for stoploss on 6h
     def calculate_atr(high_arr, low_arr, close_arr, window):
         """Average True Range"""
         tr1 = high_arr - low_arr
         tr2 = np.abs(high_arr - np.roll(close_arr, 1))
         tr3 = np.abs(low_arr - np.roll(close_arr, 1))
         tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]  # First TR is just high-low
+        tr[0] = tr1[0]
         atr = pd.Series(tr).ewm(span=window, adjust=False, min_periods=window).mean().values
         return atr
     
-    # Get Donchian levels (20-period)
-    upper_20, lower_20 = calculate_donchian(high_1d, low_1d, 20)
+    # Get ADX and align to 6h
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Get 1w data for EMA50 trend filter (higher timeframe)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Calculate ATR on 6h
+    atr = calculate_atr(high, low, close, 14)
     
-    # Calculate EMA50 on 1w
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Elder Ray components on 6h
+    # Bull Power = High - EMA13
+    # Bear Power = Low - EMA13
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Calculate volume average (20-period) on 1d
-    volume_1d_series = pd.Series(volume_1d)
-    volume_ma_1d = volume_1d_series.rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate ATR (14-period) for stoploss on 1d
-    atr = calculate_atr(high_1d, low_1d, close_1d, 14)
-    
-    # Align all indicators to 1d timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
-    ema50_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    # Volume average (20-period) on 6h
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     entry_price = 0.0
     
-    start_idx = 50  # warmup for EMA50 and Donchian
+    start_idx = 30  # warmup for EMA13 and ADX
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(ema50_aligned[i]) or np.isnan(volume_ma_aligned[i]) or np.isnan(atr_aligned[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
-        upper = upper_aligned[i]
-        lower = lower_aligned[i]
-        ema50 = ema50_aligned[i]
-        vol_ma = volume_ma_aligned[i]
-        atr_val = atr_aligned[i]
+        adx_val = adx_aligned[i]
+        bull = bull_power[i]
+        bear = bear_power[i]
+        vol_ma = volume_ma[i]
+        atr_val = atr[i]
         vol = volume[i]
         price = close[i]
         
         if position == 0:
-            # Long: Breakout above upper Donchian + price > 1w EMA50 + volume spike
-            if price > upper and price > ema50 and vol > 2.0 * vol_ma:
+            # Long: Bull Power > 0 (buying pressure) + ADX > 25 (trending) + volume spike
+            if bull > 0 and adx_val > 25 and vol > 1.5 * vol_ma:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: Breakout below lower Donchian + price < 1w EMA50 + volume spike
-            elif price < lower and price < ema50 and vol > 2.0 * vol_ma:
+            # Short: Bear Power < 0 (selling pressure) + ADX > 25 (trending) + volume spike
+            elif bear < 0 and adx_val > 25 and vol > 1.5 * vol_ma:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -108,12 +125,16 @@ def generate_signals(prices):
             # Exit conditions for long
             exit_signal = False
             
-            # Exit 1: Price crosses below lower Donchian (mean reversion to lower level)
-            if price < lower:
+            # Exit 1: Bull Power <= 0 (buying pressure gone)
+            if bull <= 0:
                 exit_signal = True
             
-            # Exit 2: ATR-based stoploss (2.5 * ATR below entry)
-            elif price < entry_price - 2.5 * atr_val:
+            # Exit 2: ADX < 20 (market ranging)
+            elif adx_val < 20:
+                exit_signal = True
+            
+            # Exit 3: ATR-based stoploss (2.0 * ATR below entry)
+            elif price < entry_price - 2.0 * atr_val:
                 exit_signal = True
             
             if exit_signal:
@@ -126,12 +147,16 @@ def generate_signals(prices):
             # Exit conditions for short
             exit_signal = False
             
-            # Exit 1: Price crosses above upper Donchian (mean reversion to upper level)
-            if price > upper:
+            # Exit 1: Bear Power >= 0 (selling pressure gone)
+            if bear >= 0:
                 exit_signal = True
             
-            # Exit 2: ATR-based stoploss (2.5 * ATR above entry)
-            elif price > entry_price + 2.5 * atr_val:
+            # Exit 2: ADX < 20 (market ranging)
+            elif adx_val < 20:
+                exit_signal = True
+            
+            # Exit 3: ATR-based stoploss (2.0 * ATR above entry)
+            elif price > entry_price + 2.0 * atr_val:
                 exit_signal = True
             
             if exit_signal:
@@ -142,6 +167,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wEMA50_VolumeSpike_ATRStop"
-timeframe = "1d"
+name = "6h_ElderRay_ADXRegime_VolumeSpike_ATRStop"
+timeframe = "6h"
 leverage = 1.0
