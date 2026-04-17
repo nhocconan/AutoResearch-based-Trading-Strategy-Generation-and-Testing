@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-4h Camarilla Pivot + 1d EMA Trend + Volume Spike
-Long: Price > Camarilla H3 + price > 1d EMA(34) + volume > 1.5x 4h volume SMA(20)
-Short: Price < Camarilla L3 + price < 1d EMA(34) + volume > 1.5x 4h volume SMA(20)
-Exit: Price crosses back through Camarilla H3/L3 or EMA(34) flip
-Uses Camarilla levels for institutional support/resistance, EMA for trend filter, volume for confirmation.
-Designed to capture breakouts with institutional levels in both bull and bear markets.
-Target: 50-150 total trades over 4 years (12-37/year)
+1d Donchian(20) Breakout + 1w EMA50 Trend + Volume Spike
+Long: Price > Donchian High(20) + price > 1w EMA50 + volume > 1.5x 1d volume SMA(20)
+Short: Price < Donchian Low(20) + price < 1w EMA50 + volume > 1.5x 1d volume SMA(20)
+Exit: Opposite breakout or price crosses 1w EMA50
+Designed to capture strong trends in both bull and bear markets with volume confirmation.
+Target: 30-100 total trades over 4 years (7-25/year)
 """
 
 import numpy as np
@@ -23,83 +22,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter
+    # Get 1d data for Donchian and volume
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d EMA(34)
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate Donchian(20) on 1d
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 4h volume SMA(20) for volume filter
-    vol_sma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d volume SMA(20)
+    vol_sma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Get 1w data for EMA50 trend
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Calculate 1w EMA(50)
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 1d indicators to lower timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    vol_sma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_1d)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = max(34, 20)  # need EMA and volume SMA
+    start_idx = 20  # need Donchian and volume SMA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_sma_4h[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(vol_sma_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        high_val = high[i]
-        low_val = low[i]
         vol = volume[i]
-        vol_sma_val = vol_sma_4h[i]
-        ema_val = ema_34_1d_aligned[i]
-        
-        # Calculate Camarilla levels from previous day's range
-        # Need previous day's high, low, close
-        if i >= 1:
-            # Get indices for previous day's data (assuming 24h periods)
-            # Since we're on 4h timeframe, previous day = 6 bars ago
-            prev_day_idx = max(0, i - 6)
-            if prev_day_idx < len(high):
-                prev_high = high[prev_day_idx]
-                prev_low = low[prev_day_idx]
-                prev_close = close[prev_day_idx]
-            else:
-                # Use available data
-                prev_high = high[0]
-                prev_low = low[0]
-                prev_close = close[0]
-            
-            # Camarilla levels
-            range_val = prev_high - prev_low
-            if range_val > 0:
-                H3 = prev_close + range_val * 1.1 / 4
-                L3 = prev_close - range_val * 1.1 / 4
-                H4 = prev_close + range_val * 1.1 / 2
-                L4 = prev_close - range_val * 1.1 / 2
-            else:
-                H3 = L3 = H4 = L4 = prev_close
-        else:
-            H3 = L3 = H4 = L4 = close[0]
+        donch_high = donchian_high_aligned[i]
+        donch_low = donchian_low_aligned[i]
+        vol_sma_val = vol_sma_1d_aligned[i]
+        ema50_val = ema_50_1w_aligned[i]
         
         if position == 0:
-            # Long: Price > H3 + price > EMA(34) + volume spike
-            if price > H3 and price > ema_val and vol > 1.5 * vol_sma_val:
+            # Long: Price > Donchian High + price > 1w EMA50 + volume spike
+            if price > donch_high and price > ema50_val and vol > 1.5 * vol_sma_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price < L3 + price < EMA(34) + volume spike
-            elif price < L3 and price < ema_val and vol > 1.5 * vol_sma_val:
+            # Short: Price < Donchian Low + price < 1w EMA50 + volume spike
+            elif price < donch_low and price < ema50_val and vol > 1.5 * vol_sma_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price < H3 or price < EMA(34)
-            if price < H3 or price < ema_val:
+            # Long exit: Price < Donchian Low or price < 1w EMA50
+            if price < donch_low or price < ema50_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price > L3 or price > EMA(34)
-            if price > L3 or price > ema_val:
+            # Short exit: Price > Donchian High or price > 1w EMA50
+            if price > donch_high or price > ema50_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_Pivot_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
