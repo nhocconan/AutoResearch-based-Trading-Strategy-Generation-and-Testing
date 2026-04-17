@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: On the daily timeframe, price reacts to the 1-week high and low as significant support/resistance levels.
-We use a breakout strategy with volume confirmation and a weekly EMA trend filter to capture institutional interest.
-Long when price breaks above the prior 1-week high with volume > 1.8x average and price above weekly EMA20.
-Short when price breaks below the prior 1-week low with volume > 1.8x average and price below weekly EMA20.
-Exit when price returns to the prior 1-week midpoint (mean reversion) or on opposite breakout.
-Designed for 1d to work in trending (breakouts) and ranging (mean reversion to mid-point) markets with ~10-25 trades per year.
+Hypothesis: On the 4-hour timeframe, price tends to revert to the mean when it deviates significantly from the 20-period VWAP, 
+especially when accompanied by extreme RSI readings and low volatility (squeeze conditions). 
+We use a Bollinger Band squeeze to identify low-volatility regimes, then look for mean reversion 
+when price touches the outer Bollinger Bands with RSI extremes. 
+This strategy works in both bull and bear markets by capturing overextended moves that are likely to revert.
+We limit trades to ~20-30 per year by requiring multiple confluence factors.
 """
 
 import numpy as np
@@ -22,65 +22,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for prior period's high/low and EMA20
-    df_1w = get_htf_data(prices, '1w')
+    # Calculate Bollinger Bands (20, 2)
+    close_series = pd.Series(close)
+    sma_20 = close_series.rolling(window=20, min_periods=20).mean()
+    std_20 = close_series.rolling(window=20, min_periods=20).std()
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
     
-    # Prior 1w high and low (use shift(1) to avoid look-ahead: use completed period's levels)
-    phigh = df_1w['high'].shift(1).values
-    plow = df_1w['low'].shift(1).values
-    pclose = df_1w['close'].values
+    # Bollinger Band Width for squeeze detection (low volatility)
+    bb_width = (upper_bb - lower_bb) / sma_20
+    bb_width_sma = bb_width.rolling(window=50, min_periods=50).mean()
+    squeeze_condition = bb_width < bb_width_sma * 0.8  # Bollinger Band squeeze
     
-    # Prior 1w midpoint for mean reversion exit
-    pmid = (phigh + plow) / 2
+    # RSI (14)
+    delta = close_series.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate 1w EMA20 for trend filter (use prior period's close to avoid look-ahead)
-    ema_20 = pd.Series(pclose).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # VWAP (approximation using typical price)
+    typical_price = (high + low + close) / 3
+    vwap_numerator = (typical_price * volume).cumsum()
+    vwap_denominator = volume.cumsum()
+    vwap = vwap_numerator / vwap_denominator
     
-    # Align all 1w levels to 1d timeframe (waits for 1w bar to close)
-    phigh_1d = align_htf_to_ltf(prices, df_1w, phigh)
-    plow_1d = align_htf_to_ltf(prices, df_1w, plow)
-    pmid_1d = align_htf_to_ltf(prices, df_1w, pmid)
-    ema_20_1d = align_htf_to_ltf(prices, df_1w, ema_20)
-    
-    # Volume confirmation: 20-period volume MA on 1d
-    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    # Volume moving average for confirmation
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # warmup for EMA20 and volume MA
+    start_idx = 50  # warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(phigh_1d[i]) or np.isnan(plow_1d[i]) or np.isnan(pmid_1d[i]) or
-            np.isnan(ema_20_1d[i]) or np.isnan(volume_ma_20.iloc[i])):
+        if (np.isnan(sma_20.iloc[i]) or np.isnan(std_20.iloc[i]) or 
+            np.isnan(rsi.iloc[i]) or np.isnan(vwap[i]) or 
+            np.isnan(volume_ma.iloc[i]) or np.isnan(squeeze_condition.iloc[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        rsi_val = rsi.iloc[i]
         vol = volume[i]
-        vol_ma = volume_ma_20.iloc[i]
+        vol_ma = volume_ma.iloc[i]
+        squeeze = squeeze_condition.iloc[i]
         
         if position == 0:
-            # Long: price breaks above prior 1w high with volume spike and above 1w EMA20
-            if price > phigh_1d[i] and vol > 1.8 * vol_ma and price > ema_20_1d[i]:
+            # Long setup: price at lower BB, RSI oversold, volume above average, in squeeze
+            if price <= lower_bb.iloc[i] and rsi_val < 30 and vol > vol_ma and squeeze:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below prior 1w low with volume spike and below 1w EMA20
-            elif price < plow_1d[i] and vol > 1.8 * vol_ma and price < ema_20_1d[i]:
+            # Short setup: price at upper BB, RSI overbought, volume above average, in squeeze
+            elif price >= upper_bb.iloc[i] and rsi_val > 70 and vol > vol_ma and squeeze:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to prior 1w midpoint (mean reversion) OR breaks below prior 1w low (invalidates breakout)
-            if price < pmid_1d[i] or price < plow_1d[i]:
+            # Long exit: price returns to VWAP or RSI normalizes
+            if price >= vwap[i] or rsi_val > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to prior 1w midpoint (mean reversion) OR breaks above prior 1w high (invalidates breakout)
-            if price > pmid_1d[i] or price > phigh_1d[i]:
+            # Short exit: price returns to VWAP or RSI normalizes
+            if price <= vwap[i] or rsi_val < 50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Prior1W_HL_Breakout_MeanRev"
-timeframe = "1d"
+name = "4h_BB_Squeeze_RSI_MeanReversion_VWAP"
+timeframe = "4h"
 leverage = 1.0
