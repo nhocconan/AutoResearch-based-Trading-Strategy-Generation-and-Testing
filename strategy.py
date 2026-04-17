@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Pivot_R1_S1_Breakout_Volume_Spike
-Strategy: Trade breakouts above S1 or below S1 on 12h with 1d EMA34 trend filter and volume spike.
-Long: Price breaks above S1 + 1d EMA34 > EMA144 + volume > 2x average
-Short: Price breaks below S1 + 1d EMA34 < EMA144 + volume > 2x average
-Exit: Price moves back inside pivot range or trend reverses
+12h_TRIX_VolumeSpike_Crossover
+Strategy: TRIX(12) crossover with volume spike on 12h, filtered by 1d EMA34 trend.
+Long: TRIX crosses above 0 + volume > 1.5x average + 1d EMA34 rising
+Short: TRIX crosses below 0 + volume > 1.5x average + 1d EMA34 falling
+Exit: Opposite TRIX cross or trend reversal
 Position size: 0.25
-Designed to capture breakouts from weekly pivot levels with trend alignment and volume confirmation.
+Designed to capture momentum shifts with volume confirmation in trending markets.
 Timeframe: 12h
 """
 
@@ -16,25 +16,28 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA34 and EMA144 for trend filter
+    # Calculate TRIX(12) on 12h
+    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
+    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
+    trix = ((ema3 - ema3.shift(1)) / ema3.shift(1)) * 100
+    trix = trix.fillna(0).values
+    
+    # Calculate 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
     close_series_1d = pd.Series(close_1d)
     ema34_1d = close_series_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema144_1d = close_series_1d.ewm(span=144, adjust=False, min_periods=144).mean().values
     
-    # Align 1d EMAs to 12h timeframe
+    # Align 1d EMA34 to 12h timeframe
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    ema144_1d_aligned = align_htf_to_ltf(prices, df_1d, ema144_1d)
     
     # Volume confirmation (20-period MA on 12h)
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -42,83 +45,53 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(144, 20)
+    start_idx = max(36, 20)  # TRIX needs 3x EMA + volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(ema144_1d_aligned[i]) or 
-            np.isnan(volume_ma20[i])):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_ma20[i]):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2x 20-period average
-        volume_filter = volume[i] > (2.0 * volume_ma20[i])
+        # Volume filter: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
-        # Trend filter: 1d EMA34 > EMA144 for long, < for short
-        ema34_gt_ema144 = ema34_1d_aligned[i] > ema144_1d_aligned[i]
-        ema34_lt_ema144 = ema34_1d_aligned[i] < ema144_1d_aligned[i]
+        # Trend filter: 1d EMA34 rising/falling
+        ema34_rising = i > 0 and ema34_1d_aligned[i] > ema34_1d_aligned[i-1]
+        ema34_falling = i > 0 and ema34_1d_aligned[i] < ema34_1d_aligned[i-1]
         
-        # Calculate weekly S1 from previous week's OHLC
-        if i >= 14:  # Need at least 14 12h bars (1 week) to get previous week
-            # Get weekly data for S1 calculation
-            df_1w = get_htf_data(prices, '1w')
-            
-            # Find previous week's index in 1w data
-            current_time = prices['open_time'].iloc[i]
-            prev_week = current_time - pd.Timedelta(days=7)
-            
-            # Get previous week's OHLC from 1w data
-            week_mask = df_1w['open_time'].dt.date == prev_week.date()
-            if week_mask.any():
-                prev_week_data = df_1w[week_mask].iloc[0]
-                prev_high = prev_week_data['high']
-                prev_low = prev_week_data['low']
-                prev_close = prev_week_data['close']
-                
-                # Calculate weekly pivot and S1
-                pivot = (prev_high + prev_low + prev_close) / 3
-                range_val = prev_high - prev_low
-                if range_val > 0:
-                    s1 = pivot - (range_val * 1.1 / 12)
-                    
-                    # Entry conditions: price breaks above/below S1
-                    price_above_s1 = close[i] > s1
-                    price_below_s1 = close[i] < s1
-                    
-                    if position == 0:
-                        # Long: breaks above S1 + uptrend + volume spike
-                        if price_above_s1 and ema34_gt_ema144 and volume_filter:
-                            signals[i] = 0.25
-                            position = 1
-                        # Short: breaks below S1 + downtrend + volume spike
-                        elif price_below_s1 and ema34_lt_ema144 and volume_filter:
-                            signals[i] = -0.25
-                            position = -1
-                    
-                    elif position == 1:
-                        # Exit long: price moves back inside pivot range or trend reverses
-                        if close[i] < pivot or not ema34_gt_ema144:
-                            signals[i] = 0.0
-                            position = 0
-                        else:
-                            signals[i] = 0.25
-                    
-                    elif position == -1:
-                        # Exit short: price moves back inside pivot range or trend reverses
-                        if close[i] > pivot or not ema34_lt_ema144:
-                            signals[i] = 0.0
-                            position = 0
-                        else:
-                            signals[i] = -0.25
-                else:
-                    signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        # TRIX crossover signals
+        trix_cross_up = i > 0 and trix[i-1] <= 0 and trix[i] > 0
+        trix_cross_down = i > 0 and trix[i-1] >= 0 and trix[i] < 0
+        
+        if position == 0:
+            # Long: TRIX crosses up + rising trend + volume spike
+            if trix_cross_up and ema34_rising and volume_filter:
+                signals[i] = 0.25
+                position = 1
+            # Short: TRIX crosses down + falling trend + volume spike
+            elif trix_cross_down and ema34_falling and volume_filter:
+                signals[i] = -0.25
+                position = -1
+        
+        elif position == 1:
+            # Exit long: TRIX crosses down or trend turns down
+            if trix_cross_down or not ema34_rising:
+                signals[i] = 0.0
+                position = 0
             else:
-                signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-        else:
-            signals[i] = 0.0
+                signals[i] = 0.25
+        
+        elif position == -1:
+            # Exit short: TRIX crosses up or trend turns up
+            if trix_cross_up or not ema34_falling:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "12h_Pivot_R1_S1_Breakout_Volume_Spike"
+name = "12h_TRIX_VolumeSpike_Crossover"
 timeframe = "12h"
 leverage = 1.0
