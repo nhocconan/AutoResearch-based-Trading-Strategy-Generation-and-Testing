@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Pivot_R1_S1_Breakout_VolumeSpike_v1
-Breakout of Camarilla R1/S1 levels on 12h timeframe with volume spike confirmation.
-Trend filter: price above/below weekly EMA200.
-Exit when price returns to pivot point or volume drops below average.
-Designed to capture institutional breakouts with volume confirmation in both bull and bear markets.
+4h_KAMA_Trend_With_Volume_Confirmation_v1
+KAMA(10) direction for trend, volume > 1.5x MA(20) for confirmation.
+Exit when KAMA flips direction or volume drops below average.
+Designed to work in both bull and bear markets by following adaptive trend.
 Target: 50-150 total trades over 4 years (12-37/year).
 """
 
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,106 +21,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Calculate Pivot Point and Camarilla Levels from previous day ===
-    # Use daily OHLC from previous day to calculate today's levels
-    df_1d = get_htf_data(prices, '1d')
+    # === KAMA(10) ===
+    # Efficiency Ratio
+    change = np.abs(close - np.roll(close, 10))
+    change[0:10] = 0  # First 10 values invalid
     
-    # Calculate pivot and camarilla levels for each day
-    # Pivot = (H + L + C) / 3
-    # R1 = Pivot + (H - L) * 1.1 / 12
-    # S1 = Pivot - (H - L) * 1.1 / 12
-    # R2 = Pivot + (H - L) * 1.1 / 6
-    # S2 = Pivot - (H - L) * 1.1 / 6
-    # R3 = Pivot + (H - L) * 1.1 / 4
-    # S3 = Pivot - (H - L) * 1.1 / 4
-    # R4 = Pivot + (H - L) * 1.1 / 2
-    # S4 = Pivot - (H - L) * 1.1 / 2
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # Temporary fix, will compute properly below
+    # Recompute volatility properly
+    volatility = np.zeros(n)
+    for i in range(1, n):
+        volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
+    # Volatility over 10 periods
+    vol_10 = np.zeros(n)
+    for i in range(10, n):
+        vol_10[i] = volatility[i] - volatility[i-10]
     
-    # We'll calculate these for each day and then align to 12h timeframe
-    # For each daily bar, calculate levels that apply to the NEXT day
-    # So we shift the calculated levels forward by 1 day
+    # Avoid division by zero
+    er = np.zeros(n)
+    mask = vol_10 != 0
+    er[mask] = change[mask] / vol_10[mask]
     
-    # Previous day's OHLC for level calculation
-    prev_high = df_1d['high'].shift(1).values  # Previous day's high
-    prev_low = df_1d['low'].shift(1).values    # Previous day's low
-    prev_close = df_1d['close'].shift(1).values # Previous day's close
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Calculate pivot point from previous day
-    pivot = (prev_high + prev_low + prev_close) / 3.0
+    # KAMA calculation
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Calculate Camarilla levels
-    range_val = prev_high - prev_low
-    R1 = pivot + (range_val * 1.1 / 12)
-    S1 = pivot - (range_val * 1.1 / 12)
-    R2 = pivot + (range_val * 1.1 / 6)
-    S2 = pivot - (range_val * 1.1 / 6)
-    R3 = pivot + (range_val * 1.1 / 4)
-    S3 = pivot - (range_val * 1.1 / 4)
-    R4 = pivot + (range_val * 1.1 / 2)
-    S4 = pivot - (range_val * 1.1 / 2)
-    
-    # Align daily levels to 12h timeframe
-    # We need to align each level separately
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
-    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
-    
-    # === Volume Spike Detection ===
-    # Volume spike: current volume > 2.0 * 20-period average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
-    
-    # === Weekly EMA200 for Trend Filter ===
-    df_1w = get_htf_data(prices, '1w')
-    ema_200_1w = pd.Series(df_1w['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # === Volume confirmation ===
+    vol_ma = np.zeros(n)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    vol_ratio = np.zeros(n)
+    vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
     signals = np.zeros(n)
     
-    # Warmup period - need enough data for all indicators
-    warmup = 200  # For weekly EMA200
+    # Warmup period
+    warmup = 30
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or 
-            np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or 
-            np.isnan(ema_200_1w_aligned[i])):
+        if (np.isnan(kama[i]) or 
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long breakout: price breaks above R1 with volume spike, above weekly EMA200
-            if (close[i] > R1_aligned[i] and 
-                volume_spike[i] and 
-                close[i] > ema_200_1w_aligned[i]):
+            # Long: KAMA rising AND volume > 1.5x average
+            if (kama[i] > kama[i-1] and 
+                vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short breakdown: price breaks below S1 with volume spike, below weekly EMA200
-            elif (close[i] < S1_aligned[i] and 
-                  volume_spike[i] and 
-                  close[i] < ema_200_1w_aligned[i]):
+            # Short: KAMA falling AND volume > 1.5x average
+            elif (kama[i] < kama[i-1] and 
+                  vol_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price returns to pivot point OR volume drops below average
-            if (close[i] <= pivot_aligned[i] or 
-                volume[i] < vol_ma[i]):
+            # Exit long: KAMA falling OR volume < average
+            if (kama[i] < kama[i-1] or 
+                vol_ratio[i] < 1.0):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -129,9 +102,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to pivot point OR volume drops below average
-            if (close[i] >= pivot_aligned[i] or 
-                volume[i] < vol_ma[i]):
+            # Exit short: KAMA rising OR volume < average
+            if (kama[i] > kama[i-1] or 
+                vol_ratio[i] < 1.0):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -140,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_R1_S1_Breakout_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_KAMA_Trend_With_Volume_Confirmation_v1"
+timeframe = "4h"
 leverage = 1.0
