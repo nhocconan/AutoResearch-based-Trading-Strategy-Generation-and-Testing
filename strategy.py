@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla pivot R1/S1 breakout with volume confirmation and 12h EMA trend filter.
-Long when price breaks above Camarilla R1 AND volume > 1.5x average AND 12h EMA34 > 12h EMA89 (uptrend).
-Short when price breaks below Camarilla S1 AND volume > 1.5x average AND 12h EMA34 < 12h EMA89 (downtrend).
-Exit when price reverts to Camarilla midpoint (close) OR 12h EMA flattens (|EMA34-EMA89| < 0.1% of price).
-Uses 4h for Camarilla calculation and 12h for EMA filter to reduce whipsaw in ranging markets.
-Camarilla levels provide precise intraday support/resistance, volume filters breakout validity,
-EMA trend filter avoids false signals in chop. Works in bull markets (captures uptrends via R1 breakouts)
-and bear markets (captures downtrends via S1 breakdowns). Target: 75-200 total trades over 4 years.
+Hypothesis: 1d Donchian(20) breakout with volume confirmation and 1w ADX trend filter.
+Long when price breaks above Donchian upper band AND volume > 1.5x average AND ADX > 25 (trending).
+Short when price breaks below Donchian lower band AND volume > 1.5x average AND ADX > 25.
+Exit when price reverts to Donchian middle (20-period mean) OR ADX < 20 (range market).
+Uses 1d for Donchian calculation and 1w for ADX filter to reduce whipsaw and capture major trends.
+Target: 30-100 total trades over 4 years (7-25/year). Donchian breakouts capture trends,
+volume confirmation filters fakeouts, weekly ADX filter avoids ranging markets and noise.
+Works in bull markets (captures uptrends) and bear markets (captures downtrends).
 """
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,95 +24,111 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla calculation
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Get 1d data for Donchian calculation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla levels for each 4h bar (based on previous 4h bar)
-    # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    # We use the previous 4h bar's high/low/close to calculate levels for current bar
-    prev_high_4h = np.roll(high_4h, 1)
-    prev_low_4h = np.roll(low_4h, 1)
-    prev_close_4h = np.roll(close_4h, 1)
-    prev_high_4h[0] = high_4h[0]  # first bar: use same bar
-    prev_low_4h[0] = low_4h[0]
-    prev_close_4h[0] = close_4h[0]
+    # Calculate Donchian channels on 1d timeframe (20-period)
+    high_1d_series = pd.Series(high_1d)
+    low_1d_series = pd.Series(low_1d)
+    donchian_upper = high_1d_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_1d_series.rolling(window=20, min_periods=20).min().values
+    donchian_middle = ((donchian_upper + donchian_lower) / 2).values
     
-    camarilla_upper = prev_close_4h + 1.1 * (prev_high_4h - prev_low_4h) / 12
-    camarilla_lower = prev_close_4h - 1.1 * (prev_high_4h - prev_low_4h) / 12
-    camarilla_mid = prev_close_4h  # midpoint is previous close
+    # Get 1w data for ADX filter
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Get 12h data for EMA filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Calculate ADX on 1w timeframe (14-period)
+    high_1w_series = pd.Series(high_1w)
+    low_1w_series = pd.Series(low_1w)
+    close_1w_series = pd.Series(close_1w)
     
-    # Calculate 12h EMAs (34 and 89)
-    close_12h_series = pd.Series(close_12h)
-    ema_34_12h = close_12h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_89_12h = close_12h_series.ewm(span=89, adjust=False, min_periods=89).mean().values
+    # True Range
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
     
-    # Align 4h Camarilla to 4h timeframe (no alignment needed for same timeframe)
-    camarilla_upper_aligned = camarilla_upper
-    camarilla_lower_aligned = camarilla_lower
-    camarilla_mid_aligned = camarilla_mid
+    # Plus Directional Movement (+DM)
+    up_move = high_1w - np.roll(high_1w, 1)
+    down_move = np.roll(low_1w, 1) - low_1w
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Align 12h EMAs to 4h timeframe
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
-    ema_89_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_89_12h)
+    # Smooth TR, +DM, -DM (14-period)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
     
-    # Volume average (20-period) on 4h
-    volume_4h = df_4h['volume'].values
-    volume_ma = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_4h, volume_ma)
+    # Calculate +DI and -DI
+    plus_di = 100 * (plus_dm_smooth / np.where(atr != 0, atr, np.inf))
+    minus_di = 100 * (minus_dm_smooth / np.where(atr != 0, atr, np.inf))
+    
+    # Calculate DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) != 0, (plus_di + minus_di), np.inf)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align 1d Donchian to 1d timeframe (no alignment needed)
+    donchian_upper_aligned = donchian_upper
+    donchian_lower_aligned = donchian_lower
+    donchian_middle_aligned = donchian_middle
+    
+    # Align 1w ADX to 1d timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Volume average (20-period) on 1d
+    volume_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 100  # warmup for indicators
+    start_idx = 50  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(camarilla_upper_aligned[i]) or np.isnan(camarilla_lower_aligned[i]) or 
-            np.isnan(camarilla_mid_aligned[i]) or np.isnan(ema_34_12h_aligned[i]) or 
-            np.isnan(ema_89_12h_aligned[i]) or np.isnan(volume_ma_aligned[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(donchian_middle_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(volume_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        cu = camarilla_upper_aligned[i]
-        cl = camarilla_lower_aligned[i]
-        cm = camarilla_mid_aligned[i]
-        ema34 = ema_34_12h_aligned[i]
-        ema89 = ema_89_12h_aligned[i]
+        du = donchian_upper_aligned[i]
+        dl = donchian_lower_aligned[i]
+        dm = donchian_middle_aligned[i]
+        adx_val = adx_aligned[i]
         vol_ma = volume_ma_aligned[i]
         vol = volume[i]
         price = close[i]
         
-        # Calculate EMA separation as percentage of price
-        ema_sep_pct = abs(ema34 - ema89) / price if price != 0 else 0
-        
         if position == 0:
-            # Long: price > Camarilla R1 AND volume > 1.5x avg AND EMA34 > EMA89 (uptrend)
-            if price > cu and vol > 1.5 * vol_ma and ema34 > ema89:
+            # Long: price > Donchian upper AND volume > 1.5x avg AND ADX > 25 (trending)
+            if price > du and vol > 1.5 * vol_ma and adx_val > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < Camarilla S1 AND volume > 1.5x avg AND EMA34 < EMA89 (downtrend)
-            elif price < cl and vol > 1.5 * vol_ma and ema34 < ema89:
+            # Short: price < Donchian lower AND volume > 1.5x avg AND ADX > 25 (trending)
+            elif price < dl and vol > 1.5 * vol_ma and adx_val > 25:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price < Camarilla midpoint OR EMA flattens (low trend strength)
-            if price < cm or ema_sep_pct < 0.001:  # 0.1% threshold
+            # Exit long: price < Donchian middle OR ADX < 20 (range market)
+            if price < dm or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price > Camarilla midpoint OR EMA flattens (low trend strength)
-            if price > cm or ema_sep_pct < 0.001:  # 0.1% threshold
+            # Exit short: price > Donchian middle OR ADX < 20 (range market)
+            if price > dm or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -120,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Volume_12hEMA_Filter"
-timeframe = "4h"
+name = "1d_Donchian20_Volume_1wADX_Filter"
+timeframe = "1d"
 leverage = 1.0
