@@ -1,15 +1,39 @@
-# 6h 14-day RSI with 1-day ADX trend filter and volume confirmation
-# RSI identifies overbought/oversold conditions; ADX>25 filters chop; volume spike confirms momentum.
-# Designed for 6h timeframe to achieve 12-37 trades/year with low fee decay.
-# Works in both bull and bear markets by trading reversals at extremes in trending regimes.
+#!/usr/bin/env python3
+"""
+Hypothesis:
+This strategy combines 6h Donchian breakouts with 1-day pivot direction and volume confirmation.
+In trending markets (ADX > 25), price tends to continue in the direction of breakouts from
+Donchian channels. The 1-day pivot provides institutional reference points: breaks above
+R1 suggest bullish continuation, breaks below S1 suggest bearish continuation. Volume
+confirmation ensures the breakout has conviction. Designed for 6h timeframe to achieve
+12-37 trades/year with low decay. Works in both bull and bear markets by filtering for
+trending regimes and using pivot levels as dynamic support/resistance.
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_donchian(high, low, window):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=window, min_periods=window).max().values
+    lower = pd.Series(low).rolling(window=window, min_periods=window).min().values
+    return upper, lower
+
+def calculate_pivot_points(high, low, close):
+    """Calculate classic pivot points"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    return pivot, r1, r2, r3, s1, s2, s3
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,28 +41,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1-day RSI (14-period) for mean reversion signals ===
+    # === 6h Donchian Channel (20-period) ===
+    donch_hi, donch_lo = calculate_donchian(high, low, 20)
+    
+    # === 1-day Pivot Points (for direction) ===
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    
-    # RSI calculation
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    
-    rs = avg_gain / (avg_loss + 1e-10)  # avoid division by zero
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Align RSI to 6h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    
-    # === 1-day ADX (14-period) for trend filter ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
+    # Calculate pivot points for each 1d bar
+    pivot_1d = np.full_like(close_1d, np.nan)
+    r1_1d = np.full_like(close_1d, np.nan)
+    s1_1d = np.full_like(close_1d, np.nan)
+    
+    for i in range(len(close_1d)):
+        p, r1, s1, _, _, _, _ = calculate_pivot_points(high_1d[i], low_1d[i], close_1d[i])
+        pivot_1d[i] = p
+        r1_1d[i] = r1
+        s1_1d[i] = s1
+    
+    # Align pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # === 1-day ADX (14-period) for trend filter ===
     # True Range
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
@@ -73,14 +101,16 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 100
+    warmup = 50
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(rsi_aligned[i]) or np.isnan(adx_aligned[i]) or
+        if (np.isnan(donch_hi[i]) or np.isnan(donch_lo[i]) or
+            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or np.isnan(adx_aligned[i]) or
             np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
@@ -95,26 +125,33 @@ def generate_signals(prices):
         # Trend filter: ADX > 25
         trend_filter = adx_aligned[i] > 25
         
-        # RSI reversal signals
-        oversold = rsi_aligned[i] < 30  # Oversold condition
-        overbought = rsi_aligned[i] > 70  # Overbought condition
+        # Donchian breakout conditions
+        breakout_up = close[i] > donch_hi[i-1]  # Break above upper band
+        breakout_down = close[i] < donch_lo[i-1]  # Break below lower band
+        
+        # Pivot direction: price relative to R1/S1
+        above_r1 = close[i] > r1_aligned[i]
+        below_s1 = close[i] < s1_aligned[i]
         
         # Entry logic: only enter when flat
         if position == 0:
             if vol_spike and trend_filter:
-                if oversold:
+                # Long: breakout up AND above R1 (bullish confluence)
+                if breakout_up and above_r1:
                     signals[i] = 0.25
                     position = 1
                     continue
-                elif overbought:
+                # Short: breakout down AND below S1 (bearish confluence)
+                elif breakout_down and below_s1:
                     signals[i] = -0.25
                     position = -1
                     continue
         
-        # Exit logic: exit when RSI returns to neutral zone or conditions fail
+        # Exit logic: exit when price returns to Donchian mid-point or conditions fail
         elif position == 1:
-            # Exit long if RSI returns above 50 or conditions fail
-            if rsi_aligned[i] > 50 or not vol_spike or not trend_filter:
+            donch_mid = (donch_hi[i] + donch_lo[i]) / 2
+            # Exit long if price falls below midpoint or conditions fail
+            if close[i] < donch_mid or not vol_spike or not trend_filter:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -122,8 +159,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short if RSI returns below 50 or conditions fail
-            if rsi_aligned[i] < 50 or not vol_spike or not trend_filter:
+            donch_mid = (donch_hi[i] + donch_lo[i]) / 2
+            # Exit short if price rises above midpoint or conditions fail
+            if close[i] > donch_mid or not vol_spike or not trend_filter:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -132,6 +170,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_RSI14_1dADX25_Volume1.5x"
+name = "6h_Donchian20_1dPivotR1S1_Volume1.5x_ADX25"
 timeframe = "6h"
 leverage = 1.0
