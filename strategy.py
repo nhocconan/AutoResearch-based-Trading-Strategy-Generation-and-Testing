@@ -1,112 +1,113 @@
 #!/usr/bin/env python3
 """
 Hypothesis:
-This strategy uses 6-hour Heikin-Ashi candles with 1-day EMA200 trend filter and volume surge detection.
-Heikin-Ashi smooths price action to reduce noise and false signals in choppy markets.
-The 1-day EMA200 provides a strong trend filter: only long when price > EMA200, short when price < EMA200.
-Volume surge (current volume > 2x 20-period average) confirms momentum behind the move.
-Designed for 6h timeframe to achieve 12-37 trades/year with low turnover. Works in both bull and bear
-markets by using EMA200 as dynamic trend filter and Heikin-Ashi for cleaner trend visualization.
+12-hour Williams Alligator with 1-week trend filter and volume confirmation.
+Williams Alligator uses three smoothed moving averages (Jaws, Teeth, Lips) to identify trends.
+Only trade in direction of 1-week trend (price > weekly EMA50 for long, < for short).
+Volume confirmation (current volume > 1.5x 20-period average) ensures momentum.
+Designed for 12h timeframe to achieve 12-37 trades/year with low turnover.
+Works in bull markets by catching trends and in bear markets by avoiding counter-trend trades via weekly filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_heikin_ashi(open_price, high, low, close):
-    """Calculate Heikin-Ashi candles"""
-    ha_close = (open_price + high + low + close) / 4.0
-    ha_open = np.zeros_like(close)
-    ha_open[0] = (open_price[0] + close[0]) / 2.0
-    for i in range(1, len(close)):
-        ha_open[i] = (ha_open[i-1] + ha_close[i-1]) / 2.0
-    ha_high = np.maximum(np.maximum(high, low), np.maximum(ha_open, ha_close))
-    ha_low = np.minimum(np.minimum(high, low), np.minimum(ha_open, ha_close))
-    return ha_open, ha_high, ha_low, ha_close
+def calculate_alligator(high, low, close):
+    """Calculate Williams Alligator: Jaws(13,8), Teeth(8,5), Lips(5,3)"""
+    # Typical price
+    tp = (high + low + close) / 3.0
+    
+    # Smoothed Moving Average (SMMA) - same as RMA/Wilder's smoothing
+    def smma(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            # First value is simple average
+            result[period-1] = np.mean(data[:period])
+            # Subsequent values: (prev * (period-1) + current) / period
+            for i in range(period, len(data)):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    jaws = smma(tp, 13)  # Blue line
+    teeth = smma(tp, 8)  # Red line
+    lips = smma(tp, 5)   # Green line
+    
+    # Shift as per Williams: Jaws+8, Teeth+5, Lips+3
+    jaws = np.roll(jaws, 8)
+    teeth = np.roll(teeth, 5)
+    lips = np.roll(lips, 3)
+    
+    return jaws, teeth, lips
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Heikin-Ashi
-    ha_open, ha_high, ha_low, ha_close = calculate_heikin_ashi(open_price, high, low, close)
+    # Calculate Williams Alligator
+    jaws, teeth, lips = calculate_alligator(high, low, close)
     
-    # === 1-day EMA200 (trend filter) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # === 1-week EMA50 (trend filter) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # EMA200 calculation
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # EMA50 calculation
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Volume surge: current volume > 2x 20-period average
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
-    # Warmup: need enough data for EMA200 and Heikin-Ashi
-    warmup = 200
+    # Warmup: need enough data for Alligator (13+8 shift) and EMA50
+    warmup = max(50, 20) + 13  # EMA50 + volatility + Alligator setup
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(ha_close[i]) or np.isnan(ha_open[i]) or
-            np.isnan(ema200_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(jaws[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Get aligned volume for current bar
-        vol_current_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+        # Alligator alignment: all three lines ordered
+        # Bullish: Lips > Teeth > Jaws (green above red above blue)
+        # Bearish: Lips < Teeth < Jaws (green below red below blue)
+        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaws[i]
+        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaws[i]
         
-        # Volume surge condition
-        vol_surge = vol_current_aligned[i] > vol_ma_20_1d_aligned[i] * 2.0
+        # Trend filter: price relative to weekly EMA50
+        price_above_ema50w = close[i] > ema50_1w_aligned[i]
+        price_below_ema50w = close[i] < ema50_1w_aligned[i]
         
-        # Trend filter: price relative to EMA200
-        price_above_ema200 = ha_close[i] > ema200_1d_aligned[i]
-        price_below_ema200 = ha_close[i] < ema200_1d_aligned[i]
-        
-        # Heikin-Ashi trend: strong bullish (no lower shadow) or strong bearish (no upper shadow)
-        # Strong bullish: close near high and open near low
-        ha_body = abs(ha_close[i] - ha_open[i])
-        ha_range = ha_high[i] - ha_low[i]
-        lower_shadow = min(ha_open[i], ha_close[i]) - ha_low[i]
-        upper_shadow = ha_high[i] - max(ha_open[i], ha_close[i])
-        
-        # Strong bullish candle: small lower shadow, body > 50% of range
-        strong_bullish = (ha_range > 0) and (lower_shadow < ha_range * 0.1) and (ha_body > ha_range * 0.5)
-        # Strong bearish candle: small upper shadow, body > 50% of range
-        strong_bearish = (ha_range > 0) and (upper_shadow < ha_range * 0.1) and (ha_body > ha_range * 0.5)
+        # Volume confirmation
+        vol_confirm = volume[i] > vol_ma_20[i] * 1.5
         
         # Entry logic: only enter when flat
         if position == 0:
-            if vol_surge:
-                # Long: strong bullish HA candle AND price above EMA200
-                if strong_bullish and price_above_ema200:
-                    signals[i] = 0.25
-                    position = 1
-                    continue
-                # Short: strong bearish HA candle AND price below EMA200
-                elif strong_bearish and price_below_ema200:
-                    signals[i] = -0.25
-                    position = -1
-                    continue
+            if bullish_alignment and price_above_ema50w and vol_confirm:
+                signals[i] = 0.25
+                position = 1
+                continue
+            elif bearish_alignment and price_below_ema50w and vol_confirm:
+                signals[i] = -0.25
+                position = -1
+                continue
         
-        # Exit logic: exit when HA candle changes direction or volume surge ends
+        # Exit logic: exit when Alligator alignment breaks or trend fails
         elif position == 1:
-            # Exit long if bearish candle forms or no volume surge
-            if strong_bearish or not vol_surge:
+            # Exit long if bearish alignment forms or price drops below weekly EMA50
+            if bearish_alignment or not price_above_ema50w:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -114,8 +115,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short if bullish candle forms or no volume surge
-            if strong_bullish or not vol_surge:
+            # Exit short if bullish alignment forms or price rises above weekly EMA50
+            if bullish_alignment or not price_below_ema50w:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -124,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_HeikinAshi_EMA200_VolumeSurge_2x"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1wEMA50_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
