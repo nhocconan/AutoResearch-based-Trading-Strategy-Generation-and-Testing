@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h timeframe with 1d Williams %R (14) mean reversion and volume confirmation.
-Trade reversals when Williams %R reaches extreme levels (<-80 for long, >-20 for short)
-with volume spike (>1.3x 20-period average). Use 1d ADX < 20 to filter for ranging markets
-(avoid trending whipsaws). In ranging markets: buy oversold dips, sell overbought rallies.
+Hypothesis: 12h timeframe with 1d Bollinger Bands mean reversion and volume confirmation.
+Trade reversals at Bollinger Band extremes (2 std) with volume spike (>1.5x 20-period average).
+Use 1w ADX > 25 to filter for trending markets (avoid ranging whipsaws).
+In bull markets: buy dips to lower BB in uptrend; sell rallies to upper BB in uptrend.
+In bear markets: sell rallies to upper BB in downtrend; buy dips to lower BB in downtrend.
 Position sizing: 0.25 for entries, 0 for exits.
 Target: 50-150 total trades over 4 years (12-37/year).
 """
@@ -22,31 +23,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams %R and ADX
+    # Get 1d data for Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate Williams %R (14)
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
-    # Handle division by zero (when highest_high == lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate Bollinger Bands (20, 2)
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
     
-    # Calculate ADX (14) for ranging market filter
-    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    # Get 1w data for ADX filter
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate ADX (14)
+    plus_dm = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    minus_dm = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
     plus_dm = np.concatenate([[0], plus_dm])
     minus_dm = np.concatenate([[0], minus_dm])
     
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.concatenate([[close_1w[0]], close_1w[:-1]]))
+    tr3 = np.abs(low_1w - np.concatenate([[close_1w[0]], close_1w[:-1]]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
@@ -55,13 +61,17 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Volume filter: 1.3x 20-period average
+    # Volume filter: 1.5x 20-period average
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all to 6h
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align all to 12h
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    sma_20_aligned = align_htf_to_ltf(prices, df_1d, sma_20)
+    plus_di_aligned = align_htf_to_ltf(prices, df_1w, plus_di)
+    minus_di_aligned = align_htf_to_ltf(prices, df_1w, minus_di)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -70,39 +80,43 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ma_20_aligned[i])):
+        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or
+            np.isnan(sma_20_aligned[i]) or np.isnan(plus_di_aligned[i]) or 
+            np.isnan(minus_di_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Range market condition: ADX < 20 (low trend strength)
-        ranging_market = adx_aligned[i] < 20
+        # Determine trend direction from ADX components
+        uptrend = plus_di_aligned[i] > minus_di_aligned[i]
+        downtrend = plus_di_aligned[i] < minus_di_aligned[i]
+        strong_trend = adx_aligned[i] > 25
         
         if position == 0:
-            # Long: Williams %R oversold (<-80), volume spike, ranging market
-            if (williams_r_aligned[i] <= -80 and 
-                volume[i] > vol_ma_20_aligned[i] * 1.3 and 
-                ranging_market):
+            # Long: price at lower BB, volume spike, strong trend
+            if (close[i] <= lower_bb_aligned[i] and 
+                volume[i] > vol_ma_20_aligned[i] * 1.5 and 
+                strong_trend and uptrend):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (>-20), volume spike, ranging market
-            elif (williams_r_aligned[i] >= -20 and 
-                  volume[i] > vol_ma_20_aligned[i] * 1.3 and 
-                  ranging_market):
+            # Short: price at upper BB, volume spike, strong trend
+            elif (close[i] >= upper_bb_aligned[i] and 
+                  volume[i] > vol_ma_20_aligned[i] * 1.5 and 
+                  strong_trend and downtrend):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Williams %R returns above -50 (mean reversion) or volume drops
-            if williams_r_aligned[i] > -50:
+            # Exit long: price crosses above SMA
+            if close[i] >= sma_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Williams %R returns below -50 (mean reversion) or volume drops
-            if williams_r_aligned[i] < -50:
+            # Exit short: price crosses below SMA
+            if close[i] <= sma_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR14_Range_Volume"
-timeframe = "6h"
+name = "12h_BBands20_2_TrendFilter_Volume"
+timeframe = "12h"
 leverage = 1.0
