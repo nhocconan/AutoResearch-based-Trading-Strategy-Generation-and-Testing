@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -36,14 +36,14 @@ def generate_signals(prices):
     r2_prev[0] = np.nan
     s2_prev[0] = np.nan
     
-    # Align daily pivot levels to daily timeframe
-    r1_daily = align_htf_to_ltf(prices, df_1d, r1_prev)
-    s1_daily = align_htf_to_ltf(prices, df_1d, s1_prev)
-    r2_daily = align_htf_to_ltf(prices, df_1d, r2_prev)
-    s2_daily = align_htf_to_ltf(prices, df_1d, s2_prev)
+    # Align daily pivot levels to 12h timeframe
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1_prev)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1_prev)
+    r2_12h = align_htf_to_ltf(prices, df_1d, r2_prev)
+    s2_12h = align_htf_to_ltf(prices, df_1d, s2_prev)
     
-    # Volume confirmation: current volume > 1.5 * 20-period average (avoid low volume)
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: current volume > 1.8 * 12-period average (12h * 12 = 6 days)
+    volume_ma12 = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
     
     # ATR filter to avoid low volatility environments
     tr1 = high - low
@@ -54,58 +54,58 @@ def generate_signals(prices):
     tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma20 = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
+    atr_ma10 = pd.Series(atr).rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 40  # Need R2/S2 and ATR MA20
+    start_idx = 20  # Need R2/S2 and ATR MA10
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(volume_ma20[i]) or 
+        if (np.isnan(volume_ma12[i]) or 
             np.isnan(atr[i]) or 
-            np.isnan(atr_ma20[i]) or 
-            np.isnan(r2_daily[i]) or 
-            np.isnan(s2_daily[i]) or
-            np.isnan(r1_daily[i]) or 
-            np.isnan(s1_daily[i])):
+            np.isnan(atr_ma10[i]) or 
+            np.isnan(r2_12h[i]) or 
+            np.isnan(s2_12h[i]) or
+            np.isnan(r1_12h[i]) or 
+            np.isnan(s1_12h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
-        # Volatility filter: ATR > ATR MA20 (avoid low volatility)
-        volatility_filter = atr[i] > atr_ma20[i]
+        # Volume filter: current volume > 1.8x 12-period average (6 days)
+        volume_filter = volume[i] > (1.8 * volume_ma12[i])
+        # Volatility filter: ATR > ATR MA10 (avoid low volatility)
+        volatility_filter = atr[i] > atr_ma10[i]
         
         if position == 0:
             # Long: price breaks above R2 with volume and volatility (strong breakout)
-            if close[i] > r2_daily[i] and volume_filter and volatility_filter:
-                signals[i] = 0.30
+            if close[i] > r2_12h[i] and volume_filter and volatility_filter:
+                signals[i] = 0.25
                 position = 1
             # Short: price breaks below S2 with volume and volatility (strong breakdown)
-            elif close[i] < s2_daily[i] and volume_filter and volatility_filter:
-                signals[i] = -0.30
+            elif close[i] < s2_12h[i] and volume_filter and volatility_filter:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit long: price returns below R1 or volatility drops
-            if close[i] < r1_daily[i] or not volatility_filter:
+            if close[i] < r1_12h[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
             # Exit short: price returns above S1 or volatility drops
-            if close[i] > s1_daily[i] or not volatility_filter:
+            if close[i] > s1_12h[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "1d_Pivot_R2_S2_Breakout_Vol_v1"
-timeframe = "1d"
+name = "12h_Pivot_R2_S2_Breakout_Vol_v5"
+timeframe = "12h"
 leverage = 1.0
