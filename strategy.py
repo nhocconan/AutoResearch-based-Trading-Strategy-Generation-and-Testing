@@ -24,11 +24,10 @@ def generate_signals(prices):
     donchian_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_1d)
     donchian_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_1d)
     
-    # === 12h Volume Spike (2.0x 20-period average) ===
-    df_12h = get_htf_data(prices, '12h')
-    volume_12h = df_12h['volume'].values
-    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
+    # === 1d Volume Spike (2.0x 20-period average) ===
+    volume_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
     # === 1d ADX (14 periods) for trend strength ===
     # Calculate directional movement
@@ -81,14 +80,14 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # Skip if any data is NaN
         if (np.isnan(donchian_high_1d_aligned[i]) or np.isnan(donchian_low_1d_aligned[i]) or 
-            np.isnan(vol_ma_20_12h_aligned[i]) or np.isnan(adx_14_aligned[i])):
+            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(adx_14_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Volume confirmation: current 12h volume > 2.0x 20-period average
-        vol_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_12h)
-        vol_confirm = vol_12h_aligned[i] > vol_ma_20_12h_aligned[i] * 2.0
+        # Volume confirmation: current 1d volume > 2.0x 20-period average
+        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+        vol_confirm = vol_1d_aligned[i] > vol_ma_20_1d_aligned[i] * 2.0
         
         # ADX filter: only trade when trend is strong (ADX > 25)
         adx_strong = adx_14_aligned[i] > 25
@@ -127,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_12hVolumeSpike_ADXFilter"
-timeframe = "12h"
+name = "1d_Donchian20_1dVolumeSpike_ADXFilter"
+timeframe = "4h"
 leverage = 1.0
