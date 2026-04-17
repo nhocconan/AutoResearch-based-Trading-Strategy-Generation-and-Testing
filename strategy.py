@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h timeframe with 1d Williams %R mean reversion + volume confirmation + chop regime filter.
-Long when Williams %R < -80 (oversold) with volume > 1.5x 20-period average and CHOP > 61.8 (ranging market).
-Short when Williams %R > -20 (overbought) with volume confirmation and CHOP > 61.8.
-Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts) or CHOP < 38.2 (trending regime).
-Uses 12h for structure and Williams %R calculation to capture mean reversion in ranging markets.
-Designed to work in both bull and bear markets by focusing on ranging conditions where mean reversion works best.
+Hypothesis: 4h timeframe with 12h Donchian(20) breakout + volume confirmation + 12h EMA34 trend filter.
+Long when price breaks above 12h Donchian upper band with volume confirmation and price > 12h EMA34 (uptrend).
+Short when price breaks below 12h Donchian lower band with volume confirmation and price < 12h EMA34 (downtrend).
+Exit when price returns to the 12h Donchian midpoint or reverses with volume.
+Uses 12h timeframe for structure (reduces noise) and 4h for entry timing and volume confirmation.
+Designed to capture medium-term breakouts with institutional volume while avoiding false breakouts in choppy markets.
+Donchian channels provide robust support/resistance based on recent price extremes, effective in trending markets.
 """
 
 import numpy as np
@@ -22,85 +23,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams %R calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 12h data for Donchian calculation
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d Williams %R (14-period)
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
-    # Handle division by zero
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate 12h Donchian(20) channels
+    high_12h_series = pd.Series(high_12h)
+    low_12h_series = pd.Series(low_12h)
+    upper_12h = high_12h_series.rolling(window=20, min_periods=20).max().values
+    lower_12h = low_12h_series.rolling(window=20, min_periods=20).min().values
+    midpoint_12h = (upper_12h + lower_12h) / 2.0
     
-    # Calculate 12h chop regime filter (14-period)
-    # Chop = 100 * log10(sum(ATR) / (log10(n) * (highest_high - lowest_low)))
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(sum_atr / (np.log10(14) * (hh_14 - ll_14)))
-    # Handle division by zero and invalid values
-    chop = np.where((hh_14 - ll_14) == 0, 50, chop)
-    chop = np.where(np.isnan(chop), 50, chop)
+    # Calculate 12h EMA34 for trend filter
+    close_12h_series = pd.Series(close_12h)
+    ema34_12h = close_12h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 12h volume 20-period average for confirmation
+    # Calculate 4h volume 20-period average for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align 1d indicators to 12h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Align 12h indicators to 4h timeframe
+    upper_12h_aligned = align_htf_to_ltf(prices, df_12h, upper_12h)
+    lower_12h_aligned = align_htf_to_ltf(prices, df_12h, lower_12h)
+    midpoint_12h_aligned = align_htf_to_ltf(prices, df_12h, midpoint_12h)
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # need enough for Williams %R and chop calculations
+    start_idx = 50  # need enough for EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(williams_r_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or 
+        if (np.isnan(upper_12h_aligned[i]) or 
+            np.isnan(lower_12h_aligned[i]) or 
+            np.isnan(midpoint_12h_aligned[i]) or 
+            np.isnan(ema34_12h_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x 20-period average
+        # Volume confirmation: current 4h volume > 1.5x 20-period average
         volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Long: Williams %R < -80 (oversold) with volume confirmation and chop > 61.8 (ranging)
-            if (williams_r_aligned[i] < -80 and 
+            # Long: price breaks above 12h Donchian upper band with volume and uptrend (price > EMA34)
+            if (close[i] > upper_12h_aligned[i] and 
                 volume_confirmed and 
-                chop_aligned[i] > 61.8):
+                close[i] > ema34_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R > -20 (overbought) with volume confirmation and chop > 61.8 (ranging)
-            elif (williams_r_aligned[i] > -20 and 
+            # Short: price breaks below 12h Donchian lower band with volume and downtrend (price < EMA34)
+            elif (close[i] < lower_12h_aligned[i] and 
                   volume_confirmed and 
-                  chop_aligned[i] > 61.8):
+                  close[i] < ema34_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Williams %R crosses above -50 OR chop < 38.2 (trending regime)
-            if (williams_r_aligned[i] > -50 or 
-                chop_aligned[i] < 38.2):
+            # Exit long: price returns to or below midpoint OR breaks below lower band with volume (reversal)
+            if (close[i] <= midpoint_12h_aligned[i] or 
+                (close[i] < lower_12h_aligned[i] and volume_confirmed)):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Williams %R crosses below -50 OR chop < 38.2 (trending regime)
-            if (williams_r_aligned[i] < -50 or 
-                chop_aligned[i] < 38.2):
+            # Exit short: price returns to or above midpoint OR breaks above upper band with volume (reversal)
+            if (close[i] >= midpoint_12h_aligned[i] or 
+                (close[i] > upper_12h_aligned[i] and volume_confirmed)):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -108,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dWilliamsR_MeanReversion_Volume_Chop_Regime"
-timeframe = "12h"
+name = "4h_12hDonchian20_Breakout_Volume_EMA34_Trend"
+timeframe = "4h"
 leverage = 1.0
