@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_ADX_DMI_Trend_with_1d_Pullback
-Hypothesis: On 6h, enter long when ADX > 25 and +DI > -DI (strong uptrend) and price pulls back to EMA20; short when ADX > 25 and -DI > +DI and price pulls back to EMA20. Uses 1d EMA50 filter to align with higher timeframe trend and avoid counter-trend trades. Designed for 20-40 trades/year to minimize fee drag and work in both bull/bear regimes via trend alignment and pullback entries.
+12h_382_Retracement_Trend_Entry
+Hypothesis: On 12h, enter long at 38.2% Fibonacci retracement of prior swing low to high when price is above weekly EMA20 (uptrend), enter short at 61.8% retracement of prior swing high to low when price is below weekly EMA20 (downtrend). Uses weekly trend filter to avoid counter-trend trades. Fibonacci levels act as institutional support/resistance in trending markets. Designed for 15-25 trades/year to minimize fee drag and work in both bull/bear regimes via trend alignment.
 """
 
 import numpy as np
@@ -10,100 +10,80 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     
-    # === 6h ADX/DMI calculation ===
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
+    # === Weekly data for trend filter ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Weekly EMA20 for trend filter
+    ema20_1w = pd.Series(close_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Smooth with Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    def wilder_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        alpha = 1.0 / period
-        # First value is simple average
-        result[period-1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-        return result
-    
-    period = 14
-    tr_sum = wilder_smooth(tr, period)
-    plus_di_sum = wilder_smooth(plus_dm, period)
-    minus_di_sum = wilder_smooth(minus_dm, period)
-    
-    # Avoid division by zero
-    plus_di = np.where(tr_sum != 0, 100 * plus_di_sum / tr_sum, 0)
-    minus_di = np.where(tr_sum != 0, 100 * minus_di_sum / tr_sum, 0)
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = wilder_smooth(dx, period)
-    
-    # === 6h EMA20 for pullback entries ===
-    close_s = pd.Series(close)
-    ema20 = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # === 1d data for trend filter ===
+    # === Daily data for swing points ===
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Calculate swing high and low using 5-day window
+    # Swing high: highest high in last 5 days
+    # Swing low: lowest low in last 5 days
+    window = 5
+    swing_high = pd.Series(high_1d).rolling(window=window, min_periods=window).max().values
+    swing_low = pd.Series(low_1d).rolling(window=window, min_periods=window).min().values
+    
+    # Calculate Fibonacci retracement levels
+    # 38.2% level for longs (retracement from swing low to swing high)
+    # 61.8% level for shorts (retracement from swing high to swing low)
+    fib_range = swing_high - swing_low
+    fib_382 = swing_low + 0.382 * fib_range  # Long entry level
+    fib_618 = swing_high - 0.382 * fib_range  # Short entry level (same as swing_low + 0.618*fib_range)
+    
+    # Align to 12h timeframe
+    swing_high_aligned = align_htf_to_ltf(prices, df_1d, swing_high)
+    swing_low_aligned = align_htf_to_ltf(prices, df_1d, swing_low)
+    fib_382_aligned = align_htf_to_ltf(prices, df_1d, fib_382)
+    fib_618_aligned = align_htf_to_ltf(prices, df_1d, fib_618)
     
     signals = np.zeros(n)
     
-    # Warmup covers ADX/DMI calculation (2*period) and EMA20
-    warmup = 2 * period + 20
+    # Warmup: covers weekly EMA20 and daily swing calculations
+    warmup = max(20, 5)  # 20 for weekly EMA, 5 for daily swing
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(adx[i]) or 
-            np.isnan(plus_di[i]) or 
-            np.isnan(minus_di[i]) or 
-            np.isnan(ema20[i]) or 
-            np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(ema20_1w_aligned[i]) or 
+            np.isnan(fib_382_aligned[i]) or 
+            np.isnan(fib_618_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry conditions
         if position == 0:
-            # Long: ADX > 25, +DI > -DI (uptrend), price at or near EMA20 (pullback)
-            if (adx[i] > 25 and 
-                plus_di[i] > minus_di[i] and 
-                close[i] <= ema20[i] * 1.005 and  # within 0.5% above EMA20
-                close[i] > ema50_1d_aligned[i]):   # above 1d EMA50 (long-term uptrend)
+            # Long: price at 38.2% retracement + above weekly EMA20 (uptrend)
+            if abs(close[i] - fib_382_aligned[i]) < 0.001 * close[i] and close[i] > ema20_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: ADX > 25, -DI > +DI (downtrend), price at or near EMA20 (pullback)
-            elif (adx[i] > 25 and 
-                  minus_di[i] > plus_di[i] and 
-                  close[i] >= ema20[i] * 0.995 and  # within 0.5% below EMA20
-                  close[i] < ema50_1d_aligned[i]):   # below 1d EMA50 (long-term downtrend)
+            # Short: price at 61.8% retracement + below weekly EMA20 (downtrend)
+            elif abs(close[i] - fib_618_aligned[i]) < 0.001 * close[i] and close[i] < ema20_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit conditions: trend weakening or opposite signal
+        # Exit conditions: reverse when price reaches opposite Fibonacci level
         elif position == 1:
-            # Exit long if ADX weakens or trend reverses
-            if adx[i] < 20 or minus_di[i] > plus_di[i]:
+            if abs(close[i] - fib_618_aligned[i]) < 0.001 * close[i]:  # exit long at 61.8%
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -111,8 +91,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short if ADX weakens or trend reverses
-            if adx[i] < 20 or plus_di[i] > minus_di[i]:
+            if abs(close[i] - fib_382_aligned[i]) < 0.001 * close[i]:  # exit short at 38.2%
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -121,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ADX_DMI_Trend_with_1d_Pullback"
-timeframe = "6h"
+name = "12h_382_Retracement_Trend_Entry"
+timeframe = "12h"
 leverage = 1.0
