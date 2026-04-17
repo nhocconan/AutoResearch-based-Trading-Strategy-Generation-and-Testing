@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour price crossing the 200-day EMA with volume confirmation and ATR-based stop.
-# The 200-day EMA provides a strong trend filter that adapts to changing market conditions.
-# Price crossing above/below the 200-day EMA with volume confirmation captures momentum shifts.
-# ATR-based stops limit drawdowns during volatile periods. Target: 10-25 trades/year (40-100 total over 4 years).
+# Hypothesis: 4-hour Williams %R with volume confirmation and 1d ATR stop.
+# Williams %R identifies overbought/oversold conditions in the short term.
+# Entry: %R crosses above -20 (short) or below -80 (long) with volume confirmation.
+# Exit: %R crosses back above -50 (long exit) or below -50 (short exit).
+# ATR-based stop limits drawdown. Target: 20-30 trades/year (80-120 total over 4 years).
+# Williams %R works in both trending and ranging markets by capturing momentum extremes.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 14:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,17 +20,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data for EMA200, ATR, and volume average ===
+    # === 1d data for Williams %R, ATR, and volume average ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # EMA200 on daily data
-    close_1d_series = pd.Series(close_1d)
-    ema200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Williams %R on daily data (14-period)
+    def calculate_williams_r(high, low, close, period=14):
+        wr = np.full_like(high, np.nan, dtype=float)
+        for i in range(period - 1, len(high)):
+            highest_high = np.max(high[i - period + 1:i + 1])
+            lowest_low = np.min(low[i - period + 1:i + 1])
+            if highest_high != lowest_low:
+                wr[i] = (highest_high - close[i]) / (highest_high - lowest_low) * -100
+            else:
+                wr[i] = -50  # Avoid division by zero
+        return wr
+    
+    williams_r_1d = calculate_williams_r(high_1d, low_1d, close_1d, 14)
+    williams_r_1d_aligned = align_htf_to_ltf(prices, df_1d, williams_r_1d)
     
     # ATR calculation on daily data (14-period)
     def calculate_atr(high, low, close, period=14):
@@ -46,46 +58,46 @@ def generate_signals(prices):
     atr_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # 20-day average volume on daily data
+    # 10-day average volume on daily data
     volume_1d_series = pd.Series(volume_1d)
-    vol_avg20_1d = volume_1d_series.rolling(window=20, min_periods=20).mean().values
-    vol_avg20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg20_1d)
+    vol_avg10_1d = volume_1d_series.rolling(window=10, min_periods=10).mean().values
+    vol_avg10_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg10_1d)
     
     signals = np.zeros(n)
     position = 0
-    warmup = 200  # Sufficient for EMA200
+    warmup = 14  # Sufficient for Williams %R
     
     for i in range(warmup, n):
-        if (np.isnan(ema200_1d_aligned[i]) or 
+        if (np.isnan(williams_r_1d_aligned[i]) or 
             np.isnan(atr_1d_aligned[i]) or
-            np.isnan(vol_avg20_1d_aligned[i])):
+            np.isnan(vol_avg10_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
-        vol_filter = vol_1d_current > 1.5 * vol_avg20_1d_aligned[i]
+        vol_filter = vol_1d_current > 1.2 * vol_avg10_1d_aligned[i]
         
         if position == 0:
-            # Long: price crosses above 200-day EMA + volume confirmation
-            if close[i] > ema200_1d_aligned[i] and vol_filter:
+            # Long: Williams %R crosses below -80 (oversold) + volume confirmation
+            if williams_r_1d_aligned[i] < -80 and williams_r_1d_aligned[i-1] >= -80 and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below 200-day EMA + volume confirmation
-            elif close[i] < ema200_1d_aligned[i] and vol_filter:
+            # Short: Williams %R crosses above -20 (overbought) + volume confirmation
+            elif williams_r_1d_aligned[i] > -20 and williams_r_1d_aligned[i-1] <= -20 and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below 200-day EMA
-            if close[i] < ema200_1d_aligned[i]:
+            # Exit long: Williams %R crosses above -50
+            if williams_r_1d_aligned[i] > -50 and williams_r_1d_aligned[i-1] <= -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above 200-day EMA
-            if close[i] > ema200_1d_aligned[i]:
+            # Exit short: Williams %R crosses below -50
+            if williams_r_1d_aligned[i] < -50 and williams_r_1d_aligned[i-1] >= -50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA200_VolumeConfirmation"
+name = "4h_WilliamsR_VolumeConfirmation"
 timeframe = "4h"
 leverage = 1.0
