@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_WeeklyPivot_R1_S1_Breakout_VolumeFilter_v2
-Uses 1w pivot points for long-term structure with 1d volatility filter.
-Long when price breaks above S1 with 1d ATR > 20-period mean, short when breaks below R1.
-Volume confirmation from 1d volume > 1.5x 20-period mean.
+12h_WeeklyPivot_R1_S1_Breakout_VolumeFilter_v3
+Uses 1w pivot points for long-term structure with 1d volatility and volume filters.
+Long when price breaks above S1 with 1d ATR > 20-period mean and volume > 1.5x 20-period mean.
+Short when price breaks below R1 with same filters.
+Exit when price crosses weekly pivot point.
 Position size: 0.25. Target: 15-30 trades/year.
 Works in bull/bear: weekly pivots capture major turning points, volatility filter avoids chop.
 """
@@ -105,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WeeklyPivot_R1_S1_Breakout_VolumeFilter_v2"
+name = "12h_WeeklyPivot_R1_S1_Breakout_VolumeFilter_v3"
 timeframe = "12h"
 leverage = 1.0
