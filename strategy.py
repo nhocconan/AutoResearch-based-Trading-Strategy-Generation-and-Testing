@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points
+    # Get daily data for pivot points (HTF = 1d)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -24,18 +24,16 @@ def generate_signals(prices):
     r1_1d = 2 * pivot_1d - low_1d
     s1_1d = 2 * pivot_1d - high_1d
     
-    # Align daily pivot levels to 1h timeframe (use previous day's levels)
-    pivot_1h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align daily pivot levels to 12h timeframe (use previous day's levels)
+    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Calculate 4h EMA34 for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1h = align_htf_to_ltf(prices, df_4h, ema34_4h)
+    # Calculate 12h EMA34 for trend filter (on 12h timeframe itself)
+    close_12h = close  # Already at 12h timeframe
+    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume filter: current volume > 1.5 * 20-period average
+    # Volume filter: current volume > 1.5 * 20-period average (12h volume)
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -45,8 +43,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_1h[i]) or np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or
-            np.isnan(ema34_1h[i]) or np.isnan(volume_ma20[i])):
+        if (np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or
+            np.isnan(ema34_12h[i]) or np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
@@ -54,37 +52,37 @@ def generate_signals(prices):
         volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
         # Trend filter: price relative to EMA34
-        price_above_ema = close[i] > ema34_1h[i]
-        price_below_ema = close[i] < ema34_1h[i]
+        price_above_ema = close[i] > ema34_12h[i]
+        price_below_ema = close[i] < ema34_12h[i]
         
         if position == 0:
             # Long breakout: price breaks above R1 with volume and above EMA34
-            if (close[i] > r1_1h[i] and volume_filter and price_above_ema):
-                signals[i] = 0.20
+            if (close[i] > r1_12h[i] and volume_filter and price_above_ema):
+                signals[i] = 0.25
                 position = 1
             # Short breakdown: price breaks below S1 with volume and below EMA34
-            elif (close[i] < s1_1h[i] and volume_filter and price_below_ema):
-                signals[i] = -0.20
+            elif (close[i] < s1_12h[i] and volume_filter and price_below_ema):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit long: price falls below pivot or EMA34
-            if close[i] < pivot_1h[i] or close[i] < ema34_1h[i]:
+            if close[i] < pivot_12h[i] or close[i] < ema34_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
             # Exit short: price rises above pivot or EMA34
-            if close[i] > pivot_1h[i] or close[i] > ema34_1h[i]:
+            if close[i] > pivot_12h[i] or close[i] > ema34_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_DailyPivot_Breakout_EMA34_Volume"
-timeframe = "1h"
+name = "12h_DailyPivot_Breakout_EMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
