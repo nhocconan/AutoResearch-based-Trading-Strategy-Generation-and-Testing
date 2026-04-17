@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_RSI_Pullback_TrendFollow
-Hypothesis: In 1h timeframe, buy pullbacks to EMA21 during strong 4h uptrend (EMA50 > EMA200) and sell rallies to EMA21 during strong 4h downtrend (EMA50 < EMA200). Uses 4h trend for direction, 1h RSI for entry timing, and session filter (08-20 UTC) to reduce noise. Target: 20-40 trades/year for low fee drag.
+1d_1w_1w_Return_Trend_Filter
+Hypothesis: On 1d timeframe, buy when 1-week total return is positive and price is above 1d SMA50, sell when 1-week return is negative and price is below 1d SMA50. Uses weekly trend filter to avoid counter-trend trades. Target: 10-20 trades/year for low fee drag.
 """
 
 import numpy as np
@@ -10,119 +10,77 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # === 4h Data (HTF for trend direction) ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # === 1w Data (HTF for weekly return) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # 4h EMA50 and EMA200 for trend
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema200_4h = pd.Series(close_4h).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
+    # 1-week total return: (current close - close 5 days ago) / close 5 days ago
+    # Since 1w = 5 trading days, we need to look back 5 bars
+    returns_1w = np.zeros_like(close_1w)
+    returns_1w[5:] = (close_1w[5:] - close_1w[:-5]) / close_1w[:-5]
     
-    # 1h indicators
-    close_s = pd.Series(close)
-    ema21_1h = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
-    rsi_1h = calculate_rsi(close, 14)
+    # Align weekly return to daily
+    returns_1w_aligned = align_htf_to_ltf(prices, df_1w, returns_1w)
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # 1d SMA50 for trend filter
+    close_series = pd.Series(close)
+    sma_50 = close_series.rolling(window=50, min_periods=50).mean().values
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 200
+    warmup = 50
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_4h_aligned[i]) or 
-            np.isnan(ema200_4h_aligned[i]) or
-            np.isnan(ema21_1h[i]) or
-            np.isnan(rsi_1h[i])):
+        if (np.isnan(returns_1w_aligned[i]) or 
+            np.isnan(sma_50[i])):
             signals[i] = 0.0
             position = 0
             continue
-        
-        # Session filter: only trade 08-20 UTC
-        if not (8 <= hours[i] <= 20):
-            signals[i] = 0.0
-            position = 0
-            continue
-        
-        # Determine 4h trend
-        uptrend = ema50_4h_aligned[i] > ema200_4h_aligned[i]
-        downtrend = ema50_4h_aligned[i] < ema200_4h_aligned[i]
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: uptrend + pullback to EMA21 (RSI < 40)
-            if uptrend and close[i] <= ema21_1h[i] and rsi_1h[i] < 40:
-                signals[i] = 0.20
+            # Long: positive weekly return and price above SMA50
+            if returns_1w_aligned[i] > 0 and close[i] > sma_50[i]:
+                signals[i] = 0.25
                 position = 1
                 continue
-            # Short: downtrend + rally to EMA21 (RSI > 60)
-            elif downtrend and close[i] >= ema21_1h[i] and rsi_1h[i] > 60:
-                signals[i] = -0.20
+            # Short: negative weekly return and price below SMA50
+            elif returns_1w_aligned[i] < 0 and close[i] < sma_50[i]:
+                signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic
+        # Exit logic: reverse signal
         elif position == 1:
-            # Exit when RSI > 70 (overbought) or close below EMA21
-            if rsi_1h[i] > 70 or close[i] < ema21_1h[i]:
+            # Exit when weekly turn negative or price below SMA50
+            if returns_1w_aligned[i] < 0 or close[i] < sma_50[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit when RSI < 30 (oversold) or close above EMA21
-            if rsi_1h[i] < 30 or close[i] > ema21_1h[i]:
+            # Exit when weekly turn positive or price above SMA50
+            if returns_1w_aligned[i] > 0 or close[i] > sma_50[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-def calculate_rsi(prices, period=14):
-    """Calculate RSI with proper Wilder smoothing"""
-    delta = np.diff(prices)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # First average gain/loss
-    avg_gain = np.zeros_like(prices)
-    avg_loss = np.zeros_like(prices)
-    avg_gain[period] = np.mean(gain[:period])
-    avg_loss[period] = np.mean(loss[:period])
-    
-    # Wilder smoothing
-    for i in range(period + 1, len(prices)):
-        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-    
-    # Avoid division by zero
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    # Set first period values to NaN
-    rsi[:period] = np.nan
-    
-    return rsi
-
-name = "1h_RSI_Pullback_TrendFollow"
-timeframe = "1h"
+name = "1d_1w_1w_Return_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
