@@ -3,13 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian breakout with 1-day ATR filter and volume confirmation
-# Uses 12h timeframe for entry, 1d timeframe for volatility and volume filters
-# Designed to work in both bull and bear markets by capturing breakouts during expansion phases
-# Entry: Price breaks above/below 20-period 12h Donchian channel with 1d volume confirmation
-# Filter: 1d ATR > 20-period average ATR (volatility expansion)
-# Exit: Opposite break or volatility contraction
-# Position size: 0.25 (25% of capital) to manage drawdown
+# Hypothesis: 4h Donchian breakout with 1d volatility expansion and volume confirmation
+# Targets breakouts during volatility expansion phases in both bull and bear markets
+# Uses 1d ATR and volume filters to ensure breakouts occur with institutional participation
+# Position size: 0.25 to balance return and drawdown
 
 def generate_signals(prices):
     n = len(prices)
@@ -48,8 +45,7 @@ def generate_signals(prices):
     volume_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     volume_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma20_1d)
     
-    # === 12h Donchian channel (20-period) ===
-    # Calculate rolling max/min for high/low
+    # === 4h Donchian channel (20-period) ===
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_high = high_series.rolling(window=20, min_periods=20).max().values
@@ -104,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dATR_VolumeFilter"
-timeframe = "12h"
+name = "4h_Donchian20_1dATR_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
