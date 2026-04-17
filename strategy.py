@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h timeframe with 1d Camarilla R3/S3 breakout + volume confirmation + 1w EMA50 trend filter.
-Long when price breaks above 1d Camarilla R3 with volume confirmation and price > 1w EMA50 (uptrend).
-Short when price breaks below 1d Camarilla S3 with volume confirmation and price < 1w EMA50 (downtrend).
-Exit when price returns to the 1d Camarilla midpoint (H4/L4) or reverses with volume.
-Designed for fewer, higher-quality breakouts (target: 50-150 trades over 4 years) using wider Camarilla levels
-to reduce noise and avoid false breakouts. Uses 1w EMA50 for strong trend filter to avoid counter-trend trades.
+Hypothesis: 1h timeframe with 4h/1d trend alignment + Camarilla pivot breakout + volume filter.
+Long when: price > 4h EMA50 AND price > 1d EMA200 (bullish alignment) AND price breaks above 4h Camarilla R1 with volume > 1.5x 20-period average.
+Short when: price < 4h EMA50 AND price < 1d EMA200 (bearish alignment) AND price breaks below 4h Camarilla S1 with volume > 1.5x 20-period average.
+Exit when price returns to 4h Camarilla midpoint (H4/L4) or reverses with volume.
+Uses 4h/1d for trend direction and structure, 1h for precise entry timing.
+Designed to capture medium-term breakouts with institutional volume while avoiding false signals in choppy or counter-trend markets.
+Targets 15-35 trades/year by requiring HTF trend alignment + pivot breakout + volume confirmation.
 """
 
 import numpy as np
@@ -22,94 +23,99 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation
+    # Get 4h data for Camarilla levels and EMA50 trend
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # Calculate 4h Camarilla levels (based on prior 4h bar)
+    range_4h = high_4h - low_4h
+    r1_4h = close_4h + 0.833 * range_4h
+    s1_4h = close_4h - 0.833 * range_4h
+    midpoint_4h = close_4h  # Camarilla midpoint is close
+    
+    # Calculate 4h EMA50 for trend filter
+    close_4h_series = pd.Series(close_4h)
+    ema50_4h = close_4h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Get 1d data for EMA200 long-term trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Camarilla levels (based on prior 1d bar)
-    # R3 = close + 1.25*(high-low)
-    # S3 = close - 1.25*(high-low)
-    # H4/L4 = R1/S1 = close ± 0.833*(high-low)
-    range_1d = high_1d - low_1d
-    r3_1d = close_1d + 1.25 * range_1d
-    s3_1d = close_1d - 1.25 * range_1d
-    h4_1d = close_1d + 0.833 * range_1d  # R1
-    l4_1d = close_1d - 0.833 * range_1d  # S1
-    midpoint_1d = (h4_1d + l4_1d) / 2  # equals close_1d
+    # Calculate 1d EMA200 for long-term trend
+    close_1d_series = pd.Series(close_1d)
+    ema200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    close_1w_series = pd.Series(close_1w)
-    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1h volume 20-period average for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 12h volume 50-period average for confirmation
-    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Align 4h indicators to 1h timeframe
+    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
+    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
+    midpoint_4h_aligned = align_htf_to_ltf(prices, df_4h, midpoint_4h)
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Align 1d indicators to 12h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
-    midpoint_1d_aligned = align_htf_to_ltf(prices, df_1d, midpoint_1d)
-    
-    # Align 1w EMA50 to 12h timeframe
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Align 1d EMA200 to 1h timeframe
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 100  # need enough for EMA50 and volume MA
+    start_idx = 100  # need enough for EMA200 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r3_1d_aligned[i]) or 
-            np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(midpoint_1d_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(vol_ma_50[i])):
+        if (np.isnan(r1_4h_aligned[i]) or 
+            np.isnan(s1_4h_aligned[i]) or 
+            np.isnan(midpoint_4h_aligned[i]) or 
+            np.isnan(ema50_4h_aligned[i]) or 
+            np.isnan(ema200_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 2.0x 50-period average
-        volume_confirmed = volume[i] > 2.0 * vol_ma_50[i]
+        # Volume confirmation: current 1h volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
+        
+        # Trend alignment: 4h EMA50 and 1d EMA200 agreement
+        bullish_alignment = close[i] > ema50_4h_aligned[i] and close[i] > ema200_1d_aligned[i]
+        bearish_alignment = close[i] < ema50_4h_aligned[i] and close[i] < ema200_1d_aligned[i]
         
         if position == 0:
-            # Long: price breaks above 1d Camarilla R3 with volume and uptrend (price > 1w EMA50)
-            if (close[i] > r3_1d_aligned[i] and 
+            # Long: price breaks above 4h Camarilla R1 with volume and bullish alignment
+            if (close[i] > r1_4h_aligned[i] and 
                 volume_confirmed and 
-                close[i] > ema50_1w_aligned[i]):
-                signals[i] = 0.30
+                bullish_alignment):
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below 1d Camarilla S3 with volume and downtrend (price < 1w EMA50)
-            elif (close[i] < s3_1d_aligned[i] and 
+            # Short: price breaks below 4h Camarilla S1 with volume and bearish alignment
+            elif (close[i] < s1_4h_aligned[i] and 
                   volume_confirmed and 
-                  close[i] < ema50_1w_aligned[i]):
-                signals[i] = -0.30
+                  bearish_alignment):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to or below midpoint OR breaks below S3 with volume (reversal)
-            if (close[i] <= midpoint_1d_aligned[i] or 
-                (close[i] < s3_1d_aligned[i] and volume_confirmed)):
+            # Exit long: price returns to or below midpoint OR breaks below S1 with volume (reversal)
+            if (close[i] <= midpoint_4h_aligned[i] or 
+                (close[i] < s1_4h_aligned[i] and volume_confirmed)):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: price returns to or above midpoint OR breaks above R3 with volume (reversal)
-            if (close[i] >= midpoint_1d_aligned[i] or 
-                (close[i] > r3_1d_aligned[i] and volume_confirmed)):
+            # Exit short: price returns to or above midpoint OR breaks above R1 with volume (reversal)
+            if (close[i] >= midpoint_4h_aligned[i] or 
+                (close[i] > r1_4h_aligned[i] and volume_confirmed)):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.20
     
     return signals
 
-name = "12h_1dCamarilla_R3S3_Breakout_Volume_1wEMA50_Trend"
-timeframe = "12h"
+name = "1h_4h_1dTrend_Camarilla_R1S1_Breakout_Volume"
+timeframe = "1h"
 leverage = 1.0
