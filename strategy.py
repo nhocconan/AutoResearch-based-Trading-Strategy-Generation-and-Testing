@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian channel (20) breakout with 1w trend filter and volume confirmation.
-Long when price breaks above 20-day high with 1w close > 1w EMA34 and volume > 1.5x 20-day average.
-Short when price breaks below 20-day low with 1w close < 1w EMA34 and volume > 1.5x 20-day average.
-Exit when price returns to the 20-day midpoint or reverses with volume confirmation.
-Uses 1d for price action and volume, 1w for trend filter to avoid counter-trend trades.
-Designed to capture strong momentum moves with institutional participation in both bull and bear markets.
-Volume regime filter ensures trades occur during periods of higher conviction, reducing whipsaws.
-Target: 15-25 trades/year per symbol to minimize fee drag while maintaining edge.
+Hypothesis: 12h Donchian(20) breakout with 1d volume regime and 1d EMA50 trend filter.
+Long when price breaks above 20-period Donchian high with 1d volume > 1.5x 20-day average and price > 1d EMA50.
+Short when price breaks below 20-period Donchian low with 1d volume > 1.5x 20-day average and price < 1d EMA50.
+Exit when price returns to the midpoint of the Donchian channel or reverses with volume confirmation.
+Uses 1d for trend and volume regime, 12h for execution.
+Designed to capture medium-term breakouts with volume confirmation in both bull and bear markets.
+Volume regime filter ensures trades only occur during periods of higher participation, reducing whipsaws.
+Target: 12-37 trades/year per symbol to minimize fee drag.
 """
 
 import numpy as np
@@ -24,85 +24,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels and volume
+    # Get 1d data for EMA50 trend filter and volume regime
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Donchian channels (20-period)
-    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (high_20 + low_20) / 2.0
+    # Calculate 12h Donchian channel (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2.0
+    
+    # Calculate 1d EMA50 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Calculate 1d volume MA20 for regime filter
     volume_1d_series = pd.Series(volume_1d)
     vol_ma_20_1d = volume_1d_series.rolling(window=20, min_periods=20).mean().values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate 1w EMA34 for trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align 1d indicators to lower timeframe (prices index)
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
+    # Align 1d indicators to 12h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    
-    # Align 1w EMA34 to lower timeframe
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # need enough for Donchian(20) and EMA34
+    start_idx = 50  # need enough for EMA50 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(high_20_aligned[i]) or 
-            np.isnan(low_20_aligned[i]) or 
-            np.isnan(donchian_mid_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i]) or 
-            np.isnan(ema34_1w_aligned[i])):
+        if (np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or 
+            np.isnan(donchian_mid[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x 20-day average
-        # We check if current daily volume is elevated (institutional participation)
-        volume_confirmed = volume_1d[i] > 1.5 * vol_ma_20_1d[i]
+        # Volume regime: current 12h volume > 1.5x 20-period MA (expanding participation)
+        vol_ma_20_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        volume_confirmed = not np.isnan(vol_ma_20_12h[i]) and volume[i] > 1.5 * vol_ma_20_12h[i]
         
         if position == 0:
-            # Long: price breaks above 20-day high with volume confirmation and 1w uptrend
-            if (close_1d[i] > high_20_aligned[i] and 
+            # Long: price breaks above Donchian high with volume confirmation and uptrend (price > EMA50)
+            if (close[i] > donchian_high[i] and 
                 volume_confirmed and 
-                close_1w[i] > ema34_1w_aligned[i]):
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 20-day low with volume confirmation and 1w downtrend
-            elif (close_1d[i] < low_20_aligned[i] and 
+            # Short: price breaks below Donchian low with volume confirmation and downtrend (price < EMA50)
+            elif (close[i] < donchian_low[i] and 
                   volume_confirmed and 
-                  close_1w[i] < ema34_1w_aligned[i]):
+                  close[i] < ema50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to midpoint OR breaks below low with volume (reversal)
-            if (close_1d[i] <= donchian_mid_aligned[i] or 
-                (close_1d[i] < low_20_aligned[i] and volume_confirmed)):
+            # Exit long: price returns to midpoint OR breaks below Donchian low with volume (reversal)
+            if (close[i] <= donchian_mid[i] or 
+                (close[i] < donchian_low[i] and volume_confirmed)):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to midpoint OR breaks above high with volume (reversal)
-            if (close_1d[i] >= donchian_mid_aligned[i] or 
-                (close_1d[i] > high_20_aligned[i] and volume_confirmed)):
+            # Exit short: price returns to midpoint OR breaks above Donchian high with volume (reversal)
+            if (close[i] >= donchian_mid[i] or 
+                (close[i] > donchian_high[i] and volume_confirmed)):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wEMA34_Volume_Regime"
-timeframe = "1d"
+name = "12h_Donchian20_1dEMA50_VolumeRegime"
+timeframe = "12h"
 leverage = 1.0
