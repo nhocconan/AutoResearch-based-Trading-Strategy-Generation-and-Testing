@@ -1,112 +1,110 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_KumoBreakout_VolumeFilter
-Strategy: Ichimoku cloud breakout with volume confirmation on 6h timeframe.
-Long: Price breaks above Kumo cloud (Senkou Span A/B) + volume > 1.5x avg + Tenkan > Kijun
-Short: Price breaks below Kumo cloud + volume > 1.5x avg + Tenkan < Kijun
-Exit: Price returns to Tenkan-sen line
+12h_1d_Camarilla_R1_S1_Breakout_Volume_Regime
+Strategy: 12-hour breakout of daily Camarilla R1/S1 levels with volume confirmation and chop regime filter.
+Long: Price breaks above daily R1 + volume > 1.5x 20-period average + CHOP > 61.8 (range)
+Short: Price breaks below daily S1 + volume > 1.5x 20-period average + CHOP > 61.8
+Exit: Price returns to opposite Camarilla level (S1 for long, R1 for short)
 Position size: 0.25
-Designed to capture momentum breakouts with trend confirmation in both bull and bear markets.
-Timeframe: 6h
+Designed to capture mean-reversion bounces in ranging markets with volume confirmation.
+Timeframe: 12h
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_ichimoku(high, low, close):
-    """Calculate Ichimoku components"""
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max()
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min()
-    tenkan = (period9_high + period9_low) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max()
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min()
-    kijun = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = ((tenkan + kijun) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max()
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min()
-    senkou_b = ((period52_high + period52_low) / 2)
-    
-    # Chikou Span (Lagging Span): close plotted 26 periods behind
-    # Not used in signals to avoid look-ahead
-    
-    return tenkan.values, kijun.values, senkou_a.values, senkou_b.values
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Ichimoku on 6h data
-    tenkan, kijun, senkou_a, senkou_b = calculate_ichimoku(high, low, close)
+    # Calculate Camarilla levels from previous 1-day OHLC
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    open_1d = df_1d['open'].values
     
-    # Kumo top and bottom (Senkou Span A and B)
-    kumo_top = np.maximum(senkou_a, senkou_b)
-    kumo_bottom = np.minimum(senkou_a, senkou_b)
+    # Camarilla formula: range = high - low
+    # R1 = close + (range * 1.1/12)
+    # S1 = close - (range * 1.1/12)
+    range_1d = high_1d - low_1d
+    r1_1d = close_1d + (range_1d * 1.1 / 12)
+    s1_1d = close_1d - (range_1d * 1.1 / 12)
     
-    # Volume confirmation (20-period average)
+    # Align Camarilla levels to 12h timeframe
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # Volume confirmation (20-period MA on 12h)
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Chopiness Index (14-period) for regime filter - range when > 61.8
+    # CHOP = 100 * log10(sum(ATR14) / (max(HH14) - min(LL14))) / log10(14)
+    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
+    tr1 = np.maximum(tr1, np.absolute(low - np.roll(close, 1)))
+    tr1[0] = high[0] - low[0]  # first period
+    atr14 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
+    hh14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * (np.log10(atr14 * 14) / np.log10(14)) / np.log10((hh14 - ll14) + 1e-10)
+    chop = np.where((hh14 - ll14) > 0, chop, 50)  # avoid division by zero
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(52, 20)  # Need Senkou Span B data
+    start_idx = max(30, 20, 14)
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(kumo_top[i]) or np.isnan(kumo_bottom[i]) or 
-            np.isnan(volume_ma20[i])):
+        if (np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(volume_ma20[i]) or 
+            np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter: current volume > 1.5x 20-period average
         volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
-        # Cloud breakout conditions
-        price_above_kumo = close[i] > kumo_top[i]
-        price_below_kumo = close[i] < kumo_bottom[i]
+        # Regime filter: choppy market (CHOP > 61.8) for mean reversion
+        regime_filter = chop[i] > 61.8
         
-        # Trend confirmation: Tenkan vs Kijun
-        tenkan_above_kijun = tenkan[i] > kijun[i]
-        tenkan_below_kijun = tenkan[i] < kijun[i]
+        # Breakout conditions
+        breakout_above_r1 = close[i] > r1_1d_aligned[i-1]
+        breakout_below_s1 = close[i] < s1_1d_aligned[i-1]
         
-        # Re-entry condition: price returns to Tenkan-sen
-        return_to_tenkan = abs(close[i] - tenkan[i]) < (0.003 * close[i])  # within 0.3%
+        # Exit conditions: return to opposite level
+        return_to_s1 = abs(close[i] - s1_1d_aligned[i]) < 0.001 * close[i]  # within 0.1% of S1
+        return_to_r1 = abs(close[i] - r1_1d_aligned[i]) < 0.001 * close[i]  # within 0.1% of R1
         
         if position == 0:
-            # Long: price breaks above cloud + volume + Tenkan > Kijun
-            if price_above_kumo and volume_filter and tenkan_above_kijun:
+            # Long: break above R1 + volume + chop regime
+            if breakout_above_r1 and volume_filter and regime_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below cloud + volume + Tenkan < Kijun
-            elif price_below_kumo and volume_filter and tenkan_below_kijun:
+            # Short: break below S1 + volume + chop regime
+            elif breakout_below_s1 and volume_filter and regime_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to Tenkan or breaks below cloud
-            if return_to_tenkan or price_below_kumo:
+            # Exit long: return to S1 or break above R1 again
+            if return_to_s1 or breakout_above_r1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to Tenkan or breaks above cloud
-            if return_to_tenkan or price_above_kumo:
+            # Exit short: return to R1 or break below S1 again
+            if return_to_r1 or breakout_below_s1:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -114,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_KumoBreakout_VolumeFilter"
-timeframe = "6h"
+name = "12h_1d_Camarilla_R1_S1_Breakout_Volume_Regime"
+timeframe = "12h"
 leverage = 1.0
