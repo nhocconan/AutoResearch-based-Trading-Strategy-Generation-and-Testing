@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h KAMA Trend + 1d RSI + Volume Spike
-Long: KAMA rising + RSI(1d) > 55 + volume > 1.5x 12h volume SMA(20)
-Short: KAMA falling + RSI(1d) < 45 + volume > 1.5x 12h volume SMA(20)
-Exit: Opposite KAMA direction or RSI crosses 50
-Uses Kaufman Adaptive Moving Average for trend, filtered by daily momentum and volume.
-Designed to work in trending markets with confirmation from higher timeframe momentum.
-Target: 50-150 total trades over 4 years (12-37/year)
+4h Donchian Breakout + 12h EMA34 Trend + Volume Spike
+Long: Close breaks above Donchian(20) high + price > 12h EMA34 + volume > 1.5x 4h volume SMA(20)
+Short: Close breaks below Donchian(20) low + price < 12h EMA34 + volume > 1.5x 4h volume SMA(20)
+Exit: Opposite breakout or trailing stop via ATR(10)*3
+Uses price channel breakouts for trend capture, filtered by higher timeframe trend and volume.
+Designed to work in trending markets with confirmation from higher timeframe and volume.
+Target: 75-200 total trades over 4 years (19-50/year)
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,81 +23,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for RSI filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get 12h data for EMA34 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d RSI(14)
-    delta = pd.Series(close_1d).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_14_1d = 100 - (100 / (1 + rs))
-    rsi_14_1d = rsi_14_1d.fillna(50).values  # neutral when undefined
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
+    # Calculate 12h EMA34
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Calculate KAMA(10, 2, 30) for trend
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close))
-    er = np.zeros_like(change)
-    for i in range(len(change)):
-        if i == 0:
-            er[i] = 0
-        else:
-            er[i] = change[i] / (volatility[:i+1].sum() + 1e-10)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
-    # KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate 4h Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Calculate 12h volume SMA(20)
-    vol_sma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 4h volume SMA(20) for volume filter
+    vol_sma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate ATR(10) for trailing stop
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    start_idx = max(20, 30)  # need volume SMA and RSI
+    start_idx = max(34, 20)  # need EMA34 and Donchian
     
     for i in range(start_idx, n):
-        if (np.isnan(rsi_14_1d_aligned[i]) or np.isnan(vol_sma_12h[i]) or
-            np.isnan(kama[i]) or np.isnan(kama[i-1])):
+        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(vol_sma_4h[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_sma_val = vol_sma_12h[i]
-        rsi_val = rsi_14_1d_aligned[i]
-        kama_val = kama[i]
-        kama_prev = kama[i-1]
+        vol_sma_val = vol_sma_4h[i]
+        donch_high = donchian_high[i]
+        donch_low = donchian_low[i]
+        ema_12h = ema_34_12h_aligned[i]
+        atr_val = atr[i]
         
         if position == 0:
-            # Long: KAMA rising + RSI > 55 + volume spike
-            if kama_val > kama_prev and rsi_val > 55 and vol > 1.5 * vol_sma_val:
+            # Long: break above Donchian high + above 12h EMA + volume spike
+            if price > donch_high and price > ema_12h and vol > 1.5 * vol_sma_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA falling + RSI < 45 + volume spike
-            elif kama_val < kama_prev and rsi_val < 45 and vol > 1.5 * vol_sma_val:
+                entry_price = price
+                highest_since_entry = price
+            # Short: break below Donchian low + below 12h EMA + volume spike
+            elif price < donch_low and price < ema_12h and vol > 1.5 * vol_sma_val:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
+                lowest_since_entry = price
         
         elif position == 1:
-            # Long exit: KAMA falling or RSI < 50
-            if kama_val < kama_prev or rsi_val < 50:
+            # Update highest since entry
+            if price > highest_since_entry:
+                highest_since_entry = price
+            
+            # Exit conditions: opposite breakout or ATR trailing stop
+            if price < donch_low or price < highest_since_entry - 3.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: KAMA rising or RSI > 50
-            if kama_val > kama_prev or rsi_val > 50:
+            # Update lowest since entry
+            if price < lowest_since_entry:
+                lowest_since_entry = price
+            
+            # Exit conditions: opposite breakout or ATR trailing stop
+            if price > donch_high or price > lowest_since_entry + 3.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_KAMA_Trend_1dRSI_VolumeSpike"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_12hEMA34_VolumeSpike_ATRStop"
+timeframe = "4h"
 leverage = 1.0
