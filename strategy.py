@@ -3,9 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 12h 144-bar KAMA trend with 1d Bollinger squeeze filter
+# - Uses KAMA (Kaufman Adaptive MA) to capture trend with low lag
+# - Bollinger Band width < 20th percentile identifies low volatility (squeeze)
+# - Breakouts from squeeze with trend alignment yield explosive moves
+# - Works in both bull/bear: squeeze precedes major moves in any direction
+# - Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag
+# - Position size: 0.25 (25%) to balance return and drawdown
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,80 +21,105 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR-based channels
+    # Get 1d data for Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate ATR(14) on 1d
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr2 = np.maximum(np.abs(low_1d[1:] - close_1d[:-1]), np.zeros_like(tr1))
-    tr = np.concatenate([[np.nan], np.maximum(tr1, tr2)])
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate Bollinger Bands (20, 2.0) on daily close
+    bb_period = 20
+    bb_std = 2.0
+    sma_1d = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_1d = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_bb = sma_1d + (bb_std * std_1d)
+    lower_bb = sma_1d - (bb_std * std_1d)
+    bb_width = upper_bb - lower_bb
     
-    # Donchian channels (20-period) on 1d
-    high_max20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_min20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Bollinger Band Width percentile (20-period lookback)
+    bb_width_percentile = pd.Series(bb_width).rolling(window=20, min_periods=1).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
+    ).values
     
-    # Align to 6h timeframe
-    atr14_6h = align_htf_to_ltf(prices, df_1d, atr14)
-    high_max20_6h = align_htf_to_ltf(prices, df_1d, high_max20)
-    low_min20_6h = align_htf_to_ltf(prices, df_1d, low_min20)
+    # Bollinger squeeze: width < 20th percentile
+    squeeze = bb_width_percentile < 0.20
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # Weekly EMA50 for trend
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_6h = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Align squeeze signal to 12h timeframe
+    squeeze_12h = align_htf_to_ltf(prices, df_1d, squeeze)
+    
+    # Get 12h data for KAMA (trend filter)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    
+    # Calculate KAMA (144-period, fast=2, slow=30)
+    kama_period = 144
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    
+    # Calculate efficiency ratio
+    change = np.abs(np.diff(close_12h, kama_period))
+    volatility = np.sum(np.abs(np.diff(close_12h)), axis=0)
+    er = np.zeros_like(close_12h)
+    er[kama_period:] = change[kama_period:] / volatility[kama_period:]
+    er[:kama_period] = 0
+    
+    # Calculate smoothing constant
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama = np.full_like(close_12h, np.nan)
+    kama[kama_period] = close_12h[kama_period]
+    for i in range(kama_period + 1, len(close_12h)):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    # Align KAMA to 12h timeframe (already on 12h, but ensure alignment)
+    kama_12h_aligned = align_htf_to_ltf(prices, df_12h, kama)
     
     # Volume filter: current volume > 1.5 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * volume_ma20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # Need ATR, Donchian, EMA50, volume MA
+    start_idx = max(200, kama_period + 50)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(atr14_6h[i]) or 
-            np.isnan(high_max20_6h[i]) or 
-            np.isnan(low_min20_6h[i]) or 
-            np.isnan(ema50_6h[i]) or 
+        if (np.isnan(squeeze_12h[i]) or 
+            np.isnan(kama_12h_aligned[i]) or 
             np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
-        
-        # Trend filter: price above/below weekly EMA50
-        price_above_weekly_ema = close[i] > ema50_6h[i]
-        price_below_weekly_ema = close[i] < ema50_6h[i]
+        # Breakout conditions
+        breakout_up = close[i] > kama_12h_aligned[i]
+        breakout_down = close[i] < kama_12h_aligned[i]
         
         if position == 0:
-            # Long: Break above 20-day high with volume and uptrend
-            if (close[i] > high_max20_6h[i] and price_above_weekly_ema and volume_filter):
+            # Enter long: squeeze + breakout up + volume
+            if squeeze_12h[i] and breakout_up and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below 20-day low with volume and downtrend
-            elif (close[i] < low_min20_6h[i] and price_below_weekly_ema and volume_filter):
+            # Enter short: squeeze + breakout down + volume
+            elif squeeze_12h[i] and breakout_down and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price closes below 20-day low OR trend reverses
-            if (close[i] < low_min20_6h[i]) or (close[i] < ema50_6h[i]):
+            # Exit long: breakout down or squeeze ends
+            if breakout_down or not squeeze_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price closes above 20-day high OR trend reverses
-            if (close[i] > high_max20_6h[i]) or (close[i] > ema50_6h[i]):
+            # Exit short: breakout up or squeeze ends
+            if breakout_up or not squeeze_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_WeeklyEMA50_Trend_Volume"
-timeframe = "6h"
+name = "12h_KAMA_BollingerSqueeze_Volume"
+timeframe = "12h"
 leverage = 1.0
