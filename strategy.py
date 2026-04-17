@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,79 +13,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot levels
+    # Get daily data for 200 EMA (HTF)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily Camarilla pivot levels (H3, L3, H4, L4)
-    # H3 = High + 1.1*(Close - Low)/2
-    # L3 = Low - 1.1*(High - Close)/2
-    # H4 = High + 1.1*(Close - Low)
-    # L4 = Low - 1.1*(High - Close)
-    pivot_range = high_1d - low_1d
-    h3 = high_1d + 1.1 * (close_1d - low_1d) / 2
-    l3 = low_1d - 1.1 * (high_1d - close_1d) / 2
-    h4 = high_1d + 1.1 * (close_1d - low_1d)
-    l4 = low_1d - 1.1 * (high_1d - close_1d)
+    # Calculate daily 200 EMA
+    ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Align daily Camarilla levels to 6h
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    # Align daily 200 EMA to 4h
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
     
-    # Weekly trend filter: price above/below weekly EMA50
+    # Get weekly data for ATR (HTF)
     df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    weekly_trend_up = close_1w > ema50_1w
-    weekly_trend_down = close_1w < ema50_1w
-    weekly_trend_up_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_up)
-    weekly_trend_down_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_down)
     
-    # Volume confirmation: current volume > 1.5 * 20-period average
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate weekly ATR (14-period)
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    
+    atr_1w = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align weekly ATR to 4h
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    
+    # Daily ATR for volatility filter
+    tr1_d = df_1d['high'].values - df_1d['low'].values
+    tr2_d = np.abs(df_1d['high'].values - np.roll(close_1d, 1))
+    tr3_d = np.abs(df_1d['low'].values - np.roll(close_1d, 1))
+    tr_d = np.maximum(tr1_d, np.maximum(tr2_d, tr3_d))
+    tr_d[0] = tr1_d[0]
+    atr_1d = pd.Series(tr_d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # Bollinger Bands on 4h close (20, 2)
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
+    
+    # Bollinger Band Width for regime detection
+    bb_width = (upper_bb - lower_bb) / sma_20
+    bb_width_ma50 = pd.Series(bb_width).rolling(window=50, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 100  # Need daily pivots, weekly EMA, volume MA
+    start_idx = 200  # Need 200 EMA, Bollinger Bands, ATR
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(weekly_trend_up_aligned[i]) or np.isnan(weekly_trend_down_aligned[i]) or
-            np.isnan(volume_ma20[i])):
+        if (np.isnan(ema_200_aligned[i]) or 
+            np.isnan(atr_1w_aligned[i]) or 
+            np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(sma_20[i]) or 
+            np.isnan(std_20[i]) or 
+            np.isnan(bb_width_ma50[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        # Regime filter: Bollinger Band Width > 50-day average (volatile/trending market)
+        volatile_regime = bb_width[i] > bb_width_ma50[i]
+        
+        # Volatility filter: current volatility not too extreme
+        vol_filter = atr_1d_aligned[i] < (3.0 * atr_1w_aligned[i])
         
         if position == 0:
-            # Long: price breaks above H4 with weekly uptrend and volume
-            if (close[i] > h4_aligned[i] and weekly_trend_up_aligned[i] and volume_filter):
+            # Long: price touches lower BB in uptrend (price > 200 EMA) with volatile regime
+            if (close[i] <= lower_bb[i] and close[i] > ema_200_aligned[i] and 
+                volatile_regime and vol_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below L4 with weekly downtrend and volume
-            elif (close[i] < l4_aligned[i] and weekly_trend_down_aligned[i] and volume_filter):
+            # Short: price touches upper BB in downtrend (price < 200 EMA) with volatile regime
+            elif (close[i] >= upper_bb[i] and close[i] < ema_200_aligned[i] and 
+                  volatile_regime and vol_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to L3 (mean reversion in uptrend)
-            if close[i] < l3_aligned[i]:
+            # Exit long: price returns to SMA(20) or hits trailing stop
+            if close[i] >= sma_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to H3 (mean reversion in downtrend)
-            if close[i] > h3_aligned[i]:
+            # Exit short: price returns to SMA(20) or hits trailing stop
+            if close[i] <= sma_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_H4_L4_WeeklyTrend_Volume"
-timeframe = "6h"
+name = "4h_BollingerMeanReversion_VolatileRegime"
+timeframe = "4h"
 leverage = 1.0
