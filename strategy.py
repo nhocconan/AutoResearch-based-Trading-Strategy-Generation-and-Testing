@@ -1,9 +1,12 @@
+# Your turn. Remember: NO REASONING, no explanation, just the code. Let's go.  
 #!/usr/bin/env python3
 """
-Hypothesis: On 1h timeframe, price often respects 4-hour and daily key levels (S2/R2 from Camarilla).
-By combining 4h Camarilla S2/R2 with 1d EMA50 trend filter and volume spikes (>2x 20-bar avg),
-we capture high-probability breakouts. Use 4h/1d for signal direction, 1h only for entry timing.
-Session filter (08-20 UTC) reduces noise. Target: 15-37 trades/year (~60-150 over 4 years).
+Hypothesis: Weekly price extremes (highest high and lowest low) act as strong support/resistance.
+On 6h timeframe, price breaking above the weekly high with volume confirmation indicates
+continuation of the weekly uptrend, while breaking below the weekly low indicates
+continuation of the weekly downtrend. Entries are filtered by 1d EMA50 to ensure alignment
+with the daily trend. Exits occur when price returns to the weekly midpoint, reducing
+exposure during reversals. Designed for 6h to capture multi-day trends with low frequency.
 """
 
 import numpy as np
@@ -12,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,83 +23,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla pivot levels
-    df_4h = get_htf_data(prices, '4h')
+    # Get weekly data for high/low extremes and midpoint
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate Camarilla pivot levels from previous 4h bar
-    phigh = df_4h['high'].values
-    plow = df_4h['low'].values
-    pclose = df_4h['close'].values
+    # Weekly highest high and lowest low
+    whigh = df_1w['high'].values
+    wlow = df_1w['low'].values
     
-    pivot = (phigh + plow + pclose) / 3
-    range_ = phigh - plow
+    # Weekly midpoint for exit
+    wmid = (whigh + wlow) / 2
     
-    # Camarilla S2/R2 levels
-    R2 = pivot + (range_ * 1.1 / 6)
-    S2 = pivot - (range_ * 1.1 / 6)
-    
-    # Get 1d data for EMA50 trend filter
+    # Get daily data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    dclose = df_1d['close'].values
+    ema_50 = pd.Series(dclose).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align all levels to 1h timeframe
-    R2_1h = align_htf_to_ltf(prices, df_4h, R2)
-    S2_1h = align_htf_to_ltf(prices, df_4h, S2)
-    pivot_1h = align_htf_to_ltf(prices, df_4h, pivot)
-    ema_50_1h = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Align weekly and daily levels to 6h timeframe
+    whigh_6h = align_htf_to_ltf(prices, df_1w, whigh)
+    wlow_6h = align_htf_to_ltf(prices, df_1w, wlow)
+    wmid_6h = align_htf_to_ltf(prices, df_1w, wmid)
+    ema_50_6h = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Volume confirmation: 20-period volume MA on 1h
-    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Volume confirmation: 24-period volume MA on 6h (4 days)
+    volume_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean()
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # warmup for all indicators
+    start_idx = 60  # warmup for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(R2_1h[i]) or np.isnan(S2_1h[i]) or np.isnan(pivot_1h[i]) or
-            np.isnan(ema_50_1h[i]) or np.isnan(volume_ma_20.iloc[i])):
+        if (np.isnan(whigh_6h[i]) or np.isnan(wlow_6h[i]) or np.isnan(wmid_6h[i]) or
+            np.isnan(ema_50_6h[i]) or np.isnan(volume_ma_24.iloc[i])):
             signals[i] = 0.0
             continue
         
-        hour = hours[i]
-        in_session = 8 <= hour <= 20
-        
         price = close[i]
         vol = volume[i]
-        vol_ma = volume_ma_20.iloc[i]
+        vol_ma = volume_ma_24.iloc[i]
         
-        if position == 0 and in_session:
-            # Long: break above R2 with volume spike and above 1d EMA50
-            if price > R2_1h[i] and vol > 2.0 * vol_ma and price > ema_50_1h[i]:
-                signals[i] = 0.20
+        if position == 0:
+            # Long: break above weekly high with volume and above daily EMA50
+            if price > whigh_6h[i] and vol > 2.0 * vol_ma and price > ema_50_6h[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: break below S2 with volume spike and below 1d EMA50
-            elif price < S2_1h[i] and vol > 2.0 * vol_ma and price < ema_50_1h[i]:
-                signals[i] = -0.20
+            # Short: break below weekly low with volume and below daily EMA50
+            elif price < wlow_6h[i] and vol > 2.0 * vol_ma and price < ema_50_6h[i]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to pivot or closes below session
-            if price < pivot_1h[i] or not in_session:
+            # Long exit: price returns to weekly midpoint
+            if price < wmid_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to pivot or closes below session
-            if price > pivot_1h[i] or not in_session:
+            # Short exit: price returns to weekly midpoint
+            if price > wmid_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_S2R2_Volume_EMA50_Session"
-timeframe = "1h"
+name = "6h_WeeklyHighLow_Volume_EMA50"
+timeframe = "6h"
 leverage = 1.0
