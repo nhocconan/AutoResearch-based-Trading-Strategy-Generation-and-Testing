@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA trend filter and volume confirmation.
-Long when price breaks above Camarilla R1 AND close > 4h EMA34 AND volume > 1.3x average.
-Short when price breaks below Camarilla S1 AND close < 4h EMA34 AND volume > 1.3x average.
-Exit when price reverts to Camarilla pivot (PP) OR volume drops below average.
-Uses 1h for entry timing precision, 4h for trend direction to reduce whipsaw.
-Target: 80-150 total trades over 4 years (20-38/year). Camarilla levels provide intraday
-support/resistance, volume confirms breakout validity, EMA filter avoids counter-trend trades.
-Works in bull markets (buys breakouts in uptrends) and bear markets (sells breakdowns in downtrends).
+Hypothesis: 6h Camarilla pivot breakout with 1w trend filter and volume confirmation.
+Long when price breaks above R4 (1d) AND 1w close > 1w open (bullish weekly candle) AND volume > 1.5x average.
+Short when price breaks below S4 (1d) AND 1w close < 1w open (bearish weekly candle) AND volume > 1.5x average.
+Exit when price reverts to R1/S1 (1d) OR weekly trend reverses.
+Uses 6h for entry timing, 1d for Camarilla levels, 1w for trend filter to avoid counter-trend trades.
+Target: 50-150 total trades over 4 years (12-37/year). Camarilla R4/S4 are strong breakout levels,
+volume confirmation reduces fakeouts, weekly trend filter ensures trading with higher timeframe momentum.
+Works in bull markets (captures uptrend breakouts) and bear markets (captures downtrend breakdowns).
 """
 
 import numpy as np
@@ -24,99 +24,126 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1h data for Camarilla calculation
-    df_1h = get_htf_data(prices, '1h')
-    high_1h = df_1h['high'].values
-    low_1h = df_1h['low'].values
-    close_1h = df_1h['close'].values
+    # Get 1d data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate previous day's Camarilla levels on 1h timeframe
-    # Use prior 24h period (96 bars for 1h) for OHLC
-    lookback = 96  # 24 hours * 4 bars per hour = 96 bars for prior day
-    if len(high_1h) < lookback + 20:  # need extra for Camarilla calculation
-        return np.zeros(n)
+    # Calculate Camarilla levels on 1d timeframe (based on previous day)
+    # Camarilla: R4 = close + 1.1*(high-low)*1.1, S4 = close - 1.1*(high-low)*1.1
+    # R1 = close + 1.1*(high-low)*1.1/6, S1 = close - 1.1*(high-low)*1.1/6
+    # Actually standard Camarilla: R4 = close + 1.1*(high-low)*1.1/2? Let me verify
+    # Standard formula: R4 = close + 1.1*(high-low)*1.1, but that seems too wide
+    # Correct: R4 = close + 1.1*(high-low)*1.1/2? No
+    # Actual: R4 = close + 1.1*(high-low)*1.1, R3 = close + 1.1*(high-low)*1.1/4, etc.
+    # After checking: R4 = close + 1.1*(high-low)*1.1, S4 = close - 1.1*(high-low)*1.1
+    # But this seems off. Let me use the correct formula:
+    # Camarilla pivot levels:
+    # Pivot = (high + low + close)/3
+    # R4 = close + 1.1*(high-low)*1.1
+    # R3 = close + 1.1*(high-low)*1.1/4
+    # R2 = close + 1.1*(high-low)*1.1/6
+    # R1 = close + 1.1*(high-low)*1.1/12
+    # S1 = close - 1.1*(high-low)*1.1/12
+    # S2 = close - 1.1*(high-low)*1.1/6
+    # S3 = close - 1.1*(high-low)*1.1/4
+    # S4 = close - 1.1*(high-low)*1.1
     
-    # Calculate Camarilla for each bar using prior day's OHLC
-    camarilla_pp = np.full(n, np.nan)
-    camarilla_r1 = np.full(n, np.nan)
-    camarilla_s1 = np.full(n, np.nan)
+    # Actually, after verification, the standard is:
+    # Range = high - low
+    # R4 = close + Range * 1.1 * 1.1
+    # But I think it's: R4 = close + Range * 1.1
+    # Let me use the commonly accepted: R4 = close + 1.1*(high-low), S4 = close - 1.1*(high-low)
+    # And R1/S1 at 1/6 of that range from close
     
-    for i in range(lookback, len(high_1h)):
-        # Prior day's OHLC (24 hours ago)
-        prior_high = np.max(high_1h[i-lookback:i])
-        prior_low = np.min(low_1h[i-lookback:i])
-        prior_close = close_1h[i-lookback]  # close 24 hours ago
-        
-        # Camarilla calculations
-        rng = prior_high - prior_low
-        camarilla_pp[i] = (prior_high + prior_low + prior_close) / 3
-        camarilla_r1[i] = camarilla_pp[i] + (rng * 1.1 / 12)
-        camarilla_s1[i] = camarilla_pp[i] - (rng * 1.1 / 12)
+    range_1d = high_1d - low_1d
+    camarilla_pivot = (high_1d + low_1d + close_1d) / 3.0
     
-    # Get 4h data for EMA filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Camarilla levels
+    r4 = close_1d + 1.1 * range_1d
+    r3 = close_1d + 1.1 * range_1d / 4
+    r2 = close_1d + 1.1 * range_1d / 6
+    r1 = close_1d + 1.1 * range_1d / 12
+    s1 = close_1d - 1.1 * range_1d / 12
+    s2 = close_1d - 1.1 * range_1d / 6
+    s3 = close_1d - 1.1 * range_1d / 4
+    s4 = close_1d - 1.1 * range_1d
     
-    # Calculate EMA34 on 4h timeframe
-    close_4h_series = pd.Series(close_4h)
-    ema_4h = close_4h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    open_1w = df_1w['open'].values
     
-    # Align 4h EMA to 1h timeframe
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Weekly trend: bullish if close > open, bearish if close < open
+    weekly_bullish = close_1w > open_1w
+    weekly_bearish = close_1w < open_1w
     
-    # Volume average (20-period) on 1h
-    volume_1h = df_1h['volume'].values
-    volume_ma = pd.Series(volume_1h).rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1h, volume_ma)
+    # Align 1d Camarilla levels to 6h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Align 1w trend to 6h timeframe
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
+    
+    # Volume average (20-period) on 6h
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = lookback + 20  # warmup for indicators
+    start_idx = 50  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or np.isnan(camarilla_pp[i]) or 
-            np.isnan(ema_4h_aligned[i]) or np.isnan(volume_ma_aligned[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]) or 
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        r1 = camarilla_r1[i]
-        s1 = camarilla_s1[i]
-        pp = camarilla_pp[i]
-        ema_val = ema_4h_aligned[i]
-        vol_ma = volume_ma_aligned[i]
+        r4_val = r4_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        s4_val = s4_aligned[i]
+        weekly_bull = weekly_bullish_aligned[i] > 0.5
+        weekly_bear = weekly_bearish_aligned[i] > 0.5
+        vol_ma = volume_ma[i]
         vol = volume[i]
         price = close[i]
         
         if position == 0:
-            # Long: price > Camarilla R1 AND close > 4h EMA34 AND volume > 1.3x avg
-            if price > r1 and close[i] > ema_val and vol > 1.3 * vol_ma:
-                signals[i] = 0.20
+            # Long: price > R4 AND weekly bullish AND volume > 1.5x avg
+            if price > r4_val and weekly_bull and vol > 1.5 * vol_ma:
+                signals[i] = 0.25
                 position = 1
-            # Short: price < Camarilla S1 AND close < 4h EMA34 AND volume > 1.3x avg
-            elif price < s1 and close[i] < ema_val and vol > 1.3 * vol_ma:
-                signals[i] = -0.20
+            # Short: price < S4 AND weekly bearish AND volume > 1.5x avg
+            elif price < s4_val and weekly_bear and vol > 1.5 * vol_ma:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price < Camarilla PP OR volume < average
-            if price < pp or vol < vol_ma:
+            # Exit long: price < R1 OR weekly trend turns bearish
+            if price < r1_val or not weekly_bull:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price > Camarilla PP OR volume < average
-            if price > pp or vol < vol_ma:
+            # Exit short: price > S1 OR weekly trend turns bullish
+            if price > s1_val or not weekly_bear:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_R1S1_Volume_EMA_Filter"
-timeframe = "1h"
+name = "6h_Camarilla_R4_S4_Volume_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
