@@ -12,7 +12,6 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # === 4h price channel: 20-period Donchian breakout ===
-    # Calculate high and low of last 20 periods
     high_20 = pd.Series(close).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(close).rolling(window=20, min_periods=20).min().values
     
