@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Keltner_Breakout_Channel_v1
-Breakout strategy using Keltner Channels (EMA20 + 2*ATR10) with volume confirmation and ADX trend filter.
-Enters long when price closes above upper KC with ADX>25 and volume>1.5x average.
-Enters short when price closes below lower KC with ADX>25 and volume>1.5x average.
-Exits when price crosses back through EMA20 or ADX falls below 20.
-Designed to capture trends with volatility-adjusted breakouts.
-Target: 50-150 total trades over 4 years (12-37/year).
+1d_KAMA_RSI_ChopFilter_v1
+1d strategy: Use KAMA direction for trend, RSI(14) for mean reversion entries,
+and Choppiness Index (14) for regime filter. Enter long when KAMA up, RSI<30, CHOP>61.8.
+Enter short when KAMA down, RSI>70, CHOP>61.8. Exit when RSI crosses 50.
+Designed to capture mean reversion in ranging markets while avoiding strong trends.
+Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
@@ -23,40 +22,48 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === EMA20 for Keltner Channel center ===
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # === KAMA (14, 2, 30) for trend direction ===
+    # Efficiency Ratio
+    change = np.abs(close - np.roll(close, 14))
+    change[0] = 0
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else None
+    # Manual calculation for volatility sum over 14 periods
+    volatility = np.zeros_like(close)
+    for i in range(14, len(close)):
+        volatility[i] = np.sum(np.abs(np.diff(close[i-13:i+1])))
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # === True Range and ATR(10) for Keltner Channel width ===
+    # === RSI(14) for mean reversion signal ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # === Choppiness Index (14) for regime filter ===
+    # True Range
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    
-    # === Keltner Channel bounds ===
-    kc_upper = ema20 + 2 * atr10
-    kc_lower = ema20 - 2 * atr10
-    
-    # === ADX(14) for trend strength ===
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    
-    atr14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr14 + 1e-10)
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr14 + 1e-10)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # === Volume average for confirmation ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # === 1d EMA50 for higher timeframe trend filter ===
-    df_1d = get_htf_data(prices, '1d')
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Sum of TR over 14 periods
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Highest high and lowest low over 14 periods
+    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Chop formula
+    chop = 100 * np.log10(tr_sum / (hh - ll)) / np.log10(14)
+    # Handle division by zero when hh == ll
+    chop = np.where((hh - ll) != 0, chop, 50)
     
     signals = np.zeros(n)
     
@@ -68,43 +75,38 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema20[i]) or 
-            np.isnan(kc_upper[i]) or 
-            np.isnan(kc_lower[i]) or 
-            np.isnan(adx[i]) or 
-            np.isnan(vol_ma[i]) or 
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(kama[i]) or 
+            np.isnan(rsi[i]) or 
+            np.isnan(chop[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
+        # KAMA direction: compare to previous value
+        kama_up = kama[i] > kama[i-1]
+        kama_down = kama[i] < kama[i-1]
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price closes above upper KC, ADX > 25, volume confirmed, price above 1d EMA50
-            if (close[i] > kc_upper[i] and 
-                adx[i] > 25 and 
-                vol_confirmed and 
-                close[i] > ema_50_1d_aligned[i]):
+            # Long: KAMA up, RSI < 30 (oversold), Chop > 61.8 (ranging market)
+            if (kama_up and 
+                rsi[i] < 30 and 
+                chop[i] > 61.8):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price closes below lower KC, ADX > 25, volume confirmed, price below 1d EMA50
-            elif (close[i] < kc_lower[i] and 
-                  adx[i] > 25 and 
-                  vol_confirmed and 
-                  close[i] < ema_50_1d_aligned[i]):
+            # Short: KAMA down, RSI > 70 (overbought), Chop > 61.8 (ranging market)
+            elif (kama_down and 
+                  rsi[i] > 70 and 
+                  chop[i] > 61.8):
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic: trend weakening or reversal through EMA20
+        # Exit logic: RSI crosses 50 (mean reversion complete)
         elif position == 1:
-            # Exit long: ADX < 20 OR price closes below EMA20
-            if (adx[i] < 20 or 
-                close[i] < ema20[i]):
+            # Exit long: RSI crosses above 50
+            if rsi[i] > 50:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -112,9 +114,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: ADX < 20 OR price closes above EMA20
-            if (adx[i] < 20 or 
-                close[i] > ema20[i]):
+            # Exit short: RSI crosses below 50
+            if rsi[i] < 50:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -123,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Keltner_Breakout_Channel_v1"
-timeframe = "4h"
+name = "1d_KAMA_RSI_ChopFilter_v1"
+timeframe = "1d"
 leverage = 1.0
