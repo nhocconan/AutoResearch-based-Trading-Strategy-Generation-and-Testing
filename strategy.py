@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_RSI_Volume_Signal
-Hypothesis: On 12h timeframe, use Kaufman Adaptive Moving Average (KAMA) to detect trend direction, combined with RSI for momentum confirmation and volume surge for entry timing. This strategy aims to capture trend continuations with low frequency to minimize fee drag, working in both bull and bear markets by aligning with adaptive trend and volume confirmation.
+4h_Keltner_Channel_Breakout_Volume_Trend
+Hypothesis: On 4h timeframe, enter long when price breaks above Keltner upper band with 12h volume confirmation and bullish 12h trend; short when price breaks below Keltner lower band with volume and bearish 12h trend. Keltner Channels adapt to volatility better than Bollinger Bands in crypto markets, reducing whipsaws. The 12h trend filter ensures alignment with higher timeframe momentum, while volume confirmation avoids low-conviction breakouts. Designed for 15-35 trades per year to minimize fee drag and work in both bull/bear regimes via trend alignment.
 """
 
 import numpy as np
@@ -10,55 +10,44 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Daily data for volume confirmation and trend filter ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # === 12h data for volume and trend ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # KAMA ( Kaufman Adaptive Moving Average ) on close prices
-    # ER = Efficiency Ratio, SC = Smoothing Constant
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close))
-    er = np.zeros_like(change)
-    for i in range(len(change)):
-        if volatility[i] != 0:
-            er[i] = change[i] / volatility[i]
-        else:
-            er[i] = 0
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Keltner Channel (20, 2) on 4h data
+    # Middle = EMA(20), Width = ATR(20) * 2
+    ema20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    atr20 = pd.Series(tr).ewm(span=20, min_periods=20, adjust=False).mean().values
+    kc_upper = ema20 + 2 * atr20
+    kc_lower = ema20 - 2 * atr20
     
-    # RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # 12h volume average (20-period) for confirmation
+    vol_avg20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_avg20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_avg20_12h)
     
-    # Daily volume average for confirmation
-    vol_avg20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg20_1d)
-    
-    # Daily trend filter: price above/below 50 EMA
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # 12h EMA50 for trend filter
+    ema50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     signals = np.zeros(n)
     
-    # Warmup: covers KAMA, RSI, and daily indicators
+    # Warmup: covers EMA20, ATR20, and 12h indicators
     warmup = 50
     
     # Track position
@@ -66,44 +55,38 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
-            np.isnan(vol_avg20_1d_aligned[i]) or np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(ema20[i]) or np.isnan(atr20[i]) or 
+            np.isnan(vol_avg20_12h_aligned[i]) or np.isnan(ema50_12h_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Get current daily volume
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
+        # Get current 12h volume
+        vol_12h_current = align_htf_to_ltf(prices, df_12h, volume_12h)[i]
         
-        # Volume filter: current volume > 1.8x 20-day average (tighter to reduce trades)
-        vol_filter = vol_1d_current > 1.8 * vol_avg20_1d_aligned[i]
+        # Volume filter: current volume > 1.8x 20-period average
+        vol_filter = vol_12h_current > 1.8 * vol_avg20_12h_aligned[i]
         
-        # Trend filter: price vs KAMA
-        above_kama = close[i] > kama[i]
-        below_kama = close[i] < kama[i]
-        
-        # RSI conditions: not overbought/oversold
-        rsi_not_overbought = rsi[i] < 70
-        rsi_not_oversold = rsi[i] > 30
+        # Trend filter: price above/below 12h EMA50
+        above_trend = close[i] > ema50_12h_aligned[i]
+        below_trend = close[i] < ema50_12h_aligned[i]
         
         # Entry conditions
         if position == 0:
-            # Long: price > KAMA + volume surge + RSI not overbought + above daily EMA
-            if (above_kama and vol_filter and rsi_not_overbought and 
-                close[i] > ema50_1d_aligned[i]):
+            # Long: price breaks above Keltner upper + volume + above 12h trend
+            if close[i] > kc_upper[i] and vol_filter and above_trend:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price < KAMA + volume surge + RSI not oversold + below daily EMA
-            elif (below_kama and vol_filter and rsi_not_oversold and 
-                  close[i] < ema50_1d_aligned[i]):
+            # Short: price breaks below Keltner lower + volume + below 12h trend
+            elif close[i] < kc_lower[i] and vol_filter and below_trend:
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit conditions: reverse signal when price crosses KAMA
+        # Exit conditions: reverse signal when price crosses EMA20 (middle)
         elif position == 1:
-            if close[i] < kama[i]:  # price crosses below KAMA = exit long
+            if close[i] < ema20[i]:  # price crosses below middle = exit long
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -111,7 +94,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            if close[i] > kama[i]:  # price crosses above KAMA = exit short
+            if close[i] > ema20[i]:  # price crosses above middle = exit short
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -120,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_KAMA_RSI_Volume_Signal"
-timeframe = "12h"
+name = "4h_Keltner_Channel_Breakout_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
