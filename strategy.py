@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,8 +20,6 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate daily pivot points (standard formula)
-    # P = (H + L + C) / 3
-    # R1 = 2*P - L, S1 = 2*P - H
     pivot = (high_1d + low_1d + close_1d) / 3.0
     r1 = 2 * pivot - low_1d
     s1 = 2 * pivot - high_1d
@@ -35,6 +33,7 @@ def generate_signals(prices):
     # Align daily pivot levels to 4h timeframe
     r1_4h = align_htf_to_ltf(prices, df_1d, r1_prev)
     s1_4h = align_htf_to_ltf(prices, df_1d, s1_prev)
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
     
     # Volume confirmation: current volume > 1.5 * 48-period average (4h * 12 = 48h)
     volume_ma48 = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
@@ -61,7 +60,8 @@ def generate_signals(prices):
             np.isnan(atr[i]) or 
             np.isnan(atr_ma20[i]) or 
             np.isnan(r1_4h[i]) or 
-            np.isnan(s1_4h[i])):
+            np.isnan(s1_4h[i]) or 
+            np.isnan(pivot_4h[i])):
             signals[i] = 0.0
             continue
         
@@ -73,33 +73,31 @@ def generate_signals(prices):
         if position == 0:
             # Long: price breaks above R1 with volume and volatility
             if close[i] > r1_4h[i] and volume_filter and volatility_filter:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             # Short: price breaks below S1 with volume and volatility
             elif close[i] < s1_4h[i] and volume_filter and volatility_filter:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit long: price returns below pivot or volatility drops
-            pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
             if close[i] < pivot_4h[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
             # Exit short: price returns above pivot or volatility drops
-            pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
             if close[i] > pivot_4h[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_Pivot_R1_S1_VolVol"
+name = "4h_Pivot_R1_S1_VolVol_v2"
 timeframe = "4h"
 leverage = 1.0
