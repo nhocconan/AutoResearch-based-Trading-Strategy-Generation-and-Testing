@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_HTF_Trend_LTF_Entry_v1
-Trend follows 1d EMA34 direction with 4h Donchian breakout entries and ATR stop.
-Long when: price > 1d EMA34 & breaks above 4h Donchian(20) high & volume > 1.5x MA(20)
-Short when: price < 1d EMA34 & breaks below 4h Donchian(20) low & volume > 1.5x MA(20)
-Exit: trailing stop at 3x ATR from extreme.
-Designed to capture trends while avoiding whipsaw in ranges.
+12h_Donchian_Breakout_VolumeTrend_v1
+Breakout above Donchian(20) high or below Donchian(20) low with volume confirmation and 1d EMA200 trend filter.
+Exit when price returns to Donchian middle (midpoint of 20-period high-low).
+Designed to capture breakouts in trending markets with volume confirmation.
 Target: 50-150 total trades over 4 years (12-37/year).
 """
 
@@ -23,97 +21,94 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1d EMA34 for trend filter ===
+    # === Donchian Channel (20) ===
+    # Upper: highest high of last 20 periods
+    # Lower: lowest low of last 20 periods
+    # Middle: average of upper and lower
+    def rolling_max(arr, window):
+        result = np.full_like(arr, np.nan)
+        for i in range(window-1, len(arr)):
+            result[i] = np.max(arr[i-window+1:i+1])
+        return result
+    
+    def rolling_min(arr, window):
+        result = np.full_like(arr, np.nan)
+        for i in range(window-1, len(arr)):
+            result[i] = np.min(arr[i-window+1:i+1])
+        return result
+    
+    donch_high = rolling_max(high, 20)
+    donch_low = rolling_min(low, 20)
+    donch_mid = (donch_high + donch_low) / 2.0
+    
+    # === Volume confirmation: volume > 1.5x 20-period average volume ===
+    vol_ma = np.full_like(volume, np.nan)
+    for i in range(19, len(volume)):
+        vol_ma[i] = np.mean(volume[i-19:i+1])
+    volume_ratio = volume / (vol_ma + 1e-10)
+    
+    # === 1d EMA200 for trend filter ===
     df_1d = get_htf_data(prices, '1d')
-    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # === 4h Donchian(20) channels ===
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # === ATR(14) for volatility and stop ===
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # === Volume filter: volume > 1.5x 20-period MA ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     signals = np.zeros(n)
     
-    # Warmup period
-    warmup = 50
+    # Warmup period: need 20 for Donchian, 19 for volume MA, 200 for EMA
+    warmup = 200
     
-    # Track position and extreme for trailing stop
+    # Track position state
     position = 0  # 0: flat, 1: long, -1: short
-    long_extreme = 0.0
-    short_extreme = 0.0
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
-            np.isnan(atr[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(donch_high[i]) or 
+            np.isnan(donch_low[i]) or 
+            np.isnan(donch_mid[i]) or 
+            np.isnan(volume_ratio[i]) or 
+            np.isnan(ema_200_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
-            long_extreme = 0.0
-            short_extreme = 0.0
             continue
         
+        # Entry logic: only enter when flat
         if position == 0:
-            # Look for entry signals
-            long_entry = (close[i] > ema34_1d_aligned[i] and 
-                         close[i] > donchian_high[i] and 
-                         volume[i] > 1.5 * vol_ma[i])
-            short_entry = (close[i] < ema34_1d_aligned[i] and 
-                          close[i] < donchian_low[i] and 
-                          volume[i] > 1.5 * vol_ma[i])
-            
-            if long_entry:
+            # Long: price breaks above Donchian high, volume > 1.5x average, price above 1d EMA200
+            if (close[i] > donch_high[i] and 
+                volume_ratio[i] > 1.5 and 
+                close[i] > ema_200_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-                long_extreme = high[i]
-                short_extreme = 0.0
-            elif short_entry:
+                continue
+            # Short: price breaks below Donchian low, volume > 1.5x average, price below 1d EMA200
+            elif (close[i] < donch_low[i] and 
+                  volume_ratio[i] > 1.5 and 
+                  close[i] < ema_200_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
-                short_extreme = low[i]
-                long_extreme = 0.0
-            else:
-                signals[i] = 0.0
+                continue
         
+        # Exit logic: return to Donchian middle
         elif position == 1:
-            # Update long extreme and check trailing stop
-            long_extreme = max(long_extreme, high[i])
-            trailing_stop = long_extreme - 3.0 * atr[i]
-            
-            if close[i] <= trailing_stop:
+            # Exit long: price crosses below Donchian middle
+            if close[i] < donch_mid[i]:
                 signals[i] = 0.0
                 position = 0
-                long_extreme = 0.0
+                continue
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Update short extreme and check trailing stop
-            short_extreme = min(short_extreme, low[i])
-            trailing_stop = short_extreme + 3.0 * atr[i]
-            
-            if close[i] >= trailing_stop:
+            # Exit short: price crosses above Donchian middle
+            if close[i] > donch_mid[i]:
                 signals[i] = 0.0
                 position = 0
-                short_extreme = 0.0
+                continue
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "4h_HTF_Trend_LTF_Entry_v1"
-timeframe = "4h"
+name = "12h_Donchian_Breakout_VolumeTrend_v1"
+timeframe = "12h"
 leverage = 1.0
