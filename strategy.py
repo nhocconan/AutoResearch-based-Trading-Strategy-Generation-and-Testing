@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with volume confirmation and 12h EMA trend filter.
-Long when price breaks above Donchian upper band with volume > 1.5x average and 12h EMA34 rising.
-Short when price breaks below Donchian lower band with volume > 1.5x average and 12h EMA34 falling.
-Exit on opposite Donchian break or volume dry-up. Uses discrete position sizing (0.25) to minimize fee drag.
-Designed to capture trending moves in both bull and bear markets with minimal whipsaws.
-Target: 20-50 trades/year per symbol.
+Hypothesis: 1h timeframe with 4h/1d Camarilla pivot breakout + volume confirmation.
+Long when price breaks above R3 with volume > 1.5x 20-period average.
+Short when price breaks below S3 with volume > 1.5x 20-period average.
+Use 1d ADX > 20 to filter for trending markets and avoid ranging whipsaws.
+Session filter: 08-20 UTC to reduce noise.
+Position sizing: 0.20 for entries.
+Target: 60-150 total trades over 4 years (15-37/year).
+Camarilla pivots provide precise support/resistance levels that work in both bull and bear markets.
 """
 
 import numpy as np
@@ -14,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,73 +24,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period)
-    donchian_window = 20
-    donchian_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    donchian_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    # Pre-compute session filter (08-20 UTC)
+    hours = prices.index.hour  # prices.index is DatetimeIndex
+    in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate volume average (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 0)
+    # Get 1d data for Camarilla pivots and ADX
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Get 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Calculate 1d Camarilla levels (based on previous day)
+    # Typical price = (high + low + close) / 3
+    typical_price = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Calculate 12h EMA34
-    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_12h_rising = np.gradient(ema_12h) > 0  # True when EMA is rising
-    ema_12h_falling = np.gradient(ema_12h) < 0  # True when EMA is falling
+    # Resistance levels: R3 = close + (high - low) * 1.1/2
+    # Support levels: S3 = close - (high - low) * 1.1/2
+    r3 = close_1d + range_1d * 1.1 / 2
+    s3 = close_1d - range_1d * 1.1 / 2
     
-    # Align 12h EMA signals to 4h
-    ema_rising_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_rising)
-    ema_falling_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_falling)
+    # Calculate 1d ADX (14)
+    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / (atr + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / (atr + 1e-10)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align all to 1h
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume filter: 1.5x 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = max(20, 34)  # Donchian and EMA warmup
+    start_idx = 100
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ratio[i]) or np.isnan(ema_rising_aligned[i]) or 
-            np.isnan(ema_falling_aligned[i])):
+        # Skip if any required data is not available or outside session
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long entry: price breaks above Donchian high + volume spike + 12h EMA rising
-            if (close[i] > donchian_high[i] and 
-                vol_ratio[i] > 1.5 and 
-                ema_rising_aligned[i]):
-                signals[i] = 0.25
+            # Long: price breaks above R3 with volume filter and ADX > 20
+            if (close[i] > r3_aligned[i] and 
+                volume_filter[i] and 
+                adx_aligned[i] > 20):
+                signals[i] = 0.20
                 position = 1
-            # Short entry: price breaks below Donchian low + volume spike + 12h EMA falling
-            elif (close[i] < donchian_low[i] and 
-                  vol_ratio[i] > 1.5 and 
-                  ema_falling_aligned[i]):
-                signals[i] = -0.25
+            # Short: price breaks below S3 with volume filter and ADX > 20
+            elif (close[i] < s3_aligned[i] and 
+                  volume_filter[i] and 
+                  adx_aligned[i] > 20):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below Donchian low OR volume dry-up
-            if (close[i] < donchian_low[i] or vol_ratio[i] < 0.5):
+            # Exit long: price falls below S3 or ADX weakens
+            if (close[i] < s3_aligned[i] or 
+                adx_aligned[i] < 15):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: price breaks above Donchian high OR volume dry-up
-            if (close[i] > donchian_high[i] or vol_ratio[i] < 0.5):
+            # Exit short: price rises above R3 or ADX weakens
+            if (close[i] > r3_aligned[i] or 
+                adx_aligned[i] < 15):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Donchian20_Volume_EMA12h"
-timeframe = "4h"
+name = "1h_1dCamarilla_R3S3_Volume_ADX_Session"
+timeframe = "1h"
 leverage = 1.0
