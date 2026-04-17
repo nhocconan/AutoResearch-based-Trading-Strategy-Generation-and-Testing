@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,94 +13,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Bollinger Bands
+    # Get daily data for pivot points (1d)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily Bollinger Bands (20, 2.0)
-    bb_period = 20
-    bb_std = 2.0
+    # Calculate daily pivot points (standard formula)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = 2 * pivot_1d - low_1d
+    s1_1d = 2 * pivot_1d - high_1d
     
-    # Middle band: SMA of close
-    sma_20 = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).mean().values
-    # Standard deviation
-    std_20 = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).std().values
-    # Upper and lower bands
-    upper_bb = sma_20 + (bb_std * std_20)
-    lower_bb = sma_20 - (bb_std * std_20)
+    # Align daily pivot levels to 4h timeframe (use previous day's levels)
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Bollinger Band Width: (Upper - Lower) / Middle
-    bb_width = (upper_bb - lower_bb) / sma_20
-    # Handle division by zero
-    bb_width = np.where(sma_20 == 0, 0, bb_width)
-    
-    # Align Bollinger Band Width to 12h timeframe
-    bb_width_12h = align_htf_to_ltf(prices, df_1d, bb_width)
-    
-    # Bollinger Band Percentile (20-period) for regime detection
-    bb_width_percentile = pd.Series(bb_width_12h).rolling(window=20, min_periods=20).rank(pct=True).values * 100
-    
-    # Bollinger Band Squeeze detection: low volatility regime
-    squeeze_threshold = 20  # Below 20th percentile = squeeze
-    bb_squeeze = bb_width_percentile < squeeze_threshold
-    
-    # Bollinger Band Expansion detection: high volatility regime
-    expansion_threshold = 80  # Above 80th percentile = expansion
-    bb_expansion = bb_width_percentile > expansion_threshold
-    
-    # Price position within Bollinger Bands
-    # Align BB bands to 12h
-    sma_20_12h = align_htf_to_ltf(prices, df_1d, sma_20)
-    upper_bb_12h = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_12h = align_htf_to_ltf(prices, df_1d, lower_bb)
-    
-    # %B: (Price - Lower) / (Upper - Lower)
-    bb_percent_b = (close - lower_bb_12h) / (upper_bb_12h - lower_bb_12h)
-    # Avoid division by zero
-    bb_range = upper_bb_12h - lower_bb_12h
-    bb_percent_b = np.where(bb_range == 0, 0.5, bb_percent_b)
-    
-    # Volume filter: current volume > 1.3 * 20-period average
+    # Volume filter: current volume > 1.5 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Choppiness index filter (trending market filter)
+    atr_period = 14
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]  # First TR
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    
+    # Avoid division by zero
+    atr_safe = np.where(atr == 0, 1e-10, atr)
+    chop = 100 * np.log10((highest_high - lowest_low) / (atr_safe * 14)) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 20  # Need sufficient data for calculations
+    start_idx = 20  # Need sufficient data for volume MA and chop
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(bb_percent_b[i]) or np.isnan(volume_ma20[i]) or 
-            np.isnan(bb_squeeze[i]) or np.isnan(bb_expansion[i])):
+        if (np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
+            np.isnan(volume_ma20[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter
-        volume_filter = volume[i] > (1.3 * volume_ma20[i])
+        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        
+        # Choppiness filter: only trade in trending markets (CHOP < 38.2)
+        trend_filter = chop[i] < 38.2
         
         if position == 0:
-            # Long entry: price below lower BB (oversold) + BB expansion (volatility increase) + volume
-            if bb_percent_b[i] < 0.1 and bb_expansion[i] and volume_filter:
+            # Long breakout: price breaks above R1 with volume and trend filter
+            if close[i] > r1_4h[i] and volume_filter and trend_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price above upper BB (overbought) + BB expansion + volume
-            elif bb_percent_b[i] > 0.9 and bb_expansion[i] and volume_filter:
+            # Short breakdown: price breaks below S1 with volume and trend filter
+            elif close[i] < s1_4h[i] and volume_filter and trend_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses above middle band or squeeze ends
-            if bb_percent_b[i] > 0.5 or not bb_expansion[i]:
+            # Exit long: price falls below S1
+            if close[i] < s1_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses below middle band or squeeze ends
-            if bb_percent_b[i] < 0.5 or not bb_expansion[i]:
+            # Exit short: price rises above R1
+            if close[i] > r1_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -108,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_BollingerBands_Squeeze_Expansion_Volume"
-timeframe = "12h"
+name = "4h_DailyPivot_Breakout_Volume_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
