@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Williams %R + 1d Volume Spike + ADX Regime Filter.
-Long when Williams %R < -80 (oversold) + 1d volume > 1.5x 20-period average + ADX < 25 (low trend strength = mean reversion favorable).
-Short when Williams %R > -20 (overbought) + same volume + ADX conditions.
-Exit when Williams %R reverses (> -50 for long exit, < -50 for short exit) or volume/spike condition fails.
-Uses 1d for volume spike and ADX regime, 4h for Williams %R.
-Target: 20-60 total trades over 4 years (5-15/year) to avoid fee drag.
+Hypothesis: 1d Donchian(20) breakout with 1w trend filter + volume confirmation.
+Long when price breaks above 20-day high AND 1w close > 1w EMA34 AND volume > 1.5x 20-day avg volume.
+Short when price breaks below 20-day low AND 1w close < 1w EMA34 AND volume > 1.5x 20-day avg volume.
+Exit on opposite Donchian breakout or volume drop below avg volume.
+Uses 1d for price/volume, 1w for trend filter.
+Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
@@ -20,63 +20,36 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for regime filters (volume spike, ADX)
+    # Get 1d data for Donchian and volume
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d ADX (14-period)
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(high[i] - high[i-1], 0)
-            minus_dm[i] = max(low[i-1] - low[i], 0)
-            if plus_dm[i] < minus_dm[i]:
-                plus_dm[i] = 0
-            if minus_dm[i] < plus_dm[i]:
-                minus_dm[i] = 0
-            if plus_dm[i] == minus_dm[i]:
-                plus_dm[i] = 0
-                minus_dm[i] = 0
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Wilder's smoothing
-        atr = np.zeros_like(tr)
-        atr[period] = np.mean(tr[1:period+1])
-        for i in range(period+1, len(tr)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        
-        plus_di = 100 * (pd.Series(plus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr)
-        minus_di = 100 * (pd.Series(minus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr)
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = pd.Series(dx).ewm(alpha=1/period, adjust=False).mean().values
-        return adx
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d volume spike: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_1d > (1.5 * vol_ma_20)
+    # Calculate 20-day Donchian channels
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1d ADX
-    adx_14 = calculate_adx(high_1d, low_1d, close_1d, 14)
+    # Calculate 20-day average volume
+    avg_volume = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align 1d indicators
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
-    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
+    # Calculate 1w EMA34 for trend filter
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 4h Williams %R (14-period)
-    def calculate_williams_r(high, low, close, period=14):
-        highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-        lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-        wr = -100 * (highest_high - close) / (highest_high - lowest_low)
-        return wr
+    # Align 1d indicators to lower timeframe (prices index)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    avg_volume_aligned = align_htf_to_ltf(prices, df_1d, avg_volume)
     
-    wr_14 = calculate_williams_r(high, low, close, 14)
+    # Align 1w indicators
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -85,44 +58,48 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(volume_spike_aligned[i]) or 
-            np.isnan(adx_14_aligned[i]) or 
-            np.isnan(wr_14[i])):
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(avg_volume_aligned[i]) or 
+            np.isnan(ema34_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime conditions
-        vol_spike = volume_spike_aligned[i] > 0.5  # boolean from aligned float
-        low_adx = adx_14_aligned[i] < 25  # low trend strength favors mean reversion
+        price = close[i]
+        vol = volume[i]
+        donchian_high_val = donchian_high_aligned[i]
+        donchian_low_val = donchian_low_aligned[i]
+        avg_vol_val = avg_volume_aligned[i]
+        ema34_1w_val = ema34_1w_aligned[i]
         
-        # Williams %R levels
-        wr_val = wr_14[i]
-        oversold = wr_val < -80
-        overbought = wr_val > -20
-        exit_long = wr_val > -50  # exit long when recovering from oversold
-        exit_short = wr_val < -50  # exit short when declining from overbought
+        # Volume confirmation: current volume > 1.5x 20-day average
+        volume_confirm = vol > 1.5 * avg_vol_val
+        
+        # Trend filter: 1w close > 1w EMA34 for long bias, < for short bias
+        trend_long = close_1w[i] > ema34_1w_val  # Note: close_1w[i] is current 1w close (may be forming)
+        trend_short = close_1w[i] < ema34_1w_val
         
         if position == 0:
-            # Long: oversold + volume spike + low ADX (mean reversion setup)
-            if oversold and vol_spike and low_adx:
+            # Long: price breaks above Donchian high + volume confirm + trend long
+            if price > donchian_high_val and volume_confirm and trend_long:
                 signals[i] = 0.25
                 position = 1
-            # Short: overbought + volume spike + low ADX
-            elif overbought and vol_spike and low_adx:
+            # Short: price breaks below Donchian low + volume confirm + trend short
+            elif price < donchian_low_val and volume_confirm and trend_short:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Williams %R recovers above -50 OR volume spike ends
-            if exit_long or not vol_spike:
+            # Exit long: price breaks below Donchian low OR volume drops below average
+            if price < donchian_low_val or vol < avg_vol_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Williams %R declines below -50 OR volume spike ends
-            if exit_short or not vol_spike:
+            # Exit short: price breaks above Donchian high OR volume drops below average
+            if price > donchian_high_val or vol < avg_vol_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -130,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_1dVolumeSpike_ADXRegime"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA34_Volume_Confirm"
+timeframe = "1d"
 leverage = 1.0
