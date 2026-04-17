@@ -1,12 +1,13 @@
-# 4h Donchian Breakout + 12h EMA Trend + Volume Confirmation + ATR Stoploss
-# Long when price breaks above Donchian(20) high + 12h EMA34 rising + volume > 1.5x 4h volume SMA(20)
-# Short when price breaks below Donchian(20) low + 12h EMA34 falling + volume > 1.5x 4h volume SMA(20)
-# Exit when price returns to Donchian midpoint or EMA direction flips
-# Uses volume confirmation and EMA trend filter to reduce false breakouts
-# Designed for 4h timeframe with 12h trend filter for multi-timeframe confluence
-# Target: 20-50 trades/year per symbol to avoid fee drag
-
 #!/usr/bin/env python3
+"""
+1h RSI Pullback with 4h Trend Filter + Volume Spike
+Long: Price pulls back to 4h EMA21 (pullback < 1.5%) + RSI(14) < 30 + volume > 1.5x 1h volume SMA(20)
+Short: Price rallies to 4h EMA21 (pullback < 1.5%) + RSI(14) > 70 + volume > 1.5x 1h volume SMA(20)
+Exit: Opposite RSI condition or price moves >1% away from 4h EMA21
+Uses 4h EMA for trend direction and 1h for precise entry timing with mean reversion.
+Target: 60-150 total trades over 4 years (15-37/year)
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -21,81 +22,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian(20) channels
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2
+    # Get 4h data for EMA trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # Get 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Calculate 4h EMA(21)
+    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
     
-    # Calculate EMA(34) on 12h
-    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate 1h RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_14 = 100 - (100 / (1 + rs))
+    rsi_14 = rsi_14.fillna(50).values  # neutral when undefined
     
-    # Calculate 4h volume SMA(20)
-    vol_sma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR(14) for dynamic stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate 1h volume SMA(20)
+    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
-    entry_price = 0.0
     
-    start_idx = max(20, 34)  # need Donchian and EMA
+    start_idx = max(30, 21)  # need RSI and volume SMA
     
     for i in range(start_idx, n):
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_sma_4h[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(rsi_14[i]) or
+            np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_sma_val = vol_sma_4h[i]
-        ema_val = ema_12h_aligned[i]
-        ema_prev = ema_12h_aligned[i-1] if i > 0 else ema_val
-        atr_val = atr[i]
+        vol_sma_val = vol_sma_20[i]
+        rsi_val = rsi_14[i]
+        ema_21_val = ema_21_4h_aligned[i]
+        
+        # Calculate pullback percentage to 4h EMA21
+        pullback_pct = abs(price - ema_21_val) / ema_21_val * 100
         
         if position == 0:
-            # Long: break above Donchian high + EMA rising + volume spike
-            if price > donch_high[i-1] and ema_val > ema_prev and vol > 1.5 * vol_sma_val:
-                signals[i] = 0.25
+            # Long: Pullback to 4h EMA21 + RSI oversold + volume spike
+            if pullback_pct < 1.5 and price <= ema_21_val and rsi_val < 30 and vol > 1.5 * vol_sma_val:
+                signals[i] = 0.20
                 position = 1
-                entry_price = price
-            # Short: break below Donchian low + EMA falling + volume spike
-            elif price < donch_low[i-1] and ema_val < ema_prev and vol > 1.5 * vol_sma_val:
-                signals[i] = -0.25
+            # Short: Rally to 4h EMA21 + RSI overbought + volume spike
+            elif pullback_pct < 1.5 and price >= ema_21_val and rsi_val > 70 and vol > 1.5 * vol_sma_val:
+                signals[i] = -0.20
                 position = -1
-                entry_price = price
         
         elif position == 1:
-            # Long exit: price returns to midpoint OR EMA flips down OR stoploss hit
-            if price < donch_mid[i] or ema_val < ema_prev or price < entry_price - 2.0 * atr_val:
+            # Long exit: RSI > 50 or price moves >1% above EMA21
+            if rsi_val > 50 or price > ema_21_val * 1.01:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price returns to midpoint OR EMA flips up OR stoploss hit
-            if price > donch_mid[i] or ema_val > ema_prev or price > entry_price + 2.0 * atr_val:
+            # Short exit: RSI < 50 or price moves >1% below EMA21
+            if rsi_val < 50 or price < ema_21_val * 0.99:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Donchian_Breakout_12hEMA34_VolumeSpike_ATRStop"
-timeframe = "4h"
+name = "1h_RSI_Pullback_4hEMA21_VolumeSpike"
+timeframe = "1h"
 leverage = 1.0
