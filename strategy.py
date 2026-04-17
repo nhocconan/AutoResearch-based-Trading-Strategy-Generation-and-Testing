@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_Pivot_R1S1_Breakout_1dEMA34_VolumeConfirm
-Strategy: Camarilla pivot R1/S1 breakout with 1d EMA34 trend filter and volume confirmation.
-Long: Price breaks above R1 + close > 1d EMA34 + volume > 1.5x 20-period average
-Short: Price breaks below S1 + close < 1d EMA34 + volume > 1.5x 20-period average
-Exit: Price returns to pivot point (PP) or volume drops below average
+6h_Pivot_R1_S1_Breakout_Volume_WeeklyTrend_Filter
+Strategy: 6h breakout above R1 or below S1 with volume confirmation, filtered by weekly trend.
+Uses 1d Pivot Points (R1/S1) and 1w EMA(20) for trend filter.
+Long: break above R1 + volume > 1.5x avg + price > weekly EMA20
+Short: break below S1 + volume > 1.5x avg + price < weekly EMA20
+Exit: return to pivot point (PP) or trend reversal
 Position size: 0.25
-Designed to capture breakouts with trend alignment and volume confirmation.
-Timeframe: 4h
+Designed to capture institutional breakouts with weekly trend alignment.
+Timeframe: 6h
 """
 
 import numpy as np
@@ -16,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,42 +25,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA34 for trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate Camarilla pivot levels from previous day (OHLC)
-    # Pivot points calculated from previous day's OHLC
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    
-    # First day: use first available values
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
-    
-    # Calculate pivot point (PP)
-    pp = (prev_high + prev_low + prev_close) / 3.0
-    
-    # Calculate Camarilla levels
-    range_prev = prev_high - prev_low
-    r1 = pp + (range_prev * 1.1 / 12)
-    s1 = pp - (range_prev * 1.1 / 12)
-    
-    # Volume confirmation (20-period MA)
+    # Calculate 20-period volume MA for confirmation
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Get 1d data for pivot points (using previous day's OHLC)
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate pivot points from previous day's OHLC
+    # Pivot Point (PP) = (High + Low + Close) / 3
+    # R1 = 2*PP - Low
+    # S1 = 2*PP - High
+    pp = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    r1 = 2 * pp - df_1d['low']
+    s1 = 2 * pp - df_1d['high']
+    
+    # Align pivot levels to 6h timeframe (they represent previous day's levels)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp.values)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
+    
+    # Get 1w data for trend filter (EMA20)
+    df_1w = get_htf_data(prices, '1w')
+    # Calculate weekly EMA20
+    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Align weekly EMA to 6h timeframe
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Wait for EMA34 and volume MA
+    start_idx = max(20, 20)  # Need volume MA20 and weekly EMA warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r1[i]) or 
-            np.isnan(s1[i]) or np.isnan(pp[i]) or np.isnan(volume_ma20[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(volume_ma20[i]) or 
+            np.isnan(ema_20_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -68,26 +69,30 @@ def generate_signals(prices):
         
         # Entry conditions
         if position == 0:
-            # Long: Price breaks above R1 + trend up + volume
-            if (close[i] > r1[i] and close[i] > ema_34_1d_aligned[i] and volume_filter):
+            # Long: break above R1 + volume + above weekly EMA20
+            if (close[i] > r1_aligned[i] and 
+                volume_filter and 
+                close[i] > ema_20_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 + trend down + volume
-            elif (close[i] < s1[i] and close[i] < ema_34_1d_aligned[i] and volume_filter):
+            # Short: break below S1 + volume + below weekly EMA20
+            elif (close[i] < s1_aligned[i] and 
+                  volume_filter and 
+                  close[i] < ema_20_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price returns to pivot point or volume drops
-            if close[i] < pp[i] or not volume_filter:
+            # Exit long: return to pivot point or trend reversal (below weekly EMA)
+            if close[i] <= pp_aligned[i] or close[i] < ema_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price returns to pivot point or volume drops
-            if close[i] > pp[i] or not volume_filter:
+            # Exit short: return to pivot point or trend reversal (above weekly EMA)
+            if close[i] >= pp_aligned[i] or close[i] > ema_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -95,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_Pivot_R1S1_Breakout_1dEMA34_VolumeConfirm"
-timeframe = "4h"
+name = "6h_Pivot_R1_S1_Breakout_Volume_WeeklyTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
