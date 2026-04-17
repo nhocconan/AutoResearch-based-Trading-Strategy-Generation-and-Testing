@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,82 +13,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Williams Alligator (1d)
+    # Get daily data for pivot points (1d)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Williams Alligator: Jaw (13-period, offset 8), Teeth (8-period, offset 5), Lips (5-period, offset 3)
-    jaw_len, teeth_len, lips_len = 13, 8, 5
-    jaw_offset, teeth_offset, lips_offset = 8, 5, 3
+    # Calculate daily pivot points (standard formula)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = 2 * pivot_1d - low_1d
+    s1_1d = 2 * pivot_1d - high_1d
     
-    # Calculate smoothed median prices
-    median_price_1d = (high_1d + low_1d) / 2
+    # Align daily pivot levels to 12h timeframe (use previous day's levels)
+    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Jaw: SMMA of median price (13 periods, offset 8)
-    jaw = pd.Series(median_price_1d).rolling(window=jaw_len, min_periods=jaw_len).mean()
-    jaw = jaw.shift(jaw_offset)
-    
-    # Teeth: SMMA of median price (8 periods, offset 5)
-    teeth = pd.Series(median_price_1d).rolling(window=teeth_len, min_periods=teeth_len).mean()
-    teeth = teeth.shift(teeth_offset)
-    
-    # Lips: SMMA of median price (5 periods, offset 3)
-    lips = pd.Series(median_price_1d).rolling(window=lips_len, min_periods=lips_len).mean()
-    lips = lips.shift(lips_offset)
-    
-    # Align Alligator lines to 6h timeframe
-    jaw_6h = align_htf_to_ltf(prices, df_1d, jaw.values)
-    teeth_6h = align_htf_to_ltf(prices, df_1d, teeth.values)
-    lips_6h = align_htf_to_ltf(prices, df_1d, lips.values)
-    
-    # Volume filter: current volume > 1.3 * 20-period average
+    # Volume filter: current volume > 1.5 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Choppiness index filter (trending market filter)
+    atr_period = 14
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]  # First TR
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    
+    # Avoid division by zero
+    atr_safe = np.where(atr == 0, 1e-10, atr)
+    chop = 100 * np.log10((highest_high - lowest_low) / (atr_safe * 14)) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = max(jaw_len + jaw_offset, teeth_len + teeth_offset, lips_len + lips_offset, 20)
+    start_idx = 20  # Need sufficient data for volume MA and chop
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(jaw_6h[i]) or np.isnan(teeth_6h[i]) or np.isnan(lips_6h[i]) or 
-            np.isnan(volume_ma20[i])):
+        if (np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or
+            np.isnan(volume_ma20[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter
-        volume_filter = volume[i] > (1.3 * volume_ma20[i])
+        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        
+        # Choppiness filter: only trade in trending markets (CHOP < 38.2)
+        trend_filter = chop[i] < 38.2
         
         if position == 0:
-            # Long: Lips above Teeth above Teeth (bullish alignment) with volume
-            if lips_6h[i] > teeth_6h[i] and teeth_6h[i] > jaw_6h[i] and volume_filter:
-                signals[i] = 0.25
+            # Long breakout: price breaks above R1 with volume and trend filter
+            if close[i] > r1_12h[i] and volume_filter and trend_filter:
+                signals[i] = 0.30
                 position = 1
-            # Short: Lips below Teeth below Jaw (bearish alignment) with volume
-            elif lips_6h[i] < teeth_6h[i] and teeth_6h[i] < jaw_6h[i] and volume_filter:
-                signals[i] = -0.25
+            # Short breakdown: price breaks below S1 with volume and trend filter
+            elif close[i] < s1_12h[i] and volume_filter and trend_filter:
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
-            # Exit long: Lips crosses below Teeth (bullish alignment broken)
-            if lips_6h[i] < teeth_6h[i]:
+            # Exit long: price falls below S1
+            if close[i] < s1_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Exit short: Lips crosses above Teeth (bearish alignment broken)
-            if lips_6h[i] > teeth_6h[i]:
+            # Exit short: price rises above R1
+            if close[i] > r1_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "6h_WilliamsAlligator_Alignment_VolumeFilter"
-timeframe = "6h"
+name = "12h_DailyPivot_Breakout_Volume_TrendFilter"
+timeframe = "12h"
 leverage = 1.0
