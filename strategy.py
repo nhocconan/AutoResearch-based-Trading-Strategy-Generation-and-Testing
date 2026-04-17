@@ -20,6 +20,10 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate daily pivot points (standard formula)
+    # P = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
     pivot = (high_1d + low_1d + close_1d) / 3.0
     r1 = 2 * pivot - low_1d
     s1 = 2 * pivot - high_1d
@@ -42,15 +46,15 @@ def generate_signals(prices):
     r3_prev[0] = np.nan
     s3_prev[0] = np.nan
     
-    # Align daily pivot levels to 12h timeframe
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1_prev)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1_prev)
-    r2_12h = align_htf_to_ltf(prices, df_1d, r2_prev)
-    s2_12h = align_htf_to_ltf(prices, df_1d, s2_prev)
-    r3_12h = align_htf_to_ltf(prices, df_1d, r3_prev)
-    s3_12h = align_htf_to_ltf(prices, df_1d, s3_prev)
+    # Align daily pivot levels to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1_prev)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1_prev)
+    r2_4h = align_htf_to_ltf(prices, df_1d, r2_prev)
+    s2_4h = align_htf_to_ltf(prices, df_1d, s2_prev)
+    r3_4h = align_htf_to_ltf(prices, df_1d, r3_prev)
+    s3_4h = align_htf_to_ltf(prices, df_1d, s3_prev)
     
-    # Volume confirmation: current volume > 1.5 * 4-period average (12h * 4 = 24h)
+    # Volume confirmation: current volume > 1.5 * 4-period average (4h * 4 = 16h)
     volume_ma4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     # ATR filter to avoid low volatility environments
@@ -74,10 +78,10 @@ def generate_signals(prices):
         if (np.isnan(volume_ma4[i]) or 
             np.isnan(atr[i]) or 
             np.isnan(atr_ma10[i]) or 
-            np.isnan(r1_12h[i]) or 
-            np.isnan(s1_12h[i]) or
-            np.isnan(r3_12h[i]) or 
-            np.isnan(s3_12h[i])):
+            np.isnan(r1_4h[i]) or 
+            np.isnan(s1_4h[i]) or
+            np.isnan(r3_4h[i]) or 
+            np.isnan(s3_4h[i])):
             signals[i] = 0.0
             continue
         
@@ -88,32 +92,40 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price breaks above R3 with volume and volatility (strong breakout)
-            if close[i] > r3_12h[i] and volume_filter and volatility_filter:
-                signals[i] = 0.30
+            if close[i] > r3_4h[i] and volume_filter and volatility_filter:
+                signals[i] = 0.25
                 position = 1
             # Short: price breaks below S3 with volume and volatility (strong breakdown)
-            elif close[i] < s3_12h[i] and volume_filter and volatility_filter:
-                signals[i] = -0.30
+            elif close[i] < s3_4h[i] and volume_filter and volatility_filter:
+                signals[i] = -0.25
+                position = -1
+            # Long reversal: price rejects S1 and moves back above it (bullish rejection)
+            elif close[i] > s1_4h[i] and low[i] < s1_4h[i] and volume_filter and volatility_filter:
+                signals[i] = 0.25
+                position = 1
+            # Short reversal: price rejects R1 and moves back below it (bearish rejection)
+            elif close[i] < r1_4h[i] and high[i] > r1_4h[i] and volume_filter and volatility_filter:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns below R2 or volatility drops
-            if close[i] < r2_12h[i] or not volatility_filter:
+            # Exit long: price returns below R1 or volatility drops
+            if close[i] < r1_4h[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns above S2 or volatility drops
-            if close[i] > s2_12h[i] or not volatility_filter:
+            # Exit short: price returns above S1 or volatility drops
+            if close[i] > s1_4h[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "12h_Pivot_R3_S3_Breakout_R2_S2_Exit_Vol"
-timeframe = "12h"
+name = "4h_Pivot_R3_S3_Breakout_Rejection_Vol"
+timeframe = "4h"
 leverage = 1.0
