@@ -13,35 +13,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Williams %R (14-period) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 12h Williams %R (14-period) ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
     # Calculate Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = np.full_like(high_1d, np.nan)
-    lowest_low = np.full_like(low_1d, np.nan)
+    highest_high = np.full_like(high_12h, np.nan)
+    lowest_low = np.full_like(low_12h, np.nan)
     period = 14
-    for i in range(len(high_1d)):
+    for i in range(len(high_12h)):
         if i >= period - 1:
-            highest_high[i] = np.max(high_1d[i-(period-1):i+1])
-            lowest_low[i] = np.min(low_1d[i-(period-1):i+1])
+            highest_high[i] = np.max(high_12h[i-(period-1):i+1])
+            lowest_low[i] = np.min(low_12h[i-(period-1):i+1])
         elif i > 0:
-            highest_high[i] = np.max(high_1d[0:i+1])
-            lowest_low[i] = np.min(low_1d[0:i+1])
+            highest_high[i] = np.max(high_12h[0:i+1])
+            lowest_low[i] = np.min(low_12h[0:i+1])
         else:
-            highest_high[i] = high_1d[0]
-            lowest_low[i] = low_1d[0]
+            highest_high[i] = high_12h[0]
+            lowest_low[i] = low_12h[0]
     
-    williams_r = np.full_like(close_1d, np.nan)
-    for i in range(len(close_1d)):
+    williams_r = np.full_like(close_12h, np.nan)
+    for i in range(len(close_12h)):
         if highest_high[i] != lowest_low[i]:
-            williams_r[i] = (highest_high[i] - close_1d[i]) / (highest_high[i] - lowest_low[i]) * -100
+            williams_r[i] = (highest_high[i] - close_12h[i]) / (highest_high[i] - lowest_low[i]) * -100
         else:
             williams_r[i] = -50  # neutral when no range
     
-    # === 1d Williams %R smoothing (3-period) to reduce noise ===
+    # === 12h Williams %R smoothing (3-period) to reduce noise ===
     williams_r_smooth = np.full_like(williams_r, np.nan)
     for i in range(len(williams_r)):
         if i >= 2:
@@ -51,22 +51,22 @@ def generate_signals(prices):
         else:
             williams_r_smooth[i] = williams_r[0]
     
-    # === 1d EMA(34) for trend filter ===
-    ema_34 = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 34:
-        ema_34[33] = np.mean(close_1d[:34])  # seed
+    # === 12h EMA(34) for trend filter ===
+    ema_34 = np.full_like(close_12h, np.nan)
+    if len(close_12h) >= 34:
+        ema_34[33] = np.mean(close_12h[:34])  # seed
         alpha = 2 / (34 + 1)
-        for i in range(34, len(close_1d)):
-            ema_34[i] = alpha * close_1d[i] + (1 - alpha) * ema_34[i-1]
+        for i in range(34, len(close_12h)):
+            ema_34[i] = alpha * close_12h[i] + (1 - alpha) * ema_34[i-1]
     else:
-        for i in range(len(close_1d)):
-            ema_34[i] = np.mean(close_1d[:i+1]) if i >= 0 else close_1d[0]
+        for i in range(len(close_12h)):
+            ema_34[i] = np.mean(close_12h[:i+1]) if i >= 0 else close_12h[0]
     
-    # === Align indicators to 12h timeframe ===
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r_smooth)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # === Align indicators to 4h timeframe ===
+    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r_smooth)
+    ema_34_aligned = align_htf_to_ltf(prices, df_12h, ema_34)
     
-    # === 12h Volume confirmation ===
+    # === 4h Volume confirmation ===
     # Calculate 20-period average volume
     vol_ma_20 = np.full_like(volume, np.nan)
     for i in range(len(volume)):
@@ -141,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsR_EMA34_VolumeFilter_v1"
-timeframe = "12h"
+name = "4h_WilliamsR_EMA34_VolumeFilter_v1"
+timeframe = "4h"
 leverage = 1.0
