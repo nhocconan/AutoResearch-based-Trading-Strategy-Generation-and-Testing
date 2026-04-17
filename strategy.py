@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,82 +13,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points (1d)
+    # Get weekly data for trend filter (1w)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # Weekly EMA34 for trend
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    
+    # Daily close for Donchian breakout
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate daily pivot points (standard formula)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
-    r2_1d = pivot_1d + (high_1d - low_1d)
-    s2_1d = pivot_1d - (high_1d - low_1d)
+    # Daily Donchian channels (20-period)
+    donch_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
     
-    # Align daily pivot levels to 4h timeframe (use previous day's levels)
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_4h = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_4h = align_htf_to_ltf(prices, df_1d, s2_1d)
-    
-    # Volume filter: current volume > 1.5 * 20-period average
+    # Volume filter: current volume > 1.5 * 20-day average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Choppiness index filter (trending market filter)
-    # CHOP > 61.8 = ranging, CHOP < 38.2 = trending
-    atr_period = 14
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]  # First TR
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
-    
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Avoid division by zero
-    atr_safe = np.where(atr == 0, 1e-10, atr)
-    chop = 100 * np.log10((highest_high - lowest_low) / (atr_safe * 14)) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 20  # Need sufficient data for volume MA and chop
+    start_idx = 30  # Need sufficient data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
-            np.isnan(r2_4h[i]) or np.isnan(s2_4h[i]) or np.isnan(volume_ma20[i]) or np.isnan(chop[i])):
+        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
+            np.isnan(donch_low_aligned[i]) or np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter
         volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
-        # Choppiness filter: only trade in trending markets (CHOP < 38.2)
-        trend_filter = chop[i] < 38.2
-        
         if position == 0:
-            # Long breakout: price breaks above R1 with volume and trend filter
-            if close[i] > r1_4h[i] and volume_filter and trend_filter:
+            # Long: price breaks above weekly EMA34 and daily Donchian high with volume
+            if close[i] > ema34_1w_aligned[i] and close[i] > donch_high_aligned[i] and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below S1 with volume and trend filter
-            elif close[i] < s1_4h[i] and volume_filter and trend_filter:
+            # Short: price breaks below weekly EMA34 and daily Donchian low with volume
+            elif close[i] < ema34_1w_aligned[i] and close[i] < donch_low_aligned[i] and volume_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls below S2 (deeper level) OR chop increases (range developing)
-            if close[i] < s2_4h[i] or chop[i] > 61.8:
+            # Exit long: price falls below weekly EMA34
+            if close[i] < ema34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises above R2 OR chop increases (range developing)
-            if close[i] > r2_4h[i] or chop[i] > 61.8:
+            # Exit short: price rises above weekly EMA34
+            if close[i] > ema34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,6 +81,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyPivot_Breakout_Volume_TrendFilter"
-timeframe = "4h"
+name = "1d_WeeklyEMA34_DailyDonchian_Breakout_Volume"
+timeframe = "1d"
 leverage = 1.0
