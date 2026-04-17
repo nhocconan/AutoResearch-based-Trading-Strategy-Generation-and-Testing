@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h timeframe with 1d ATR-based volatility expansion filter + Donchian(20) breakout + volume confirmation.
-Long when price breaks above 20-day high with ATR(7)/ATR(30) > 1.5 (volatility expansion) and volume > 1.5x 20-period volume average.
-Short when price breaks below 20-day low with ATR(7)/ATR(30) > 1.5 and volume > 1.5x 20-period volume average.
-Volatility expansion helps capture strong momentum moves after consolidation, working in both bull and bear markets.
-ATR stoploss exits when price retraces 2*ATR from extreme.
-Designed for fewer, higher-quality trades to avoid fee drag.
+Hypothesis: 12h timeframe with 1d Williams %R filter + 12h Donchian(20) breakout + volume confirmation.
+Long when price breaks above 20-period high with 1d Williams %R < -80 (oversold) and volume > 1.5x 20-period volume average.
+Short when price breaks below 20-period low with 1d Williams %R > -20 (overbought) and volume > 1.5x 20-period volume average.
+Williams %R on daily timeframe helps identify overextended moves in the primary trend, increasing probability of continuation breakouts.
+Designed to work in bull markets (breakout from oversold) and bear markets (breakdown from overbought).
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,98 +21,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR calculation
+    # Get 1d data for Williams %R and volume
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d ATR(7) and ATR(30)
-    def atr(high_vals, low_vals, close_vals, window):
-        tr1 = high_vals - low_vals
-        tr2 = np.abs(high_vals - np.roll(close_vals, 1))
-        tr3 = np.abs(low_vals - np.roll(close_vals, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]  # first period TR is just high-low
-        atr_vals = pd.Series(tr).ewm(span=window, adjust=False, min_periods=window).mean().values
-        return atr_vals
+    # Calculate 1d Williams %R (14-period)
+    def williams_r(high_vals, low_vals, close_vals, window):
+        highest_high = pd.Series(high_vals).rolling(window=window, min_periods=window).max().values
+        lowest_low = pd.Series(low_vals).rolling(window=window, min_periods=window).min().values
+        wr = -100 * (highest_high - close_vals) / (highest_high - lowest_low)
+        # Handle division by zero when highest_high == lowest_low
+        wr = np.where((highest_high - lowest_low) == 0, -50, wr)
+        return wr
     
-    atr_7_1d = atr(high_1d, low_1d, close_1d, 7)
-    atr_30_1d = atr(high_1d, low_1d, close_1d, 30)
+    wr_14_1d = williams_r(high_1d, low_1d, close_1d, 14)
     
-    # Calculate 1d Donchian(20) channels
+    # Calculate 12h Donchian(20) channels
     def donchian_channel(high_vals, low_vals, window):
         upper = pd.Series(high_vals).rolling(window=window, min_periods=window).max().values
         lower = pd.Series(low_vals).rolling(window=window, min_periods=window).min().values
         return upper, lower
     
-    donchian_upper, donchian_lower = donchian_channel(high_1d, low_1d, 20)
+    donchian_upper, donchian_lower = donchian_channel(high, low, 20)
     
-    # Calculate 1d volume 20-period average
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate 12h volume 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align all to primary timeframe (4h)
-    atr_7_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_7_1d)
-    atr_30_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_30_1d)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Align all to primary timeframe (12h)
+    wr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, wr_14_1d)
+    donchian_upper_aligned = align_htf_to_ltf(prices, prices, donchian_upper)  # same TF
+    donchian_lower_aligned = align_htf_to_ltf(prices, prices, donchian_lower)  # same TF
+    vol_ma_20_aligned = align_htf_to_ltf(prices, prices, vol_ma_20)  # same TF
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    atr_multiplier = 2.0  # ATR multiplier for stoploss
-    long_extreme = 0.0    # track highest high since entering long
-    short_extreme = 0.0   # track lowest low since entering short
     
-    start_idx = 40  # need enough for ATR and Donchian
+    start_idx = 200  # need enough for Williams %R and Donchian
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(atr_7_1d_aligned[i]) or 
-            np.isnan(atr_30_1d_aligned[i]) or 
+        if (np.isnan(wr_14_1d_aligned[i]) or 
             np.isnan(donchian_upper_aligned[i]) or 
             np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i])):
+            np.isnan(vol_ma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility expansion: ATR(7) > 1.5 * ATR(30)
-        vol_expansion = atr_7_1d_aligned[i] > 1.5 * atr_30_1d_aligned[i]
-        
-        # Volume confirmation: current 4h volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20_1d_aligned[i]
+        # Volume confirmation: current 12h volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20_aligned[i]
         
         if position == 0:
-            # Long: price breaks above 20-day high with vol expansion and volume
+            # Long: price breaks above 20-period high with daily oversold and volume
             if (close[i] > donchian_upper_aligned[i] and 
-                vol_expansion and 
+                wr_14_1d_aligned[i] < -80 and 
                 volume_confirmed):
                 signals[i] = 0.25
                 position = 1
-                long_extreme = high[i]  # initialize extreme to current high
-            # Short: price breaks below 20-day low with vol expansion and volume
+            # Short: price breaks below 20-period low with daily overbought and volume
             elif (close[i] < donchian_lower_aligned[i] and 
-                  vol_expansion and 
+                  wr_14_1d_aligned[i] > -20 and 
                   volume_confirmed):
                 signals[i] = -0.25
                 position = -1
-                short_extreme = low[i]  # initialize extreme to current low
         
         elif position == 1:
-            # Update long extreme
-            long_extreme = max(long_extreme, high[i])
-            # ATR stoploss: exit if price retraces 2*ATR from extreme
-            if close[i] < long_extreme - atr_multiplier * atr_7_1d_aligned[i]:
+            # Exit long: price falls back below 20-period low (opposite side of channel)
+            if close[i] < donchian_lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Update short extreme
-            short_extreme = min(short_extreme, low[i])
-            # ATR stoploss: exit if price rallies 2*ATR from extreme
-            if close[i] > short_extreme + atr_multiplier * atr_7_1d_aligned[i]:
+            # Exit short: price rises back above 20-period high (opposite side of channel)
+            if close[i] > donchian_upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -121,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dATRratio_VolatilityExpansion_Donchian20_Breakout_Volume_Confirm"
-timeframe = "4h"
+name = "12h_1dWilliamsR14_Donchian20_Breakout_Volume_Confirm"
+timeframe = "12h"
 leverage = 1.0
