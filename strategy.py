@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_RSI_Trend_Reversal_v1
-Long: RSI < 30 + price above 200-day EMA (trend filter)
-Short: RSI > 70 + price below 200-day EMA
-Exit: RSI crosses back to 50
-Uses 200-day EMA from daily timeframe as trend filter to avoid counter-trend trades.
-Designed to work in both bull and bear markets by fading extremes in the direction of the higher timeframe trend.
+12h_Pivot_R1_S1_Breakout_VolumeSpike_v1
+Breakout of Camarilla R1/S1 levels on 12h timeframe with volume spike confirmation.
+Trend filter: price above/below weekly EMA200.
+Exit when price returns to pivot point or volume drops below average.
+Designed to capture institutional breakouts with volume confirmation in both bull and bear markets.
 Target: 50-150 total trades over 4 years (12-37/year).
 """
 
@@ -18,57 +17,111 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # === RSI(14) ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # === 200-day EMA from daily timeframe ===
+    # === Calculate Pivot Point and Camarilla Levels from previous day ===
+    # Use daily OHLC from previous day to calculate today's levels
     df_1d = get_htf_data(prices, '1d')
-    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    
+    # Calculate pivot and camarilla levels for each day
+    # Pivot = (H + L + C) / 3
+    # R1 = Pivot + (H - L) * 1.1 / 12
+    # S1 = Pivot - (H - L) * 1.1 / 12
+    # R2 = Pivot + (H - L) * 1.1 / 6
+    # S2 = Pivot - (H - L) * 1.1 / 6
+    # R3 = Pivot + (H - L) * 1.1 / 4
+    # S3 = Pivot - (H - L) * 1.1 / 4
+    # R4 = Pivot + (H - L) * 1.1 / 2
+    # S4 = Pivot - (H - L) * 1.1 / 2
+    
+    # We'll calculate these for each day and then align to 12h timeframe
+    # For each daily bar, calculate levels that apply to the NEXT day
+    # So we shift the calculated levels forward by 1 day
+    
+    # Previous day's OHLC for level calculation
+    prev_high = df_1d['high'].shift(1).values  # Previous day's high
+    prev_low = df_1d['low'].shift(1).values    # Previous day's low
+    prev_close = df_1d['close'].shift(1).values # Previous day's close
+    
+    # Calculate pivot point from previous day
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    
+    # Calculate Camarilla levels
+    range_val = prev_high - prev_low
+    R1 = pivot + (range_val * 1.1 / 12)
+    S1 = pivot - (range_val * 1.1 / 12)
+    R2 = pivot + (range_val * 1.1 / 6)
+    S2 = pivot - (range_val * 1.1 / 6)
+    R3 = pivot + (range_val * 1.1 / 4)
+    S3 = pivot - (range_val * 1.1 / 4)
+    R4 = pivot + (range_val * 1.1 / 2)
+    S4 = pivot - (range_val * 1.1 / 2)
+    
+    # Align daily levels to 12h timeframe
+    # We need to align each level separately
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
+    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    
+    # === Volume Spike Detection ===
+    # Volume spike: current volume > 2.0 * 20-period average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
+    
+    # === Weekly EMA200 for Trend Filter ===
+    df_1w = get_htf_data(prices, '1w')
+    ema_200_1w = pd.Series(df_1w['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
     signals = np.zeros(n)
     
-    # Warmup period
-    warmup = 200
+    # Warmup period - need enough data for all indicators
+    warmup = 200  # For weekly EMA200
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi[i]) or 
-            np.isnan(ema_200_1d_aligned[i])):
+        if (np.isnan(pivot_aligned[i]) or 
+            np.isnan(R1_aligned[i]) or 
+            np.isnan(S1_aligned[i]) or 
+            np.isnan(ema_200_1w_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: RSI < 30, price above 200-day EMA
-            if (rsi[i] < 30 and 
-                close[i] > ema_200_1d_aligned[i]):
+            # Long breakout: price breaks above R1 with volume spike, above weekly EMA200
+            if (close[i] > R1_aligned[i] and 
+                volume_spike[i] and 
+                close[i] > ema_200_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: RSI > 70, price below 200-day EMA
-            elif (rsi[i] > 70 and 
-                  close[i] < ema_200_1d_aligned[i]):
+            # Short breakdown: price breaks below S1 with volume spike, below weekly EMA200
+            elif (close[i] < S1_aligned[i] and 
+                  volume_spike[i] and 
+                  close[i] < ema_200_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: RSI > 50
-            if rsi[i] > 50:
+            # Exit long: price returns to pivot point OR volume drops below average
+            if (close[i] <= pivot_aligned[i] or 
+                volume[i] < vol_ma[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -76,8 +129,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI < 50
-            if rsi[i] < 50:
+            # Exit short: price returns to pivot point OR volume drops below average
+            if (close[i] >= pivot_aligned[i] or 
+                volume[i] < vol_ma[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -86,6 +140,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI_Trend_Reversal_v1"
-timeframe = "4h"
+name = "12h_Pivot_R1_S1_Breakout_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
