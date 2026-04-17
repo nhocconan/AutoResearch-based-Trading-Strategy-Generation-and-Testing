@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivot calculation
+    # Get 1d data for pivot calculation (HTF: 1d for daily pivots)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -27,29 +27,31 @@ def generate_signals(prices):
     r2_1d = pivot_1d + range_1d
     s2_1d = pivot_1d - range_1d
     
-    # Align 1d pivot levels to 4h
+    # Align 1d pivot levels to daily timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
     s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
     
-    # Get 1d EMA50 for trend filter
+    # Get 1d EMA200 for long-term trend filter
     close_1d_series = pd.Series(close_1d)
-    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Volume filter: current volume > 2.0x 20-period average (strict to reduce trades)
+    # Volume filter: current volume > 1.8x 20-period average (moderate to control trade frequency)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 2.0)
+    volume_filter = volume > (vol_ma * 1.8)
     
-    # Choppiness filter: avoid trading in high chop (range-bound) markets
-    # Calculate Choppiness Index (14-period)
-    atr_14 = pd.Series(np.maximum(np.maximum(high - low, np.abs(high - np.append([np.nan], close[:-1]))), np.abs(low - np.append([np.nan], close[:-1])))).rolling(window=14, min_periods=14).mean().values
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10((atr_14 * 14) / (highest_high_14 - lowest_low_14)) / np.log10(14)
-    chop_filter = chop < 61.8  # Only trade when NOT in chop (trending market)
+    # Volatility filter: avoid low volatility periods (ATR ratio)
+    tr1 = high - low
+    tr2 = np.abs(high - np.concatenate([[np.nan], closed]))
+    tr3 = np.abs(low - np.concatenate([[np.nan], closed]))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    atr10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    atr30 = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
+    atr_ratio = atr10 / atr30
+    vol_filter = atr_ratio > 0.3  # Only trade when volatility is not too low
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -60,31 +62,31 @@ def generate_signals(prices):
         # Skip if any required data is not available
         if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
             np.isnan(r2_1d_aligned[i]) or np.isnan(s2_1d_aligned[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(chop[i])):
+            np.isnan(ema200_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr_ratio[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with volume, above 1d EMA50, and NOT in chop
-            if close[i] > r1_1d_aligned[i] and volume_filter[i] and close[i] > ema50_1d_aligned[i] and chop_filter[i]:
+            # Long: price breaks above R1 with volume, above 1d EMA200 (bullish bias), and sufficient volatility
+            if close[i] > r1_1d_aligned[i] and volume_filter[i] and close[i] > ema200_1d_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume, below 1d EMA50, and NOT in chop
-            elif close[i] < s1_1d_aligned[i] and volume_filter[i] and close[i] < ema50_1d_aligned[i] and chop_filter[i]:
+            # Short: price breaks below S1 with volume, below 1d EMA200 (bearish bias), and sufficient volatility
+            elif close[i] < s1_1d_aligned[i] and volume_filter[i] and close[i] < ema200_1d_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below pivot OR below S1
-            if close[i] < pivot_1d_aligned[i] or close[i] < s1_1d_aligned[i]:
+            # Exit long: price breaks below S1 (conservative exit)
+            if close[i] < s1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above pivot OR above R1
-            if close[i] > pivot_1d_aligned[i] or close[i] > r1_1d_aligned[i]:
+            # Exit short: price breaks above R1 (conservative exit)
+            if close[i] > r1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dPivot_R1S1_Volume_EMA50_ChopFilter"
-timeframe = "4h"
+name = "1d_Pivot_R1S1_Volume_EMA200_VolFilter"
+timeframe = "1d"
 leverage = 1.0
