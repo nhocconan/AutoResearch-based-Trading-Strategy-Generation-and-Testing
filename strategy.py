@@ -13,137 +13,131 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h Donchian Channel (20-period) ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # === Weekly high-low channel (primary signal) ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate Donchian upper/lower
-    upper_12h = np.full_like(high_12h, np.nan)
-    lower_12h = np.full_like(low_12h, np.nan)
-    for i in range(len(high_12h)):
-        if i >= 19:
-            upper_12h[i] = np.max(high_12h[i-19:i+1])
-            lower_12h[i] = np.min(low_12h[i-19:i+1])
-        elif i > 0:
-            upper_12h[i] = np.max(high_12h[0:i+1])
-            lower_12h[i] = np.min(low_12h[0:i+1])
-        else:
-            upper_12h[i] = high_12h[0]
-            lower_12h[i] = low_12h[0]
+    # === Daily ADX for trend filter (28-period) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === 12h EMA(50) for trend filter ===
-    close_12h = df_12h['close'].values
-    ema_50_12h = np.full_like(close_12h, np.nan)
-    if len(close_12h) >= 50:
-        ema_50_12h[49] = np.mean(close_12h[:50])
-        for i in range(50, len(close_12h)):
-            ema_50_12h[i] = close_12h[i] * 0.0392 + ema_50_12h[i-1] * 0.9608  # alpha = 2/(50+1)
+    # Calculate True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    # === 12h Volume spike detection ===
-    vol_12h = df_12h['volume'].values
-    vol_ma_20_12h = np.full_like(vol_12h, np.nan)
-    for i in range(len(vol_12h)):
-        if i >= 19:
-            vol_ma_20_12h[i] = np.mean(vol_12h[i-19:i+1])
-        elif i > 0:
-            vol_ma_20_12h[i] = np.mean(vol_12h[0:i+1])
-        else:
-            vol_ma_20_12h[i] = vol_12h[0]
+    # Calculate directional movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
     
-    vol_spike_12h = vol_12h > (vol_ma_20_12h * 2.0)
+    # Smoothed values
+    tr14 = np.full_like(close_1d, np.nan)
+    plus_dm14 = np.full_like(close_1d, np.nan)
+    minus_dm14 = np.full_like(close_1d, np.nan)
     
-    # === Align 12h indicators to 4h timeframe ===
-    upper_12h_aligned = align_htf_to_ltf(prices, df_12h, upper_12h)
-    lower_12h_aligned = align_htf_to_ltf(prices, df_12h, lower_12h)
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    vol_spike_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_spike_12h)
-    
-    # === 4h ATR for volatility filter and stop management ===
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.concatenate([[close[0]], close[:-1]])), np.abs(low - np.concatenate([[close[0]], close[:-1]]))))
-    atr = np.full_like(close, np.nan)
-    for i in range(len(tr)):
+    for i in range(len(close_1d)):
         if i >= 13:
-            atr[i] = np.mean(tr[i-13:i+1])
+            tr14[i] = np.sum(tr[i-13:i+1])
+            plus_dm14[i] = np.sum(plus_dm[i-13:i+1])
+            minus_dm14[i] = np.sum(minus_dm[i-13:i+1])
         elif i > 0:
-            atr[i] = np.mean(tr[0:i+1])
-        else:
-            atr[i] = tr[0]
+            tr14[i] = np.sum(tr[1:i+1])
+            plus_dm14[i] = np.sum(plus_dm[1:i+1])
+            minus_dm14[i] = np.sum(minus_dm[1:i+1])
     
-    # === 4h volume confirmation ===
+    # Calculate DI and DX
+    plus_di = np.full_like(close_1d, np.nan)
+    minus_di = np.full_like(close_1d, np.nan)
+    dx = np.full_like(close_1d, np.nan)
+    
+    for i in range(len(close_1d)):
+        if not np.isnan(tr14[i]) and tr14[i] > 0:
+            plus_di[i] = 100 * plus_dm14[i] / tr14[i]
+            minus_di[i] = 100 * minus_dm14[i] / tr14[i]
+            if plus_di[i] + minus_di[i] > 0:
+                dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+    
+    # Calculate ADX (smoothed DX)
+    adx = np.full_like(close_1d, np.nan)
+    for i in range(len(close_1d)):
+        if i >= 27:
+            valid_dx = dx[i-13:i+1]
+            valid_dx = valid_dx[~np.isnan(valid_dx)]
+            if len(valid_dx) >= 14:
+                adx[i] = np.mean(valid_dx)
+        elif i >= 13:
+            valid_dx = dx[1:i+1]
+            valid_dx = valid_dx[~np.isnan(valid_dx)]
+            if len(valid_dx) >= 1:
+                adx[i] = np.mean(valid_dx)
+    
+    # === Daily Volume confirmation (20-period average) ===
     vol_ma_20 = np.full_like(volume, np.nan)
     for i in range(len(volume)):
         if i >= 19:
             vol_ma_20[i] = np.mean(volume[i-19:i+1])
         elif i > 0:
-            vol_ma_20[i] = np.mean(volume[0:i+1])
+            vol_ma_20[i] = np.mean(volume[max(0, i-9):i+1])
         else:
             vol_ma_20[i] = volume[0]
     
-    vol_confirm = volume > (vol_ma_20 * 1.5)
+    vol_confirm = volume > vol_ma_20 * 1.5
+    
+    # === Align indicators to daily timeframe ===
+    high_1w_aligned = align_htf_to_ltf(prices, df_1w, high_1w)
+    low_1w_aligned = align_htf_to_ltf(prices, df_1w, low_1w)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
-    
-    # Warmup period
     warmup = 100
-    
-    # Track position state
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
     for i in range(warmup, n):
-        # Skip if any required data is NaN
-        if (np.isnan(upper_12h_aligned[i]) or 
-            np.isnan(lower_12h_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(vol_spike_12h_aligned[i]) or 
-            np.isnan(atr[i]) or 
+        if (np.isnan(high_1w_aligned[i]) or 
+            np.isnan(low_1w_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or 
             np.isnan(vol_confirm[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Entry logic: only enter when flat
         if position == 0:
-            # Long: price breaks above upper Donchian in uptrend with volume spike
-            if (close[i] > upper_12h_aligned[i] and 
-                close[i] > ema_50_12h_aligned[i] and 
-                vol_spike_12h_aligned[i] and 
-                vol_confirm[i]):
+            # Long: break above weekly high in strong trend (ADX > 25) with volume
+            if close[i] > high_1w_aligned[i] and adx_aligned[i] > 25 and vol_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-                continue
-            # Short: price breaks below lower Donchian in downtrend with volume spike
-            elif (close[i] < lower_12h_aligned[i] and 
-                  close[i] < ema_50_12h_aligned[i] and 
-                  vol_spike_12h_aligned[i] and 
-                  vol_confirm[i]):
+            # Short: break below weekly low in strong trend (ADX > 25) with volume
+            elif close[i] < low_1w_aligned[i] and adx_aligned[i] > 25 and vol_confirm[i]:
                 signals[i] = -0.25
                 position = -1
-                continue
-        
-        # Exit logic
+            else:
+                signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below EMA(50) or ATR-based stop
-            if (close[i] < ema_50_12h_aligned[i]) or \
-               (close[i] < (upper_12h_aligned[i] - 2.0 * atr[i])):
+            # Exit long: price returns to weekly low OR trend weakens (ADX < 20)
+            if close[i] < low_1w_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
-                continue
             else:
                 signals[i] = 0.25
-        
         elif position == -1:
-            # Exit short: price closes above EMA(50) or ATR-based stop
-            if (close[i] > ema_50_12h_aligned[i]) or \
-               (close[i] > (lower_12h_aligned[i] + 2.0 * atr[i])):
+            # Exit short: price returns to weekly high OR trend weakens (ADX < 20)
+            if close[i] > high_1w_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
-                continue
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "4h_Donchian20_EMA50_VolumeSpike_ATR_v1"
-timeframe = "4h"
+name = "1d_WeeklyChannel_ADX25_VolumeFilter_v1"
+timeframe = "1d"
 leverage = 1.0
