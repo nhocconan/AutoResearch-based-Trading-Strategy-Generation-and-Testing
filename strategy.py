@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_1w_Momentum_Volume_Regime
-Strategy: Daily momentum with volume confirmation and weekly regime filter.
-Long: Price > daily VWAP + volume > 1.5x 20-day avg + weekly close > weekly open
-Short: Price < daily VWAP + volume > 1.5x 20-day avg + weekly close < weekly open
-Exit: Price crosses back through daily VWAP
+6h_Ichimoku_CloudBreakout
+Strategy: 6-hour Ichimoku breakout with 1d trend filter.
+Long: Tenkan > Kijun + price above Kumo + price breaks above Kumo top
+Short: Tenkan < Kijun + price below Kumo + price breaks below Kumo bottom
+Kumo calculated from 1d data for trend context.
 Position size: 0.25
-Designed to capture momentum moves aligned with weekly trend in both bull and bear markets.
-Timeframe: 1d
+Designed to capture momentum in trending markets while avoiding counter-trend trades.
+Timeframe: 6h
 """
 
 import numpy as np
@@ -16,78 +16,95 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 52:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Calculate daily VWAP for entry/exit
-    typical_price = (high + low + close) / 3.0
-    vwap_num = (typical_price * volume).cumsum()
-    vwap_den = volume.cumsum()
-    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
+    # Calculate Ichimoku components on 6h
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    # Get weekly data for regime filter
-    df_1w = get_htf_data(prices, '1w')
-    weekly_open = df_1w['open'].values
-    weekly_close = df_1w['close'].values
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
     
-    # Align weekly data to daily timeframe
-    weekly_open_aligned = align_htf_to_ltf(prices, df_1w, weekly_open)
-    weekly_close_aligned = align_htf_to_ltf(prices, df_1w, weekly_close)
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
     
-    # Volume confirmation (20-day MA)
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = (period52_high + period52_low) / 2
+    
+    # Kumo (Cloud) top and bottom
+    kumo_top = np.maximum(senkou_a, senkou_b)
+    kumo_bottom = np.minimum(senkou_a, senkou_b)
+    
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    
+    # Calculate 1d EMA50 for trend filter
+    close_series_1d = pd.Series(close_1d)
+    ema50_1d = close_series_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 1)  # Need volume MA and weekly data
+    start_idx = 52  # Need 52 periods for Senkou B
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(vwap[i]) or 
-            np.isnan(volume_ma20[i]) or 
-            np.isnan(weekly_open_aligned[i]) or 
-            np.isnan(weekly_close_aligned[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
+            np.isnan(kumo_top[i]) or np.isnan(kumo_bottom[i]) or
+            np.isnan(ema50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-day average
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        # Ichimoku signals
+        tenkan_above_kijun = tenkan[i] > kijun[i]
+        tenkan_below_kijun = tenkan[i] < kijun[i]
+        price_above_kumo = close[i] > kumo_top[i]
+        price_below_kumo = close[i] < kumo_bottom[i]
         
-        # Regime filter: weekly close > weekly open (bullish week) or < (bearish week)
-        weekly_bullish = weekly_close_aligned[i] > weekly_open_aligned[i]
-        weekly_bearish = weekly_close_aligned[i] < weekly_open_aligned[i]
+        # Trend filter: price relative to 1d EMA50
+        price_above_ema = close[i] > ema50_1d_aligned[i]
+        price_below_ema = close[i] < ema50_1d_aligned[i]
         
-        # Entry conditions
-        price_above_vwap = close[i] > vwap[i]
-        price_below_vwap = close[i] < vwap[i]
+        # Kumo breakout conditions
+        kumo_breakout_up = close[i] > kumo_top[i] and close[i-1] <= kumo_top[i-1]
+        kumo_breakout_down = close[i] < kumo_bottom[i] and close[i-1] >= kumo_bottom[i-1]
         
         if position == 0:
-            # Long: price above VWAP + volume filter + bullish week
-            if price_above_vwap and volume_filter and weekly_bullish:
+            # Long: bullish TK cross + price above Kumo + breaks above Kumo top + above 1d EMA50
+            if (tenkan_above_kijun and price_above_kumo and 
+                kumo_breakout_up and price_above_ema):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below VWAP + volume filter + bearish week
-            elif price_below_vwap and volume_filter and weekly_bearish:
+            # Short: bearish TK cross + price below Kumo + breaks below Kumo bottom + below 1d EMA50
+            elif (tenkan_below_kijun and price_below_kumo and 
+                  kumo_breakout_down and price_below_ema):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses back below VWAP
-            if price_below_vwap:
+            # Exit long: price falls below Kumo bottom or TK cross turns bearish
+            if close[i] < kumo_bottom[i] or tenkan[i] < kijun[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses back above VWAP
-            if price_above_vwap:
+            # Exit short: price rises above Kumo top or TK cross turns bullish
+            if close[i] > kumo_top[i] or tenkan[i] > kijun[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -95,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Momentum_Volume_Regime"
-timeframe = "1d"
+name = "6h_Ichimoku_CloudBreakout"
+timeframe = "6h"
 leverage = 1.0
