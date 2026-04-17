@@ -1,3 +1,4 @@
+# Solution
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,7 +14,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for primary timeframe
+    # Get 12h data for pivot levels
     df_12h = get_htf_data(prices, '12h')
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
