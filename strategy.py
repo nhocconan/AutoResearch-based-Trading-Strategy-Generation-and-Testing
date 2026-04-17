@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_Breakout_With_Volume_And_Trend_v1
-Long when price breaks above Donchian(20) high, short when breaks below Donchian(20) low.
-Trend filter: price above/below 1d EMA200.
-Volume filter: current volume > 1.5x 20-period average volume.
-Exit when price crosses back through the Donchian midpoint.
+4h_Pivot_R1_S1_Breakout_Volume_Filter_v1
+Breakout above Camarilla R1 or below S1 with volume confirmation.
+Uses 1d timeframe for Camarilla levels and 1h for volume spike filter.
+Long when price breaks above R1 with volume > 1.5x 20-period average.
+Short when price breaks below S1 with volume > 1.5x 20-period average.
+Exit when price returns to Pivot point (PP) or reverses with volume confirmation.
+Designed to capture institutional breakouts with volume confirmation.
 Target: 50-150 total trades over 4 years (12-37/year).
 """
 
@@ -22,58 +24,79 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Donchian Channel (20) ===
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2.0
+    # === Volume spike filter (1h timeframe) ===
+    df_1h = get_htf_data(prices, '1h')
+    vol_ma = pd.Series(df_1h['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1h, vol_ma)
     
-    # === Volume Filter ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # === 1d EMA200 for trend filter ===
+    # === Camarilla pivot levels (1d timeframe) ===
     df_1d = get_htf_data(prices, '1d')
-    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Calculate Camarilla levels from previous day's OHLC
+    # H, L, C from previous day
+    phigh = df_1d['high'].values
+    plow = df_1d['low'].values
+    pclose = df_1d['close'].values
+    
+    # Camarilla formulas
+    # R4 = C + ((H-L) * 1.1/2)
+    # R3 = C + ((H-L) * 1.1/4)
+    # R2 = C + ((H-L) * 1.1/6)
+    # R1 = C + ((H-L) * 1.1/12)
+    # PP = (H + L + C) / 3
+    # S1 = C - ((H-L) * 1.1/12)
+    # S2 = C - ((H-L) * 1.1/6)
+    # S3 = C - ((H-L) * 1.1/4)
+    # S4 = C - ((H-L) * 1.1/2)
+    
+    rng = phigh - plow
+    r1 = pclose + (rng * 1.1 / 12)
+    s1 = pclose - (rng * 1.1 / 12)
+    pp = (phigh + plow + pclose) / 3.0
+    
+    # Align to LTF
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 200
+    warmup = 50
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ma[i]) or 
-            np.isnan(ema_200_1d_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(pp_aligned[i]) or 
+            np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
+        # Volume spike condition: current volume > 1.5x 20-period average
+        vol_spike = volume[i] > (1.5 * vol_ma_aligned[i])
+        
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: break above Donchian high + volume filter + price above 1d EMA200
-            if (close[i] > donchian_high[i] and 
-                volume[i] > 1.5 * vol_ma[i] and 
-                close[i] > ema_200_1d_aligned[i]):
+            # Long: price breaks above R1 with volume spike
+            if (close[i] > r1_aligned[i] and vol_spike):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: break below Donchian low + volume filter + price below 1d EMA200
-            elif (close[i] < donchian_low[i] and 
-                  volume[i] > 1.5 * vol_ma[i] and 
-                  close[i] < ema_200_1d_aligned[i]):
+            # Short: price breaks below S1 with volume spike
+            elif (close[i] < s1_aligned[i] and vol_spike):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price crosses below Donchian midpoint
-            if close[i] < donchian_mid[i]:
+            # Exit long: price returns to PP or reverses below R1 with volume
+            if (close[i] <= pp_aligned[i] or 
+                (close[i] < r1_aligned[i] and vol_spike)):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -81,8 +104,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above Donchian midpoint
-            if close[i] > donchian_mid[i]:
+            # Exit short: price returns to PP or reverses above S1 with volume
+            if (close[i] >= pp_aligned[i] or 
+                (close[i] > s1_aligned[i] and vol_spike)):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -91,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_With_Volume_And_Trend_v1"
+name = "4h_Pivot_R1_S1_Breakout_Volume_Filter_v1"
 timeframe = "4h"
 leverage = 1.0
