@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla pivot R1/S1 breakout with volume confirmation and 1d ADX trend filter.
-Long when price breaks above R1 AND volume > 1.3x average AND ADX > 25 (trending).
-Short when price breaks below S1 AND volume > 1.3x average AND ADX > 25.
-Exit when price reverts to daily pivot point (PP) OR ADX < 20 (range market).
-Uses 4h for price action and volume, 1d for Camarilla levels and ADX to reduce whipsaw.
-Target: 75-200 total trades over 4 years (19-50/year). Camarilla levels provide institutional
-support/resistance, volume confirms breakout validity, ADX ensures trending markets.
-Works in bull markets (breaks above R1) and bear markets (breaks below S1).
+Hypothesis: 1d Donchian(20) breakout + weekly EMA200 trend filter + volume confirmation.
+Long when price breaks above Donchian upper band AND close > weekly EMA200 AND volume > 1.5x average.
+Short when price breaks below Donchian lower band AND close < weekly EMA200 AND volume > 1.5x average.
+Exit when price reverts to Donchian middle (20-period mean).
+Uses 1d for Donchian calculation and 1w for EMA200 trend filter to capture major trends.
+Target: 30-100 total trades over 4 years (7-25/year). Donchian breakouts capture strong moves,
+weekly EMA200 ensures we trade with the major trend, volume confirmation filters fakeouts.
+Works in bull markets (captures uptrends with weekly EMA200 support) and bear markets 
+(captures downtrends with weekly EMA200 resistance).
 """
 
 import numpy as np
@@ -24,104 +25,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot and ADX calculation
+    # Get 1d data for Donchian calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate daily pivot point (PP)
-    pp = (high_1d + low_1d + close_1d) / 3
+    # Calculate Donchian channels on 1d timeframe (20-period)
+    high_1d_series = pd.Series(high_1d)
+    low_1d_series = pd.Series(low_1d)
+    donchian_upper = high_1d_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_1d_series.rolling(window=20, min_periods=20).min().values
+    donchian_middle = ((donchian_upper + donchian_lower) / 2).values
     
-    # Calculate Camarilla levels (R1, S1)
-    range_1d = high_1d - low_1d
-    r1 = pp + (range_1d * 1.1 / 12)
-    s1 = pp - (range_1d * 1.1 / 12)
+    # Get 1w data for EMA200 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate ADX on 1d timeframe (14-period)
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
+    # Calculate EMA200 on weekly timeframe
+    close_1w_series = pd.Series(close_1w)
+    ema200_1w = close_1w_series.ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # +DM and -DM
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed TR, +DM, -DM (14-period)
-    tr_period = 14
-    atr = pd.Series(tr).rolling(window=tr_period, min_periods=tr_period).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=tr_period, min_periods=tr_period).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=tr_period, min_periods=tr_period).mean().values
-    
-    # +DI and -DI
-    plus_di = 100 * (plus_dm_smooth / atr)
-    minus_di = 100 * (minus_dm_smooth / atr)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    # Handle division by zero
-    dx = np.where((plus_di + minus_di) == 0, 0, dx)
-    adx = pd.Series(dx).rolling(window=tr_period, min_periods=tr_period).mean().values
-    
-    # Align 1d Camarilla levels and ADX to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume average (20-period) on 4h
-    df_4h = get_htf_data(prices, '4h')
-    volume_4h = df_4h['volume'].values
-    volume_ma = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_4h, volume_ma)
+    # Align indicators to 1d timeframe
+    donchian_upper_aligned = donchian_upper
+    donchian_lower_aligned = donchian_lower
+    donchian_middle_aligned = donchian_middle
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, 
+                                        pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # warmup for indicators
+    start_idx = 200  # warmup for weekly EMA200
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(pp_aligned[i]) or np.isnan(adx_aligned[i]) or 
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(donchian_middle_aligned[i]) or np.isnan(ema200_1w_aligned[i]) or 
             np.isnan(volume_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        pp_val = pp_aligned[i]
-        adx_val = adx_aligned[i]
+        du = donchian_upper_aligned[i]
+        dl = donchian_lower_aligned[i]
+        dm = donchian_middle_aligned[i]
+        ema200 = ema200_1w_aligned[i]
         vol_ma = volume_ma_aligned[i]
         vol = volume[i]
         price = close[i]
         
         if position == 0:
-            # Long: price > R1 AND volume > 1.3x avg AND ADX > 25 (trending)
-            if price > r1_val and vol > 1.3 * vol_ma and adx_val > 25:
+            # Long: price > Donchian upper AND close > weekly EMA200 AND volume > 1.5x avg
+            if price > du and close[i] > ema200 and vol > 1.5 * vol_ma:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < S1 AND volume > 1.3x avg AND ADX > 25 (trending)
-            elif price < s1_val and vol > 1.3 * vol_ma and adx_val > 25:
+            # Short: price < Donchian lower AND close < weekly EMA200 AND volume > 1.5x avg
+            elif price < dl and close[i] < ema200 and vol > 1.5 * vol_ma:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price < PP OR ADX < 20 (range market)
-            if price < pp_val or adx_val < 20:
+            # Exit long: price < Donchian middle
+            if price < dm:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price > PP OR ADX < 20 (range market)
-            if price > pp_val or adx_val < 20:
+            # Exit short: price > Donchian middle
+            if price > dm:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -129,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Volume_ADX_Filter"
-timeframe = "4h"
+name = "1d_Donchian20_WeeklyEMA200_Volume_Confirm"
+timeframe = "1d"
 leverage = 1.0
