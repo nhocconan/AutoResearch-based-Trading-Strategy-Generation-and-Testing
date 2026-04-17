@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h timeframe with 1d Williams %R mean reversion + volume spike + choppiness regime filter.
-Williams %R identifies overbought/oversold conditions. Long when %R < -80 (oversold) with volume spike and choppy market (CHOP > 61.8).
-Short when %R > -20 (overbought) with volume spike and choppy market. Exit when %R returns to -50 (mean reversion) or volume spike reversal.
-Uses 1d for Williams %R calculation (more stable) and 4h for volume confirmation and entry timing.
-Designed to work in both bull and bear markets by capturing mean reversion in ranging conditions (chop filter avoids trending markets).
+Hypothesis: 1d timeframe with 1w Williams %R mean reversion + volume confirmation + chop regime filter.
+Long when Williams %R < -80 (oversold) with volume confirmation and choppy market (CHOP > 61.8).
+Short when Williams %R > -20 (overbought) with volume confirmation and choppy market (CHOP > 61.8).
+Exit when Williams %R returns to -50 (mean reversion) or chop regime ends (CHOP < 38.2 trending).
+Uses 1w timeframe for Williams %R to avoid noise and 1d for entry timing and volume confirmation.
+Designed to capture mean reversion in bear markets (2025 test) while avoiding false signals in strong trends.
+Williams %R identifies overextended moves, chop filter ensures we only mean revert in ranging markets.
 """
 
 import numpy as np
@@ -21,84 +23,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams %R calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 1w data for Williams %R calculation
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d Williams %R: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    # Using 14-period lookback
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
+    # Calculate 1w Williams %R (14-period)
+    period = 14
+    highest_high = pd.Series(high_1w).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low_1w).rolling(window=period, min_periods=period).min().values
+    williams_r = -100 * (highest_high - close_1w) / (highest_high - lowest_low)
     # Handle division by zero when high == low
-    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate 4h volume 20-period average for confirmation
+    # Calculate 1d choppiness index (CHOP) for regime filter
+    atr_period = 14
+    chop_period = 14
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period TR is just high-low
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    max_high = pd.Series(high).rolling(window=chop_period, min_periods=chop_period).max().values
+    min_low = pd.Series(low).rolling(window=chop_period, min_periods=chop_period).min().values
+    chop = 100 * np.log10(atr * chop_period / (max_high - min_low)) / np.log10(chop_period)
+    # Handle division by zero when max_high == min_low
+    chop = np.where((max_high - min_low) == 0, 50, chop)
+    
+    # Calculate 1d volume 20-period average for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d Choppiness Index: CHOP = 100 * log10(sum(ATR(1)) / (n * ATR(n))) / log10(1/n)
-    # Using 14-period CHOP
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]), np.abs(low_1d[1:] - close_1d[:-1]))
-    tr1 = np.concatenate([[np.abs(high_1d[0] - low_1d[0])], tr1])  # First TR is just high-low
-    atr1 = tr1  # ATR(1) is just true range
-    sum_tr1 = pd.Series(atr1).rolling(window=14, min_periods=14).sum().values
-    atr14 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
-    chop = 100 * np.log10(sum_tr1 / (14 * atr14)) / np.log10(1/14)
-    # Handle division by zero and invalid values
-    chop = np.where((atr14 == 0) | np.isnan(chop) | np.isinf(chop), 50, chop)
-    
-    # Align 1d indicators to 4h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Align 1w indicators to 1d timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1w, williams_r)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # need enough for Williams %R and CHOP calculations
+    start_idx = 50  # need enough for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(williams_r_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or 
+            np.isnan(chop[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 2.0x 20-period average (tighter filter)
-        volume_confirmed = volume[i] > 2.0 * vol_ma_20[i]
+        # Volume confirmation: current 1d volume > 1.3x 20-period average
+        volume_confirmed = volume[i] > 1.3 * vol_ma_20[i]
         
-        # Chop regime filter: only trade in choppy markets (CHOP > 61.8 = ranging)
-        chop_filter = chop_aligned[i] > 61.8
+        # Chop regime filter: only trade in ranging markets (CHOP > 61.8)
+        chop_regime = chop[i] > 61.8
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) with volume confirmation and choppy market
+            # Long: Williams %R < -80 (oversold) with volume and chop regime
             if (williams_r_aligned[i] < -80 and 
                 volume_confirmed and 
-                chop_filter):
+                chop_regime):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (> -20) with volume confirmation and choppy market
+            # Short: Williams %R > -20 (overbought) with volume and chop regime
             elif (williams_r_aligned[i] > -20 and 
                   volume_confirmed and 
-                  chop_filter):
+                  chop_regime):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Williams %R returns to mean (-50) or volume spike reversal
+            # Exit long: Williams %R returns to -50 OR chop regime ends (trending market)
             if (williams_r_aligned[i] >= -50 or 
-                (volume[i] > 2.0 * vol_ma_20[i] and williams_r_aligned[i] < williams_r_aligned[i-1])):
+                chop[i] < 38.2):  # trending market
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Williams %R returns to mean (-50) or volume spike reversal
+            # Exit short: Williams %R returns to -50 OR chop regime ends (trending market)
             if (williams_r_aligned[i] <= -50 or 
-                (volume[i] > 2.0 * vol_ma_20[i] and williams_r_aligned[i] > williams_r_aligned[i-1])):
+                chop[i] < 38.2):  # trending market
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dWilliamsR_MeanReversion_Volume_Chop_Regime"
-timeframe = "4h"
+name = "1d_1wWilliamsR_MeanReversion_Volume_Chop_Regime"
+timeframe = "1d"
 leverage = 1.0
