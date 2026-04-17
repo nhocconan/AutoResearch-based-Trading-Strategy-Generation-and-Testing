@@ -1,28 +1,21 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_R1_S1_Breakout_VolumeFilter
-Strategy: 6h breakout at weekly pivot R1/S1 with volume confirmation.
-- Long when price breaks above weekly R1 + volume > 1.5x 20-period avg
-- Short when price breaks below weekly S1 + volume > 1.5x 20-period avg
-- Exit when price returns to weekly pivot point or opposite breakout occurs
+4h_Donchian_20_Breakout_Volume_Trend_HTF_v2
+Enhanced version with tighter filters to reduce trade frequency and improve generalization.
+- Long when price breaks above 20-period high + volume > 2.0x 20-period avg + 12h close > 12h EMA34
+- Short when price breaks below 20-period low + volume > 2.0x 20-period avg + 12h close < 12h EMA34
+- Exit when price returns to 20-period midpoint or opposite breakout occurs
 - Position size: ±0.25
-- Uses weekly pivot levels (calculated from prior week) for structure
+- Uses 4h timeframe as primary with 12h for trend filter
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf
-
-def weekly_pivot(high, low, close):
-    """Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H"""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    return pivot, r1, s1
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -30,72 +23,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) == 0:
-        return np.zeros(n)
+    # Calculate 20-period Donchian channels and midpoint
+    high_max20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (high_max20 + low_min20) / 2.0
     
-    # Calculate weekly pivot points
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
-    
-    # Calculate pivot, R1, S1 for each week
-    weekly_pivot_val, weekly_r1, weekly_s1 = weekly_pivot(weekly_high, weekly_low, weekly_close)
-    
-    # Align weekly levels to 6h timeframe (using previous week's values)
-    pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot_val)
-    r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
-    
-    # Volume confirmation (20-period MA on 6h)
+    # Volume confirmation (20-period MA on 4h)
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    
+    # Calculate 12h EMA34 for trend filter
+    close_series_12h = pd.Series(close_12h)
+    ema34_12h = close_series_12h.ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align 12h EMA to 4h timeframe
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = max(20, 1)  # volume MA20 and weekly data
+    start_idx = max(20, 20, 34)  # Donchian20, volume MA20, EMA34
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(volume_ma20[i]) or 
-            np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i])):
+        if (np.isnan(high_max20[i]) or 
+            np.isnan(low_min20[i]) or 
+            np.isnan(volume_ma20[i]) or 
+            np.isnan(ema34_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        # Volume filter: current volume > 2.0x 20-period average (increased from 1.8x)
+        volume_filter = volume[i] > (2.0 * volume_ma20[i])
         
-        # Breakout conditions at weekly R1/S1
-        breakout_up = close[i] > r1_aligned[i-1]  # break above weekly R1
-        breakout_down = close[i] < s1_aligned[i-1]  # break below weekly S1
+        # Breakout conditions
+        breakout_up = close[i] > high_max20[i-1]  # break above 20-period high
+        breakout_down = close[i] < low_min20[i-1]  # break below 20-period low
         
-        # Return to weekly pivot for exit
-        return_to_pivot = abs(close[i] - pivot_aligned[i]) < 0.005 * close[i]  # within 0.5% of pivot
+        # Return to midpoint for exit
+        return_to_mid = abs(close[i] - donchian_mid[i]) < 0.002 * close[i]  # within 0.2% of midpoint
         
         if position == 0:
-            # Long: breakout above R1 + volume filter
-            if breakout_up and volume_filter:
+            # Long: breakout up + volume filter + 12h uptrend
+            if breakout_up and volume_filter and close[i] > ema34_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below S1 + volume filter
-            elif breakout_down and volume_filter:
+            # Short: breakout down + volume filter + 12h downtrend
+            elif breakout_down and volume_filter and close[i] < ema34_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: return to pivot or opposite breakout
-            if return_to_pivot or breakout_down:
+            # Exit long: return to midpoint or opposite breakout
+            if return_to_mid or breakout_down:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: return to pivot or opposite breakout
-            if return_to_pivot or breakout_up:
+            # Exit short: return to midpoint or opposite breakout
+            if return_to_mid or breakout_up:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -103,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R1_S1_Breakout_VolumeFilter"
-timeframe = "6h"
+name = "4h_Donchian_20_Breakout_Volume_Trend_HTF_v2"
+timeframe = "4h"
 leverage = 1.0
