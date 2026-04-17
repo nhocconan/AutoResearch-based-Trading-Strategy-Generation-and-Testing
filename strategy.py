@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_HTF_CounterTrend_Momentum
-4-hour counter-trend momentum strategy using 1-week RSI extremes and 1-day volume confirmation.
-Long when: 1w RSI < 25 (deep oversold) + 1d volume > 1.5x 20-day average + price > 10-period EMA.
-Short when: 1w RSI > 75 (overbought) + 1d volume > 1.5x 20-day average + price < 10-period EMA.
-Exit when: 1w RSI crosses back to neutral (40-60 range).
-Position size: 0.25. Target: 20-50 trades/year.
-Uses 1w RSI for extreme condition, 1d volume for momentum confirmation, 4h EMA for trend alignment.
-Works in both bull/bear: mean reversion in extremes, volume ensures momentum behind reversals.
+6h_Camarilla_R1_S1_Breakout_Volume_ATRFilter
+Strategy: Use 1d Camarilla pivot levels (R1/S1) for breakout entries with volume and ATR confirmation.
+- Long when price breaks above R1 with volume > 1.5x 20-period average and ATR(14) > 0.5 * ATR(50)
+- Short when price breaks below S1 with same filters
+- Exit when price returns to the pivot point (PP) or opposite Camarilla level (S1 for long, R1 for short)
+- Position size: 0.25
+- Uses 1d Camarilla levels for structure, 6s for entry timing, volume/ATR for confirmation
+- Works in bull/bear: breaks of key levels with volume/volatility confirmation capture strong moves
 """
 
 import numpy as np
@@ -20,99 +20,88 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1w data for RSI
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate 1w RSI(14)
-    delta = np.diff(close_1w)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.zeros_like(close_1w)
-    avg_loss = np.zeros_like(close_1w)
-    avg_gain[14] = np.mean(gain[1:15])
-    avg_loss[14] = np.mean(loss[1:15])
-    for i in range(15, len(close_1w)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi_1w = 100 - (100 / (1 + rs))
-    rsi_1w[:14] = np.nan  # Not enough data
-    
-    # Align 1w RSI to 4h
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
-    
-    # Get 1d data for volume confirmation
+    # Get 1d data for Camarilla pivots and volume average
     df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    volume_ma20_1d = np.full_like(volume_1d, np.nan)
-    for i in range(19, len(volume_1d)):
-        volume_ma20_1d[i] = np.mean(volume_1d[i-19:i+1])
-    volume_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma20_1d)
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Calculate 4h EMA10 for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema10_4h = np.full_like(close_4h, np.nan)
-    for i in range(9, len(close_4h)):
-        ema10_4h[i] = (close_4h[i] * 2 + ema10_4h[i-1] * 9) / 11 if i > 9 else np.mean(close_4h[:i+1])
-    ema10_4h_aligned = align_htf_to_ltf(prices, df_4h, ema10_4h)
+    # Calculate 1d Camarilla levels: R1, S1, PP
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Pivot Point (PP) = (H + L + C) / 3
+    pp_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Range = H - L
+    range_1d = high_1d - low_1d
+    # R1 = PP + (Range * 1.1 / 2)
+    r1_1d = pp_1d + (range_1d * 1.1 / 2)
+    # S1 = PP - (Range * 1.1 / 2)
+    s1_1d = pp_1d - (range_1d * 1.1 / 2)
+    
+    # Align Camarilla levels to 6s
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # 1d volume average (20-period)
+    volume_1d = df_1d['volume'].values
+    volume_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_ma20_aligned = align_htf_to_ltf(prices, df_1d, volume_ma20_1d)
+    
+    # ATR for volatility filter
+    # TR = max(H-L, abs(H-PC), abs(L-PC))
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Precompute current 4h close price (approximation using latest available)
-    # For each 4h bar, we use the last 4h close available
-    last_4h_close_idx = -1
-    last_4h_close_val = np.nan
-    
-    for i in range(40, n):  # warmup for indicators
-        # Update last known 4h close (simplified: assume we can track it)
-        # In practice, we use the aligned EMA as trend proxy
-        
+    for i in range(50, n):  # warmup for ATR50
         # Skip if any required data is not available
-        if (np.isnan(rsi_1w_aligned[i]) or np.isnan(volume_ma20_1d_aligned[i]) or 
-            np.isnan(ema10_4h_aligned[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(volume_ma20_aligned[i]) or np.isnan(atr14[i]) or np.isnan(atr50[i])):
             signals[i] = 0.0
             continue
         
-        # Current 1d volume aligned to 4h
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
+        # Volume filter: current volume > 1.5x 20-day average
+        volume_filter = volume[i] > (1.5 * volume_ma20_aligned[i])
         
-        volume_filter = vol_1d_current > (1.5 * volume_ma20_1d_aligned[i])
+        # ATR filter: short-term ATR > 50% of long-term ATR (volatility expansion)
+        atr_filter = atr14[i] > (0.5 * atr50[i])
         
-        # RSI extremes
-        rsi_oversold = rsi_1w_aligned[i] < 25
-        rsi_overbought = rsi_1w_aligned[i] > 75
-        rsi_neutral = (rsi_1w_aligned[i] >= 40) & (rsi_1w_aligned[i] <= 60)
+        # Entry conditions
+        long_entry = (close[i] > r1_aligned[i]) and volume_filter and atr_filter
+        short_entry = (close[i] < s1_aligned[i]) and volume_filter and atr_filter
         
-        # Price vs EMA10 trend filter
-        # Use close price vs EMA10 (we approximate current close with EMA for simplicity)
-        price_above_ema = close[i] > ema10_4h_aligned[i]  # Simplified
-        price_below_ema = close[i] < ema10_4h_aligned[i]  # Simplified
+        # Exit conditions
+        long_exit = (position == 1) and (close[i] <= pp_aligned[i])
+        short_exit = (position == -1) and (close[i] >= pp_aligned[i])
         
         if position == 0:
-            # Long: 1w RSI oversold + volume surge + price above EMA10
-            if rsi_oversold and volume_filter and price_above_ema:
+            if long_entry:
                 signals[i] = 0.25
                 position = 1
-            # Short: 1w RSI overbought + volume surge + price below EMA10
-            elif rsi_overbought and volume_filter and price_below_ema:
+            elif short_entry:
                 signals[i] = -0.25
                 position = -1
-        
         elif position == 1:
-            # Exit long: 1w RSI returns to neutral
-            if rsi_neutral:
+            if long_exit:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        
         elif position == -1:
-            # Exit short: 1w RSI returns to neutral
-            if rsi_neutral:
+            if short_exit:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -120,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_HTF_CounterTrend_Momentum"
-timeframe = "4h"
+name = "6h_Camarilla_R1_S1_Breakout_Volume_ATRFilter"
+timeframe = "6h"
 leverage = 1.0
