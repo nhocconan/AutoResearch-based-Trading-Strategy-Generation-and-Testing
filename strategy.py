@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_R1_S1_Breakout_VolumeFilter
-Strategy: 6h weekly pivot point (R1/S1) breakout with volume filter.
-Long: Price breaks above weekly pivot R1 + volume > 1.5x 20-period avg
-Short: Price breaks below weekly pivot S1 + volume > 1.5x 20-period avg
-Exit: Opposite pivot level break
+12h_1d_KAMA_RSI_TrendFilter_V1
+Strategy: 12h KAMA trend with 1d RSI filter and volume confirmation.
+Long: KAMA rising (trend up) + RSI(14) > 50 + volume > 1.5x 20-period average
+Short: KAMA falling (trend down) + RSI(14) < 50 + volume > 1.5x 20-period average
+Exit: Opposite KAMA direction change
 Position size: 0.25
-Uses weekly pivot levels for structure, volume for confirmation.
-Designed to work in both bull and bear markets by capturing breakouts from key levels.
-Timeframe: 6h
+Uses KAMA for adaptive trend, RSI for momentum filter, volume for confirmation.
+Designed to work in both bull and bear markets by adapting to volatility.
+Timeframe: 12h
 """
 
 import numpy as np
@@ -25,31 +25,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 1:
+    # Get 1d data for RSI filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly pivot points: P = (H+L+C)/3
-    # R1 = 2*P - L, S1 = 2*P - H
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # Calculate 1d RSI(14)
+    rsi_period = 14
+    delta = np.diff(df_1d['close'].values)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[rsi_period] = np.mean(gain[:rsi_period])
+    avg_loss[rsi_period] = np.mean(loss[:rsi_period])
+    for i in range(rsi_period + 1, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i]) / rsi_period
+        avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i]) / rsi_period
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    # Pad beginning with NaN
+    rsi_padded = np.full(len(df_1d), np.nan)
+    rsi_padded[rsi_period:] = rsi[rsi_period:]
     
-    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    r1 = 2 * pivot - weekly_low
-    s1 = 2 * pivot - weekly_high
+    # Align 1d RSI to 12h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_padded)
     
-    # Align weekly pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
+    # Calculate 12h KAMA
+    kama_period = 10
+    fast_sc = 2 / (2 + 1)
+    slow_sc = 2 / (30 + 1)
+    change = np.abs(np.diff(close, k=1))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(change) > 0 else np.array([])
+    # Proper ER calculation
+    er = np.zeros_like(close)
+    for i in range(kama_period, len(close)):
+        if np.sum(np.abs(np.diff(close[i-kama_period:i+1]))) > 0:
+            er[i] = np.abs(close[i] - close[i-kama_period]) / np.sum(np.abs(np.diff(close[i-kama_period:i+1])))
+        else:
+            er[i] = 0
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Calculate 6h volume average (20-period)
-    df_6h = get_htf_data(prices, '6h')
-    volume_6h = df_6h['volume'].values
-    volume_ma20_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
-    volume_ma20_6h_aligned = align_htf_to_ltf(prices, df_6h, volume_ma20_6h)
+    # Align 12h KAMA to 12h timeframe (trivial since same timeframe)
+    kama_aligned = kama
+    
+    # Calculate 12h volume average (20-period)
+    df_12h = get_htf_data(prices, '12h')
+    volume_12h = df_12h['volume'].values
+    volume_ma20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_ma20_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_ma20_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,40 +92,44 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(volume_ma20_6h_aligned[i])):
+        if (np.isnan(rsi_aligned[i]) or np.isnan(kama_aligned[i]) or 
+            np.isnan(volume_ma20_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Current 6h volume aligned to 6h
-        vol_6h_current = align_htf_to_ltf(prices, df_6h, volume_6h)[i]
-        volume_filter = vol_6h_current > (1.5 * volume_ma20_6h_aligned[i])
+        # Current 12h volume aligned to 12h
+        vol_12h_current = align_htf_to_ltf(prices, df_12h, volume_12h)[i]
+        volume_filter = vol_12h_current > (1.5 * volume_ma20_12h_aligned[i])
         
-        # Breakout signals
-        breakout_up = close[i] > r1_aligned[i]
-        breakout_down = close[i] < s1_aligned[i]
+        # KAMA direction
+        kama_rising = kama_aligned[i] > kama_aligned[i-1]
+        kama_falling = kama_aligned[i] < kama_aligned[i-1]
+        
+        # RSI filter
+        rsi_above_50 = rsi_aligned[i] > 50
+        rsi_below_50 = rsi_aligned[i] < 50
         
         if position == 0:
-            # Long: Breakout above R1 + volume filter
-            if breakout_up and volume_filter:
+            # Long: KAMA rising + RSI > 50 + volume filter
+            if kama_rising and rsi_above_50 and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Breakdown below S1 + volume filter
-            elif breakout_down and volume_filter:
+            # Short: KAMA falling + RSI < 50 + volume filter
+            elif kama_falling and rsi_below_50 and volume_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Breakdown below S1 (opposite level)
-            if breakout_down:
+            # Exit long: KAMA falling (trend change)
+            if kama_falling:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Breakout above R1 (opposite level)
-            if breakout_up:
+            # Exit short: KAMA rising (trend change)
+            if kama_rising:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R1_S1_Breakout_VolumeFilter"
-timeframe = "6h"
+name = "12h_1d_KAMA_RSI_TrendFilter_V1"
+timeframe = "12h"
 leverage = 1.0
