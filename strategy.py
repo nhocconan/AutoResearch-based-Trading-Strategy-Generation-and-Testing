@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h timeframe with daily Donchian(20) breakout + volume confirmation + 1d ADX trend filter.
-Long when price breaks above 20-period Donchian high with volume > 1.5x 20-period average and 1d ADX > 25.
-Short when price breaks below 20-period Donchian low with volume > 1.5x 20-period average and 1d ADX > 25.
-Donchian channels capture volatility-based breakouts; volume confirmation reduces false signals; ADX filter ensures trending market.
-Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag. Uses discrete sizing 0.25.
+Hypothesis: 4h timeframe with 12h Supertrend trend filter + Donchian(20) breakout + volume confirmation.
+Long when price breaks above Donchian upper band with volume > 1.5x 20-period average and 12h Supertrend = uptrend.
+Short when price breaks below Donchian lower band with volume > 1.5x 20-period average and 12h Supertrend = downtrend.
+Exit on opposite Donchian band touch or trend reversal.
+Uses ATR-based stoploss equivalent via close-based exit.
+Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag. Uses discrete sizing 0.25.
 """
 
 import numpy as np
@@ -21,130 +22,145 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian channels, volume, and ADX
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
-    
-    # Calculate 1d Donchian channels (20-period)
-    high_ma_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).mean().values
-    low_ma_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).mean().values
-    # Donchian high = rolling max of high, Donchian low = rolling min of low
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate 1d volume 20-period average
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate 1d ADX (14-period)
-    # ADX requires +DI, -DI, and DX calculation
-    # +DM = max(high - prev_high, 0) if high - prev_high > prev_low - low else 0
-    # -DM = max(prev_low - low, 0) if prev_low - low > high - prev_high else 0
-    # TR = max(high - low, abs(high - prev_close), abs(low - prev_close))
-    # +DM_smooth = smoothed +DM, -DM_smooth = smoothed -DM, TR_smooth = smoothed TR
-    # +DI = 100 * +DM_smooth / TR_smooth
-    # -DI = 100 * -DM_smooth / TR_smooth
-    # DX = 100 * abs(+DI - -DI) / (+DI + -DI)
-    # ADX = smoothed DX
-    
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
-    
-    plus_dm = np.where((high_1d - prev_high) > (prev_low - low_1d), np.maximum(high_1d - prev_high, 0), 0)
-    minus_dm = np.where((prev_low - low_1d) > (high_1d - prev_high), np.maximum(prev_low - low_1d, 0), 0)
-    
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - prev_close)
-    tr3 = np.abs(low_1d - prev_close)
+    # Calculate ATR for Supertrend (using 10-period ATR, multiplier 3.0)
+    atr_period = 10
+    atr_mult = 3.0
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
     
-    # Wilder's smoothing (alpha = 1/period)
-    period = 14
-    alpha = 1.0 / period
+    # Calculate basic upper and lower bands
+    hl2 = (high + low) / 2
+    basic_ub = hl2 + atr_mult * atr
+    basic_lb = hl2 - atr_mult * atr
     
-    plus_dm_smooth = np.zeros_like(plus_dm)
-    minus_dm_smooth = np.zeros_like(minus_dm)
-    tr_smooth = np.zeros_like(tr)
+    # Initialize Supertrend
+    supertrend = np.zeros_like(close)
+    direction = np.ones_like(close)  # 1 for uptrend, -1 for downtrend
     
-    plus_dm_smooth[period-1] = np.nansum(plus_dm[:period])
-    minus_dm_smooth[period-1] = np.nansum(minus_dm[:period])
-    tr_smooth[period-1] = np.nansum(tr[:period])
+    supertrend[0] = basic_ub[0]
+    direction[0] = 1
     
-    for i in range(period, len(tr)):
-        plus_dm_smooth[i] = plus_dm_smooth[i-1] - (plus_dm_smooth[i-1] / period) + plus_dm[i]
-        minus_dm_smooth[i] = minus_dm_smooth[i-1] - (minus_dm_smooth[i-1] / period) + minus_dm[i]
-        tr_smooth[i] = tr_smooth[i-1] - (tr_smooth[i-1] / period) + tr[i]
+    for i in range(1, n):
+        if close[i] > supertrend[i-1]:
+            direction[i] = 1
+        elif close[i] < supertrend[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+        
+        if direction[i] == 1 and direction[i-1] == -1:
+            supertrend[i] = basic_lb[i]
+        elif direction[i] == -1 and direction[i-1] == 1:
+            supertrend[i] = basic_ub[i]
+        elif direction[i] == 1:
+            supertrend[i] = max(basic_lb[i], supertrend[i-1])
+        else:
+            supertrend[i] = min(basic_ub[i], supertrend[i-1])
     
-    # Avoid division by zero
-    plus_di = np.where(tr_smooth != 0, 100 * plus_dm_smooth / tr_smooth, 0)
-    minus_di = np.where(tr_smooth != 0, 100 * minus_dm_smooth / tr_smooth, 0)
+    # Get 12h data for Supertrend trend filter
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    # Calculate 12h ATR for Supertrend
+    tr1_12h = high_12h - low_12h
+    tr2_12h = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3_12h = np.abs(low_12h - np.roll(close_12h, 1))
+    tr1_12h[0] = 0
+    tr2_12h[0] = 0
+    tr3_12h[0] = 0
+    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
+    atr_12h = pd.Series(tr_12h).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
     
-    # Smooth DX to get ADX
-    adx = np.zeros_like(dx)
-    adx[period-1] = np.nansum(dx[:period])
-    for i in range(period, len(dx)):
-        adx[i] = adx[i-1] - (adx[i-1] / period) + dx[i]
+    # Calculate 12h basic upper and lower bands
+    hl2_12h = (high_12h + low_12h) / 2
+    basic_ub_12h = hl2_12h + atr_mult * atr_12h
+    basic_lb_12h = hl2_12h - atr_mult * atr_12h
     
-    # Align all to 12h
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
-    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Initialize 12h Supertrend
+    supertrend_12h = np.zeros_like(close_12h)
+    direction_12h = np.ones_like(close_12h)
+    
+    supertrend_12h[0] = basic_ub_12h[0]
+    direction_12h[0] = 1
+    
+    for i in range(1, len(close_12h)):
+        if close_12h[i] > supertrend_12h[i-1]:
+            direction_12h[i] = 1
+        elif close_12h[i] < supertrend_12h[i-1]:
+            direction_12h[i] = -1
+        else:
+            direction_12h[i] = direction_12h[i-1]
+        
+        if direction_12h[i] == 1 and direction_12h[i-1] == -1:
+            supertrend_12h[i] = basic_lb_12h[i]
+        elif direction_12h[i] == -1 and direction_12h[i-1] == 1:
+            supertrend_12h[i] = basic_ub_12h[i]
+        elif direction_12h[i] == 1:
+            supertrend_12h[i] = max(basic_lb_12h[i], supertrend_12h[i-1])
+        else:
+            supertrend_12h[i] = min(basic_ub_12h[i], supertrend_12h[i-1])
+    
+    # Align 12h Supertrend direction to 4h
+    supertrend_12h_dir_aligned = align_htf_to_ltf(prices, df_12h, direction_12h)
+    
+    # Calculate Donchian channels (20-period)
+    donchian_period = 20
+    highest_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lowest_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    
+    # Calculate 20-period volume average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 20  # need enough for Donchian and ADX
+    start_idx = max(donchian_period, 20)  # need enough for Donchian and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(vol_ma_20_aligned[i]) or np.isnan(volume_1d_aligned[i]) or 
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(supertrend_12h_dir_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x 20-period average
-        volume_confirmed = volume_1d_aligned[i] > 1.5 * vol_ma_20_aligned[i]
-        # Trend filter: ADX > 25 indicates strong trend
-        trend_filter = adx_aligned[i] > 25
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Long: price breaks above Donchian high with volume and trend
-            if (close[i] > donchian_high_aligned[i] and 
+            # Long: price breaks above Donchian upper band with volume and bullish 12h trend
+            if (close[i] > highest_high[i] and 
                 volume_confirmed and 
-                trend_filter):
+                supertrend_12h_dir_aligned[i] == 1):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low with volume and trend
-            elif (close[i] < donchian_low_aligned[i] and 
+            # Short: price breaks below Donchian lower band with volume and bearish 12h trend
+            elif (close[i] < lowest_low[i] and 
                   volume_confirmed and 
-                  trend_filter):
+                  supertrend_12h_dir_aligned[i] == -1):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below Donchian low or trend weakens
-            if (close[i] < donchian_low_aligned[i] or 
-                adx_aligned[i] < 20):  # ADX < 20 indicates weak trend/no trend
+            # Exit long: price touches Donchian lower band or 12h trend turns bearish
+            if (close[i] < lowest_low[i] or 
+                supertrend_12h_dir_aligned[i] == -1):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above Donchian high or trend weakens
-            if (close[i] > donchian_high_aligned[i] or 
-                adx_aligned[i] < 20):
+            # Exit short: price touches Donchian upper band or 12h trend turns bullish
+            if (close[i] > highest_high[i] or 
+                supertrend_12h_dir_aligned[i] == 1):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -152,6 +168,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dDonchian20_Volume_ADX"
-timeframe = "12h"
+name = "4h_12hSupertrend_Donchian20_Volume"
+timeframe = "4h"
 leverage = 1.0
