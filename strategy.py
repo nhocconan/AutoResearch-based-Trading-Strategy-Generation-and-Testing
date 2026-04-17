@@ -30,7 +30,7 @@ def generate_signals(prices):
     r4_1d = pivot_1d + 3 * (high_1d - low_1d)
     s4_1d = pivot_1d - 3 * (high_1d - low_1d)
     
-    # Align pivot levels to 6h timeframe
+    # Align pivot levels to 12h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
@@ -50,10 +50,14 @@ def generate_signals(prices):
     ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Calculate 6h ATR for volatility filter
+    # Calculate 12h ATR for volatility filter
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Volume filter: current volume > 20-period average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > vol_ma
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -65,7 +69,7 @@ def generate_signals(prices):
         if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
             np.isnan(r2_1d_aligned[i]) or np.isnan(s2_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or
             np.isnan(s3_1d_aligned[i]) or np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(atr[i])):
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -77,12 +81,12 @@ def generate_signals(prices):
         vol_filter = atr[i] > np.nanpercentile(atr[max(0, i-100):i+1], 20) if i >= 100 else True
         
         if position == 0:
-            # Long: price breaks above S3 with trend alignment
-            if long_trend and vol_filter and close[i] > s3_1d_aligned[i]:
+            # Long: price breaks above S3 with trend alignment and volume confirmation
+            if long_trend and vol_filter and volume_filter[i] and close[i] > s3_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below R3 with trend alignment
-            elif short_trend and vol_filter and close[i] < r3_1d_aligned[i]:
+            # Short: price breaks below R3 with trend alignment and volume confirmation
+            elif short_trend and vol_filter and volume_filter[i] and close[i] < r3_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
@@ -104,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Pivot_S3R3_Breakout_WeeklyTrend"
-timeframe = "6h"
+name = "12h_Pivot_S3R3_Breakout_WeeklyTrend_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
