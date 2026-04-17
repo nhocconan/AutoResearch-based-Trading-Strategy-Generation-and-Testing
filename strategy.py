@@ -13,32 +13,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Williams %R (14-period) for mean reversion ===
+    # === 1d EMA (34-period) for trend direction ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate highest high and lowest low over 14 days
-    highest_high = np.full_like(high_1d, np.nan)
-    lowest_low = np.full_like(low_1d, np.nan)
-    for i in range(len(high_1d)):
-        if i >= 13:
-            highest_high[i] = np.max(high_1d[i-13:i+1])
-            lowest_low[i] = np.min(low_1d[i-13:i+1])
-        else:
-            highest_high[i] = np.max(high_1d[:i+1]) if i > 0 else high_1d[0]
-            lowest_low[i] = np.min(low_1d[:i+1]) if i > 0 else low_1d[0]
-    
-    # Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    williams_r = np.full_like(close_1d, np.nan)
-    for i in range(len(close_1d)):
-        if highest_high[i] != lowest_low[i]:
-            williams_r[i] = (highest_high[i] - close_1d[i]) / (highest_high[i] - lowest_low[i]) * -100
-        else:
-            williams_r[i] = -50  # neutral when no range
+    # Calculate EMA with Wilder's smoothing (alpha = 1/period)
+    alpha = 1.0 / 34
+    ema_34 = np.full_like(close_1d, np.nan)
+    if len(close_1d) > 0:
+        ema_34[0] = close_1d[0]
+        for i in range(1, len(close_1d)):
+            ema_34[i] = alpha * close_1d[i] + (1 - alpha) * ema_34[i-1]
     
     # === 1d ATR (14-period) for volatility filter ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # True Range
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -47,19 +38,34 @@ def generate_signals(prices):
     tr3[0] = np.abs(low_1d[0] - close_1d[0])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
+    # Wilder's smoothing for ATR
     atr_14 = np.full_like(tr, np.nan)
     if len(tr) >= 14:
         atr_14[13] = np.mean(tr[:14])
         for i in range(14, len(tr)):
             atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
     
-    # Align indicators to 4h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Align all indicators to 4h timeframe
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # === 4h Close for price action ===
+    # === 4h Volume regime filter ===
     df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
+    
+    # Calculate 20-period average volume on 4h timeframe
+    vol_ma_20 = np.full_like(volume_4h, np.nan)
+    for i in range(len(volume_4h)):
+        if i >= 19:
+            vol_ma_20[i] = np.mean(volume_4h[i-19:i+1])
+        elif i > 0:
+            vol_ma_20[i] = np.mean(volume_4h[max(0, i-9):i+1])
+        else:
+            vol_ma_20[i] = volume_4h[0]
+    
+    # Volume regime: high volume when current > 1.5x average
+    vol_regime_4h = volume_4h > vol_ma_20 * 1.5
+    vol_regime_aligned = align_htf_to_ltf(prices, df_4h, vol_regime_4h.astype(float))
     
     signals = np.zeros(n)
     
@@ -71,54 +77,63 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
-            np.isnan(close_4h[i // 16] if i // 16 < len(close_4h) else np.nan)):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
+            np.isnan(vol_regime_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Get 4h close price (using last completed 4h bar)
-        idx_4h = i // 16
-        if idx_4h >= len(close_4h):
-            idx_4h = len(close_4h) - 1
-        close_4h_price = close_4h[idx_4h]
+        # Volume confirmation: current 4h volume > 1.3x 20-period average
+        vol_ma_20_4h = np.zeros_like(volume_4h)
+        for j in range(len(volume_4h)):
+            if j >= 19:
+                vol_ma_20_4h[j] = np.mean(volume_4h[j-19:j+1])
+            elif j > 0:
+                vol_ma_20_4h[j] = np.mean(volume_4h[max(0, j-9):j+1])
+            else:
+                vol_ma_20_4h[j] = volume_4h[0]
+        vol_confirm = volume_4h[i] > vol_ma_20_4h[i] * 1.3
         
-        # Entry logic: only enter when flat
+        # Entry logic: only enter when flat AND in high volume regime (4h)
         if position == 0:
-            # Long: Williams %R oversold (< -80) + volatility filter
-            if (williams_r_aligned[i] < -80 and 
-                atr_14_aligned[i] > 0.005 * close[i]):
-                signals[i] = 0.25
+            # Long: price above EMA34 + volatility filter + volume confirmation + high vol regime
+            if (close[i] > ema_34_aligned[i] and 
+                atr_14_aligned[i] > 0.005 * close[i] and  # volatility filter
+                vol_confirm and
+                vol_regime_aligned[i] > 0.5):  # high volume regime
+                signals[i] = 0.20
                 position = 1
                 continue
-            # Short: Williams %R overbought (> -20) + volatility filter
-            elif (williams_r_aligned[i] > -20 and 
-                  atr_14_aligned[i] > 0.005 * close[i]):
-                signals[i] = -0.25
+            # Short: price below EMA34 + volatility filter + volume confirmation + high vol regime
+            elif (close[i] < ema_34_aligned[i] and 
+                  atr_14_aligned[i] > 0.005 * close[i] and  # volatility filter
+                  vol_confirm and
+                  vol_regime_aligned[i] > 0.5):  # high volume regime
+                signals[i] = -0.20
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: Williams %R returns to neutral (> -50) or reverse signal
-            if williams_r_aligned[i] > -50:
+            # Exit long: price crosses below EMA34
+            if close[i] < ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: Williams %R returns to neutral (< -50) or reverse signal
-            if williams_r_aligned[i] < -50:
+            # Exit short: price crosses above EMA34
+            if close[i] > ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_WilliamsR_MeanReversion_VolatilityFilter_v1"
+name = "4h_EMA34_ATR_Volume_Regime_Filter_v1"
 timeframe = "4h"
 leverage = 1.0
