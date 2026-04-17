@@ -13,41 +13,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for weekly pivot calculation
+    # Get daily data for weekly pivot calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot (using last completed week)
-    # Week high/low from 5 trading days
+    # Calculate weekly pivot using last completed week
     high_5d = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
     low_5d = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
-    close_prev = pd.Series(close_1d).shift(1).values  # Previous day close
+    close_prev = pd.Series(close_1d).shift(1).values
     
-    # Standard pivot point formula
     pivot = (high_5d + low_5d + close_prev) / 3.0
     r1 = 2 * pivot - low_5d
     s1 = 2 * pivot - high_5d
     r2 = pivot + (high_5d - low_5d)
     s2 = pivot - (high_5d - low_5d)
     
-    # Align weekly pivots to 12h timeframe
-    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
-    r2_12h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_12h = align_htf_to_ltf(prices, df_1d, s2)
+    # Align weekly pivots to 1h timeframe
+    pivot_1h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_1h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_1h = align_htf_to_ltf(prices, df_1d, s1)
+    r2_1h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_1h = align_htf_to_ltf(prices, df_1d, s2)
     
-    # Volume confirmation (20-period MA on 12h)
+    # Volume confirmation (20-period MA on 1h)
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Choppiness regime filter (1d)
-    high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    atr_14 = pd.Series(high_1d - low_1d).rolling(window=14, min_periods=14).mean().values
-    chop = 100 * np.log10(atr_14.sum() / (high_14 - low_14)) / np.log10(14)
-    chop_12h = align_htf_to_ltf(prices, df_1d, chop)
+    # Session filter: 08-20 UTC
+    hour = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hour >= 8) & (hour <= 20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -57,49 +52,50 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(volume_ma20[i]) or 
-            np.isnan(pivot_12h[i]) or 
-            np.isnan(r1_12h[i]) or 
-            np.isnan(s1_12h[i]) or 
-            np.isnan(r2_12h[i]) or 
-            np.isnan(s2_12h[i]) or
-            np.isnan(chop_12h[i])):
+            np.isnan(pivot_1h[i]) or 
+            np.isnan(r1_1h[i]) or 
+            np.isnan(s1_1h[i]) or 
+            np.isnan(r2_1h[i]) or 
+            np.isnan(s2_1h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.3x 20-period average
-        volume_filter = volume[i] > (1.3 * volume_ma20[i])
+        # Apply session filter
+        if not session_filter[i]:
+            signals[i] = 0.0
+            continue
         
-        # Chop filter: chop < 61.8 (trending market)
-        chop_filter = chop_12h[i] < 61.8
+        # Volume filter: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
         if position == 0:
-            # Long: break above R2 with volume and trending market
-            if close[i] > r2_12h[i] and volume_filter and chop_filter:
-                signals[i] = 0.25
+            # Long: break above R2 with volume
+            if close[i] > r2_1h[i] and volume_filter:
+                signals[i] = 0.20
                 position = 1
-            # Short: break below S2 with volume and trending market
-            elif close[i] < s2_12h[i] and volume_filter and chop_filter:
-                signals[i] = -0.25
+            # Short: break below S2 with volume
+            elif close[i] < s2_1h[i] and volume_filter:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below R1 or chop becomes too high (range) or volume dries up
-            if close[i] < r1_12h[i] or chop_12h[i] > 61.8 or volume[i] < volume_ma20[i]:
+            # Exit long: price crosses below R1 or volume dries up
+            if close[i] < r1_1h[i] or volume[i] < volume_ma20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: price crosses above S1 or chop becomes too high (range) or volume dries up
-            if close[i] > s1_12h[i] or chop_12h[i] > 61.8 or volume[i] < volume_ma20[i]:
+            # Exit short: price crosses above S1 or volume dries up
+            if close[i] > s1_1h[i] or volume[i] < volume_ma20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "12h_WeeklyPivot_R2_S2_Breakout_Volume_Chop"
-timeframe = "12h"
+name = "1h_WeeklyPivot_R2_S2_Breakout_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
