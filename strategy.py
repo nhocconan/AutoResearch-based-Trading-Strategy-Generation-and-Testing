@@ -62,11 +62,11 @@ def generate_signals(prices):
         for i in range(len(close_1d)):
             ema_34[i] = np.mean(close_1d[:i+1]) if i >= 0 else close_1d[0]
     
-    # === Align indicators to 1d timeframe ===
+    # === Align indicators to 6h timeframe ===
     williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r_smooth)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # === 1d Volume confirmation ===
+    # === 6h Volume confirmation ===
     # Calculate 20-period average volume
     vol_ma_20 = np.full_like(volume, np.nan)
     for i in range(len(volume)):
@@ -141,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WilliamsR_EMA34_VolumeFilter_v1"
-timeframe = "1d"
+name = "6h_WilliamsR_EMA34_VolumeFilter_v1"
+timeframe = "6h"
 leverage = 1.0
