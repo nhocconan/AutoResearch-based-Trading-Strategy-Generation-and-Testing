@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: In BTC/ETH markets, price tends to respect the Volume Weighted Average Price (VWAP) 
-as a dynamic equilibrium. Combining 1-day VWAP with 4-hour Bollinger Band breakouts and volume 
-confirmation creates high-probability mean-reversion trades. The strategy targets 20-30 trades 
-per year by requiring price to deviate significantly from VWAP (>2 standard deviations) with 
-volume expansion, then revert back to VWAP. Works in both bull (buy dips to VWAP) and bear 
-(sell rallies to VWAP) regimes by fading extremes.
+Hypothesis: Weekly price extremes act as significant support/resistance levels.
+Price tends to reverse or consolidate when reaching prior week's high/low.
+Combining weekly range boundaries with daily RSI extremes and volume confirmation
+creates high-probability mean-reversion trades. Targets 50-80 trades total over 4 years
+by requiring price touch of weekly high/low, RSI <30 or >70, and volume >1.5x average.
+Works in both bull (buy dips to weekly support) and bear (sell rallies to weekly resistance).
 """
 
 import numpy as np
@@ -22,67 +22,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for VWAP calculation
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for range calculation
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate daily VWAP and standard deviation
-    # VWAP = sum(price * volume) / sum(volume) over the day
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    vwap = (typical_price * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    # Calculate weekly high/low from previous week
+    whigh = df_1w['high'].values
+    wlow = df_1w['low'].values
     
-    # Calculate daily standard deviation of price from VWAP
-    price_dev = typical_price - vwap
-    variance = (price_dev ** 2 * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
-    std_dev = np.sqrt(variance)
+    # Calculate daily RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # Bollinger Bands around VWAP: VWAP ± 2 * std_dev
-    upper_band = vwap + 2.0 * std_dev
-    lower_band = vwap - 2.0 * std_dev
-    
-    # Align all daily levels to 4h timeframe (waits for daily bar to close)
-    vwap_4h = align_htf_to_ltf(prices, df_1d, vwap.values)
-    upper_4h = align_htf_to_ltf(prices, df_1d, upper_band.values)
-    lower_4h = align_htf_to_ltf(prices, df_1d, lower_band.values)
-    
-    # Volume confirmation: 20-period volume MA on 4h
+    # Volume confirmation: 20-day average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    
+    # Align weekly levels to daily timeframe
+    whigh_daily = align_htf_to_ltf(prices, df_1w, whigh)
+    wlow_daily = align_htf_to_ltf(prices, df_1w, wlow)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 40  # warmup for all indicators
+    start_idx = 35  # warmup for RSI and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(vwap_4h[i]) or np.isnan(upper_4h[i]) or np.isnan(lower_4h[i]) or
-            np.isnan(volume_ma_20.iloc[i])):
+        if (np.isnan(whigh_daily[i]) or np.isnan(wlow_daily[i]) or
+            np.isnan(rsi_values[i]) or np.isnan(volume_ma_20.iloc[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = volume_ma_20.iloc[i]
+        rsi_val = rsi_values[i]
         
         if position == 0:
-            # Long: price below lower Bollinger Band with volume expansion
-            if price < lower_4h[i] and vol > 1.5 * vol_ma:
+            # Long: price at weekly low, oversold RSI, volume confirmation
+            if price <= wlow_daily[i] * 1.002 and rsi_val < 30 and vol > 1.5 * vol_ma:
                 signals[i] = 0.25
                 position = 1
-            # Short: price above upper Bollinger Band with volume expansion
-            elif price > upper_4h[i] and vol > 1.5 * vol_ma:
+            # Short: price at weekly high, overbought RSI, volume confirmation
+            elif price >= whigh_daily[i] * 0.998 and rsi_val > 70 and vol > 1.5 * vol_ma:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to VWAP or volume dries up
-            if price > vwap_4h[i] or vol < vol_ma:
+            # Long exit: price reaches weekly high or RSI overbought
+            if price >= whigh_daily[i] * 0.995 or rsi_val > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to VWAP or volume dries up
-            if price < vwap_4h[i] or vol < vol_ma:
+            # Short exit: price reaches weekly low or RSI oversold
+            if price <= wlow_daily[i] * 1.005 or rsi_val < 30:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_VWAP_BBands_Volume_MeanReversion"
-timeframe = "4h"
+name = "1d_WeeklyHighLow_RSI_Volume"
+timeframe = "1d"
 leverage = 1.0
