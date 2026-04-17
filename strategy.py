@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,44 +13,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for primary timeframe (6h chart)
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Calculate 12h pivot points (standard formula)
-    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
-    range_12h = high_12h - low_12h
-    r1_12h = 2 * pivot_12h - low_12h
-    s1_12h = 2 * pivot_12h - high_12h
-    r2_12h = pivot_12h + range_12h
-    s2_12h = pivot_12h - range_12h
-    
-    # Align 12h pivot levels to 6h
-    pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
-    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
-    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
-    r2_12h_aligned = align_htf_to_ltf(prices, df_12h, r2_12h)
-    s2_12h_aligned = align_htf_to_ltf(prices, df_12h, s2_12h)
-    
-    # Get 1d data for higher timeframe trend filter
+    # Get 1d data for higher timeframe
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # Calculate 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume filter: current volume > 2.0x 20-period average
+    # Calculate 1-day Donchian channels (20-period)
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian levels to 4h
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    
+    # Calculate 1-day ATR(14) for volatility filter
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 2.0)
+    volume_filter = volume > (vol_ma * 1.5)
     
-    # Calculate RSI(14) for momentum filter
+    # Calculate 4-period RSI for momentum
     delta = pd.Series(close).diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    avg_gain = gain.rolling(window=4, min_periods=4).mean()
+    avg_loss = loss.rolling(window=4, min_periods=4).mean()
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
     rsi = rsi.values
@@ -58,37 +54,36 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 200
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_12h_aligned[i]) or np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or
-            np.isnan(r2_12h_aligned[i]) or np.isnan(s2_12h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(rsi[i])):
+        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
+            np.isnan(atr_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above R2 with volume, RSI > 55, and above 1d EMA50
-            if close[i] > r2_12h_aligned[i] and volume_filter[i] and rsi[i] > 55 and close[i] > ema_50_1d_aligned[i]:
+            # Long: price breaks above Donchian high with volume and RSI > 50
+            if close[i] > high_20_aligned[i] and volume_filter[i] and rsi[i] > 50:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S2 with volume, RSI < 45, and below 1d EMA50
-            elif close[i] < s2_12h_aligned[i] and volume_filter[i] and rsi[i] < 45 and close[i] < ema_50_1d_aligned[i]:
+            # Short: price breaks below Donchian low with volume and RSI < 50
+            elif close[i] < low_20_aligned[i] and volume_filter[i] and rsi[i] < 50:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below R1
-            if close[i] < r1_12h_aligned[i]:
+            # Exit long: price breaks below Donchian low or ATR-based stop
+            if close[i] < low_20_aligned[i] or close[i] < (high[i] - 1.5 * atr_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above S1
-            if close[i] > s1_12h_aligned[i]:
+            # Exit short: price breaks above Donchian high or ATR-based stop
+            if close[i] > high_20_aligned[i] or close[i] > (low[i] + 1.5 * atr_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12hPivot_R2S2_Breakout_Volume_RSI_1dEMA50"
-timeframe = "6h"
+name = "4h_1dDonchian20_Volume_RSI_ATRStop"
+timeframe = "4h"
 leverage = 1.0
