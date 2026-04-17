@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h timeframe with 4h Donchian breakout (20) and volume confirmation, filtered by 1d EMA50 trend.
-Uses breakout continuation with volume filter to avoid false breakouts. Designed to work in both bull and bear markets
-by trading breakouts in the direction of the 1d trend. Aims for 15-35 trades/year on 1h (60-140 total over 4 years).
+Hypothesis: 6h timeframe with 1-week pivot points (R1/S1) and volume confirmation, filtered by 1-day EMA50 trend.
+Uses mean reversion at weekly pivot levels with breakout confirmation. Designed to work in both bull and bear markets
+by trading reversals at key weekly levels with volume filter to avoid false breakouts. Aims for 12-37 trades/year.
 """
 import numpy as np
 import pandas as pd
@@ -18,32 +18,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian channels
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Get 1w data for pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 4h Donchian channels (20-period)
-    high_max = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Calculate 1w pivot points (standard formula)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
     
-    # Align 4h Donchian to 1h
-    donchian_high = align_htf_to_ltf(prices, df_4h, high_max)
-    donchian_low = align_htf_to_ltf(prices, df_4h, low_min)
+    # Align 1w pivot levels to 6h
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
     
     # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
+    
+    # 1d EMA(50) for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume filter: current volume > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma * 2.0)
-    
-    # Session filter: 08:00-20:00 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -52,39 +54,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or
             np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above 4h Donchian high with volume, in session, and above 1d EMA50
-            if close[i] > donchian_high[i] and volume_filter[i] and session_filter[i] and close[i] > ema_50_1d_aligned[i]:
-                signals[i] = 0.20
+            # Long: price breaks above R1 with volume, and above 1d EMA50
+            if close[i] > r1_1w_aligned[i] and volume_filter[i] and close[i] > ema_50_1d_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 4h Donchian low with volume, in session, and below 1d EMA50
-            elif close[i] < donchian_low[i] and volume_filter[i] and session_filter[i] and close[i] < ema_50_1d_aligned[i]:
-                signals[i] = -0.20
+            # Short: price breaks below S1 with volume, and below 1d EMA50
+            elif close[i] < s1_1w_aligned[i] and volume_filter[i] and close[i] < ema_50_1d_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below 4h Donchian low
-            if close[i] < donchian_low[i]:
+            # Exit long: price breaks below pivot
+            if close[i] < pivot_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above 4h Donchian high
-            if close[i] > donchian_high[i]:
+            # Exit short: price breaks above pivot
+            if close[i] > pivot_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_4hDonchian20_Volume_1dEMA50_Session"
-timeframe = "1h"
+name = "6h_1wPivot_R1S1_Volume_1dEMA50"
+timeframe = "6h"
 leverage = 1.0
