@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-1h_RSI_Trend_Zone_v1
-RSI(14) + 4h/1d trend filter with session filter (08-20 UTC).
-Long: RSI<35 + price above 4h EMA20 + price above 1d EMA50
-Short: RSI>65 + price below 4h EMA20 + price below 1d EMA50
-Exit: RSI crosses back to neutral zone (45-55)
-Target: 60-150 total trades over 4 years (15-37/year) with ~0.20 position size.
+6h_RSI20_TrendFilter_V1
+RSI(20) > 60 for long, RSI(20) < 40 for short with 6h trend filter from 1w EMA200.
+Exit when RSI crosses back to neutral (40-60) or trend weakens.
+Designed to capture momentum in trending markets while avoiding whipsaws in ranges.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -21,34 +20,26 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     
-    # === RSI(14) ===
+    # === RSI(20) ===
     delta = np.diff(close)
     delta = np.concatenate([[0], delta])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    avg_gain = pd.Series(gain).rolling(window=20, min_periods=20).mean().values
+    avg_loss = pd.Series(loss).rolling(window=20, min_periods=20).mean().values
     rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
     
-    # === 4h EMA20 for trend filter ===
-    df_4h = get_htf_data(prices, '4h')
-    ema_20_4h = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-    
-    # === 1d EMA50 for trend filter ===
-    df_1d = get_htf_data(prices, '1d')
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # === Session filter: 08-20 UTC ===
-    hours = prices.index.hour  # pre-compute before loop
+    # === 1w EMA200 for trend filter ===
+    df_1w = get_htf_data(prices, '1w')
+    ema_200_1w = pd.Series(df_1w['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 50
+    warmup = 200
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
@@ -56,58 +47,49 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # Skip if any required data is NaN
         if (np.isnan(rsi[i]) or 
-            np.isnan(ema_20_4h_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i])):
-            signals[i] = 0.0
-            position = 0
-            continue
-        
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)  # UTC 8-20
-        
-        if not in_session:
+            np.isnan(ema_200_1w_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: RSI<35 + price above 4h EMA20 + price above 1d EMA50
-            if (rsi[i] < 35 and 
-                close[i] > ema_20_4h_aligned[i] and 
-                close[i] > ema_50_1d_aligned[i]):
-                signals[i] = 0.20
+            # Long: RSI > 60, price above 1w EMA200
+            if (rsi[i] > 60 and 
+                close[i] > ema_200_1w_aligned[i]):
+                signals[i] = 0.25
                 position = 1
                 continue
-            # Short: RSI>65 + price below 4h EMA20 + price below 1d EMA50
-            elif (rsi[i] > 65 and 
-                  close[i] < ema_20_4h_aligned[i] and 
-                  close[i] < ema_50_1d_aligned[i]):
-                signals[i] = -0.20
+            # Short: RSI < 40, price below 1w EMA200
+            elif (rsi[i] < 40 and 
+                  close[i] < ema_200_1w_aligned[i]):
+                signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: RSI > 45 (return to neutral)
-            if rsi[i] > 45:
+            # Exit long: RSI < 40 OR price below 1w EMA200
+            if (rsi[i] < 40 or 
+                close[i] < ema_200_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI < 55 (return to neutral)
-            if rsi[i] < 55:
+            # Exit short: RSI > 60 OR price above 1w EMA200
+            if (rsi[i] > 60 or 
+                close[i] > ema_200_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_RSI_Trend_Zone_v1"
-timeframe = "1h"
+name = "6h_RSI20_TrendFilter_V1"
+timeframe = "6h"
 leverage = 1.0
