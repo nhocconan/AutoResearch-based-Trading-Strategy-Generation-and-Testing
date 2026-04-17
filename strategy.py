@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Ichimoku_Cloud_Trend_Strategy
-Strategy: 12h Ichimoku Cloud with Tenkan/Kijun cross and price outside cloud.
-Long: Tenkan > Kijun AND price above Senkou Span A/B (above cloud)
-Short: Tenkan < Kijun AND price below Senkou Span A/B (below cloud)
-Exit: Tenkan/Kijun cross reverses OR price enters cloud
-Position size: 0.25
-Trend-following strategy designed to capture sustained moves while avoiding whipsaws in ranging markets.
-Timeframe: 12h
+1h_MultiTimeframe_VolumeBreakout
+Strategy: Multi-timeframe volume breakout with ADX trend filter.
+Long: 1h price breaks above 4h high AND volume > 2x 20-period avg AND ADX > 25
+Short: 1h price breaks below 4h low AND volume > 2x 20-period avg AND ADX > 25
+Exit: Price returns to 4h midpoint OR volume drops below threshold
+Position size: 0.20
+Designed to capture institutional breakouts with volume confirmation across multiple timeframes.
+Timeframe: 1h
 """
 
 import numpy as np
@@ -16,110 +16,98 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 52:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Ichimoku components
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (period52_high + period52_low) / 2
-    
-    # Chikou Span (Lagging Span): current close plotted 26 periods back
-    # Not used for signals to avoid look-ahead
-    
-    # Daily trend filter from 1D timeframe
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    
-    close_series_1d = pd.Series(close_1d)
-    ema50_1d = close_series_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Volume confirmation: 20-period volume average
+    # Calculate volume MA(20) on 1h
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate ADX(14) on 1h for trend strength
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                       np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                        np.maximum(low[:-1] - low[1:], 0), 0)
+    plus_dm = np.insert(plus_dm, 0, 0)
+    minus_dm = np.insert(minus_dm, 0, 0)
+    
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.insert(tr, 0, 0)
+    
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / (atr * 14 + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / (atr * 14 + 1e-10)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Get 4h data for breakout levels
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # Align 4h levels to 1h timeframe (wait for 4h bar close)
+    high_4h_aligned = align_htf_to_ltf(prices, df_4h, high_4h)
+    low_4h_aligned = align_htf_to_ltf(prices, df_4h, low_4h)
+    midpoint_4h_aligned = align_htf_to_ltf(prices, df_4h, (high_4h + low_4h) / 2)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 52  # Need Senkou B calculation
+    start_idx = max(20, 14)  # volume MA20, ADX
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_ma20[i])):
+        if (np.isnan(volume_ma20[i]) or 
+            np.isnan(adx[i]) or 
+            np.isnan(high_4h_aligned[i]) or 
+            np.isnan(low_4h_aligned[i]) or 
+            np.isnan(midpoint_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Determine cloud boundaries (Senkou Span A/B)
-        upper_cloud = max(senkou_a[i], senkou_b[i])
-        lower_cloud = min(senkou_a[i], senkou_b[i])
+        # Volume filter: current volume > 2x 20-period average
+        volume_filter = volume[i] > (2.0 * volume_ma20[i])
         
-        # Price position relative to cloud
-        price_above_cloud = close[i] > upper_cloud
-        price_below_cloud = close[i] < lower_cloud
-        price_in_cloud = (close[i] >= lower_cloud) and (close[i] <= upper_cloud)
-        
-        # Tenkan/Kijun cross
-        tenkan_above_kijun = tenkan[i] > kijun[i]
-        tenkan_below_kijun = tenkan[i] < kijun[i]
-        
-        # Volume filter: current volume > 1.3x 20-period average
-        volume_filter = volume[i] > (1.3 * volume_ma20[i])
-        
-        # Trend filter: price above/below daily EMA50
-        price_above_dema = close[i] > ema50_1d_aligned[i]
-        price_below_dema = close[i] < ema50_1d_aligned[i]
+        # Trend filter: ADX > 25 indicates strong trend
+        trend_filter = adx[i] > 25
         
         if position == 0:
-            # Long: Tenkan > Kijun AND price above cloud + volume + trend filter
-            if (tenkan_above_kijun and price_above_cloud and 
-                volume_filter and price_above_dema):
-                signals[i] = 0.25
+            # Long: price breaks above 4h high + volume + trend
+            if close[i] > high_4h_aligned[i] and volume_filter and trend_filter:
+                signals[i] = 0.20
                 position = 1
-            # Short: Tenkan < Kijun AND price below cloud + volume + trend filter
-            elif (tenkan_below_kijun and price_below_cloud and 
-                  volume_filter and price_below_dema):
-                signals[i] = -0.25
+            # Short: price breaks below 4h low + volume + trend
+            elif close[i] < low_4h_aligned[i] and volume_filter and trend_filter:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: Tenkan/Kijun cross down OR price enters cloud
-            if (tenkan_below_kijun or price_in_cloud):
+            # Exit long: price returns to 4h midpoint OR volume drops
+            if close[i] < midpoint_4h_aligned[i] or volume[i] < volume_ma20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: Tenkan/Kijun cross up OR price enters cloud
-            if (tenkan_above_kijun or price_in_cloud):
+            # Exit short: price returns to 4h midpoint OR volume drops
+            if close[i] > midpoint_4h_aligned[i] or volume[i] < volume_ma20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "12h_Ichimoku_Cloud_Trend_Strategy"
-timeframe = "12h"
+name = "1h_MultiTimeframe_VolumeBreakout"
+timeframe = "1h"
 leverage = 1.0
