@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_R1_S1_Breakout_VolumeFilter
-Strategy: 6-hour breakout of weekly pivot R1/S1 levels with volume confirmation.
-Long: Price breaks above weekly pivot R1 + volume > 1.8x 20-period average
-Short: Price breaks below weekly pivot S1 + volume > 1.8x 20-period average
-Exit: Price returns to weekly pivot point (PP)
+12h_1d_RangeBreakout_Volume_Trend
+Strategy: 12-hour breakout of 1d high/low with volume confirmation and 1d trend filter.
+Long: Price breaks above 1-day high + volume > 1.8x 20-period avg + price above 1d EMA50
+Short: Price breaks below 1-day low + volume > 1.8x 20-period avg + price below 1d EMA50
+Exit: Price returns to 12h VWAP
 Position size: 0.25
-Weekly pivot levels provide institutional reference points that work in both trending and ranging markets.
-Timeframe: 6h
+Designed to capture breakouts aligned with daily trend in both bull and bear markets.
+Timeframe: 12h
 """
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,37 +24,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate weekly pivot points (PP, R1, S1)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 12h VWAP for exit
+    typical_price = (high + low + close) / 3.0
+    vwap_num = (typical_price * volume).cumsum()
+    vwap_den = volume.cumsum()
+    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
     
-    # Pivot point calculation: PP = (H + L + C)/3
-    pp_1w = (high_1w + low_1w + close_1w) / 3.0
-    # R1 = (2 * PP) - L
-    r1_1w = (2 * pp_1w) - low_1w
-    # S1 = (2 * PP) - H
-    s1_1w = (2 * pp_1w) - high_1w
+    # Calculate 1d high/low for breakout levels
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align weekly levels to 6h timeframe
-    pp_1w_aligned = align_htf_to_ltf(prices, df_1w, pp_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    # Calculate 1d EMA50 for trend filter
+    close_series_1d = pd.Series(close_1d)
+    ema50_1d = close_series_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume confirmation (20-period MA on 6h)
+    # Align 1d levels to 12h timeframe
+    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
+    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Volume confirmation (20-period MA on 12h)
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pp_1w_aligned[i]) or 
-            np.isnan(r1_1w_aligned[i]) or 
-            np.isnan(s1_1w_aligned[i]) or 
+        if (np.isnan(high_1d_aligned[i]) or 
+            np.isnan(low_1d_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or 
             np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
@@ -62,34 +65,38 @@ def generate_signals(prices):
         # Volume filter: current volume > 1.8x 20-period average
         volume_filter = volume[i] > (1.8 * volume_ma20[i])
         
-        # Breakout conditions
-        breakout_up = close[i] > r1_1w_aligned[i-1]  # break above weekly R1
-        breakout_down = close[i] < s1_1w_aligned[i-1]  # break below weekly S1
+        # Trend filter: price above/below 1d EMA50
+        price_above_ema = close[i] > ema50_1d_aligned[i]
+        price_below_ema = close[i] < ema50_1d_aligned[i]
         
-        # Return to weekly pivot point for exit
-        return_to_pp = abs(close[i] - pp_1w_aligned[i]) < 0.005 * close[i]  # within 0.5% of PP
+        # Breakout conditions
+        breakout_up = close[i] > high_1d_aligned[i-1]  # break above previous day high
+        breakout_down = close[i] < low_1d_aligned[i-1]  # break below previous day low
+        
+        # Return to 12h VWAP for exit
+        return_to_vwap = abs(close[i] - vwap[i]) < 0.005 * close[i]  # within 0.5% of VWAP
         
         if position == 0:
-            # Long: breakout above R1 + volume filter
-            if breakout_up and volume_filter:
+            # Long: breakout up + volume filter + price above EMA
+            if breakout_up and volume_filter and price_above_ema:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below S1 + volume filter
-            elif breakout_down and volume_filter:
+            # Short: breakout down + volume filter + price below EMA
+            elif breakout_down and volume_filter and price_below_ema:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: return to PP or break below S1
-            if return_to_pp or breakout_down:
+            # Exit long: return to VWAP or break down
+            if return_to_vwap or breakout_down:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: return to PP or break above R1
-            if return_to_pp or breakout_up:
+            # Exit short: return to VWAP or break up
+            if return_to_vwap or breakout_up:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R1_S1_Breakout_VolumeFilter"
-timeframe = "6h"
+name = "12h_1d_RangeBreakout_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
