@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Williams %R reversal with 1-day ADX trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions; ADX>25 filters chop; volume spike confirms momentum.
+# Hypothesis: 6-hour 14-day RSI with 1-day ADX trend filter and volume confirmation
+# RSI identifies overbought/oversold conditions; ADX>25 filters chop; volume spike confirms momentum.
 # Designed for 6h timeframe to achieve 12-37 trades/year with low fee decay.
 # Works in both bull and bear markets by trading reversals at extremes in trending regimes.
 
@@ -18,23 +18,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1-day Williams %R (14-period) for mean reversion signals ===
+    # === 1-day RSI (14-period) for mean reversion signals ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Highest high and lowest low over lookback period
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # RSI calculation
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
     
-    # Align Williams %R to 6h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    rs = avg_gain / (avg_loss + 1e-10)  # avoid division by zero
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Align RSI to 6h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
     # === 1-day ADX (14-period) for trend filter ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
     # True Range
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
@@ -53,11 +58,11 @@ def generate_signals(prices):
     minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
     
     # Directional Indicators
-    plus_di = 100 * plus_dm_14 / tr_14
-    minus_di = 100 * minus_dm_14 / tr_14
+    plus_di = 100 * plus_dm_14 / (tr_14 + 1e-10)
+    minus_di = 100 * minus_dm_14 / (tr_14 + 1e-10)
     
     # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
@@ -76,7 +81,7 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(adx_aligned[i]) or
+        if (np.isnan(rsi_aligned[i]) or np.isnan(adx_aligned[i]) or
             np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
@@ -91,9 +96,9 @@ def generate_signals(prices):
         # Trend filter: ADX > 25
         trend_filter = adx_aligned[i] > 25
         
-        # Williams %R reversal signals
-        oversold = williams_r_aligned[i] < -80  # Oversold condition
-        overbought = williams_r_aligned[i] > -20  # Overbought condition
+        # RSI reversal signals
+        oversold = rsi_aligned[i] < 30  # Oversold condition
+        overbought = rsi_aligned[i] > 70  # Overbought condition
         
         # Entry logic: only enter when flat
         if position == 0:
@@ -107,10 +112,10 @@ def generate_signals(prices):
                     position = -1
                     continue
         
-        # Exit logic: exit when Williams %R returns to neutral zone or conditions fail
+        # Exit logic: exit when RSI returns to neutral zone or conditions fail
         elif position == 1:
-            # Exit long if Williams %R returns above -50 or conditions fail
-            if williams_r_aligned[i] > -50 or not vol_spike or not trend_filter:
+            # Exit long if RSI returns above 50 or conditions fail
+            if rsi_aligned[i] > 50 or not vol_spike or not trend_filter:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -118,8 +123,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short if Williams %R returns below -50 or conditions fail
-            if williams_r_aligned[i] < -50 or not vol_spike or not trend_filter:
+            # Exit short if RSI returns below 50 or conditions fail
+            if rsi_aligned[i] < 50 or not vol_spike or not trend_filter:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -128,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_1dADX25_Volume1.5x"
+name = "6h_RSI14_1dADX25_Volume1.5x"
 timeframe = "6h"
 leverage = 1.0
