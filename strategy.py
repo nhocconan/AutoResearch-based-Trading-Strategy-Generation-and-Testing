@@ -1,19 +1,14 @@
-# NOTE: This strategy was developed but did not pass evaluation in the latest round.
-# It is kept in the history for reference and learning.
-# Final metrics: train_sharpe=0.583, test_sharpe=-0.141
-# Strategy: 4h_PriceAction_Momentum_Consolidation_Breakout
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour price action momentum with consolidation breakout detection
-# Strategy identifies periods of low volatility (consolidation) followed by
-# momentum breakouts in the direction of the 12-hour trend.
-# Uses Bollinger Band width for consolidation detection and RSI for momentum.
-# In strong trends (ADX > 25), trades breakouts with volume confirmation.
-# Designed to work in both bull and bear markets by following the trend.
-# Target: 20-35 trades/year to minimize fee decay while capturing strong moves.
+# Hypothesis: 1h trading with 4h directional bias and 1d trend filter.
+# Uses 4h EMA21 for trend direction (price > EMA21 = long bias, < EMA21 = short bias)
+# 1d ADX > 25 ensures we only trade in strong trending markets to avoid whipsaws
+# Entry triggered on 1h when price crosses EMA13 in direction of 4h trend
+# Conservative position size (0.20) and session filter (08-20 UTC) to limit trades to ~20-40/year
+# Designed to work in both bull (trend following) and bear (avoids false signals via ADX filter)
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,126 +20,118 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h Trend Indicators ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # === 4h EMA21 for trend direction ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
     
-    # 12h EMA34 for trend direction
-    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    # === 1d ADX (14-period) for trend strength filter ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 12h ADX for trend strength
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.concatenate([[close_12h[0]], close_12h[:-1]]))
-    tr3 = np.abs(low_12h - np.concatenate([[close_12h[0]], close_12h[:-1]]))
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_12h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    up_move = high_12h - np.concatenate([[high_12h[0]], high_12h[:-1]])
-    down_move = np.concatenate([[low_12h[0]], low_12h[:-1]]) - low_12h
+    # Directional Movement
+    up_move = high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])
+    down_move = np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Smoothed DM
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
     
-    plus_di = 100 * plus_dm_smooth / (atr_12h + 1e-10)
-    minus_di = 100 * minus_dm_smooth / (atr_12h + 1e-10)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx_12h = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    # Directional Indicators
+    plus_di_1d = 100 * plus_dm_smooth / (atr_1d + 1e-10)
+    minus_di_1d = 100 * minus_dm_smooth / (atr_1d + 1e-10)
     
-    # === 4h Consolidation and Momentum ===
-    # Bollinger Bands for volatility squeeze detection
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
-    bb_width = (upper_bb - lower_bb) / sma_20
+    # DX and ADX
+    dx = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d + 1e-10)
+    adx_1d = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # RSI for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # === 1h EMA13 for entry timing ===
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 50
+    warmup = 100
+    
+    # Pre-compute session hours (08-20 UTC)
+    if isinstance(prices.index, pd.DatetimeIndex):
+        hours = prices.index.hour
+    else:
+        hours = pd.DatetimeIndex(prices['open_time']).hour
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(ema34_12h_aligned[i]) or np.isnan(adx_12h_aligned[i]) or 
-            np.isnan(bb_width[i]) or np.isnan(rsi[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
+            np.isnan(ema_13[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Consolidation: Bollinger Band width in lowest 20% of last 50 periods
-        bb_width_low = bb_width[i] < np.percentile(bb_width[max(0, i-50):i+1], 20)
+        # Session filter: 08-20 UTC only
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
         
-        # Momentum: RSI > 55 for bullish, < 45 for bearish
-        mom_bullish = rsi[i] > 55
-        mom_bearish = rsi[i] < 45
+        if not in_session:
+            signals[i] = 0.0
+            position = 0
+            continue
         
-        # Trend filter: 12h trend direction and strength
-        uptrend = close_12h[-1] > ema34_12h[-1] if len(close_12h) > 0 else False  # Use last known 12h value
-        strong_trend = adx_12h_aligned[i] > 25
-        
-        # Volume confirmation: current volume > 1.3x average
-        vol_confirm = volume[i] > vol_ma_20[i] * 1.3
-        
-        # Breakout: price outside Bollinger Bands
-        breakout_up = close[i] > upper_bb[i]
-        breakout_down = close[i] < lower_bb[i]
+        # Trend filters
+        strong_trend = adx_1d_aligned[i] > 25
+        bullish_bias = close[i] > ema_21_4h_aligned[i]  # price above 4h EMA21
+        bearish_bias = close[i] < ema_21_4h_aligned[i]  # price below 4h EMA21
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Need consolidation breakout with momentum and trend alignment
-            if bb_width_low and vol_confirm and strong_trend:
-                if mom_bullish and breakout_up and uptrend:
-                    signals[i] = 0.25
+            if strong_trend and in_session:
+                # Go long if bullish bias and price crosses above EMA13
+                if bullish_bias and close[i] > ema_13[i] and (i == warmup or close[i-1] <= ema_13[i-1]):
+                    signals[i] = 0.20
                     position = 1
                     continue
-                elif mom_bearish and breakout_down and not uptrend:
-                    signals[i] = -0.25
+                # Go short if bearish bias and price crosses below EMA13
+                elif bearish_bias and close[i] < ema_13[i] and (i == warmup or close[i-1] >= ema_13[i-1]):
+                    signals[i] = -0.20
                     position = -1
                     continue
         
-        # Exit logic: exit when momentum reverses or volatility expands
+        # Exit logic
         elif position == 1:
-            # Exit long if bearish momentum or volatility expansion
-            if mom_bearish or bb_width[i] > np.percentile(bb_width[max(0, i-20):i+1], 80):
+            # Exit long if bearish bias forms or trend weakens
+            if bearish_bias or not strong_trend:
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short if bullish momentum or volatility expansion
-            if mom_bullish or bb_width[i] > np.percentile(bb_width[max(0, i-20):i+1], 80):
+            # Exit short if bullish bias forms or trend weakens
+            if bullish_bias or not strong_trend:
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_PriceAction_Momentum_Consolidation_Breakout"
-timeframe = "4h"
+name = "1h_EMA13_4hEMA21_1dADXFilter"
+timeframe = "1h"
 leverage = 1.0
