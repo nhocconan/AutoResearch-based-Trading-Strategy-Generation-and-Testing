@@ -1,17 +1,20 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-hour Bollinger Band breakout with 4-hour RSI filter and volume confirmation.
-# Breakouts capture momentum moves in both bull and bear markets. The 4-hour RSI filter
-# avoids counter-trend trades (long when RSI>50, short when RSI<50), while volume
-# confirmation validates breakout strength. Uses 1-hour timeframe for entry timing.
-# Target: 60-150 total trades over 4 years = 15-37/year for 1h.
+# Hypothesis: 6-hour Williams Fractal breakout with weekly trend filter and volume confirmation.
+# Williams Fractals identify local swing highs/lows with confirmation delay. 
+# Breakouts from fractal levels capture momentum after consolidation.
+# Weekly trend filter ensures trades align with higher-timeframe momentum.
+# Volume confirmation validates breakout strength.
+# Works in bull/bear markets by capturing breakouts in trending regimes.
+# Target: 12-37 trades/year (50-150 total over 4 years).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,98 +22,117 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h data for RSI filter ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # === Weekly data for trend filter ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # RSI calculation (14-period) on 4h data
-    def calculate_rsi(close, period=14):
-        delta = np.diff(close, prepend=close[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
+    # Weekly EMA34 for trend filter
+    def calculate_ema(arr, period):
+        ema = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return ema
+        multiplier = 2 / (period + 1)
+        ema[period-1] = np.mean(arr[:period])
+        for i in range(period, len(arr)):
+            ema[i] = (arr[i] * multiplier) + (ema[i-1] * (1 - multiplier))
+        return ema
+    
+    ema34_1w = calculate_ema(close_1w, 34)
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    
+    # === Daily data for Williams Fractals ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Williams Fractals: bearish (swing high) and bullish (swing low)
+    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n] > high[n+1] and high[n] > high[n+2]
+    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n] < low[n+1] and low[n] < low[n+2]
+    def calculate_williams_fractals(high, low):
+        n = len(high)
+        bearish = np.full(n, np.nan)
+        bullish = np.full(n, np.nan)
         
-        avg_gain = np.zeros_like(close)
-        avg_loss = np.zeros_like(close)
+        for i in range(2, n-2):
+            # Bearish fractal (swing high)
+            if (high[i-2] < high[i-1] and 
+                high[i] > high[i-1] and 
+                high[i] > high[i+1] and 
+                high[i] > high[i+2]):
+                bearish[i] = high[i]
+            
+            # Bullish fractal (swing low)
+            if (low[i-2] > low[i-1] and 
+                low[i] < low[i-1] and 
+                low[i] < low[i+1] and 
+                low[i] < low[i+2]):
+                bullish[i] = low[i]
         
-        # Wilder's smoothing
-        avg_gain[period] = np.mean(gain[1:period+1])
-        avg_loss[period] = np.mean(loss[1:period+1])
-        
-        for i in range(period+1, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+        return bearish, bullish
     
-    rsi_4h = calculate_rsi(close_4h, 14)
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
+    bearish_fractal, bullish_fractal = calculate_williams_fractals(high_1d, low_1d)
+    # Williams fractals need 2-bar confirmation delay after the center bar
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     
-    # === 1h data for Bollinger Bands ===
-    # Bollinger Bands (20, 2) on 1h data
-    bb_period = 20
-    bb_std = 2
+    # === Daily volume for confirmation ===
+    volume_1d = df_1d['volume'].values
+    vol_avg20_1d = np.full_like(volume_1d, np.nan)
+    for i in range(len(volume_1d)):
+        if i >= 19:
+            vol_avg20_1d[i] = np.mean(volume_1d[i-19:i+1])
     
-    sma = np.full_like(close, np.nan)
-    std_dev = np.full_like(close, np.nan)
-    
-    for i in range(bb_period - 1, len(close)):
-        sma[i] = np.mean(close[i - bb_period + 1:i + 1])
-        std_dev[i] = np.std(close[i - bb_period + 1:i + 1])
-    
-    upper_band = sma + (std_dev * bb_std)
-    lower_band = sma - (std_dev * bb_std)
-    
-    # Volume average (20-period)
-    vol_avg = np.full_like(volume, np.nan)
-    for i in range(19, len(volume)):
-        vol_avg[i] = np.mean(volume[i-19:i+1])
+    vol_avg20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg20_1d)
     
     signals = np.zeros(n)
     position = 0
-    warmup = max(50, bb_period)  # Sufficient for all indicators
+    warmup = 100  # Sufficient for all indicators
     
     for i in range(warmup, n):
-        if (np.isnan(upper_band[i]) or 
-            np.isnan(lower_band[i]) or
-            np.isnan(rsi_4h_aligned[i]) or
-            np.isnan(vol_avg[i])):
+        if (np.isnan(ema34_1w_aligned[i]) or
+            np.isnan(bearish_fractal_aligned[i]) or
+            np.isnan(bullish_fractal_aligned[i]) or
+            np.isnan(vol_avg20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        vol_filter = volume[i] > 1.5 * vol_avg[i]
+        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
+        vol_filter = vol_1d_current > 1.5 * vol_avg20_1d_aligned[i]
         
         if position == 0:
-            # Long: price breaks above upper band + RSI > 50 (bullish bias) + volume
-            if close[i] > upper_band[i] and \
-               rsi_4h_aligned[i] > 50 and vol_filter:
-                signals[i] = 0.20
+            # Long: price breaks above bearish fractal (resistance) + weekly uptrend + volume
+            if (close[i] > bearish_fractal_aligned[i] and 
+                close[i] > ema34_1w_aligned[i] and 
+                vol_filter):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower band + RSI < 50 (bearish bias) + volume
-            elif close[i] < lower_band[i] and \
-                 rsi_4h_aligned[i] < 50 and vol_filter:
-                signals[i] = -0.20
+            # Short: price breaks below bullish fractal (support) + weekly downtrend + volume
+            elif (close[i] < bullish_fractal_aligned[i] and 
+                  close[i] < ema34_1w_aligned[i] and 
+                  vol_filter):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below lower band (mean reversion)
-            if close[i] < lower_band[i]:
+            # Exit long: price breaks below bullish fractal (support) or weekly trend turns down
+            if (close[i] < bullish_fractal_aligned[i] or 
+                close[i] < ema34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above upper band (mean reversion)
-            if close[i] > upper_band[i]:
+            # Exit short: price breaks above bearish fractal (resistance) or weekly trend turns up
+            if (close[i] > bearish_fractal_aligned[i] or 
+                close[i] > ema34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_BB20_4hRSI_VolumeFilter"
-timeframe = "1h"
+name = "6h_WilliamsFractal_WeeklyEMA34_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
