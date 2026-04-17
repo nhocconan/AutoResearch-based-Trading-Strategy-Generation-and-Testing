@@ -13,20 +13,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d EMA34 ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # === 1w EMA50 ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # Calculate EMA34
-    ema_34 = np.zeros(len(close_1d))
-    alpha = 2 / (34 + 1)
-    ema_34[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        ema_34[i] = alpha * close_1d[i] + (1 - alpha) * ema_34[i-1]
+    # Calculate EMA50 on weekly
+    ema_50 = np.zeros(len(close_1w))
+    alpha = 2 / (50 + 1)
+    ema_50[0] = close_1w[0]
+    for i in range(1, len(close_1w)):
+        ema_50[i] = alpha * close_1w[i] + (1 - alpha) * ema_50[i-1]
     
-    # === 1d RSI(14) ===
-    delta = np.diff(close_1d, prepend=close_1d[0])
+    # === 1w RSI(14) ===
+    delta = np.diff(close_1w, prepend=close_1w[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
@@ -40,20 +40,20 @@ def generate_signals(prices):
         avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
     rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    rsi_1w = 100 - (100 / (1 + rs))
     
-    # === 1d Volume MA(20) ===
-    vol_ma_20_1d = np.zeros(len(volume_1d))
-    for i in range(len(volume_1d)):
-        if i >= 19:
-            vol_ma_20_1d[i] = np.mean(volume_1d[i-19:i+1])
+    # === 1w Volume MA(10) ===
+    vol_ma_10_1w = np.zeros(len(volume_1w))
+    for i in range(len(volume_1w)):
+        if i >= 9:
+            vol_ma_10_1w[i] = np.mean(volume_1w[i-9:i+1])
         else:
-            vol_ma_20_1d[i] = np.mean(volume_1d[max(0, i-9):i+1]) if i > 0 else volume_1d[0]
+            vol_ma_10_1w[i] = np.mean(volume_1w[max(0, i-4):i+1]) if i > 0 else volume_1w[0]
     
-    # Align to 4h timeframe
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Align to daily timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    vol_ma_10_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_10_1w)
     
     signals = np.zeros(n)
     
@@ -65,33 +65,33 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(rsi_1w_aligned[i]) or 
+            np.isnan(vol_ma_10_1w_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-        vol_confirm = vol_1d_aligned[i] > vol_ma_20_1d_aligned[i] * 1.5
+        # Volume confirmation: current weekly volume > 1.3x 10-period average
+        vol_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_1w)
+        vol_confirm = vol_1w_aligned[i] > vol_ma_10_1w_aligned[i] * 1.3
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price above EMA34 and RSI < 35 with volume confirmation
-            if close[i] > ema_34_aligned[i] and rsi_1d_aligned[i] < 35 and vol_confirm:
+            # Long: price above weekly EMA50 and RSI < 30 with volume confirmation
+            if close[i] > ema_50_aligned[i] and rsi_1w_aligned[i] < 30 and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price below EMA34 and RSI > 65 with volume confirmation
-            elif close[i] < ema_34_aligned[i] and rsi_1d_aligned[i] > 65 and vol_confirm:
+            # Short: price below weekly EMA50 and RSI > 70 with volume confirmation
+            elif close[i] < ema_50_aligned[i] and rsi_1w_aligned[i] > 70 and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic: RSI returns to neutral (40-60 range)
+        # Exit logic: RSI returns to neutral range
         elif position == 1:
             # Exit long: RSI >= 40
-            if rsi_1d_aligned[i] >= 40:
+            if rsi_1w_aligned[i] >= 40:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -100,7 +100,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit short: RSI <= 60
-            if rsi_1d_aligned[i] <= 60:
+            if rsi_1w_aligned[i] <= 60:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -109,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA34_RSI_Volume"
-timeframe = "4h"
+name = "1d_WeeklyEMA50_RSI_Volume"
+timeframe = "1d"
 leverage = 1.0
