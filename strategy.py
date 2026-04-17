@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h timeframe with 12h Supertrend(10,3) trend filter + 6h Camarilla pivot breakout + volume confirmation.
-Long when price breaks above Camarilla R3 level with 12h Supertrend uptrend and volume > 1.3x 20-period volume average.
-Short when price breaks below Camarilla S3 level with 12h Supertrend downtrend and volume > 1.3x 20-period volume average.
-Uses 12h timeframe for trend filter to avoid whipsaw, and 6h for precise entry/exit. Designed to work in both bull and bear markets by following the higher timeframe trend.
+Hypothesis: 12h timeframe with 1d Camarilla pivot R1/S1 breakout + volume confirmation + 1d chop regime filter.
+Long when price breaks above 1d Camarilla R1 with volume > 1.3x 20-period average and chop < 61.8 (trending).
+Short when price breaks below 1d Camarilla S1 with volume > 1.3x 20-period average and chop < 61.8.
+Camarilla pivots from daily timeframe provide intraday support/resistance levels that often hold.
+Volume confirmation ensures breakout strength. Chop filter avoids false signals in ranging markets.
+Designed to work in both bull and bear markets by trading breakouts from key daily levels with trend filter.
 """
 
 import numpy as np
@@ -20,137 +22,109 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Supertrend
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Get 1d data for Camarilla pivots and chop
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h ATR(10)
-    def atr(high_vals, low_vals, close_vals, window):
-        tr1 = pd.Series(high_vals).shift(1).values
-        tr2 = pd.Series(low_vals).shift(1).values
-        tr0 = high_vals - low_vals
-        tr1 = np.abs(high_vals - tr1)
-        tr2 = np.abs(low_vals - tr2)
-        tr = np.maximum(tr0, np.maximum(tr1, tr2))
-        atr_vals = pd.Series(tr).rolling(window=window, min_periods=window).mean().values
-        # First values: use expanding mean
-        tr_expanding = pd.Series(tr).expanding(min_periods=1).mean().values
-        atr_vals = np.where(np.arange(len(tr)) < window, tr_expanding, atr_vals)
-        return atr_vals
+    # Calculate 1d Camarilla levels (based on previous day)
+    def camarilla_levels(high_vals, low_vals, close_vals):
+        # Typical price
+        pp = (high_vals + low_vals + close_vals) / 3.0
+        range_val = high_vals - low_vals
+        r1 = pp + (range_val * 1.1 / 12)
+        s1 = pp - (range_val * 1.1 / 12)
+        return r1, s1
     
-    atr_10_12h = atr(high_12h, low_12h, close_12h, 10)
+    # Shift by 1 to use previous day's levels
+    r1, s1 = camarilla_levels(high_1d, low_1d, close_1d)
+    r1 = np.roll(r1, 1)
+    s1 = np.roll(s1, 1)
+    r1[0] = np.nan
+    s1[0] = np.nan
     
-    # Calculate 12h Supertrend(10,3)
-    hl2_12h = (high_12h + low_12h) / 2
-    upper_band_12h = hl2_12h + 3 * atr_10_12h
-    lower_band_12h = hl2_12h - 3 * atr_10_12h
-    
-    supertrend_12h = np.full(len(close_12h), np.nan)
-    direction_12h = np.full(len(close_12h), np.nan)  # 1 for uptrend, -1 for downtrend
-    
-    for i in range(len(close_12h)):
-        if i == 0:
-            supertrend_12h[i] = hl2_12h[i]
-            direction_12h[i] = 1
-        else:
-            if close_12h[i] > supertrend_12h[i-1]:
-                direction_12h[i] = 1
-            elif close_12h[i] < supertrend_12h[i-1]:
-                direction_12h[i] = -1
+    # Calculate 1d Choppiness Index (CHOP)
+    def choppiness_index(high_vals, low_vals, close_vals, window):
+        atr = []
+        for i in range(len(high_vals)):
+            if i == 0:
+                tr = high_vals[i] - low_vals[i]
             else:
-                direction_12h[i] = direction_12h[i-1]
-            
-            if direction_12h[i] == 1:
-                supertrend_12h[i] = max(lower_band_12h[i], supertrend_12h[i-1])
-            else:
-                supertrend_12h[i] = min(upper_band_12h[i], supertrend_12h[i-1])
+                tr = max(high_vals[i] - low_vals[i], 
+                         abs(high_vals[i] - close_vals[i-1]), 
+                         abs(low_vals[i] - close_vals[i-1]))
+            atr.append(tr)
+        
+        atr = np.array(atr)
+        atr_sum = pd.Series(atr).rolling(window=window, min_periods=window).sum().values
+        
+        highest_high = pd.Series(high_vals).rolling(window=window, min_periods=window).max().values
+        lowest_low = pd.Series(low_vals).rolling(window=window, min_periods=window).min().values
+        range_max_min = highest_high - lowest_low
+        
+        chop = 100 * np.log10(atr_sum / range_max_min) / np.log10(window)
+        # Handle division by zero and invalid values
+        chop = np.where((range_max_min == 0) | np.isnan(atr_sum) | np.isinf(atr_sum), 50, chop)
+        chop = np.where(chop > 100, 100, chop)
+        chop = np.where(chop < 0, 0, chop)
+        return chop
     
-    # Calculate 6h Camarilla levels from previous 6h bar
-    def camarilla_levels(high_val, low_val, close_val):
-        range_val = high_val - low_val
-        if range_val == 0:
-            return close_val, close_val, close_val, close_val, close_val, close_val, close_val, close_val
-        r4 = close_val + range_val * 1.1 / 2
-        r3 = close_val + range_val * 1.1 / 4
-        r2 = close_val + range_val * 1.1 / 6
-        r1 = close_val + range_val * 1.1 / 12
-        s1 = close_val - range_val * 1.1 / 12
-        s2 = close_val - range_val * 1.1 / 6
-        s3 = close_val - range_val * 1.1 / 4
-        s4 = close_val - range_val * 1.1 / 2
-        return r1, r2, r3, r4, s1, s2, s3, s4
+    chop_14_1d = choppiness_index(high_1d, low_1d, close_1d, 14)
     
-    # Use previous bar's OHLC for Camarilla (standard practice)
-    r1_6h = np.full(n, np.nan)
-    r2_6h = np.full(n, np.nan)
-    r3_6h = np.full(n, np.nan)
-    r4_6h = np.full(n, np.nan)
-    s1_6h = np.full(n, np.nan)
-    s2_6h = np.full(n, np.nan)
-    s3_6h = np.full(n, np.nan)
-    s4_6h = np.full(n, np.nan)
-    
-    for i in range(1, n):
-        r1, r2, r3, r4, s1, s2, s3, s4 = camarilla_levels(high[i-1], low[i-1], close[i-1])
-        r1_6h[i] = r1
-        r2_6h[i] = r2
-        r3_6h[i] = r3
-        r4_6h[i] = r4
-        s1_6h[i] = s1
-        s2_6h[i] = s2
-        s3_6h[i] = s3
-        s4_6h[i] = s4
-    
-    # Calculate 6h volume 20-period average
+    # Calculate 12h volume 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align 12h Supertrend direction to 6h timeframe
-    direction_12h_aligned = align_htf_to_ltf(prices, df_12h, direction_12h)
+    # Align 1d indicators to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    chop_14_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_14_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 20  # need enough for volume MA
+    start_idx = 20  # need enough for volume MA and HTF indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(direction_12h_aligned[i]) or 
-            np.isnan(r3_6h[i]) or 
-            np.isnan(s3_6h[i]) or 
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(chop_14_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 6h volume > 1.3x 20-period average
+        # Volume confirmation: current 12h volume > 1.3x 20-period average
         volume_confirmed = volume[i] > 1.3 * vol_ma_20[i]
         
+        # Chop regime filter: trending market (CHOP < 61.8)
+        trending_regime = chop_14_1d_aligned[i] < 61.8
+        
         if position == 0:
-            # Long: price breaks above Camarilla R3 with 12h uptrend and volume
-            if (close[i] > r3_6h[i] and 
-                direction_12h_aligned[i] == 1 and 
-                volume_confirmed):
+            # Long: price breaks above 1d Camarilla R1 with volume and trending regime
+            if (close[i] > r1_aligned[i] and 
+                volume_confirmed and 
+                trending_regime):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla S3 with 12h downtrend and volume
-            elif (close[i] < s3_6h[i] and 
-                  direction_12h_aligned[i] == -1 and 
-                  volume_confirmed):
+            # Short: price breaks below 1d Camarilla S1 with volume and trending regime
+            elif (close[i] < s1_aligned[i] and 
+                  volume_confirmed and 
+                  trending_regime):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below Camarilla S3
-            if close[i] < s3_6h[i]:
+            # Exit long: price falls back below 1d Camarilla S1 (opposite side)
+            if close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above Camarilla R3
-            if close[i] > r3_6h[i]:
+            # Exit short: price rises back above 1d Camarilla R1 (opposite side)
+            if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -158,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12hSupertrend10_3_CamarillaR3S3_Breakout_Volume_Confirm"
-timeframe = "6h"
+name = "12h_1dCamarilla_R1S1_Breakout_Volume_ChopFilter"
+timeframe = "12h"
 leverage = 1.0
