@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with volume spike and 1d ADX trend filter.
-Long when price breaks above Donchian upper band AND volume > 1.8x average AND daily ADX > 25 (trending).
-Short when price breaks below Donchian lower band AND volume > 1.8x average AND daily ADX > 25.
-Exit when price reverts to Donchian midpoint OR daily ADX < 20 (range market).
-Uses 4h for price/volume, 1d for ADX filter to avoid whipsaw in ranging markets.
-Target: 100-200 total trades over 4 years (25-50/year). Donchian channels provide clear breakout levels,
-volume confirmation reduces fakeouts, daily ADX ensures we only trade in strong trends.
-Works in bull markets (captures uptrends) and bear markets (captures downtrends).
+Hypothesis: 6h Elder Ray Index (Bull/Bear Power) with 1d EMA200 trend filter and ATR-based volatility filter.
+Long when Bull Power > 0 AND price > 1d EMA200 AND ATR(6h) > 0.5 * ATR(1d) (sufficient volatility).
+Short when Bear Power < 0 AND price < 1d EMA200 AND ATR(6h) > 0.5 * ATR(1d).
+Exit when Bull/Bear Power crosses zero OR ATR(6h) < 0.3 * ATR(1d) (low volatility).
+Elder Ray measures buying/selling pressure relative to EMA13. EMA200 filter ensures we trade with the higher timeframe trend.
+ATR ratio filter avoids choppy markets. Works in bull markets (captures strong uptrends) and bear markets (captures strong downtrends).
+Target: 50-150 total trades over 4 years (12-37/year). Discrete sizing 0.25 minimizes fee churn.
 """
 
 import numpy as np
@@ -16,119 +15,98 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 4h data for Donchian channels and volume
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
-    
-    # Calculate Donchian channels on 4h timeframe (20-period)
-    high_series = pd.Series(high_4h)
-    low_series = pd.Series(low_4h)
-    
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_middle = (donchian_upper + donchian_lower) / 2
-    
-    # Calculate volume average (20-period) on 4h
-    volume_series = pd.Series(volume_4h)
-    volume_ma = volume_series.rolling(window=20, min_periods=20).mean().values
-    
-    # Get 1d data for ADX filter
+    # Get 1d data for EMA200 and ATR
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate ADX on 1d timeframe (14-period)
+    # Calculate EMA200 on 1d
+    close_1d_series = pd.Series(close_1d)
+    ema200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Calculate ATR(14) on 1d
     high_1d_series = pd.Series(high_1d)
     low_1d_series = pd.Series(low_1d)
     close_1d_series = pd.Series(close_1d)
     
-    # True Range
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1d[0] = tr1[0]  # first period
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     
-    # Plus Directional Movement (+DM)
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Align 1d EMA200 and ATR to 6h timeframe
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Smooth TR, +DM, -DM (14-period)
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    # Calculate ATR(14) on 6h
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    close_series = pd.Series(close)
     
-    # Calculate +DI and -DI
-    plus_di = 100 * (plus_dm_smooth / np.where(atr != 0, atr, np.inf))
-    minus_di = 100 * (minus_dm_smooth / np.where(atr != 0, atr, np.inf))
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr_6h = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_6h[0] = tr1[0]  # first period
+    atr_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) != 0, (plus_di + minus_di), np.inf)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # Calculate EMA13 on 6h for Elder Ray
+    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Align 4h Donchian channels, volume MA, and 1d ADX to 4h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
-    donchian_middle_aligned = align_htf_to_ltf(prices, df_4h, donchian_middle)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_4h, volume_ma)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema13
+    bear_power = low - ema13
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # warmup for indicators
+    start_idx = 100  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(donchian_middle_aligned[i]) or np.isnan(volume_ma_aligned[i]) or 
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(atr_6h[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
             signals[i] = 0.0
             continue
         
-        upper = donchian_upper_aligned[i]
-        lower = donchian_lower_aligned[i]
-        middle = donchian_middle_aligned[i]
-        vol_ma = volume_ma_aligned[i]
-        adx_val = adx_aligned[i]
-        vol = volume[i]
+        ema200 = ema200_1d_aligned[i]
+        atr_1d_val = atr_1d_aligned[i]
+        atr_6h_val = atr_6h[i]
+        bull = bull_power[i]
+        bear = bear_power[i]
         price = close[i]
         
         if position == 0:
-            # Long: price > Donchian upper AND volume > 1.8x avg AND daily ADX > 25 (trending)
-            if price > upper and vol > 1.8 * vol_ma and adx_val > 25:
+            # Long: Bull Power > 0 AND price > 1d EMA200 AND sufficient volatility (ATR ratio > 0.5)
+            if bull > 0 and price > ema200 and atr_6h_val > 0.5 * atr_1d_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < Donchian lower AND volume > 1.8x avg AND daily ADX > 25 (trending)
-            elif price < lower and vol > 1.8 * vol_ma and adx_val > 25:
+            # Short: Bear Power < 0 AND price < 1d EMA200 AND sufficient volatility (ATR ratio > 0.5)
+            elif bear < 0 and price < ema200 and atr_6h_val > 0.5 * atr_1d_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price < Donchian middle OR daily ADX < 20 (range market)
-            if price < middle or adx_val < 20:
+            # Exit long: Bull Power <= 0 OR low volatility (ATR ratio < 0.3)
+            if bull <= 0 or atr_6h_val < 0.3 * atr_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price > Donchian middle OR daily ADX < 20 (range market)
-            if price > middle or adx_val < 20:
+            # Exit short: Bear Power >= 0 OR low volatility (ATR ratio < 0.3)
+            if bear >= 0 or atr_6h_val < 0.3 * atr_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -136,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Volume_1dADX_Filter_v2"
-timeframe = "4h"
+name = "6h_ElderRay_EMA200_ATRFilter"
+timeframe = "6h"
 leverage = 1.0
