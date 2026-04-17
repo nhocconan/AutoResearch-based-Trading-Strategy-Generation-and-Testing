@@ -1,7 +1,3 @@
-# 4h_PriceAction_Confirmation_Strategy
-# Hypothesis: Price action confirmation using bullish/bearish engulfing patterns with volume and trend filter on 4h timeframe. Works in bull/bear by capturing momentum shifts at key levels with volume confirmation.
-# Timeframe: 4h, uses 1d for trend filter. Target: 30-60 trades/year to avoid fee drag.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -9,70 +5,77 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
-    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Daily EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate weekly pivot points (standard formula)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    r2_1w = pivot_1w + (high_1w - low_1w)
+    s2_1w = pivot_1w - (high_1w - low_1w)
     
-    # Volume filter: current volume > 1.5 * 20-period average (4h bars)
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align weekly pivot levels to 6h timeframe (use previous week's levels)
+    pivot_6h = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_6h = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_6h = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r2_6h = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_6h = align_htf_to_ltf(prices, df_1w, s2_1w)
     
-    # Bullish engulfing: current green candle engulfs previous red candle
-    bullish_engulf = (close > open_) & (open_ < close) & (close_[1] < open_[1]) & (close > open_[1]) & (open_ < close_[1])
-    # Bearish engulfing: current red candle engulfs previous green candle
-    bearish_engulf = (close < open_) & (open_ > close) & (close_[1] > open_[1]) & (close < open_[1]) & (open_ > close_[1])
+    # Volume filter: current volume > 2.0 * 24-period average (6h bars)
+    volume_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    
+    # Momentum filter: EMA(34) for trend direction
+    close_series = pd.Series(close)
+    ema34 = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 20
+    start_idx = 24
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_ma20[i])):
+        if (np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or
+            np.isnan(volume_ma24[i]) or np.isnan(ema34[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
-        
-        # Trend filter: price above EMA34 for long, below for short
-        trend_filter_long = close[i] > ema34_1d_aligned[i]
-        trend_filter_short = close[i] < ema34_1d_aligned[i]
+        volume_filter = volume[i] > (2.0 * volume_ma24[i])
         
         if position == 0:
-            # Long entry: bullish engulfing with volume and trend filter
-            if i >= 1 and bullish_engulf[i] and volume_filter and trend_filter_long:
+            # Long breakout: price breaks above R2 with volume and above EMA34
+            if close[i] > r2_6h[i] and volume_filter and close[i] > ema34[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: bearish engulfing with volume and trend filter
-            elif i >= 1 and bearish_engulf[i] and volume_filter and trend_filter_short:
+            # Short breakdown: price breaks below S2 with volume and below EMA34
+            elif close[i] < s2_6h[i] and volume_filter and close[i] < ema34[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: bearish engulfing or trend reversal
-            if i >= 1 and bearish_engulf[i] and volume_filter:
+            # Exit long: price falls below R1
+            if close[i] < r1_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bullish engulfing or trend reversal
-            if i >= 1 and bullish_engulf[i] and volume_filter:
+            # Exit short: price rises above S1
+            if close[i] > s1_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -80,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_PriceAction_Confirmation_Strategy"
-timeframe = "4h"
+name = "6h_WeeklyPivot_R2_S2_Breakout_Volume_EMA34Filter"
+timeframe = "6h"
 leverage = 1.0
