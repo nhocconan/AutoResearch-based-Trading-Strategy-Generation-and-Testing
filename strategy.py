@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Camarilla R1/S1 breakout with volume confirmation and 1w ADX trend filter.
-Long when price breaks above Camarilla R1 AND volume > 1.5x average AND ADX > 25 (trending).
-Short when price breaks below Camarilla S1 AND volume > 1.5x average AND ADX > 25.
-Exit when price reverts to Camarilla midpoint (R1+S1)/2 OR ADX < 20 (range market).
-Uses 1d for Camarilla calculation and 1w for ADX filter to reduce whipsaw.
-Target: 30-100 total trades over 4 years (7-25/year). Camarilla pivots provide structure,
-volume confirmation filters fakeouts, weekly ADX avoids ranging markets.
-Works in bull markets (captures uptrends) and bear markets (captures downtrends).
+Hypothesis: 6h Elder Ray Index (Bull/Bear Power) with 1d EMA50 trend filter and volume confirmation.
+Long when Bull Power > 0, Bear Power < 0, price > EMA50 (1d), and volume > 1.5x average.
+Short when Bull Power < 0, Bear Power > 0, price < EMA50 (1d), and volume > 1.5x average.
+Exit when Elder Ray signals weaken (Bull Power <= 0 for long, Bear Power <= 0 for short) OR volume drops.
+Uses 6h for Elder Ray calculation and 1d for EMA50 filter to reduce whipsaw and align with higher timeframe trend.
+Targets 50-150 total trades over 4 years (12-37/year). Elder Ray measures bull/bear power via EMA,
+volume confirms conviction, and 1d EMA50 ensures trading with the dominant trend.
+Works in bull markets (captures sustained buying pressure) and bear markets (captures sustained selling pressure).
 """
 
 import numpy as np
@@ -24,68 +24,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation
+    # Get 6h data for Elder Ray and EMA13 (fast EMA for Bull/Bear Power)
+    df_6h = get_htf_data(prices, '6h')
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    volume_6h = df_6h['volume'].values
+    
+    # Calculate EMA13 on 6h for Elder Ray (Bull/Bear Power)
+    close_6h_series = pd.Series(close_6h)
+    ema13 = close_6h_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Bull Power = High - EMA13
+    bull_power = high_6h - ema13
+    # Bear Power = Low - EMA13
+    bear_power = low_6h - ema13
+    
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels on 1d timeframe (previous day's range)
-    # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    range_1d = high_1d - low_1d
-    camarilla_r1 = close_1d + 1.1 * range_1d / 12
-    camarilla_s1 = close_1d - 1.1 * range_1d / 12
-    camarilla_mid = (camarilla_r1 + camarilla_s1) / 2  # midpoint for exit
+    # Calculate EMA50 on 1d for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema50 = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Get 1w data for ADX filter
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Align 6h indicators to 6h timeframe (no alignment needed)
+    bull_power_aligned = bull_power
+    bear_power_aligned = bear_power
     
-    # Calculate ADX on 1w timeframe (14-period)
-    high_1w_series = pd.Series(high_1w)
-    low_1w_series = pd.Series(low_1w)
-    close_1w_series = pd.Series(close_1w)
+    # Align 1d EMA50 to 6h timeframe
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50)
     
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
-    
-    # Plus Directional Movement (+DM)
-    up_move = high_1w - np.roll(high_1w, 1)
-    down_move = np.roll(low_1w, 1) - low_1w
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smooth TR, +DM, -DM (14-period)
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate +DI and -DI
-    plus_di = 100 * (plus_dm_smooth / np.where(atr != 0, atr, np.inf))
-    minus_di = 100 * (minus_dm_smooth / np.where(atr != 0, atr, np.inf))
-    
-    # Calculate DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) != 0, (plus_di + minus_di), np.inf)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align 1d Camarilla to 1d timeframe (no alignment needed)
-    camarilla_r1_aligned = camarilla_r1
-    camarilla_s1_aligned = camarilla_s1
-    camarilla_mid_aligned = camarilla_mid
-    
-    # Align 1w ADX to 1d timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Volume average (20-period) on 1d
-    volume_1d = df_1d['volume'].values
-    volume_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
+    # Volume average (20-period) on 6h
+    volume_ma = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    volume_ma_aligned = align_htf_to_ltf(prices, df_6h, volume_ma)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -94,41 +66,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(camarilla_mid_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(volume_ma_aligned[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(ema50_aligned[i]) or np.isnan(volume_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        r1 = camarilla_r1_aligned[i]
-        s1 = camarilla_s1_aligned[i]
-        mid = camarilla_mid_aligned[i]
-        adx_val = adx_aligned[i]
+        bp = bull_power_aligned[i]
+        br = bear_power_aligned[i]
+        ema50_val = ema50_aligned[i]
         vol_ma = volume_ma_aligned[i]
         vol = volume[i]
         price = close[i]
         
         if position == 0:
-            # Long: price > Camarilla R1 AND volume > 1.5x avg AND ADX > 25 (trending)
-            if price > r1 and vol > 1.5 * vol_ma and adx_val > 25:
+            # Long: Bull Power > 0 AND Bear Power < 0 AND price > EMA50 AND volume > 1.5x avg
+            if bp > 0 and br < 0 and price > ema50_val and vol > 1.5 * vol_ma:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < Camarilla S1 AND volume > 1.5x avg AND ADX > 25 (trending)
-            elif price < s1 and vol > 1.5 * vol_ma and adx_val > 25:
+            # Short: Bull Power < 0 AND Bear Power > 0 AND price < EMA50 AND volume > 1.5x avg
+            elif bp < 0 and br > 0 and price < ema50_val and vol > 1.5 * vol_ma:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price < Camarilla midpoint OR ADX < 20 (range market)
-            if price < mid or adx_val < 20:
+            # Exit long: Bull Power <= 0 (weakening bullish pressure) OR volume < average
+            if bp <= 0 or vol < vol_ma:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price > Camarilla midpoint OR ADX < 20 (range market)
-            if price > mid or adx_val < 20:
+            # Exit short: Bear Power <= 0 (weakening bearish pressure) OR volume < average
+            if br <= 0 or vol < vol_ma:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -136,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1S1_Volume_1wADX_Filter"
-timeframe = "1d"
+name = "6h_ElderRay_Volume_EMA50_Filter"
+timeframe = "6h"
 leverage = 1.0
