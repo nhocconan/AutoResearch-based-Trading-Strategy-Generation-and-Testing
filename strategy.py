@@ -1,5 +1,3 @@
-# SPDX-FileCopyrightText: 2025 Alpaca Trading Team
-# SPDX-License-Identifier: MIT
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -7,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,14 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (EMA34)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # Weekly EMA34
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # Get daily data for pivot points
+    # Get daily data for pivot points (1d)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -35,14 +26,14 @@ def generate_signals(prices):
     r2_1d = pivot_1d + (high_1d - low_1d)
     s2_1d = pivot_1d - (high_1d - low_1d)
     
-    # Align daily pivot levels to 12h timeframe (use previous day's levels)
-    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_12h = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_12h = align_htf_to_ltf(prices, df_1d, s2_1d)
+    # Align daily pivot levels to 4h timeframe (use previous day's levels)
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r2_4h = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s2_4h = align_htf_to_ltf(prices, df_1d, s2_1d)
     
-    # Volume filter: current volume > 1.8 * 20-period average (tighter)
+    # Volume filter: current volume > 1.5 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Choppiness index filter (trending market filter)
@@ -66,43 +57,38 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or
-            np.isnan(r2_12h[i]) or np.isnan(s2_12h[i]) or np.isnan(volume_ma20[i]) or 
-            np.isnan(chop[i]) or np.isnan(ema34_1w_aligned[i])):
+        if (np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
+            np.isnan(r2_4h[i]) or np.isnan(s2_4h[i]) or np.isnan(volume_ma20[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter (tighter)
-        volume_filter = volume[i] > (1.8 * volume_ma20[i])
+        # Volume filter
+        volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
         # Choppiness filter: only trade in trending markets (CHOP < 38.2)
         trend_filter = chop[i] < 38.2
         
-        # Weekly trend filter: price above/below weekly EMA34
-        weekly_uptrend = close[i] > ema34_1w_aligned[i]
-        weekly_downtrend = close[i] < ema34_1w_aligned[i]
-        
         if position == 0:
-            # Long breakout: price breaks above R1 with volume, trend, and weekly uptrend
-            if close[i] > r1_12h[i] and volume_filter and trend_filter and weekly_uptrend:
+            # Long breakout: price breaks above R1 with volume and trend filter
+            if close[i] > r1_4h[i] and volume_filter and trend_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below S1 with volume, trend, and weekly downtrend
-            elif close[i] < s1_12h[i] and volume_filter and trend_filter and weekly_downtrend:
+            # Short breakdown: price breaks below S1 with volume and trend filter
+            elif close[i] < s1_4h[i] and volume_filter and trend_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls below S1 (stop) OR chop increases (range developing) OR weekly trend turns down
-            if close[i] < s1_12h[i] or chop[i] > 61.8 or not weekly_uptrend:
+            # Exit long: price falls below S2 (deeper level) OR chop increases (range developing)
+            if close[i] < s2_4h[i] or chop[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises above R1 OR chop increases (range developing) OR weekly trend turns up
-            if close[i] > r1_12h[i] or chop[i] > 61.8 or not weekly_downtrend:
+            # Exit short: price rises above R2 OR chop increases (range developing)
+            if close[i] > r2_4h[i] or chop[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WeeklyEMA34_DailyPivot_Breakout_Volume_TrendFilter"
-timeframe = "12h"
+name = "4h_DailyPivot_Breakout_Volume_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
