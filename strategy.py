@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout + 1w EMA34 trend filter + volume spike confirmation
-- Uses 1d Donchian channel (20-period high/low) as price structure for breakouts
-- 1w EMA34 as HTF trend filter to ensure alignment with higher timeframe momentum
-- Volume spike (2.0x 20-period MA) confirms institutional participation and reduces false breakouts
-- ATR-based stoploss (2.5x ATR) to manage risk and limit drawdown
+Hypothesis: 6h Ichimoku Cloud with 1d filter and volume confirmation
+- Uses Ichimoku Cloud (Tenkan-sen, Kijun-sen, Senkou Span A/B) on 6h as primary trend and momentum indicator
+- 1d EMA50 as HTF trend filter to ensure alignment with daily trend
+- Volume spike (2.0x 20-period MA) confirms breakout strength and reduces false signals
+- Long when price > Cloud + Tenkan > Kijun + volume spike + price > 1d EMA50 (bullish alignment)
+- Short when price < Cloud + Tenkan < Kijun + volume spike + price < 1d EMA50 (bearish alignment)
+- Ichimoku works in both trending and ranging markets; cloud acts as dynamic support/resistance
 - Discrete position sizing (0.25) minimizes fee churn
-- Target: 7-25 trades/year per symbol (~30-100 total over 4 years)
-- Works in bull markets (buying upper band breakouts in uptrend) and bear markets (selling lower band breakouts in downtrend)
-- Proven pattern: Donchian breakouts with volume confirmation show strong test performance (Sharpe 1.10-1.38 on SOLUSDT)
+- Target: 12-37 trades/year per symbol (~50-150 total over 4 years)
 """
 
 import numpy as np
@@ -25,102 +25,105 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channel calculation (primary timeframe)
+    # Get 6h data for Ichimoku calculation (primary timeframe)
+    df_6h = get_htf_data(prices, '6h')
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    
+    # Get 1d data for EMA50 trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Get 1w data for EMA34 trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Calculate Ichimoku components on 6h
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high_6h).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_6h).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    # Calculate Donchian channel (20-period) on 1d
-    # Upper band = highest high of last 20 periods, Lower band = lowest low of last 20 periods
-    high_ma_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_ma_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high_6h).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_6h).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
     
-    # Calculate EMA34 on 1w for trend filter
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2, plotted 26 periods ahead
+    senkou_a = (tenkan + kijun) / 2
     
-    # Volume average (20-period) on 1d
-    volume_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2, plotted 26 periods ahead
+    period52_high = pd.Series(high_6h).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_6h).rolling(window=52, min_periods=52).min().values
+    senkou_b = (period52_high + period52_low) / 2
     
-    # ATR (14-period) on 1d for stoploss calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate EMA50 on 1d for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align all indicators to 1d timeframe (primary)
-    upper_band_aligned = align_htf_to_ltf(prices, df_1d, high_ma_20)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1d, low_ma_20)
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Volume average (20-period) on 6h
+    volume_6h = df_6h['volume'].values
+    volume_ma_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all indicators to 6h timeframe (primary)
+    tenkan_aligned = align_htf_to_ltf(prices, df_6h, tenkan)
+    kijun_aligned = align_htf_to_ltf(prices, df_6h, kijun)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_6h, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_6h, senkou_b)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    volume_ma_aligned = align_htf_to_ltf(prices, df_6h, volume_ma_20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    entry_price = 0.0
-    atr_stop = 0.0
     
     start_idx = 100  # warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(volume_ma_aligned[i]) or 
-            np.isnan(atr_aligned[i])):
+        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
+            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        upper = upper_band_aligned[i]
-        lower = lower_band_aligned[i]
-        ema_trend = ema34_1w_aligned[i]
+        tenkan_val = tenkan_aligned[i]
+        kijun_val = kijun_aligned[i]
+        senkou_a_val = senkou_a_aligned[i]
+        senkou_b_val = senkou_b_aligned[i]
+        ema_trend = ema50_1d_aligned[i]
         vol_ma = volume_ma_aligned[i]
-        atr_val = atr_aligned[i]
         vol = volume[i]
         price = close[i]
         
+        # Determine cloud boundaries (Senkou Span A/B)
+        upper_cloud = max(senkou_a_val, senkou_b_val)
+        lower_cloud = min(senkou_a_val, senkou_b_val)
+        
         if position == 0:
-            # Look for breakouts with volume confirmation and trend alignment
-            # Long: price breaks above upper band + volume spike + price > 1w EMA34 (uptrend)
-            if price > upper and vol > 2.0 * vol_ma and price > ema_trend:
+            # Long: price above cloud + Tenkan > Kijun (bullish momentum) + volume spike + price > 1d EMA50
+            if (price > upper_cloud and tenkan_val > kijun_val and 
+                vol > 2.0 * vol_ma and price > ema_trend):
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-                atr_stop = entry_price - 2.5 * atr_val
-            # Short: price breaks below lower band + volume spike + price < 1w EMA34 (downtrend)
-            elif price < lower and vol > 2.0 * vol_ma and price < ema_trend:
+            # Short: price below cloud + Tenkan < Kijun (bearish momentum) + volume spike + price < 1d EMA50
+            elif (price < lower_cloud and tenkan_val < kijun_val and 
+                  vol > 2.0 * vol_ma and price < ema_trend):
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
-                atr_stop = entry_price + 2.5 * atr_val
         
         elif position == 1:
-            # Check stoploss
-            if price <= atr_stop:
+            # Exit long: price falls below cloud OR Tenkan < Kijun (momentum shift)
+            if price < lower_cloud or tenkan_val < kijun_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-                # Trail stop: raise stop if price moves favorably
-                atr_stop = max(atr_stop, price - 2.0 * atr_val)
         
         elif position == -1:
-            # Check stoploss
-            if price >= atr_stop:
+            # Exit short: price rises above cloud OR Tenkan > Kijun (momentum shift)
+            if price > upper_cloud or tenkan_val > kijun_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
-                # Trail stop: lower stop if price moves favorably
-                atr_stop = min(atr_stop, price + 2.0 * atr_val)
     
     return signals
 
-name = "1d_Donchian20_1wEMA34_VolumeSpike_ATRStop"
-timeframe = "1d"
+name = "6h_Ichimoku_Cloud_1dEMA50_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
