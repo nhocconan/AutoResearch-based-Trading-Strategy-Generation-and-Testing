@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_12h_Camarilla_Pivot_Breakout_Volume_Confirmation
-Hypothesis: Camarilla pivot levels from 12h act as strong support/resistance. Breakouts above R3 or below S3 with volume confirmation indicate institutional interest and trend continuation. Works in bull markets by capturing breakouts and in bear markets by fading false breaks at R3/S3 and confirming real breaks with volume. Targets 15-30 trades/year.
+4h_Donchian_20_Breakout_Volume_SR_Filter_v3
+Hypothesis: Price breaking above Donchian(20) high or below low captures breakouts with momentum.
+Volume spike confirms institutional participation. Only trade when price is above/below the 200-period
+simple moving average to align with longer-term trend, reducing whipsaw in chop.
+Designed for fewer trades (~20-40/year) with strong edge in both bull (breakouts) and bear (breakdowns).
 """
 
 import numpy as np
@@ -10,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,80 +21,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla pivot calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
+    # Donchian channel (20-period high/low)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Volume spike: current volume > 2.0 x 20-period average volume
+    volume_series = pd.Series(volume)
+    volume_ma20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * volume_ma20)
     
-    # Calculate Camarilla levels for each 12h bar
-    R4 = np.zeros_like(close_12h)
-    R3 = np.zeros_like(close_12h)
-    S3 = np.zeros_like(close_12h)
-    S4 = np.zeros_like(close_12h)
+    # 200-period SMA for trend filter
+    close_series = pd.Series(close)
+    sma200 = close_series.rolling(window=200, min_periods=200).mean().values
     
-    for i in range(1, len(close_12h)):
-        # Use previous 12h bar's high, low, close to calculate today's levels
-        H = high_12h[i-1]
-        L = low_12h[i-1]
-        C = close_12h[i-1]
-        diff = H - L
-        R3[i] = C + (diff * 1.1 / 4)
-        S3[i] = C - (diff * 1.1 / 4)
-        R4[i] = C + (diff * 1.1 / 2)
-        S4[i] = C - (diff * 1.1 / 2)
-    
-    # Align 12h Camarilla levels to 6h timeframe (with 1-bar delay for completed bar)
-    R3_6h = align_htf_to_ltf(prices, df_12h, R3)
-    S3_6h = align_htf_to_ltf(prices, df_12h, S3)
-    R4_6h = align_htf_to_ltf(prices, df_12h, R4)
-    S4_6h = align_htf_to_ltf(prices, df_12h, S4)
-    
-    # Volume confirmation: 20-period EMA on 6h
-    volume_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Get 1d data for higher timeframe trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    sma50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 20  # Volume EMA20
+    start_idx = max(20, 20, 200)  # Donchian, volume MA, SMA200
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(R3_6h[i]) or 
-            np.isnan(S3_6h[i]) or 
-            np.isnan(R4_6h[i]) or 
-            np.isnan(S4_6h[i]) or 
-            np.isnan(volume_ema20[i])):
+        if (np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or 
+            np.isnan(sma200[i]) or 
+            np.isnan(sma50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period EMA
-        volume_filter = volume[i] > (1.5 * volume_ema20[i])
-        
         if position == 0:
-            # Long breakout: price breaks above R3 with volume, target R4
-            if close[i] > R3_6h[i] and volume_filter:
+            # Long: price breaks above Donchian high + volume spike + price > SMA200 + 1d uptrend
+            if (close[i] > donchian_high[i] and 
+                volume_spike[i] and 
+                close[i] > sma200[i] and 
+                close[i] > sma50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below S3 with volume, target S4
-            elif close[i] < S3_6h[i] and volume_filter:
+            # Short: price breaks below Donchian low + volume spike + price < SMA200 + 1d downtrend
+            elif (close[i] < donchian_low[i] and 
+                  volume_spike[i] and 
+                  close[i] < sma200[i] and 
+                  close[i] < sma50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price reaches R4 or reverses below R3
-            if close[i] >= R4_6h[i] or close[i] < R3_6h[i]:
+            # Exit long: price breaks below Donchian low
+            if close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price reaches S4 or reverses above S3
-            if close[i] <= S4_6h[i] or close[i] > S3_6h[i]:
+            # Exit short: price breaks above Donchian high
+            if close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_Camarilla_Pivot_Breakout_Volume_Confirmation"
-timeframe = "6h"
+name = "4h_Donchian_20_Breakout_Volume_SR_Filter_v3"
+timeframe = "4h"
 leverage = 1.0
