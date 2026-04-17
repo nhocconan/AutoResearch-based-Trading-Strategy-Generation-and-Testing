@@ -13,47 +13,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d VWAP (Volume Weighted Average Price) ===
+    # === 1d Donchian Channel (20-period) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate typical price and VWAP components
-    tp_1d = (high_1d + low_1d + close_1d) / 3
-    tpv_1d = tp_1d * volume_1d
+    # Calculate upper and lower bands
+    upper_20 = np.full_like(high_1d, np.nan)
+    lower_20 = np.full_like(low_1d, np.nan)
     
-    # Cumulative sums for VWAP
-    cum_tpv = np.cumsum(tpv_1d)
-    cum_vol = np.cumsum(volume_1d)
-    vwap_1d = np.divide(cum_tpv, cum_vol, out=np.full_like(cum_tpv, np.nan), where=cum_vol!=0)
-    
-    # === 1d RSI (14-period) ===
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing
-    avg_gain = np.full_like(close_1d, np.nan)
-    avg_loss = np.full_like(close_1d, np.nan)
-    for i in range(len(close_1d)):
-        if i < 14:
-            if i > 0:
-                avg_gain[i] = np.mean(gain[1:i+1])
-                avg_loss[i] = np.mean(loss[1:i+1])
+    for i in range(len(high_1d)):
+        if i >= 19:
+            upper_20[i] = np.max(high_1d[i-19:i+1])
+            lower_20[i] = np.min(low_1d[i-19:i+1])
+        elif i > 0:
+            upper_20[i] = np.max(high_1d[max(0, i-9):i+1])
+            lower_20[i] = np.min(low_1d[max(0, i-9):i+1])
         else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+            upper_20[i] = high_1d[0]
+            lower_20[i] = low_1d[0]
     
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi_1d = 100 - (100 / (1 + rs))
+    # === 1d ATR (14-period) for volatility filter ===
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close[1:]) if len(close) > 1 else np.array([])
+    tr3 = np.abs(low_1d[1:] - close[1:]) if len(close) > 1 else np.array([])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3)) if len(tr1) > 0 else np.array([])
+    tr = np.concatenate([[np.nan], tr]) if len(tr) > 0 else np.array([np.nan])
     
-    # === Align indicators to 1h timeframe ===
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    atr_14 = np.full_like(high_1d, np.nan)
+    for i in range(len(high_1d)):
+        if i >= 13:
+            atr_14[i] = np.mean(tr[i-13:i+1])
+        elif i > 0:
+            atr_14[i] = np.mean(tr[1:i+1]) if len(tr[1:i+1]) > 0 else np.nan
+        else:
+            atr_14[i] = np.nan
     
-    # === 1h Volume confirmation ===
+    # === 1d Volume moving average (20-period) ===
     vol_ma_20 = np.full_like(volume, np.nan)
     for i in range(len(volume)):
         if i >= 19:
@@ -63,7 +60,11 @@ def generate_signals(prices):
         else:
             vol_ma_20[i] = volume[0]
     
-    vol_confirm = volume > vol_ma_20 * 1.5
+    # === Align indicators to 12h timeframe ===
+    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     
@@ -75,49 +76,50 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(vwap_aligned[i]) or 
-            np.isnan(rsi_aligned[i]) or 
-            np.isnan(vol_confirm[i])):
+        if (np.isnan(upper_20_aligned[i]) or 
+            np.isnan(lower_20_aligned[i]) or 
+            np.isnan(atr_14_aligned[i]) or 
+            np.isnan(vol_ma_20_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price above VWAP AND RSI oversold (<30)
-            if close[i] > vwap_aligned[i] and rsi_aligned[i] < 30:
-                if vol_confirm[i]:
-                    signals[i] = 0.20
-                    position = 1
-                    continue
-            # Short: price below VWAP AND RSI overbought (>70)
-            elif close[i] < vwap_aligned[i] and rsi_aligned[i] > 70:
-                if vol_confirm[i]:
-                    signals[i] = -0.20
-                    position = -1
-                    continue
+            # Long: price breaks above upper band with volume confirmation
+            if (close[i] > upper_20_aligned[i] and 
+                volume[i] > vol_ma_20_aligned[i] * 1.5):
+                signals[i] = 0.25
+                position = 1
+                continue
+            # Short: price breaks below lower band with volume confirmation
+            elif (close[i] < lower_20_aligned[i] and 
+                  volume[i] > vol_ma_20_aligned[i] * 1.5):
+                signals[i] = -0.25
+                position = -1
+                continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price below VWAP OR RSI overbought (>70)
-            if close[i] < vwap_aligned[i] or rsi_aligned[i] > 70:
+            # Exit long: price returns to lower band
+            if close[i] < lower_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price above VWAP OR RSI oversold (<30)
-            if close[i] > vwap_aligned[i] or rsi_aligned[i] < 30:
+            # Exit short: price returns to upper band
+            if close[i] > upper_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_VWAP_RSI_Volume_Confluence_v1"
-timeframe = "1h"
+name = "12h_Donchian20_VolumeBreakout_v1"
+timeframe = "12h"
 leverage = 1.0
