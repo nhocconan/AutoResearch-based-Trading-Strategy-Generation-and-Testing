@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot levels
+    # Get daily data for pivot levels (1d)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -24,14 +24,10 @@ def generate_signals(prices):
     range_1d = high_1d - low_1d
     r1_1d = pivot_1d + (range_1d * 1.0)
     s1_1d = pivot_1d - (range_1d * 1.0)
-    r2_1d = pivot_1d + (range_1d * 2.0)
-    s2_1d = pivot_1d - (range_1d * 2.0)
     
-    # Align pivot levels to 4h timeframe
+    # Align pivot levels to 12h timeframe
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
     
     # Get weekly EMA20 for trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -60,7 +56,6 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(r2_1d_aligned[i]) or np.isnan(s2_1d_aligned[i]) or 
             np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -76,16 +71,16 @@ def generate_signals(prices):
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below S2 OR ATR-based stop
-            if close[i] < s2_1d_aligned[i] or close[i] < (high[max(0, i-1)] - 1.5 * atr[i]):
+            # Exit long: price breaks below S1 OR ATR-based stop
+            if close[i] < s1_1d_aligned[i] or close[i] < (high[max(0, i-1)] - 1.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.30
         
         elif position == -1:
-            # Exit short: price breaks above R2 OR ATR-based stop
-            if close[i] > r2_1d_aligned[i] or close[i] > (low[max(0, i-1)] + 1.5 * atr[i]):
+            # Exit short: price breaks above R1 OR ATR-based stop
+            if close[i] > r1_1d_aligned[i] or close[i] > (low[max(0, i-1)] + 1.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Pivot_R1S1_R2S2_Breakout_Volume_WeeklyTrend"
-timeframe = "4h"
+name = "12h_Pivot_R1S1_R2S2_Breakout_Volume_WeeklyTrend"
+timeframe = "12h"
 leverage = 1.0
