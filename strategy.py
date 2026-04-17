@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_RSI_Overbought_Oversold_With_Stochastic_Confirmation
-Hypothesis: 6h RSI extremes (overbought >70, oversold <30) confirmed by 6h Stochastic Oscillator to reduce false signals in trending markets. Works in both bull (mean reversion in uptrend) and bear (mean reversion in downtrend) regimes. Uses 60-period RSI to reduce noise and 14-period Stochastic with smoothing. Entry when RSI crosses extreme with Stochastic confirmation, exit when RSI returns to neutral zone (40-60). Position size 0.25 to manage drawdown.
+12h_Camarilla_R1_S1_RangeBound_MeanReversion
+Hypothesis: In ranging markets, price tends to revert from Camarilla R1/S1 levels on 12h timeframe.
+Long near S1 when price is below EMA34 (bearish bias) with bullish reversal signals.
+Short near R1 when price is above EMA34 (bullish bias) with bearish reversal signals.
+Uses RSI(7) for mean reversion signals and volume confirmation. Designed for 12h to avoid overtrading.
+Works in sideways markets (2025-2026) and captures reversals from extremes.
 """
 
 import numpy as np
@@ -10,79 +14,111 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # RSI(60) calculation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # === 1d data for Camarilla pivot, EMA trend, and RSI ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Use Wilder's smoothing (alpha = 1/period)
-    alpha = 1.0 / 60
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    avg_gain[0] = gain[0]
-    avg_loss[0] = loss[0]
+    # Calculate Camarilla pivot levels from previous 1d bar
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
     
-    for i in range(1, n):
-        avg_gain[i] = alpha * gain[i] + (1 - alpha) * avg_gain[i-1]
-        avg_loss[i] = alpha * loss[i] + (1 - alpha) * avg_loss[i-1]
+    # Handle first bar
+    prev_high_1d[0] = high_1d[0]
+    prev_low_1d[0] = low_1d[0]
+    prev_close_1d[0] = close_1d[0]
     
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    cam_r1 = prev_close_1d + 0.25 * (prev_high_1d - prev_low_1d)
+    cam_s1 = prev_close_1d - 0.25 * (prev_high_1d - prev_low_1d)
     
-    # Stochastic Oscillator (14,3,3)
-    lowest_low = np.zeros(n)
-    highest_high = np.zeros(n)
+    # Align Camarilla levels to 12h timeframe
+    cam_r1_aligned = align_htf_to_ltf(prices, df_1d, cam_r1)
+    cam_s1_aligned = align_htf_to_ltf(prices, df_1d, cam_s1)
     
-    for i in range(n):
-        start_idx = max(0, i - 13)
-        lowest_low[i] = np.min(low[start_idx:i+1])
-        highest_high[i] = np.max(high[start_idx:i+1])
+    # 1d EMA34 for trend bias filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Avoid division by zero
-    denominator = highest_high - lowest_low
-    stoch_k = np.where(denominator != 0, 100 * (close - lowest_low) / denominator, 0)
+    # 1d RSI(7) for mean reversion signals
+    delta = pd.Series(close_1d).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/7, min_periods=7, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/7, min_periods=7, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d = rsi_1d.values
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Smooth %K to get %D (3-period SMA of %K)
-    stoch_d = np.zeros(n)
-    for i in range(n):
-        if i < 2:
-            stoch_d[i] = stoch_k[i] if i == 0 else (stoch_k[0] + stoch_k[1]) / 2
-        else:
-            stoch_d[i] = (stoch_k[i-2] + stoch_k[i-1] + stoch_k[i]) / 3
+    # 1d volume average (20-period) for volume confirmation
+    vol_avg20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg20_1d)
     
     signals = np.zeros(n)
     
-    # Warmup: covers RSI and Stochastic calculations
-    warmup = 80
+    # Warmup: covers EMA34, RSI, and rollouts
+    warmup = 40
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
-        # Entry conditions
+        # Skip if any data is NaN
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(cam_r1_aligned[i]) or 
+            np.isnan(cam_s1_aligned[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(vol_avg20_1d_aligned[i])):
+            signals[i] = 0.0
+            position = 0
+            continue
+        
+        # Get current 1d volume
+        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
+        
+        # Volume filter: current volume > 1.3x 20-period average
+        vol_filter = vol_1d_current > 1.3 * vol_avg20_1d_aligned[i]
+        
+        # Mean reversion conditions
         if position == 0:
-            # Long: RSI crosses above 30 from below AND Stochastic %K crosses above %D
-            if rsi[i-1] <= 30 and rsi[i] > 30 and stoch_k[i-1] <= stoch_d[i-1] and stoch_k[i] > stoch_d[i]:
+            # Long near S1: price near support, bearish bias (price < EMA34), oversold RSI
+            price_near_s1 = abs(close[i] - cam_s1_aligned[i]) < 0.005 * close[i]  # within 0.5%
+            bearish_bias = close[i] < ema34_1d_aligned[i]
+            oversold = rsi_1d_aligned[i] < 30
+            
+            if price_near_s1 and bearish_bias and oversold and vol_filter:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: RSI crosses below 70 from above AND Stochastic %K crosses below %D
-            elif rsi[i-1] >= 70 and rsi[i] < 70 and stoch_k[i-1] >= stoch_d[i-1] and stoch_k[i] < stoch_d[i]:
+            
+            # Short near R1: price near resistance, bullish bias (price > EMA34), overbought RSI
+            price_near_r1 = abs(close[i] - cam_r1_aligned[i]) < 0.005 * close[i]  # within 0.5%
+            bullish_bias = close[i] > ema34_1d_aligned[i]
+            overbought = rsi_1d_aligned[i] > 70
+            
+            if price_near_r1 and bullish_bias and overbought and vol_filter:
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit conditions
+        # Exit conditions: mean reversion complete or RSI returns to neutral
         elif position == 1:
-            # Exit long when RSI returns to neutral zone (above 40)
-            if rsi[i] >= 40:
+            # Exit long when RSI returns to neutral or price moves to midpoint
+            rsi_neutral = rsi_1d_aligned[i] > 50
+            price_at_mid = abs(close[i] - (cam_r1_aligned[i] + cam_s1_aligned[i])/2) < 0.002 * close[i]
+            
+            if rsi_neutral or price_at_mid:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -90,8 +126,11 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when RSI returns to neutral zone (below 60)
-            if rsi[i] <= 60:
+            # Exit short when RSI returns to neutral or price moves to midpoint
+            rsi_neutral = rsi_1d_aligned[i] < 50
+            price_at_mid = abs(close[i] - (cam_r1_aligned[i] + cam_s1_aligned[i])/2) < 0.002 * close[i]
+            
+            if rsi_neutral or price_at_mid:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -100,6 +139,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_RSI_Overbought_Oversold_With_Stochastic_Confirmation"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_RangeBound_MeanReversion"
+timeframe = "12h"
 leverage = 1.0
