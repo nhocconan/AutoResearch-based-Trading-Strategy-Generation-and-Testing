@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,118 +13,113 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1w High-Low Range for regime detection ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # Calculate 12-week high-low range
-    range_12w = np.full(len(high_1w), np.nan)
-    for i in range(len(high_1w)):
-        if i >= 11:
-            range_12w[i] = np.max(high_1w[i-11:i+1]) - np.min(low_1w[i-11:i+1])
-        elif i > 0:
-            range_12w[i] = np.max(high_1w[0:i+1]) - np.min(low_1w[0:i+1])
-        else:
-            range_12w[i] = high_1w[i] - low_1w[i]
-    
-    # Current weekly range (1-period)
-    weekly_range = high_1w - low_1w
-    
-    # Range ratio: current weekly range / 12-week average range
-    range_ratio = np.full(len(high_1w), np.nan)
-    for i in range(len(high_1w)):
-        if not np.isnan(range_12w[i]) and range_12w[i] > 0:
-            range_ratio[i] = weekly_range[i] / range_12w[i]
-    
-    range_ratio_aligned = align_htf_to_ltf(prices, df_1w, range_ratio)
-    
-    # === 1d Williams %R for mean reversion ===
+    # === 1d RSI (14-period) for momentum ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Williams %R (14-period)
-    highest_high = np.full(len(high_1d), np.nan)
-    lowest_low = np.full(len(low_1d), np.nan)
+    # Calculate RSI with Wilder's smoothing
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing (alpha = 1/period)
+    avg_gain = np.full_like(gain, np.nan)
+    avg_loss = np.full_like(loss, np.nan)
     period = 14
-    
-    for i in range(len(high_1d)):
-        if i >= period - 1:
-            highest_high[i] = np.max(high_1d[i-(period-1):i+1])
-            lowest_low[i] = np.min(low_1d[i-(period-1):i+1])
-        elif i > 0:
-            highest_high[i] = np.max(high_1d[0:i+1])
-            lowest_low[i] = np.min(low_1d[0:i+1])
-        else:
-            highest_high[i] = high_1d[i]
-            lowest_low[i] = low_1d[i]
-    
-    # Williams %R = -100 * (HH - Close) / (HH - LL)
-    williams_r = np.full(len(close_1d), np.nan)
-    for i in range(len(close_1d)):
-        if not np.isnan(highest_high[i]) and not np.isnan(lowest_low[i]):
-            denominator = highest_high[i] - lowest_low[i]
-            if denominator != 0:
-                williams_r[i] = -100 * (highest_high[i] - close_1d[i]) / denominator
+    for i in range(len(gain)):
+        if i < period:
+            if i == 0:
+                avg_gain[i] = gain[i]
+                avg_loss[i] = loss[i]
             else:
-                williams_r[i] = -50  # neutral when no range
-    
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    
-    # === 12h Volume spike confirmation ===
-    # Calculate 24-period average volume (2 days of 12h data)
-    vol_ma_24 = np.full_like(volume, np.nan)
-    for i in range(len(volume)):
-        if i >= 23:
-            vol_ma_24[i] = np.mean(volume[i-23:i+1])
-        elif i > 0:
-            vol_ma_24[i] = np.mean(volume[max(0, i-12):i+1])
+                avg_gain[i] = (avg_gain[i-1] * (i-1) + gain[i]) / i
+                avg_loss[i] = (avg_loss[i-1] * (i-1) + loss[i]) / i
         else:
-            vol_ma_24[i] = volume[0]
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
     
-    # Volume spike: current volume > 2.0 x 24-period average
-    vol_spike = volume > vol_ma_24 * 2.0
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d[avg_loss == 0] = 100  # Avoid division by zero
+    
+    # === 1d ATR (14-period) for volatility filter ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]
+    tr2[0] = np.abs(high_1d[0] - close_1d[0])
+    tr3[0] = np.abs(low_1d[0] - close_1d[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Wilder's smoothing for ATR
+    atr_14 = np.full_like(tr, np.nan)
+    if len(tr) >= 14:
+        atr_14[13] = np.mean(tr[:14])
+        for i in range(14, len(tr)):
+            atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
+    
+    # Align all indicators to 4h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    
+    # === 4h Volume confirmation ===
+    df_4h = get_htf_data(prices, '4h')
+    volume_4h = df_4h['volume'].values
+    
+    # Calculate 20-period average volume on 4h timeframe
+    vol_ma_20 = np.full_like(volume_4h, np.nan)
+    for i in range(len(volume_4h)):
+        if i >= 19:
+            vol_ma_20[i] = np.mean(volume_4h[i-19:i+1])
+        elif i > 0:
+            vol_ma_20[i] = np.mean(volume_4h[max(0, i-9):i+1])
+        else:
+            vol_ma_20[i] = volume_4h[0]
+    
+    # Volume confirmation: current 4h volume > 1.5x 20-period average
+    vol_confirm = volume_4h > vol_ma_20 * 1.5
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 200
+    warmup = 100
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(range_ratio_aligned[i]) or np.isnan(williams_r_aligned[i]) or 
-            np.isnan(vol_spike[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
+            np.isnan(vol_confirm[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Entry logic: only enter when flat AND volume spike
+        # Entry logic: only enter when flat AND volume confirmation
         if position == 0:
-            # Long: Williams %R < -80 (oversold) + low volatility regime + volume spike
-            if (williams_r_aligned[i] < -80 and 
-                range_ratio_aligned[i] < 0.3 and  # low volatility regime
-                vol_spike[i]):
+            # Long: RSI < 40 (oversold) + volatility filter + volume confirmation
+            if (rsi_1d_aligned[i] < 40 and 
+                atr_14_aligned[i] > 0.005 * close[i] and  # volatility filter
+                vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: Williams %R > -20 (overbought) + low volatility regime + volume spike
-            elif (williams_r_aligned[i] > -20 and 
-                  range_ratio_aligned[i] < 0.3 and  # low volatility regime
-                  vol_spike[i]):
+            # Short: RSI > 60 (overbought) + volatility filter + volume confirmation
+            elif (rsi_1d_aligned[i] > 60 and 
+                  atr_14_aligned[i] > 0.005 * close[i] and  # volatility filter
+                  vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: Williams %R crosses above -20 (overbought) OR high volatility regime
-            if (williams_r_aligned[i] > -20 or 
-                range_ratio_aligned[i] > 0.7):  # high volatility regime
+            # Exit long: RSI crosses above 60 (overbought)
+            if rsi_1d_aligned[i] > 60:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -132,9 +127,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Williams %R crosses below -80 (oversold) OR high volatility regime
-            if (williams_r_aligned[i] < -80 or 
-                range_ratio_aligned[i] > 0.7):  # high volatility regime
+            # Exit short: RSI crosses below 40 (oversold)
+            if rsi_1d_aligned[i] < 40:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -143,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsR_RangeRatio_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_RSI14_Volume_Confirm_VolatilityFilter_v1"
+timeframe = "4h"
 leverage = 1.0
