@@ -61,6 +61,8 @@ def generate_signals(prices):
     lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    plus_di_aligned = align_htf_to_ltf(prices, df_1d, plus_di)
+    minus_di_aligned = align_htf_to_ltf(prices, df_1d, minus_di)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -70,18 +72,12 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20_aligned[i])):
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or
+            np.isnan(plus_di_aligned[i]) or np.isnan(minus_di_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Determine trend direction from ADX components
-        plus_di_aligned = align_htf_to_ltf(prices, df_1d, plus_di)
-        minus_di_aligned = align_htf_to_ltf(prices, df_1d, minus_di)
-        
-        if np.isnan(plus_di_aligned[i]) or np.isnan(minus_di_aligned[i]):
-            signals[i] = 0.0
-            continue
-            
         uptrend = plus_di_aligned[i] > minus_di_aligned[i]
         downtrend = plus_di_aligned[i] < minus_di_aligned[i]
         strong_trend = adx_aligned[i] > 25
