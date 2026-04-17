@@ -36,11 +36,11 @@ def generate_signals(prices):
     r2_1d_prev[0] = np.nan
     s2_1d_prev[0] = np.nan
     
-    # Align daily pivot levels to 6h timeframe
-    r1_6h = align_htf_to_ltf(prices, df_1d, r1_1d_prev)
-    s1_6h = align_htf_to_ltf(prices, df_1d, s1_1d_prev)
-    r2_6h = align_htf_to_ltf(prices, df_1d, r2_1d_prev)
-    s2_6h = align_htf_to_ltf(prices, df_1d, s2_1d_prev)
+    # Align daily pivot levels to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1_1d_prev)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1_1d_prev)
+    r2_4h = align_htf_to_ltf(prices, df_1d, r2_1d_prev)
+    s2_4h = align_htf_to_ltf(prices, df_1d, s2_1d_prev)
     
     # Volume confirmation: current volume > 1.5 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -66,10 +66,10 @@ def generate_signals(prices):
         if (np.isnan(volume_ma20[i]) or 
             np.isnan(atr[i]) or 
             np.isnan(atr_ma10[i]) or 
-            np.isnan(r1_6h[i]) or 
-            np.isnan(s1_6h[i]) or
-            np.isnan(r2_6h[i]) or
-            np.isnan(s2_6h[i])):
+            np.isnan(r1_4h[i]) or 
+            np.isnan(s1_4h[i]) or
+            np.isnan(r2_4h[i]) or
+            np.isnan(s2_4h[i])):
             signals[i] = 0.0
             continue
         
@@ -80,32 +80,32 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price breaks above R2 with volume and volatility (breakout continuation)
-            if (close[i] > r2_6h[i] and volume_filter and volatility_filter):
-                signals[i] = 0.25
+            if (close[i] > r2_4h[i] and volume_filter and volatility_filter):
+                signals[i] = 0.30
                 position = 1
             # Short: price breaks below S2 with volume and volatility (breakout continuation)
-            elif (close[i] < s2_6h[i] and volume_filter and volatility_filter):
-                signals[i] = -0.25
+            elif (close[i] < s2_4h[i] and volume_filter and volatility_filter):
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
             # Exit long: price returns below R1 or volatility drops
-            if close[i] < r1_6h[i] or not volatility_filter:
+            if close[i] < r1_4h[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
             # Exit short: price returns above S1 or volatility drops
-            if close[i] > s1_6h[i] or not volatility_filter:
+            if close[i] > s1_4h[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "6h_Camarilla_R2_S2_Breakout_Volume"
-timeframe = "6h"
+name = "4h_Pivot_R2_S2_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
