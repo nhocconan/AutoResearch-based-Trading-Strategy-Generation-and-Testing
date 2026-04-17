@@ -1,16 +1,16 @@
-# 6h_Aroon_Trend_Filter
-# Aroon oscillator (25) + 12h ADX (20) + volume spike.
-# Aroon identifies trend strength, ADX confirms trend presence, volume validates.
-# Works in bull/bear by capturing strong trends with confirmation.
-# Target: 50-150 total trades (12-37/year).
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 4-hour price crossing 200-day EMA with volume confirmation and ATR-based stop.
+# The 200-day EMA provides a robust trend filter that works in both bull and bear markets.
+# Price crossing above/below the 200-day EMA with volume confirmation captures strong momentum shifts.
+# ATR-based stops limit drawdowns during volatile periods. Target: 25-35 trades/year (100-140 total over 4 years).
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,119 +18,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Aroon oscillator on 6h (25-period) ===
-    def calculate_aroon(high, low, period=25):
-        aroon_up = np.full(len(high), np.nan)
-        aroon_down = np.full(len(high), np.nan)
-        for i in range(len(high)):
-            if i >= period - 1:
-                # Periods since highest high
-                highest_high_idx = i - np.argmax(high[i - period + 1:i + 1])
-                periods_since_high = (period - 1) - (i - highest_high_idx)
-                aroon_up[i] = ((period - 1 - periods_since_high) / (period - 1)) * 100
-                
-                # Periods since lowest low
-                lowest_low_idx = i - np.argmin(low[i - period + 1:i + 1])
-                periods_since_low = (period - 1) - (i - lowest_low_idx)
-                aroon_down[i] = ((period - 1 - periods_since_low) / (period - 1)) * 100
-        return aroon_up - aroon_down  # Oscillator: -100 to +100
+    # === 1d data for EMA200, ATR, and volume average ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    aroon_osc = calculate_aroon(high, low, 25)
+    # EMA200 on daily data
+    close_1d_series = pd.Series(close_1d)
+    ema200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # === 12h ADX (20-period) ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    def calculate_adx(high, low, close, period=20):
-        # True Range
+    # ATR calculation on daily data (14-period)
+    def calculate_atr(high, low, close, period=14):
         tr = np.zeros_like(high)
         for i in range(1, len(high)):
             tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
         
-        # Directional Movement
-        dm_plus = np.zeros_like(high)
-        dm_minus = np.zeros_like(high)
-        for i in range(1, len(high)):
-            up_move = high[i] - high[i-1]
-            down_move = low[i-1] - low[i]
-            dm_plus[i] = up_move if up_move > down_move and up_move > 0 else 0
-            dm_minus[i] = down_move if down_move > up_move and down_move > 0 else 0
-        
-        # Smoothed values
-        def smooth_series(raw, period):
-            smoothed = np.full_like(raw, np.nan)
-            if len(raw) < period:
-                return smoothed
-            smoothed[period-1] = np.mean(raw[1:period])
-            for i in range(period, len(raw)):
-                smoothed[i] = (smoothed[i-1] * (period-1) + raw[i]) / period
-            return smoothed
-        
-        tr_smoothed = smooth_series(tr, period)
-        dm_plus_smoothed = smooth_series(dm_plus, period)
-        dm_minus_smoothed = smooth_series(dm_minus, period)
-        
-        # Directional Indicators
-        di_plus = np.full_like(high, np.nan)
-        di_minus = np.full_like(high, np.nan)
-        dx = np.full_like(high, np.nan)
-        
-        for i in range(len(high)):
-            if not np.isnan(tr_smoothed[i]) and tr_smoothed[i] > 0:
-                di_plus[i] = (dm_plus_smoothed[i] / tr_smoothed[i]) * 100
-                di_minus[i] = (dm_minus_smoothed[i] / tr_smoothed[i]) * 100
-                dx[i] = (abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])) * 100
-        
-        # ADX: smoothed DX
-        adx = smooth_series(dx, period)
-        return adx
+        atr = np.zeros_like(high)
+        if len(high) > period:
+            atr[period] = np.mean(tr[1:period+1])
+            for i in range(period+1, len(high)):
+                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        return atr
     
-    adx_12h = calculate_adx(high_12h, low_12h, close_12h, 20)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    atr_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # === Volume spike (6h) ===
-    vol_avg20 = np.full_like(volume, np.nan)
-    for i in range(len(volume)):
-        if i >= 19:
-            vol_avg20[i] = np.mean(volume[i-19:i+1])
+    # 20-day average volume on daily data
+    volume_1d_series = pd.Series(volume_1d)
+    vol_avg20_1d = volume_1d_series.rolling(window=20, min_periods=20).mean().values
+    vol_avg20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg20_1d)
     
     signals = np.zeros(n)
     position = 0
-    warmup = 50  # Sufficient for Aroon and ADX
+    warmup = 200  # Sufficient for EMA200
     
     for i in range(warmup, n):
-        if (np.isnan(aroon_osc[i]) or 
-            np.isnan(adx_12h_aligned[i]) or
-            np.isnan(vol_avg20[i])):
+        if (np.isnan(ema200_1d_aligned[i]) or 
+            np.isnan(atr_1d_aligned[i]) or
+            np.isnan(vol_avg20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        vol_spike = volume[i] > 2.0 * vol_avg20[i]
-        strong_trend = adx_12h_aligned[i] > 20
+        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
+        vol_filter = vol_1d_current > 1.5 * vol_avg20_1d_aligned[i]
         
         if position == 0:
-            # Long: Aroon up > 50 (uptrend) + strong trend + volume spike
-            if aroon_osc[i] > 50 and strong_trend and vol_spike:
+            # Long: price crosses above 200-day EMA + volume confirmation
+            if close[i] > ema200_1d_aligned[i] and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Aroon down > 50 (downtrend) + strong trend + volume spike
-            elif aroon_osc[i] < -50 and strong_trend and vol_spike:
+            # Short: price crosses below 200-day EMA + volume confirmation
+            elif close[i] < ema200_1d_aligned[i] and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Aroon down > 50 or trend weakens
-            if aroon_osc[i] < -50 or adx_12h_aligned[i] < 15:
+            # Exit long: price crosses below 200-day EMA
+            if close[i] < ema200_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Aroon up > 50 or trend weakens
-            if aroon_osc[i] > 50 or adx_12h_aligned[i] < 15:
+            # Exit short: price crosses above 200-day EMA
+            if close[i] > ema200_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -138,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Aroon_Trend_Filter"
-timeframe = "6h"
+name = "4h_EMA200_VolumeConfirmation"
+timeframe = "4h"
 leverage = 1.0
