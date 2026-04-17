@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_CCI_Trend_Filter_V1
-Strategy: 4h Commodity Channel Index (CCI) with daily EMA34 trend filter and volume confirmation.
-Long: CCI(20) > -100 + price > daily EMA34 + volume > 1.3x 20-period average
-Short: CCI(20) < 100 + price < daily EMA34 + volume > 1.3x 20-period average
-Exit: Opposite condition or trend reversal
+4h_RSI_Extreme_TrendFilter_V1
+Strategy: 4h RSI(14) extremes with daily EMA50 trend filter and volume confirmation.
+Long: RSI < 30 + price > daily EMA50 + volume > 1.5x 20-period average
+Short: RSI > 70 + price < daily EMA50 + volume > 1.5x 20-period average
+Exit: Opposite RSI extreme or trend reversal
 Position size: 0.25
 Designed to capture mean-reversion in ranging markets while respecting trend.
 Timeframe: 4h
@@ -24,42 +24,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate CCI(20)
-    def cci(high, low, close, window=20):
-        n = len(high)
-        cci_out = np.full(n, np.nan)
-        if n < window:
-            return cci_out
+    # Calculate RSI(14)
+    def rsi(close, window=14):
+        delta = np.diff(close, prepend=close[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
         
-        # Typical Price
-        tp = (high + low + close) / 3
+        avg_gain = pd.Series(gain).rolling(window=window, min_periods=window).mean().values
+        avg_loss = pd.Series(loss).rolling(window=window, min_periods=window).mean().values
         
-        # Moving Average of TP
-        tp_ma = pd.Series(tp).rolling(window=window, min_periods=window).mean().values
-        
-        # Mean Deviation
-        md = np.zeros(n)
-        for i in range(window-1, n):
-            md[i] = np.mean(np.abs(tp[i-window+1:i+1] - tp_ma[i]))
-        
-        # CCI
-        for i in range(window-1, n):
-            if md[i] > 0:
-                cci_out[i] = (tp[i] - tp_ma[i]) / (0.015 * md[i])
-            else:
-                cci_out[i] = 0
-        
-        return cci_out
+        rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, 0), where=avg_loss!=0)
+        rsi_out = 100 - (100 / (1 + rs))
+        return rsi_out
     
-    cci_val = cci(high, low, close, 20)
+    rsi_val = rsi(close, 14)
     
-    # Calculate daily EMA34 for trend filter
+    # Calculate daily EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate 4h volume average (20-period)
     df_4h = get_htf_data(prices, '4h')
@@ -80,41 +66,41 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is not available
-        if (np.isnan(cci_val[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(rsi_val[i]) or np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(volume_ma20_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Current 4h volume
         vol_4h_current = align_htf_to_ltf(prices, df_4h, volume_4h)[i]
-        volume_filter = vol_4h_current > (1.3 * volume_ma20_4h_aligned[i])
+        volume_filter = vol_4h_current > (1.5 * volume_ma20_4h_aligned[i])
         
-        # Trend filter: price above/below daily EMA34
-        trend_up = close[i] > ema_34_1d_aligned[i]
-        trend_down = close[i] < ema_34_1d_aligned[i]
+        # Trend filter: price above/below daily EMA50
+        trend_up = close[i] > ema_50_1d_aligned[i]
+        trend_down = close[i] < ema_50_1d_aligned[i]
         
         # Entry signals
         if position == 0:
-            # Long: CCI > -100 (not deeply oversold) + volume filter + trend up
-            if cci_val[i] > -100 and volume_filter and trend_up:
+            # Long: RSI < 30 (oversold) + volume filter + trend up
+            if rsi_val[i] < 30 and volume_filter and trend_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: CCI < 100 (not deeply overbought) + volume filter + trend down
-            elif cci_val[i] < 100 and volume_filter and trend_down:
+            # Short: RSI > 70 (overbought) + volume filter + trend down
+            elif rsi_val[i] > 70 and volume_filter and trend_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: CCI < -100 (deeply oversold) or trend down
-            if cci_val[i] < -100 or not trend_up:
+            # Exit long: RSI > 70 (overbought) or trend down
+            if rsi_val[i] > 70 or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: CCI > 100 (deeply overbought) or trend up
-            if cci_val[i] > 100 or not trend_down:
+            # Exit short: RSI < 30 (oversold) or trend up
+            if rsi_val[i] < 30 or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -122,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_CCI_Trend_Filter_V1"
+name = "4h_RSI_Extreme_TrendFilter_V1"
 timeframe = "4h"
 leverage = 1.0
