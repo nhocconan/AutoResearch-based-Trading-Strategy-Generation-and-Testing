@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-1h_12h_1d_Trend_Momentum_v1
-Hypothesis: In both bull and bear markets, strong momentum aligned with higher timeframe trends provides edge.
-Uses 12h EMA50 for trend filter and 1d RSI(14) for momentum filter, with 1h price action for entry timing.
-Target: 60-150 total trades over 4 years (15-37/year) by requiring confluence of 12h trend, 1d momentum, and 1h breakout.
+6h_Weekly_Pivot_Breakout_v1
+Breakout of weekly pivot R3/S3 levels with volume confirmation.
+Long: close > weekly R3 + volume > 1.5x avg volume + price > 200EMA
+Short: close < weekly S3 + volume > 1.5x avg volume + price < 200EMA
+Exit when price returns to weekly pivot (PP) or opposite pivot level.
+Designed to capture strong moves after weekly pivot breakouts.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -18,88 +21,94 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # === 12h EMA50 for trend filter (loaded once) ===
-    df_12h = get_htf_data(prices, '12h')
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # === Weekly Pivot Points (using weekly OHLC) ===
+    df_1w = get_htf_data(prices, '1w')
+    # Calculate pivot points from weekly OHLC
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # === 1d RSI(14) for momentum filter (loaded once) ===
-    df_1d = get_htf_data(prices, '1d')
-    delta = pd.Series(df_1d['close'].values).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = (100 - (100 / (1 + rs))).values
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    pp = (weekly_high + weekly_low + weekly_close) / 3.0
+    r1 = 2 * pp - weekly_low
+    s1 = 2 * pp - weekly_high
+    r2 = pp + (weekly_high - weekly_low)
+    s2 = pp - (weekly_high - weekly_low)
+    r3 = weekly_high + 2 * (pp - weekly_low)
+    s3 = weekly_low - 2 * (weekly_high - pp)
     
-    # === 1h price action: breakout above/below recent range ===
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Align weekly pivot levels to 6h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    
+    # === 200 EMA for trend filter ===
+    ema_200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # === Volume filter: 1.5x average volume (20-period) ===
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_threshold = 1.5 * avg_volume
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 100
+    warmup = 200
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i])):
+        if (np.isnan(pp_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_200[i]) or 
+            np.isnan(volume_threshold[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: 12h uptrend (price > EMA50), 1d bullish momentum (RSI > 50), 1h breakout above recent high
-            if (close[i] > ema_50_12h_aligned[i] and 
-                rsi_1d_aligned[i] > 50 and 
-                high[i] > highest_high[i-1]):
-                signals[i] = 0.20
+            # Long: breakout above R3 with volume confirmation and above 200EMA
+            if (close[i] > r3_aligned[i] and 
+                volume[i] > volume_threshold[i] and 
+                close[i] > ema_200[i]):
+                signals[i] = 0.25
                 position = 1
                 continue
-            # Short: 12h downtrend (price < EMA50), 1d bearish momentum (RSI < 50), 1h breakdown below recent low
-            elif (close[i] < ema_50_12h_aligned[i] and 
-                  rsi_1d_aligned[i] < 50 and 
-                  low[i] < lowest_low[i-1]):
-                signals[i] = -0.20
+            # Short: breakdown below S3 with volume confirmation and below 200EMA
+            elif (close[i] < s3_aligned[i] and 
+                  volume[i] > volume_threshold[i] and 
+                  close[i] < ema_200[i]):
+                signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic: reverse signal or momentum fade
+        # Exit logic
         elif position == 1:
-            # Exit long: 12h trend fails OR 1d momentum fades OR 1h breakdown
-            if (close[i] < ema_50_12h_aligned[i] or 
-                rsi_1d_aligned[i] < 40 or 
-                low[i] < lowest_low[i-1]):
+            # Exit long: price returns to pivot point (PP) or breaks below S3
+            if (close[i] <= pp_aligned[i] or 
+                close[i] < s3_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: 12h trend fails OR 1d momentum fades OR 1h breakout
-            if (close[i] > ema_50_12h_aligned[i] or 
-                rsi_1d_aligned[i] > 60 or 
-                high[i] > highest_high[i-1]):
+            # Exit short: price returns to pivot point (PP) or breaks above R3
+            if (close[i] >= pp_aligned[i] or 
+                close[i] > r3_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_12h_1d_Trend_Momentum_v1"
-timeframe = "1h"
+name = "6h_Weekly_Pivot_Breakout_v1"
+timeframe = "6h"
 leverage = 1.0
