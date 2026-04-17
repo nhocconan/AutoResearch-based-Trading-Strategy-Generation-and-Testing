@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Trend_1d_RSI_Momentum
-- Uses KAMA (Kaufman Adaptive Moving Average) on 12h for adaptive trend detection
-- Filters with 1d RSI to avoid extreme overbought/oversold conditions
-- Enters long when KAMA slopes up and RSI < 70, short when KAMA slopes down and RSI > 30
-- Exits when KAMA slope reverses or RSI reaches opposite extreme
-- Position size: 0.25 for trend alignment, 0.0 otherwise
-- Designed for 12h timeframe to reduce trade frequency and avoid fee drag
-- Works in bull (trend following) and bear (mean reversion via RSI extremes) regimes
+Hypothesis: The 4-hour price often tests daily pivot levels before reversing or breaking out. 
+By combining the daily pivot point with a 4-hour EMA34 trend filter and volume confirmation, 
+we aim to capture both breakout and mean-reversion opportunities. The strategy enters long 
+when price crosses above the daily pivot with volume > 1.8x average and price above EMA34, 
+and short when price crosses below the daily pivot with volume > 1.8x average and price 
+below EMA34. Exits occur when price returns to the midpoint between pivot and the prior 
+day's high/low, reducing exposure in ranging markets. Designed for 4h timeframe to work in 
+bull (breakouts) and bear (mean reversion to pivot) regimes with ~20-30 trades per year.
 """
 
 import numpy as np
@@ -24,82 +24,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for KAMA calculation
-    df_12h = get_htf_data(prices, '12h')
-    
-    # Get 1d data for RSI filter
+    # Get daily data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate KAMA on 12h close
-    close_12h = df_12h['close'].values
-    # Efficiency ratio
-    change = np.abs(np.diff(close_12h, n=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close_12h, n=1)), axis=0)  # 10-period volatility
-    # Avoid division by zero
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2 / (2 + 1) - 2 / (30 + 1)) + 2 / (30 + 1)) ** 2  # fast=2, slow=30
-    # KAMA calculation
-    kama = np.full_like(close_12h, np.nan)
-    kama[29] = close_12h[29]  # seed
-    for i in range(30, len(close_12h)):
-        kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
+    # Calculate daily pivot and support/resistance levels
+    phigh = df_1d['high'].values
+    plow = df_1d['low'].values
+    pclose = df_1d['close'].values
     
-    # Calculate RSI on 1d close
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    pivot = (phigh + plow + pclose) / 3
+    range_ = phigh - plow
     
-    # Align KAMA and RSI to 12h timeframe
-    kama_12h_aligned = align_htf_to_ltf(prices, df_12h, kama)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi, additional_delay_bars=0)  # RSI uses current 1d bar
+    # Define exit levels: midpoint between pivot and prior day's high/low
+    upper_exit = (pivot + phigh) / 2
+    lower_exit = (pivot + plow) / 2
     
-    # Calculate KAMA slope (1-period change)
-    kama_slope = np.diff(kama_12h_aligned, prepend=0)
+    # Calculate 1d EMA34 for trend filter
+    ema_34 = pd.Series(pclose).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align all daily levels to 4h timeframe (waits for daily bar to close)
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
+    upper_exit_4h = align_htf_to_ltf(prices, df_1d, upper_exit)
+    lower_exit_4h = align_htf_to_ltf(prices, df_1d, lower_exit)
+    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # Volume confirmation: 20-period volume MA on 4h
+    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 40  # warmup for indicators
+    start_idx = 40  # warmup for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_12h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(kama_slope[i])):
+        if (np.isnan(pivot_4h[i]) or np.isnan(upper_exit_4h[i]) or np.isnan(lower_exit_4h[i]) or
+            np.isnan(ema_34_4h[i]) or np.isnan(volume_ma_20.iloc[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        kama_val = kama_12h_aligned[i]
-        rsi_val = rsi_1d_aligned[i]
-        slope = kama_slope[i]
+        vol = volume[i]
+        vol_ma = volume_ma_20.iloc[i]
         
         if position == 0:
-            # Long: KAMA slope up and RSI not overbought
-            if slope > 0 and rsi_val < 70:
+            # Long: price crosses above pivot with volume spike and above daily EMA34
+            if price > pivot_4h[i] and vol > 1.8 * vol_ma and price > ema_34_4h[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA slope down and RSI not oversold
-            elif slope < 0 and rsi_val > 30:
+            # Short: price crosses below pivot with volume spike and below daily EMA34
+            elif price < pivot_4h[i] and vol > 1.8 * vol_ma and price < ema_34_4h[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: KAMA slope down or RSI overbought
-            if slope <= 0 or rsi_val >= 70:
+            # Long exit: price returns to upper exit level (midpoint between pivot and prior high)
+            if price < upper_exit_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: KAMA slope up or RSI oversold
-            if slope >= 0 or rsi_val <= 30:
+            # Short exit: price returns to lower exit level (midpoint between pivot and prior low)
+            if price > lower_exit_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_KAMA_Trend_1d_RSI_Momentum"
-timeframe = "12h"
+name = "4h_Pivot_Volume_EMA34_MidExit"
+timeframe = "4h"
 leverage = 1.0
