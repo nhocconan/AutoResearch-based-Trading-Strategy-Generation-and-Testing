@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,91 +13,115 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for 200-day EMA trend filter
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Get daily data for pivot points
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 200-day EMA for trend filter (long-term trend)
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_4h = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Weekly EMA(34) for trend filter
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Get 4-hour data for Donchian channel calculation
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Weekly standard deviation for volatility filter
+    std_1w = pd.Series(close_1w).rolling(window=34, min_periods=34).std().values
+    std_1w_aligned = align_htf_to_ltf(prices, df_1w, std_1w)
     
-    # Calculate 20-period Donchian channel on 4h data
-    donchian_high_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Calculate weekly pivot points (standard formula)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    r2_1w = pivot_1w + (high_1w - low_1w)
+    s2_1w = pivot_1w - (high_1w - low_1w)
     
-    # Align Donchian levels to 6h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_4h)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_4h)
+    # Use previous week's pivots (avoid look-ahead)
+    r1_1w_prev = np.roll(r1_1w, 1)
+    s1_1w_prev = np.roll(s1_1w, 1)
+    r2_1w_prev = np.roll(r2_1w, 1)
+    s2_1w_prev = np.roll(s2_1w, 1)
+    r1_1w_prev[0] = np.nan
+    s1_1w_prev[0] = np.nan
+    r2_1w_prev[0] = np.nan
+    s2_1w_prev[0] = np.nan
     
-    # Calculate 4-hour ATR for volatility filter
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    # Align weekly pivot levels to 1d timeframe
+    r1_1d = align_htf_to_ltf(prices, df_1w, r1_1w_prev)
+    s1_1d = align_htf_to_ltf(prices, df_1w, s1_1w_prev)
+    r2_1d = align_htf_to_ltf(prices, df_1w, r2_1w_prev)
+    s2_1d = align_htf_to_ltf(prices, df_1w, s2_1w_prev)
+    
+    # Volume confirmation: current volume > 1.8 * 20-period average
+    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR filter to avoid low volatility environments
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
     tr1[0] = np.nan
     tr2[0] = np.nan
     tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_4h_ma20 = pd.Series(atr_4h).rolling(window=20, min_periods=20).mean().values
-    atr_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
-    atr_ma20_aligned = align_htf_to_ltf(prices, df_4h, atr_4h_ma20)
-    
-    # Volume confirmation: current volume > 1.5 * 20-period average
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma10 = pd.Series(atr).rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 100  # Need EMA200, Donchian, volume MA20, ATR MA20
+    start_idx = 50  # Need EMA34, std, pivots, volume MA20, ATR MA10
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(volume_ma20[i]) or 
-            np.isnan(atr_aligned[i]) or 
-            np.isnan(atr_ma20_aligned[i]) or
-            np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(ema200_4h[i])):
+            np.isnan(atr[i]) or 
+            np.isnan(atr_ma10[i]) or 
+            np.isnan(r1_1d[i]) or 
+            np.isnan(s1_1d[i]) or
+            np.isnan(r2_1d[i]) or
+            np.isnan(s2_1d[i]) or
+            np.isnan(ema34_1w_aligned[i]) or
+            np.isnan(std_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
-        # Volatility filter: ATR > 20-period ATR average (avoid low volatility)
-        volatility_filter = atr_aligned[i] > atr_ma20_aligned[i]
-        # Long-term trend filter: price above/below 200-day EMA
-        trend_up = close[i] > ema200_4h[i]
-        trend_down = close[i] < ema200_4h[i]
+        # Volume filter: current volume > 1.8x 20-period average
+        volume_filter = volume[i] > (1.8 * volume_ma20[i])
+        # Volatility filter: ATR > ATR MA10 (avoid low volatility)
+        volatility_filter = atr[i] > atr_ma10[i]
+        # Weekly trend filter: price above/below weekly EMA34
+        trend_up = close[i] > ema34_1w_aligned[i]
+        trend_down = close[i] < ema34_1w_aligned[i]
+        # Weekly volatility filter: current weekly volatility > average
+        vol_filter = std_1w_aligned[i] > 0  # Only trade when volatility exists
         
         if position == 0:
-            # Long: price breaks above Donchian high with volume, volatility AND long-term uptrend
-            if (close[i] > donchian_high_aligned[i] and volume_filter and volatility_filter and 
-                trend_up):
+            # Long: price breaks above R1 with volume, volatility AND weekly uptrend
+            if (close[i] > r1_1d[i] and volume_filter and volatility_filter and 
+                trend_up and vol_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low with volume, volatility AND long-term downtrend
-            elif (close[i] < donchian_low_aligned[i] and volume_filter and volatility_filter and 
-                  trend_down):
+            # Short: price breaks below S1 with volume, volatility AND weekly downtrend
+            elif (close[i] < s1_1d[i] and volume_filter and volatility_filter and 
+                  trend_down and vol_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns below Donchian low or volatility drops
-            if close[i] < donchian_low_aligned[i] or not volatility_filter:
+            # Exit long: price returns below weekly EMA34 or volatility drops
+            if close[i] < ema34_1w_aligned[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns above Donchian high or volatility drops
-            if close[i] > donchian_high_aligned[i] or not volatility_filter:
+            # Exit short: price returns above weekly EMA34 or volatility drops
+            if close[i] > ema34_1w_aligned[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_200DEMA_DonchianBreakout_Volume"
-timeframe = "6h"
+name = "1d_WeeklyEMA34_PivotBreakout_Volume"
+timeframe = "1d"
 leverage = 1.0
