@@ -13,122 +13,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Close for indicators ===
+    # === 12h Williams %R (14-period) ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # Calculate Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = np.full_like(high_12h, np.nan)
+    lowest_low = np.full_like(low_12h, np.nan)
+    period = 14
+    
+    for i in range(len(high_12h)):
+        if i >= period - 1:
+            highest_high[i] = np.max(high_12h[i - period + 1:i + 1])
+            lowest_low[i] = np.min(low_12h[i - period + 1:i + 1])
+        else:
+            highest_high[i] = np.max(high_12h[0:i + 1])
+            lowest_low[i] = np.min(low_12h[0:i + 1])
+    
+    denominator = highest_high - lowest_low
+    williams_r = np.where(denominator != 0, ((highest_high - close_12h) / denominator) * -100, -50)
+    
+    # === 1d ADX (14-period) ===
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    close_1d = df_1d['close'].values
     
-    # === 1d RSI (14) ===
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.full_like(gain, np.nan)
-    avg_loss = np.full_like(loss, np.nan)
-    period = 14
-    for i in range(len(gain)):
-        if i < period:
-            if i == 0:
-                avg_gain[i] = gain[i]
-                avg_loss[i] = loss[i]
-            else:
-                avg_gain[i] = (avg_gain[i-1] * (i-1) + gain[i]) / i
-                avg_loss[i] = (avg_loss[i-1] * (i-1) + loss[i]) / i
-        else:
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d[avg_loss == 0] = 100
-    
-    # === 1d ATR (14) ===
+    # Calculate True Range
     tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    
+    # Calculate Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values using Wilder's smoothing
     atr = np.full_like(tr, np.nan)
-    for i in range(len(tr)):
-        if i < period:
-            if i == 0:
-                atr[i] = tr[i]
-            else:
-                atr[i] = (atr[i-1] * (i-1) + tr[i]) / i
-        else:
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+    plus_di = np.full_like(plus_dm, np.nan)
+    minus_di = np.full_like(minus_dm, np.nan)
     
-    # === 1d Bollinger Bands (20,2) ===
-    sma_20 = np.full_like(close_1d, np.nan)
-    for i in range(len(close_1d)):
+    # Initialize first values
+    atr[period - 1] = np.mean(tr[:period])
+    plus_dm_sum = np.sum(plus_dm[:period])
+    minus_dm_sum = np.sum(minus_dm[:period])
+    
+    for i in range(period, len(tr)):
+        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
+        plus_dm_sum = plus_dm_sum - (plus_dm_sum / period) + plus_dm[i]
+        minus_dm_sum = minus_dm_sum - (minus_dm_sum / period) + minus_dm[i]
+        plus_di[i] = 100 * plus_dm_sum / atr[i] if atr[i] != 0 else 0
+        minus_di[i] = 100 * minus_dm_sum / atr[i] if atr[i] != 0 else 0
+    
+    # Calculate DX and ADX
+    dx = np.full_like(tr, np.nan)
+    adx = np.full_like(tr, np.nan)
+    
+    for i in range(period, len(tr)):
+        di_sum = plus_di[i] + minus_di[i]
+        dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / di_sum if di_sum != 0 else 0
+    
+    # Smooth DX to get ADX
+    adx[2 * period - 1] = np.mean(dx[period:2 * period])
+    for i in range(2 * period, len(dx)):
+        adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
+    
+    # === Align indicators to 6h timeframe ===
+    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # === 6h Volume confirmation ===
+    vol_ma_20 = np.full_like(volume, np.nan)
+    for i in range(len(volume)):
         if i >= 19:
-            sma_20[i] = np.mean(close_1d[i-19:i+1])
+            vol_ma_20[i] = np.mean(volume[i-19:i+1])
         elif i > 0:
-            sma_20[i] = np.mean(close_1d[max(0, i-9):i+1])
+            vol_ma_20[i] = np.mean(volume[max(0, i-9):i+1])
         else:
-            sma_20[i] = close_1d[0]
+            vol_ma_20[i] = volume[0]
     
-    std_20 = np.full_like(close_1d, np.nan)
-    for i in range(len(close_1d)):
-        if i >= 19:
-            std_20[i] = np.std(close_1d[i-19:i+1])
-        elif i > 0:
-            std_20[i] = np.std(close_1d[max(0, i-9):i+1])
-        else:
-            std_20[i] = 0.0
-    
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
-    
-    # === 1d BB Width percentile (20-period) for regime detection ===
-    bb_width = (upper_bb - lower_bb) / sma_20
-    bb_width_percentile = np.full_like(bb_width, np.nan)
-    for i in range(len(bb_width)):
-        if i >= 19:
-            window = bb_width[i-19:i+1]
-            rank = np.sum(window <= bb_width[i]) / len(window)
-            bb_width_percentile[i] = rank * 100
-        elif i > 0:
-            window = bb_width[max(0, i-9):i+1]
-            rank = np.sum(window <= bb_width[i]) / len(window)
-            bb_width_percentile[i] = rank * 100
-        else:
-            bb_width_percentile[i] = 50.0
-    
-    # === 1d Volume spike (volume > 1.5x 20-period average) ===
-    vol_ma_20 = np.full_like(volume_1d, np.nan)
-    for i in range(len(volume_1d)):
-        if i >= 19:
-            vol_ma_20[i] = np.mean(volume_1d[i-19:i+1])
-        elif i > 0:
-            vol_ma_20[i] = np.mean(volume_1d[max(0, i-9):i+1])
-        else:
-            vol_ma_20[i] = volume_1d[0]
-    vol_spike = volume_1d > vol_ma_20 * 1.5
-    
-    # === Align indicators to 1d timeframe (prices is already 1d) ===
-    # Since prices is 1d timeframe, we can use values directly
-    rsi_1d_aligned = rsi_1d
-    bb_width_percentile_aligned = bb_width_percentile
-    upper_bb_aligned = upper_bb
-    lower_bb_aligned = lower_bb
-    vol_spike_aligned = vol_spike
-    atr_aligned = atr
-    sma_20_aligned = sma_20
-    
-    # === Weekly trend filter (1w) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # Weekly EMA34 for trend
-    ema_34_1w = np.full_like(close_1w, np.nan)
-    for i in range(len(close_1w)):
-        if i < 34:
-            if i == 0:
-                ema_34_1w[i] = close_1w[i]
-            else:
-                ema_34_1w[i] = (ema_34_1w[i-1] * i + close_1w[i]) / (i + 1)
-        else:
-            ema_34_1w[i] = (ema_34_1w[i-1] * 33 + close_1w[i]) / 34
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    vol_confirm = volume > vol_ma_20 * 1.5
     
     signals = np.zeros(n)
     
@@ -140,47 +110,35 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(bb_width_percentile_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(upper_bb_aligned[i]) or 
-            np.isnan(lower_bb_aligned[i]) or 
-            np.isnan(vol_spike_aligned[i]) or
-            np.isnan(ema_34_1w_aligned[i]) or
-            np.isnan(atr_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or 
+            np.isnan(vol_confirm[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Market regime: low volatility squeeze (BB Width < 20th percentile)
-        is_squeeze = bb_width_percentile_aligned[i] < 20
-        
-        # Entry logic: only enter when flat AND volume spike
+        # Entry logic: only enter when flat
         if position == 0:
-            # Long: RSI < 30 (oversold) + BB squeeze + price near lower BB + volume spike + price above weekly EMA34
-            if (rsi_1d_aligned[i] < 30 and 
-                is_squeeze and 
-                close[i] <= lower_bb_aligned[i] * 1.02 and  # within 2% of lower BB
-                vol_spike_aligned[i] and
-                close[i] > ema_34_1w_aligned[i]):
+            # Long: Williams %R oversold (< -80) + ADX > 25 (trending) + volume confirmation
+            if (williams_r_aligned[i] < -80 and 
+                adx_aligned[i] > 25 and 
+                vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: RSI > 70 (overbought) + BB squeeze + price near upper BB + volume spike + price below weekly EMA34
-            elif (rsi_1d_aligned[i] > 70 and 
-                  is_squeeze and 
-                  close[i] >= upper_bb_aligned[i] * 0.98 and  # within 2% of upper BB
-                  vol_spike_aligned[i] and
-                  close[i] < ema_34_1w_aligned[i]):
+            # Short: Williams %R overbought (> -20) + ADX > 25 (trending) + volume confirmation
+            elif (williams_r_aligned[i] > -20 and 
+                  adx_aligned[i] > 25 and 
+                  vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: RSI crosses above 50 OR ATR-based stop (2*ATR from entry) OR price reaches upper BB
-            # Simplified: exit when RSI > 50 or price > upper BB
-            if (rsi_1d_aligned[i] > 50 or 
-                close[i] >= upper_bb_aligned[i]):
+            # Exit long: Williams %R crosses above -50 (momentum fading) OR ADX < 20 (trend weak)
+            if (williams_r_aligned[i] > -50 or 
+                adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -188,10 +146,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI crosses below 50 OR ATR-based stop OR price reaches lower BB
-            # Simplified: exit when RSI < 50 or price < lower BB
-            if (rsi_1d_aligned[i] < 50 or 
-                close[i] <= lower_bb_aligned[i]):
+            # Exit short: Williams %R crosses below -50 (momentum fading) OR ADX < 20 (trend weak)
+            if (williams_r_aligned[i] < -50 or 
+                adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -200,6 +157,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_BB_Squeeze_RSI_VolumeSpike_WeeklyTrend"
-timeframe = "1d"
+name = "6h_WilliamsR_ADX_TrendFilter_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
