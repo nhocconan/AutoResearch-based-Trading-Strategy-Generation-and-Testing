@@ -13,39 +13,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Ichimoku components
+    # Get 1d data for Williams Alligator (13,8,5 SMAs)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Ichimoku components on 1d
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    high9 = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    low9 = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (high9 + low9) / 2
+    # Williams Alligator lines: Jaw (13), Teeth (8), Lips (5) SMAs
+    jaw_1d = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().values
+    teeth_1d = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().values
+    lips_1d = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    high26 = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    low26 = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (high26 + low26) / 2
+    # Align to 12h timeframe
+    jaw_12h = align_htf_to_ltf(prices, df_1d, jaw_1d)
+    teeth_12h = align_htf_to_ltf(prices, df_1d, teeth_1d)
+    lips_12h = align_htf_to_ltf(prices, df_1d, lips_1d)
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_a = (tenkan_sen + kijun_sen) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    high52 = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    low52 = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b = (high52 + low52) / 2
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b)
-    
-    # Cloud top and bottom
-    cloud_top = np.maximum(senkou_a_6h, senkou_b_6h)
-    cloud_bottom = np.minimum(senkou_a_6h, senkou_b_6h)
+    # Get 1w data for trend filter (EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     # Volume filter: current volume > 1.5 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,48 +39,47 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 60  # Need Ichimoku components
+    start_idx = 60  # Need Williams Alligator, EMA50, volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(tenkan_6h[i]) or 
-            np.isnan(kijun_6h[i]) or 
-            np.isnan(cloud_top[i]) or 
-            np.isnan(cloud_bottom[i]) or 
-            np.isnan(volume_ma20[i])):
+        if (np.isnan(jaw_12h[i]) or np.isnan(teeth_12h[i]) or np.isnan(lips_12h[i]) or
+            np.isnan(ema50_12h[i]) or np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter
         volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
-        # Ichimoku signals
-        tk_cross_bull = tenkan_6h[i] > kijun_6h[i]  # Tenkan above Kijun
-        tk_cross_bear = tenkan_6h[i] < kijun_6h[i]  # Tenkan below Kijun
-        price_above_cloud = close[i] > cloud_top[i]
-        price_below_cloud = close[i] < cloud_bottom[i]
+        # Alligator alignment: Lips > Teeth > Jaw = bullish; Lips < Teeth < Jaw = bearish
+        bullish_alignment = (lips_12h[i] > teeth_12h[i]) and (teeth_12h[i] > jaw_12h[i])
+        bearish_alignment = (lips_12h[i] < teeth_12h[i]) and (teeth_12h[i] < jaw_12h[i])
+        
+        # Trend filter: price relative to weekly EMA50
+        price_above_weekly_ema = close[i] > ema50_12h[i]
+        price_below_weekly_ema = close[i] < ema50_12h[i]
         
         if position == 0:
-            # Long: TK cross bullish AND price above cloud with volume
-            if (tk_cross_bull and price_above_cloud and volume_filter):
+            # Long: Bullish Alligator alignment + price above weekly EMA + volume
+            if bullish_alignment and price_above_weekly_ema and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: TK cross bearish AND price below cloud with volume
-            elif (tk_cross_bear and price_below_cloud and volume_filter):
+            # Short: Bearish Alligator alignment + price below weekly EMA + volume
+            elif bearish_alignment and price_below_weekly_ema and volume_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: TK cross bearish OR price drops below cloud
-            if (tk_cross_bear) or (close[i] < cloud_top[i]):
+            # Exit long: Bearish alignment OR price crosses below weekly EMA
+            if bearish_alignment or (close[i] < ema50_12h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: TK cross bullish OR price rises above cloud
-            if (tk_cross_bull) or (close[i] > cloud_bottom[i]):
+            # Exit short: Bullish alignment OR price crosses above weekly EMA
+            if bullish_alignment or (close[i] > ema50_12h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_TK_Cross_Cloud_Volume"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_EMA50_WeeklyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
