@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: On 12h timeframe, price tends to respect weekly Ichimoku Cloud support/resistance.
-Combining weekly Ichimoku Cloud with 12h volume spikes and price above/below Kumo creates
-high-probability trend-following trades. The weekly Cloud acts as dynamic support/resistance
-while volume confirms breakout strength. Strategy targets 15-25 trades per year by requiring
-price to break above/below Cloud with volume confirmation. Works in bull markets (trend
-continuation above Cloud) and bear markets (trend continuation below Cloud).
+Hypothesis: The 4-hour price often respects key intraday support/resistance derived from 
+the prior day's range (Camarilla levels). By combining daily Camarilla S2/R2 levels with 
+4-hour EMA34 trend filter and volume spikes, we create high-probability breakout trades. 
+The strategy targets ~25 trades/year by requiring confluence: price breaks S2/R2, volume 
+> 2x 20-bar average, and price on correct side of EMA34. Exits occur when price returns to 
+the daily pivot, limiting adverse exposure in ranging markets. Designed for 4h timeframe 
+to work in both bull (breakouts continuation) and bear (mean reversion to pivot) regimes.
 """
 
 import numpy as np
@@ -14,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,46 +23,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Ichimoku Cloud
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for Camarilla pivot and EMA
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Ichimoku Cloud components (weekly)
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    period9_high = pd.Series(df_1w['high']).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(df_1w['low']).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
+    # Calculate Camarilla pivot levels from previous day
+    phigh = df_1d['high'].values
+    plow = df_1d['low'].values
+    pclose = df_1d['close'].values
     
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    period26_high = pd.Series(df_1w['high']).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(df_1w['low']).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
+    pivot = (phigh + plow + pclose) / 3
+    range_ = phigh - plow
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2, plotted 26 periods ahead
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
+    # Camarilla S2/R2 levels (used for entry)
+    R2 = pivot + (range_ * 1.1 / 6)
+    S2 = pivot - (range_ * 1.1 / 6)
     
-    # Senkou Span B (Leading Span B): (52-period high + low)/2, plotted 26 periods ahead
-    period52_high = pd.Series(df_1w['high']).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(df_1w['low']).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = ((period52_high + period52_low) / 2)
+    # Calculate 1d EMA34 for trend filter
+    ema_34 = pd.Series(pclose).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align Ichimoku components to 12h timeframe
-    tenkan_12h = align_htf_to_ltf(prices, df_1w, tenkan_sen)
-    kijun_12h = align_htf_to_ltf(prices, df_1w, kijun_sen)
-    span_a_12h = align_htf_to_ltf(prices, df_1w, senkou_span_a)
-    span_b_12h = align_htf_to_ltf(prices, df_1w, senkou_span_b)
+    # Align all daily levels to 4h timeframe (waits for daily bar to close)
+    R2_4h = align_htf_to_ltf(prices, df_1d, R2)
+    S2_4h = align_htf_to_ltf(prices, df_1d, S2)
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
+    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Volume confirmation: 20-period volume MA on 12h
+    # Volume confirmation: 20-period volume MA on 4h
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 100  # warmup for Ichimoku calculations
+    start_idx = 40  # warmup for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(tenkan_12h[i]) or np.isnan(kijun_12h[i]) or 
-            np.isnan(span_a_12h[i]) or np.isnan(span_b_12h[i]) or
-            np.isnan(volume_ma_20.iloc[i])):
+        if (np.isnan(R2_4h[i]) or np.isnan(S2_4h[i]) or np.isnan(pivot_4h[i]) or
+            np.isnan(ema_34_4h[i]) or np.isnan(volume_ma_20.iloc[i])):
             signals[i] = 0.0
             continue
         
@@ -69,34 +65,27 @@ def generate_signals(prices):
         vol = volume[i]
         vol_ma = volume_ma_20.iloc[i]
         
-        # Determine Cloud boundaries and trend
-        upper_cloud = max(span_a_12h[i], span_b_12h[i])
-        lower_cloud = min(span_a_12h[i], span_b_12h[i])
-        in_cloud = lower_cloud <= price <= upper_cloud
-        above_cloud = price > upper_cloud
-        below_cloud = price < lower_cloud
-        
         if position == 0:
-            # Long: price breaks above Cloud with volume spike
-            if above_cloud and vol > 1.8 * vol_ma:
+            # Long: break above R2 with volume spike and above daily EMA34
+            if price > R2_4h[i] and vol > 2.0 * vol_ma and price > ema_34_4h[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Cloud with volume spike
-            elif below_cloud and vol > 1.8 * vol_ma:
+            # Short: break below S2 with volume spike and below daily EMA34
+            elif price < S2_4h[i] and vol > 2.0 * vol_ma and price < ema_34_4h[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price re-enters Cloud or volume drops
-            if in_cloud or vol < 0.7 * vol_ma:
+            # Long exit: price returns to pivot
+            if price < pivot_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price re-enters Cloud or volume drops
-            if in_cloud or vol < 0.7 * vol_ma:
+            # Short exit: price returns to pivot
+            if price > pivot_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_IchimokuCloud_Volume_Breakout"
-timeframe = "12h"
+name = "4h_Camarilla_R2S2_Volume_EMA34"
+timeframe = "4h"
 leverage = 1.0
