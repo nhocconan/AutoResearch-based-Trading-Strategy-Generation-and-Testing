@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h timeframe with 1-day pivot points (R1/S1) and volume confirmation, filtered by 1-day EMA50 trend.
-Uses mean reversion at daily pivot levels with breakout confirmation. Designed to work in both bull and bear markets
-by trading reversals at key daily levels with volume filter to avoid false breakouts. Aims for 12-37 trades/year.
+Hypothesis: 4h timeframe with 1-day pivot points (R1/S1) and volume confirmation.
+Uses mean reversion at daily pivot levels with breakout confirmation, filtered by 1d EMA50 trend.
+Designed to work in both bull and bear markets by trading reversals at key daily levels with volume filter.
+Targets 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
 """
 import numpy as np
 import pandas as pd
@@ -18,7 +19,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivot levels and EMA50
+    # Get 1d data for pivot levels and EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -30,13 +31,13 @@ def generate_signals(prices):
     r1_1d = 2 * pivot_1d - low_1d
     s1_1d = 2 * pivot_1d - high_1d
     
-    # Align 1d pivot levels to 12h
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 1d data to 4h
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # Get 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume filter: current volume > 2.0x 20-period average
@@ -83,6 +84,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dPivot_R1S1_Volume_1dEMA50"
-timeframe = "12h"
+name = "4h_1dPivot_R1S1_Volume_1dEMA50"
+timeframe = "4h"
 leverage = 1.0
