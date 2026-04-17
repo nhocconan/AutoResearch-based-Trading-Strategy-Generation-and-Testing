@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_RSI_TVL_Trend_v1
-KAMA trend + RSI mean reversion + volume confirmation on 12h timeframe.
-Uses daily close trend filter (KAMA direction) for trend alignment,
-RSI(14) for mean reversion entries, and volume spike for confirmation.
-Designed to work in both bull and bear markets by combining trend following
-with mean reversion at extreme RSI levels.
+6h_WeeklyPivot_DonchianBreakout_VolumeConfirmation
+Weekly pivot levels from 1w + 6h Donchian breakout with volume confirmation.
+Long: price > weekly pivot R1 + Donchian(20) breakout + volume spike
+Short: price < weekly pivot S1 + Donchian(20) breakdown + volume spike
+Weekly pivot provides institutional reference; Donchian provides breakout signal.
+Volume confirms institutional participation. Designed for 6h timeframe.
 Target: 50-150 total trades over 4 years (12-37/year).
+Works in bull/bear via breakout logic (works in trends) and pivot levels (mean reversion at extremes).
 """
 
 import numpy as np
@@ -23,105 +24,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d KAMA (Kaufman Adaptive Moving Average) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # === 1w Pivot Points (weekly high, low, close) ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.abs(np.diff(close_1d))
-    er = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
-        if i >= 10:
-            er[i] = np.sum(change[i-9:i+1]) / np.sum(volatility[i-9:i+1]) if np.sum(volatility[i-9:i+1]) > 0 else 0
-        else:
-            er[i] = 0
+    # Calculate weekly pivot: P = (H + L + C) / 3
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    # R1 = 2*P - L, S1 = 2*P - H
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
     
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    # === 6h Donchian Channel (20-period) ===
+    donchian_len = 20
+    upper = np.full_like(high, np.nan)
+    lower = np.full_like(low, np.nan)
     
-    # Calculate KAMA
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    for i in range(donchian_len - 1, len(high)):
+        upper[i] = np.max(high[i-donchian_len+1:i+1])
+        lower[i] = np.min(low[i-donchian_len+1:i+1])
     
-    # === 12h RSI (14-period) ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    for i in range(len(close)):
-        if i >= 14:
-            if i == 14:
-                avg_gain[i] = np.mean(gain[1:15])
-                avg_loss[i] = np.mean(loss[1:15])
-            else:
-                avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-                avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-        else:
-            avg_gain[i] = np.nan
-            avg_loss[i] = np.nan
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # === 12h Volume confirmation (20-period average) ===
+    # === 6h Volume confirmation (20-period average) ===
     vol_ma_20 = np.full_like(volume, np.nan)
-    for i in range(len(volume)):
-        if i >= 20:
-            vol_ma_20[i] = np.mean(volume[i-19:i+1])
-        elif i > 0:
-            vol_ma_20[i] = np.mean(volume[max(0, i-9):i+1])
-        else:
-            vol_ma_20[i] = volume[0]
+    for i in range(20, len(volume)):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
-    vol_confirm = volume > vol_ma_20 * 1.5  # volume spike: 1.5x average
-    
-    # === Align 1d KAMA to 12h timeframe ===
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    # === Align 1w pivot levels to 6h timeframe ===
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 50
+    warmup = max(50, donchian_len, 20)
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_aligned[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(vol_confirm[i])):
+        if (np.isnan(pivot_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(upper[i]) or 
+            np.isnan(lower[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             position = 0
             continue
         
+        # Volume spike: 1.5x average
+        vol_spike = volume[i] > vol_ma_20[i] * 1.5
+        
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price above KAMA (uptrend) AND RSI oversold (<30) AND volume confirmation
-            if (close[i] > kama_aligned[i] and 
-                rsi[i] < 30 and 
-                vol_confirm[i]):
+            # Long: price > weekly R1 + Donchian breakout + volume spike
+            if (close[i] > r1_aligned[i] and 
+                close[i] > upper[i] and 
+                vol_spike):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price below KAMA (downtrend) AND RSI overbought (>70) AND volume confirmation
-            elif (close[i] < kama_aligned[i] and 
-                  rsi[i] > 70 and 
-                  vol_confirm[i]):
+            # Short: price < weekly S1 + Donchian breakdown + volume spike
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < lower[i] and 
+                  vol_spike):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: RSI overbought (>70) OR price crosses below KAMA
-            if (rsi[i] > 70 or 
-                close[i] < kama_aligned[i]):
+            # Exit long: price < weekly pivot OR Donchian breakdown
+            if (close[i] < pivot_aligned[i] or 
+                close[i] < lower[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -129,9 +107,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI oversold (<30) OR price crosses above KAMA
-            if (rsi[i] < 30 or 
-                close[i] > kama_aligned[i]):
+            # Exit short: price > weekly pivot OR Donchian breakout
+            if (close[i] > pivot_aligned[i] or 
+                close[i] > upper[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -140,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_KAMA_RSI_TVL_Trend_v1"
-timeframe = "12h"
+name = "6h_WeeklyPivot_DonchianBreakout_VolumeConfirmation"
+timeframe = "6h"
 leverage = 1.0
