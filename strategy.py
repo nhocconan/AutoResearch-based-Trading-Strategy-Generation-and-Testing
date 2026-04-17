@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-6h Weekly Pivot Reversal with Volume Confirmation
-Hypothesis: Price reverses at weekly pivot levels (R1/S1, R2/S2) on 6h timeframe with volume confirmation.
-Works in bull/bear: Mean reversion at extreme weekly levels, with volume filter to avoid false signals.
-Targets 15-30 trades/year per symbol.
+12h Turtle-style Breakout with Volume Confirmation and 1D EMA Trend Filter
+Long: Price breaks above 1D Donchian high (20-day) + volume > 1.5x 12h volume MA + price > 1D EMA50
+Short: Price breaks below 1D Donchian low (20-day) + volume > 1.5x 12h volume MA + price < 1D EMA50
+Exit: Opposite break of 1D Donchian level
+Focus: Breakout trading with trend filter to avoid false signals in chop
+Target: 20-30 trades/year per symbol
 """
 
 import numpy as np
@@ -12,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,78 +22,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1D data for Donchian channels and trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot points (using prior week's OHLC)
-    # P = (H + L + C) / 3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    weekly_high = df_1w['high'].shift(1)  # Prior week's high
-    weekly_low = df_1w['low'].shift(1)    # Prior week's low
-    weekly_close = df_1w['close'].shift(1) # Prior week's close
+    # 20-period Donchian channels on daily
+    donch_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
     
-    pivot_point = (weekly_high + weekly_low + weekly_close) / 3
-    r1 = 2 * pivot_point - weekly_low
-    s1 = 2 * pivot_point - weekly_high
-    r2 = pivot_point + (weekly_high - weekly_low)
-    s2 = pivot_point - (weekly_high - weekly_low)
+    # 50-period EMA on daily for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align weekly pivot levels to 6h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1.values)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1.values)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2.values)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2.values)
+    # Align to 12h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: 6h volume > 1.5x 24-period MA
-    volume_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean()
+    # 12h volume moving average (24-period for confirmation)
+    df_12h = get_htf_data(prices, '12h')
+    volume_ma_24 = pd.Series(df_12h['volume']).rolling(window=24, min_periods=24).mean().values
+    volume_ma_24_12h = align_htf_to_ltf(prices, df_12h, volume_ma_24)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
+    entry_price = 0.0
     
-    start_idx = 24  # warmup for volume MA
+    start_idx = 60  # warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(volume_ma[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ma_24_12h[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = volume_ma[i]
-        
-        # Volume filter: require volume > 1.5x average
-        volume_ok = vol > 1.5 * vol_ma
+        vol_ma = volume_ma_24_12h[i]
         
         if position == 0:
-            # Long reversal signals: price at or below S1/S2 with volume
-            if price <= s1_aligned[i] and volume_ok:
+            # Long: break above 1D Donchian high + volume + 1D trend
+            if price > donch_high_aligned[i] and vol > 1.5 * vol_ma and price > ema_50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            elif price <= s2_aligned[i] and volume_ok:
-                signals[i] = 0.25
-                position = 1
-            # Short reversal signals: price at or above R1/R2 with volume
-            elif price >= r1_aligned[i] and volume_ok:
+                entry_price = price
+            # Short: break below 1D Donchian low + volume + 1D trend
+            elif price < donch_low_aligned[i] and vol > 1.5 * vol_ma and price < ema_50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
-            elif price >= r2_aligned[i] and volume_ok:
-                signals[i] = -0.25
-                position = -1
+                entry_price = price
         
         elif position == 1:
-            # Long exit: price reaches pivot point or R1
-            if price >= pivot_point[i] or price >= r1_aligned[i]:
+            # Long exit: break below 1D Donchian low
+            if price < donch_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price reaches pivot point or S1
-            if price <= pivot_point[i] or price <= s1_aligned[i]:
+            # Short exit: break above 1D Donchian high
+            if price > donch_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_Reversal_Volume"
-timeframe = "6h"
+name = "12h_Donchian20_Volume_1DEMA50"
+timeframe = "12h"
 leverage = 1.0
