@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h timeframe with daily Donchian(20) breakout + volume confirmation + ADX trend filter.
+Hypothesis: 4h timeframe with 1d Donchian(20) breakout + volume confirmation + ADX trend filter.
 Long when price breaks above 1d Donchian high with volume > 1.5x 20-period average and ADX > 25.
 Short when price breaks below 1d Donchian low with volume > 1.5x 20-period average and ADX > 25.
 Donchian channels from higher timeframe provide robust structure; breakouts with volume and trend filter reduce false signals.
