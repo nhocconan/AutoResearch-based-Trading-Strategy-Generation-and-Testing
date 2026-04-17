@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d timeframe with 1w Williams %R filter + 1d Donchian(20) breakout + volume confirmation.
-Long when price breaks above 20-day high with 1w Williams %R < -80 (oversold) and volume > 1.5x 20-day volume average.
-Short when price breaks below 20-day low with 1w Williams %R > -20 (overbought) and volume > 1.5x 20-day volume average.
-Williams %R on weekly timeframe helps identify overextended moves in the primary trend, increasing probability of continuation breakouts.
-Designed to work in bull markets (breakout from oversold) and bear markets (breakdown from overbought).
+Hypothesis: 6h timeframe with 1d timeframe Camarilla pivot levels (R1/S1, R2/S2, R3/S3, R4/S4).
+Enter long on breakout above R4 with volume confirmation; enter short on breakdown below S4 with volume confirmation.
+Exit when price returns to the 1d VWAP (volume-weighted average price) or opposite pivot level.
+Camarilla pivots derived from 1d OHLC provide mathematically precise support/resistance levels that work across market regimes.
+Volume confirmation filters false breakouts. Designed to capture strong momentum moves in both bull and bear markets.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,89 +21,103 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Williams %R
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Get 1d data for Donchian channels and volume
+    # Get 1d data for Camarilla pivots and VWAP
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1w Williams %R (14-period)
-    def williams_r(high_vals, low_vals, close_vals, window):
-        highest_high = pd.Series(high_vals).rolling(window=window, min_periods=window).max().values
-        lowest_low = pd.Series(low_vals).rolling(window=window, min_periods=window).min().values
-        wr = -100 * (highest_high - close_vals) / (highest_high - lowest_low)
-        # Handle division by zero when highest_high == lowest_low
-        wr = np.where((highest_high - lowest_low) == 0, -50, wr)
-        return wr
+    # Calculate 1d Camarilla levels (based on previous day's OHLC)
+    # Camarilla formulas: 
+    # R4 = close + 1.5 * (high - low)
+    # R3 = close + 1.25 * (high - low)
+    # R2 = close + 1.166 * (high - low)
+    # R1 = close + 0.833 * (high - low)
+    # PP = (high + low + close) / 3
+    # S1 = close - 0.833 * (high - low)
+    # S2 = close - 1.166 * (high - low)
+    # S3 = close - 1.25 * (high - low)
+    # S4 = close - 1.5 * (high - low)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     
-    wr_14_1w = williams_r(high_1w, low_1w, close_1w, 14)
+    # Handle first bar
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
     
-    # Calculate 1d Donchian(20) channels
-    def donchian_channel(high_vals, low_vals, window):
-        upper = pd.Series(high_vals).rolling(window=window, min_periods=window).max().values
-        lower = pd.Series(low_vals).rolling(window=window, min_periods=window).min().values
-        return upper, lower
+    rang = prev_high - prev_low
+    camarilla_pp = (prev_high + prev_low + prev_close) / 3.0
+    camarilla_r4 = prev_close + 1.5 * rang
+    camarilla_r3 = prev_close + 1.25 * rang
+    camarilla_r2 = prev_close + 1.166 * rang
+    camarilla_r1 = prev_close + 0.833 * rang
+    camarilla_s1 = prev_close - 0.833 * rang
+    camarilla_s2 = prev_close - 1.166 * rang
+    camarilla_s3 = prev_close - 1.25 * rang
+    camarilla_s4 = prev_close - 1.5 * rang
     
-    donchian_upper, donchian_lower = donchian_channel(high_1d, low_1d, 20)
+    # Calculate 1d VWAP (typical price * volume cumsum / volume cumsum)
+    typical_price = (high_1d + low_1d + close_1d) / 3.0
+    vol_cumsum = np.cumsum(volume_1d)
+    tp_vol_cumsum = np.cumsum(typical_price * volume_1d)
+    vwap_1d = np.where(vol_cumsum > 0, tp_vol_cumsum / vol_cumsum, typical_price)
     
-    # Calculate 1d volume 20-period average
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all to primary timeframe (1d)
-    wr_14_1w_aligned = align_htf_to_ltf(prices, df_1w, wr_14_1w)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Align all to primary timeframe (6h)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_r2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r2)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    camarilla_s2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s2)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 200  # need enough for Williams %R and Donchian
+    start_idx = 1  # need previous day's data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(wr_14_1w_aligned[i]) or 
-            np.isnan(donchian_upper_aligned[i]) or 
-            np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(camarilla_r4_aligned[i]) or 
+            np.isnan(camarilla_s4_aligned[i]) or 
+            np.isnan(vwap_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x 20-day average
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20_1d_aligned[i]
+        # Volume confirmation: current volume > 1.5x 20-period average (using available history)
+        if i >= 20:
+            vol_ma_20 = np.mean(volume[max(0, i-19):i+1])
+            volume_confirmed = volume[i] > 1.5 * vol_ma_20
+        else:
+            volume_confirmed = True  # no volume filter early on
         
         if position == 0:
-            # Long: price breaks above 20-day high with weekly oversold and volume
-            if (close[i] > donchian_upper_aligned[i] and 
-                wr_14_1w_aligned[i] < -80 and 
-                volume_confirmed):
+            # Long: price breaks above R4 with volume confirmation
+            if (close[i] > camarilla_r4_aligned[i] and volume_confirmed):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 20-day low with weekly overbought and volume
-            elif (close[i] < donchian_lower_aligned[i] and 
-                  wr_14_1w_aligned[i] > -20 and 
-                  volume_confirmed):
+            # Short: price breaks below S4 with volume confirmation
+            elif (close[i] < camarilla_s4_aligned[i] and volume_confirmed):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below 20-day low (opposite side of channel)
-            if close[i] < donchian_lower_aligned[i]:
+            # Exit long: price returns to VWAP or falls below R3 (taking partial profit)
+            if (close[i] <= vwap_1d_aligned[i] or close[i] < camarilla_r3_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above 20-day high (opposite side of channel)
-            if close[i] > donchian_upper_aligned[i]:
+            # Exit short: price returns to VWAP or rises above S3 (taking partial profit)
+            if (close[i] >= vwap_1d_aligned[i] or close[i] > camarilla_s3_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -111,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1wWilliamsR14_Donchian20_Breakout_Volume_Confirm"
-timeframe = "1d"
+name = "6h_1dCamarilla_R4S4_Breakout_VWAP_Exit_Volume_Confirm"
+timeframe = "6h"
 leverage = 1.0
