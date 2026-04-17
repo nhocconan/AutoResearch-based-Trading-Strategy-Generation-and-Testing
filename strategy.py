@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h strategy using 4h RSI and 1d MACD for trend direction with 1h volume spike for entry timing.
-- 4h RSI(14) > 50 = bullish bias, < 50 = bearish bias
-- 1d MACD histogram > 0 = bullish bias, < 0 = bearish bias
-- Enter long when both 4h RSI > 50 and 1d MACD hist > 0 AND 1h volume > 2.0 x 20-period volume MA
-- Enter short when both 4h RSI < 50 and 1d MACD hist < 0 AND 1h volume > 2.0 x 20-period volume MA
-- Exit when either 4h RSI crosses 50 or 1d MACD hist crosses zero
-- Fixed position size 0.20 to manage drawdown and limit trades
-- Uses multi-timeframe alignment to avoid look-ahead
-- Target: 15-37 trades/year (60-150 over 4 years) for 1h timeframe
+Hypothesis: 6h strategy using Ichimoku Cloud (Tenkan/Kijun from 1d, Senkou Span A/B from 1d).
+- Long when price above cloud, Tenkan > Kijun, and volume > 1.5x 20-period volume MA
+- Short when price below cloud, Tenkan < Kijun, and volume > 1.5x 20-period volume MA
+- Exit when price crosses back into cloud or Tenkan/Kijun cross reverses
+- Uses cloud as dynamic support/resistance, effective in both trending and ranging markets
+- Fixed position size 0.25 to manage drawdown
+- Designed for 6h timeframe with strict entry conditions to limit trades to 50-150 total over 4 years
 """
 
 import numpy as np
@@ -25,86 +23,96 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for RSI filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 14:
-        return np.zeros(n)
-    
-    # Calculate 4h RSI(14)
-    delta = pd.Series(df_4h['close']).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, 1e-10)
-    rsi_4h = 100 - (100 / (1 + rs))
-    rsi_4h_values = rsi_4h.values
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h_values)
-    
-    # Get 1d data for MACD filter
+    # Get 1-day data for Ichimoku components
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 26:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    # Calculate 1d MACD (12,26,9)
-    close_1d = pd.Series(df_1d['close'])
-    ema_fast = close_1d.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema_slow = close_1d.ewm(span=26, adjust=False, min_periods=26).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=9, adjust=False, min_periods=9).mean()
-    macd_hist = macd_line - signal_line
-    macd_hist_values = macd_hist.values
-    macd_hist_aligned = align_htf_to_ltf(prices, df_1d, macd_hist_values)
+    # Calculate Ichimoku components on 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume confirmation: 20-period volume MA on 1h
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    period_tenkan = 9
+    tenkan_sen = (pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max() + 
+                  pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min()) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    period_kijun = 26
+    kijun_sen = (pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max() + 
+                 pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min()) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(period_kijun)  # shifted 26 periods ahead
+    
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    period_senkou_b = 52
+    senkou_span_b = ((pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max() + 
+                      pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min()) / 2).shift(period_kijun)
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen.values)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen.values)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a.values)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b.values)
+    
+    # Volume confirmation: 20-period volume MA
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 20  # warmup for volume MA
+    start_idx = 52  # warmup for Ichimoku calculations
     
     for i in range(start_idx, n):
         if (np.isnan(volume_ma_20.iloc[i]) or 
-            np.isnan(rsi_4h_aligned[i]) or np.isnan(macd_hist_aligned[i])):
+            np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = volume_ma_20.iloc[i]
-        rsi = rsi_4h_aligned[i]
-        macd_hist = macd_hist_aligned[i]
+        tenkan = tenkan_sen_aligned[i]
+        kijun = kijun_sen_aligned[i]
+        span_a = senkou_span_a_aligned[i]
+        span_b = senkou_span_b_aligned[i]
+        
+        # Determine cloud top and bottom
+        cloud_top = max(span_a, span_b)
+        cloud_bottom = min(span_a, span_b)
         
         if position == 0:
-            # Look for aligned signals with volume spike
-            # Long: 4h RSI > 50, 1d MACD hist > 0, volume spike
-            if rsi > 50 and macd_hist > 0 and vol > 2.0 * vol_ma:
-                signals[i] = 0.20
+            # Look for signals with volume confirmation
+            # Long: price above cloud, Tenkan > Kijun, volume spike
+            if price > cloud_top and tenkan > kijun and vol > 1.5 * vol_ma:
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h RSI < 50, 1d MACD hist < 0, volume spike
-            elif rsi < 50 and macd_hist < 0 and vol > 2.0 * vol_ma:
-                signals[i] = -0.20
+            # Short: price below cloud, Tenkan < Kijun, volume spike
+            elif price < cloud_bottom and tenkan < kijun and vol > 1.5 * vol_ma:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when either 4h RSI < 50 or 1d MACD hist < 0
-            if rsi < 50 or macd_hist < 0:
+            # Exit when price crosses below cloud or Tenkan/Kijun cross down
+            if price < cloud_top or tenkan < kijun:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit when either 4h RSI > 50 or 1d MACD hist > 0
-            if rsi > 50 or macd_hist > 0:
+            # Exit when price crosses above cloud or Tenkan/Kijun cross up
+            if price > cloud_bottom or tenkan > kijun:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_RSI4h_MACD1d_VolumeSpike"
-timeframe = "1h"
+name = "6h_Ichimoku_Cloud_Volume"
+timeframe = "6h"
 leverage = 1.0
