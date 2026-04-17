@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Williams %R mean reversion with 1w trend filter and volume confirmation.
-Long when Williams %R < -80 (oversold) AND price > 1w EMA34 (bullish trend) AND 1d volume > 1.5x 20-bar average volume.
-Short when Williams %R > -20 (overbought) AND price < 1w EMA34 (bearish trend) AND 1d volume > 1.5x 20-bar average volume.
-Exit when Williams %R crosses above -50 (for long) or below -50 (for short).
-Uses 1d for Williams %R and volume, 1w for trend filter. Designed to capture reversals in both bull and bear markets.
-Target: 10-25 trades/year per symbol.
+Hypothesis: 12h Donchian(20) breakout with 1d volume spike and chop regime filter.
+Long when price breaks above upper Donchian channel (20) AND 1d volume > 2.0x 20-bar average volume AND 1d chop > 61.8 (range regime).
+Short when price breaks below lower Donchian channel (20) AND 1d volume > 2.0x 20-bar average volume AND 1d chop > 61.8.
+Exit when price touches the midpoint of the Donchian channel or opposite band.
+Uses 1d for Donchian levels, volume, and chop filter to avoid trends and ensure structure.
+Designed to capture breakouts in ranging markets with volume confirmation. Target: 12-37 trades/year per symbol.
 """
 
 import numpy as np
@@ -20,32 +20,40 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for Williams %R and volume
+    # Get 1d data for Donchian channels, volume, and chop regime
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Williams %R (14-period)
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close_1d) / (highest_high - lowest_low + 1e-10) * -100
+    # Calculate 1d Donchian channels (20-period)
+    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    mid_20 = (upper_20 + lower_20) / 2
     
     # Calculate 1d volume MA for confirmation
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Get 1w data for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1d chop regime (choppiness index)
+    # True range
+    tr1 = np.maximum(high_1d - low_1d, 
+                     np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
+                                np.abs(low_1d - np.roll(close_1d, 1))))
+    tr1[0] = high_1d[0] - low_1d[0]  # first bar
+    atr14 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
+    sum_atr14 = pd.Series(atr14).rolling(window=14, min_periods=14).sum().values
+    log_sum = np.log10(sum_atr14 + 1e-10)
+    log_n = np.log10(14)
+    chop = 100 * log_sum / log_n
     
-    # Align all 1d indicators to 1d timeframe (no alignment needed as we're using 1d timeframe)
-    # But we need to align 1w EMA to 1d timeframe
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Align all 1d indicators to 12h timeframe
+    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
+    mid_20_aligned = align_htf_to_ltf(prices, df_1d, mid_20)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -54,47 +62,50 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(williams_r[i]) or 
-            np.isnan(vol_ma_20[i]) or
-            np.isnan(ema34_1w_aligned[i])):
+        if (np.isnan(upper_20_aligned[i]) or 
+            np.isnan(lower_20_aligned[i]) or
+            np.isnan(mid_20_aligned[i]) or
+            np.isnan(vol_ma_20_aligned[i]) or
+            np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x 20-bar average
-        volume_confirmed = volume_1d[i] > 1.5 * vol_ma_20[i]
+        # Volume confirmation: current 1d volume > 2.0x 20-bar average
+        volume_confirmed = volume_1d[i] > 2.0 * vol_ma_20_aligned[i]
         
-        # Williams %R conditions
-        oversold = williams_r[i] < -80
-        overbought = williams_r[i] > -20
-        exit_long = williams_r[i] > -50
-        exit_short = williams_r[i] < -50
+        # Chop regime filter: only trade in ranging markets (chop > 61.8)
+        chop_filter = chop_aligned[i] > 61.8
         
-        # Trend filter: price vs 1w EMA34
-        # Note: we're on 1d timeframe, so we use daily close vs aligned 1w EMA
-        price_above_ema = close[i] > ema34_1w_aligned[i]
-        price_below_ema = close[i] < ema34_1w_aligned[i]
+        # Breakout conditions
+        breakout_upper = close[i] > upper_20_aligned[i]
+        breakout_lower = close[i] < lower_20_aligned[i]
+        
+        # Exit conditions: touch midpoint or opposite band
+        touch_mid = abs(close[i] - mid_20_aligned[i]) < 0.001 * close[i]  # within 0.1%
+        touch_opposite = (position == 1 and close[i] < lower_20_aligned[i]) or \
+                         (position == -1 and close[i] > upper_20_aligned[i])
         
         if position == 0:
-            # Long: oversold + bullish trend + volume confirmation
-            if (oversold and price_above_ema and volume_confirmed):
+            # Long: break above upper Donchian with volume confirmation and chop regime
+            if (breakout_upper and volume_confirmed and chop_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: overbought + bearish trend + volume confirmation
-            elif (overbought and price_below_ema and volume_confirmed):
+            # Short: break below lower Donchian with volume confirmation and chop regime
+            elif (breakout_lower and volume_confirmed and chop_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Williams %R crosses above -50
-            if exit_long:
+            # Exit long: touch midpoint or break below lower band
+            if (touch_mid or touch_opposite):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Williams %R crosses below -50
-            if exit_short:
+            # Exit short: touch midpoint or break above upper band
+            if (touch_mid or touch_opposite):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WilliamsR_MeanReversion_1wEMA34_Volume"
-timeframe = "1d"
+name = "12h_Donchian20_1dVolumeSpike_Chop_Regime"
+timeframe = "12h"
 leverage = 1.0
