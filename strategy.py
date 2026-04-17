@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_RSI_Momentum_FailSafe
-Strategy: 6s RSI momentum with trend filter and volatility guard.
-Long: RSI(14) > 55 + price > EMA(50) + ATR(14) > 0.3 * ATR(50)
-Short: RSI(14) < 45 + price < EMA(50) + ATR(14) > 0.3 * ATR(50)
-Exit: RSI returns to neutral zone (45-55) or volatility drops
+4h_KAMA_Trend_RSI_Momentum
+Strategy: KAMA trend direction with RSI momentum filter and volume confirmation.
+Long: KAMA rising + RSI > 55 + volume > 1.5x MA20
+Short: KAMA falling + RSI < 45 + volume > 1.5x MA20
+Exit: Opposite RSI signal or volume drop
 Position size: 0.25
-Designed to capture momentum bursts while avoiding chop and low volatility.
-Timeframe: 6h
+Designed to capture momentum in trending markets while avoiding chop.
+Timeframe: 4h
 """
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,9 +24,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate EMAs
+    # Calculate KAMA (Kaufman Adaptive Moving Average)
     close_series = pd.Series(close)
-    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Efficiency Ratio
+    change = abs(close_series - close_series.shift(10))
+    volatility = abs(close_series.diff()).rolling(window=10, min_periods=10).sum()
+    er = change / volatility.replace(0, np.nan)
+    # Smoothing constants
+    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
+    # KAMA calculation
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        if not np.isnan(sc.iloc[i]) and not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
     # Calculate RSI
     delta = np.diff(close, prepend=close[0])
@@ -37,59 +50,49 @@ def generate_signals(prices):
     rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
     rsi = 100 - (100 / (1 + rs))
     
-    # Calculate ATR for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(np.concatenate([[high[0]], high[:-1]]) - np.concatenate([[close[0]], close[:-1]]))
-    tr3 = np.abs(np.concatenate([[low[0]], low[:-1]]) - np.concatenate([[close[0]], close[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_long = pd.Series(tr).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
     # Volume confirmation (20-period MA)
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)
+    start_idx = max(30, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_50[i]) or np.isnan(rsi[i]) or 
-            np.isnan(atr[i]) or np.isnan(atr_long[i]) or np.isnan(volume_ma20[i])):
+        if (i < 10 or np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.3x 20-period average
-        volume_filter = volume[i] > (1.3 * volume_ma20[i])
+        # KAMA direction: rising if current > previous
+        kama_rising = kama[i] > kama[i-1]
+        kama_falling = kama[i] < kama[i-1]
         
-        # Volatility filter: short-term ATR > 30% of long-term ATR
-        vol_filter = atr[i] > (0.3 * atr_long[i])
+        # Volume filter: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
         # Entry conditions
         if position == 0:
-            # Long: RSI > 55 + price > EMA50 + volume + volatility
-            if (rsi[i] > 55 and close[i] > ema_50[i] and 
-                volume_filter and vol_filter):
+            # Long: KAMA rising + RSI > 55 + volume
+            if (kama_rising and rsi[i] > 55 and volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI < 45 + price < EMA50 + volume + volatility
-            elif (rsi[i] < 45 and close[i] < ema_50[i] and 
-                  volume_filter and vol_filter):
+            # Short: KAMA falling + RSI < 45 + volume
+            elif (kama_falling and rsi[i] < 45 and volume_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI drops below 50 or volatility fails
-            if rsi[i] < 50 or not vol_filter:
+            # Exit long: RSI drops below 50 or volume filter fails
+            if rsi[i] < 50 or not volume_filter:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI rises above 50 or volatility fails
-            if rsi[i] > 50 or not vol_filter:
+            # Exit short: RSI rises above 50 or volume filter fails
+            if rsi[i] > 50 or not volume_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_RSI_Momentum_FailSafe"
-timeframe = "6h"
+name = "4h_KAMA_Trend_RSI_Momentum"
+timeframe = "4h"
 leverage = 1.0
