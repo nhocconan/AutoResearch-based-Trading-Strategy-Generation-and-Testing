@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,16 +13,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Weekly RSI (14-period) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # === 1d Donchian channels (20-period) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate RSI using Wilder's smoothing
-    delta = np.diff(close_1w, prepend=close_1w[0])
+    # Calculate Donchian upper/lower (20-period)
+    donch_up = np.full_like(high_1d, np.nan)
+    donch_dn = np.full_like(low_1d, np.nan)
+    for i in range(len(high_1d)):
+        if i >= 19:
+            donch_up[i] = np.max(high_1d[i-19:i+1])
+            donch_dn[i] = np.min(low_1d[i-19:i+1])
+        else:
+            donch_up[i] = high_1d[i]
+            donch_dn[i] = low_1d[i]
+    
+    # === 1d RSI (14-period) ===
+    delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
-    # Wilder's smoothing with proper seeding
     avg_gain = np.full_like(gain, np.nan)
     avg_loss = np.full_like(loss, np.nan)
     period = 14
@@ -39,77 +51,47 @@ def generate_signals(prices):
             avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
     
     rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1w = 100 - (100 / (1 + rs))
-    rsi_1w[avg_loss == 0] = 100
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d[avg_loss == 0] = 100
     
-    # === Daily Close for Price Action ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # === Align 1d indicators to 6h timeframe ===
+    donch_up_6h = align_htf_to_ltf(prices, df_1d, donch_up)
+    donch_dn_6h = align_htf_to_ltf(prices, df_1d, donch_dn)
+    rsi_1d_6h = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # === Daily EMA (21-period) ===
-    ema_21_1d = np.full_like(close_1d, np.nan)
-    for i in range(len(close_1d)):
-        if i == 0:
-            ema_21_1d[i] = close_1d[0]
+    # === 6h volume confirmation (20-period average) ===
+    vol_ma_20 = np.full_like(volume, np.nan)
+    for i in range(len(volume)):
+        if i >= 19:
+            vol_ma_20[i] = np.mean(volume[i-19:i+1])
         else:
-            ema_21_1d[i] = (close_1d[i] * 0.0909) + (ema_21_1d[i-1] * 0.9091)
+            vol_ma_20[i] = np.mean(volume[max(0, i-9):i+1]) if i > 0 else volume[i]
     
-    # === Align indicators to daily timeframe ===
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
-    ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
+    vol_confirm = volume > vol_ma_20 * 1.5  # 1.5x average volume
     
     signals = np.zeros(n)
-    
-    # Warmup period
-    warmup = 100
-    
-    # Track position state
-    position = 0  # 0: flat, 1: long, -1: short
+    warmup = 30
     
     for i in range(warmup, n):
-        # Skip if any required data is NaN
-        if (np.isnan(rsi_1w_aligned[i]) or 
-            np.isnan(ema_21_1d_aligned[i])):
-            signals[i] = 0.0
-            position = 0
+        # Skip if any data is NaN
+        if (np.isnan(donch_up_6h[i]) or 
+            np.isnan(donch_dn_6h[i]) or 
+            np.isnan(rsi_1d_6h[i]) or 
+            np.isnan(vol_confirm[i])):
             continue
         
-        # Entry logic: only enter when flat
-        if position == 0:
-            # Long: Weekly RSI < 30 (oversold) + Daily price > EMA21
-            if (rsi_1w_aligned[i] < 30 and 
-                close[i] > ema_21_1d_aligned[i]):
-                signals[i] = 0.25
-                position = 1
-                continue
-            # Short: Weekly RSI > 70 (overbought) + Daily price < EMA21
-            elif (rsi_1w_aligned[i] > 70 and 
-                  close[i] < ema_21_1d_aligned[i]):
-                signals[i] = -0.25
-                position = -1
-                continue
-        
-        # Exit logic
-        elif position == 1:
-            # Exit long: Weekly RSI crosses above 50
-            if rsi_1w_aligned[i] > 50:
-                signals[i] = 0.0
-                position = 0
-                continue
-            else:
-                signals[i] = 0.25
-        
-        elif position == -1:
-            # Exit short: Weekly RSI crosses below 50
-            if rsi_1w_aligned[i] < 50:
-                signals[i] = 0.0
-                position = 0
-                continue
-            else:
-                signals[i] = -0.25
+        # Long: price breaks above Donchian upper + RSI < 50 (not overbought) + volume confirmation
+        if close[i] > donch_up_6h[i] and rsi_1d_6h[i] < 50 and vol_confirm[i]:
+            signals[i] = 0.25
+        # Short: price breaks below Donchian lower + RSI > 50 (not oversold) + volume confirmation
+        elif close[i] < donch_dn_6h[i] and rsi_1d_6h[i] > 50 and vol_confirm[i]:
+            signals[i] = -0.25
+        # Otherwise flat
+        else:
+            signals[i] = 0.0
     
     return signals
 
-name = "1d_WeeklyRSI_EMA21_MeanReversion_v1"
-timeframe = "1d"
+name = "6h_DonchianBreakout_RSI_VolumeFilter_v1"
+timeframe = "6h"
 leverage = 1.0
