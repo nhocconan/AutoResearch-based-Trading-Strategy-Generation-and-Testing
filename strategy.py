@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,30 +24,38 @@ def generate_signals(prices):
     daily_r1 = 2 * daily_pivot - low_1d
     daily_s1 = 2 * daily_pivot - high_1d
     
-    # Align daily pivot levels to 4h timeframe
-    daily_pivot_4h = align_htf_to_ltf(prices, df_1d, daily_pivot)
-    daily_r1_4h = align_htf_to_ltf(prices, df_1d, daily_r1)
-    daily_s1_4h = align_htf_to_ltf(prices, df_1d, daily_s1)
+    # Align daily pivot levels to 1h timeframe
+    daily_pivot_1h = align_htf_to_ltf(prices, df_1d, daily_pivot)
+    daily_r1_1h = align_htf_to_ltf(prices, df_1d, daily_r1)
+    daily_s1_1h = align_htf_to_ltf(prices, df_1d, daily_s1)
     
     # Calculate daily EMA50 for trend filter
     close_1d_series = pd.Series(close_1d)
     ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema50_1h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Volume filter: current volume > 2.0 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # Need daily EMA50, volume MA
+    start_idx = 60  # Need daily EMA50, volume MA, and pivot
     
     for i in range(start_idx, n):
+        # Session filter
+        if not (8 <= hours[i] <= 20):
+            signals[i] = 0.0
+            continue
+        
         # Skip if any required data is not available
-        if (np.isnan(daily_pivot_4h[i]) or 
-            np.isnan(daily_r1_4h[i]) or 
-            np.isnan(daily_s1_4h[i]) or 
-            np.isnan(ema50_4h[i]) or 
+        if (np.isnan(daily_pivot_1h[i]) or 
+            np.isnan(daily_r1_1h[i]) or 
+            np.isnan(daily_s1_1h[i]) or 
+            np.isnan(ema50_1h[i]) or 
             np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
@@ -56,41 +64,41 @@ def generate_signals(prices):
         volume_filter = volume[i] > (2.0 * volume_ma20[i])
         
         # Trend filter: price above/below daily EMA50
-        price_above_ema = close[i] > ema50_4h[i]
-        price_below_ema = close[i] < ema50_4h[i]
+        price_above_ema = close[i] > ema50_1h[i]
+        price_below_ema = close[i] < ema50_1h[i]
         
         # Price relative to daily pivot levels
-        price_above_r1 = close[i] > daily_r1_4h[i]
-        price_below_s1 = close[i] < daily_s1_4h[i]
+        price_above_r1 = close[i] > daily_r1_1h[i]
+        price_below_s1 = close[i] < daily_s1_1h[i]
         
         if position == 0:
             # Long: Price breaks above daily R1 with volume and above daily EMA50
             if (price_above_r1 and price_above_ema and volume_filter):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             # Short: Price breaks below daily S1 with volume and below daily EMA50
             elif (price_below_s1 and price_below_ema and volume_filter):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
             # Exit long: Price crosses below daily pivot OR below daily EMA50
-            if (close[i] < daily_pivot_4h[i]) or (close[i] < ema50_4h[i]):
+            if (close[i] < daily_pivot_1h[i]) or (close[i] < ema50_1h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
             # Exit short: Price crosses above daily pivot OR above daily EMA50
-            if (close[i] > daily_pivot_4h[i]) or (close[i] > ema50_4h[i]):
+            if (close[i] > daily_pivot_1h[i]) or (close[i] > ema50_1h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_DailyPivot_Breakout_EMA50_Volume"
-timeframe = "4h"
+name = "1h_DailyPivot_Breakout_EMA50_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
