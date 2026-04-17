@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-1D Price Action + Volume + 1W Trend Filter
-Long: Price > 1D VWAP + volume > 1.5x 1D volume MA(20) + price > 1W EMA50
-Short: Price < 1D VWAP + volume > 1.5x 1D volume MA(20) + price < 1W EMA50
-Exit: Price crosses back through 1D VWAP
-Uses 1W EMA50 to align with longer-term trend and reduce false signals in chop
-Target: 15-25 trades/year per symbol
+12h Bollinger Band Breakout with Volume Spike and Daily Trend Filter
+Long: Close breaks above upper BB(20,2) + volume > 2x 12h volume MA(4) + price > 1d EMA50
+Short: Close breaks below lower BB(20,2) + volume > 2x 12h volume MA(4) + price < 1d EMA50
+Exit: Close crosses back inside the Bollinger Bands (mean reversion in chop)
+Target: 15-25 trades/year per symbol (60-100 total over 4 years)
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,58 +21,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for VWAP and volume MA
+    # Bollinger Bands (20,2) on 12h
+    bb_period = 20
+    bb_mult = 2.0
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean()
+    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std()
+    upper_bb = (sma + bb_mult * std).values
+    lower_bb = (sma - bb_mult * std).values
+    
+    # 12h volume moving average (4-period)
+    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    
+    # Get 1D data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    vwap = (typical_price * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
-    volume_ma_20 = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean()
-    
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap.values)
-    volume_ma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20.values)
-    
-    # Get 1W EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 50  # warmup
+    start_idx = max(50, bb_period)  # warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(vwap_aligned[i]) or np.isnan(volume_ma_20_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vwap_val = vwap_aligned[i]
-        vol_ma = volume_ma_20_aligned[i]
-        ema_50 = ema_50_1w_aligned[i]
+        vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # Long: price above VWAP + volume confirmation + 1W uptrend
-            if price > vwap_val and vol > 1.5 * vol_ma and price > ema_50:
+            # Long: break above upper BB + volume spike + 1D uptrend
+            if price > upper_bb[i] and vol > 2.0 * vol_ma_val and price > ema_50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below VWAP + volume confirmation + 1W downtrend
-            elif price < vwap_val and vol > 1.5 * vol_ma and price < ema_50:
+            # Short: break below lower BB + volume spike + 1D downtrend
+            elif price < lower_bb[i] and vol > 2.0 * vol_ma_val and price < ema_50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below VWAP
-            if price < vwap_val:
+            # Long exit: price crosses back inside BB (mean reversion)
+            if price < upper_bb[i] and price > lower_bb[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above VWAP
-            if price > vwap_val:
+            # Short exit: price crosses back inside BB (mean reversion)
+            if price < upper_bb[i] and price > lower_bb[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -81,6 +80,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_VWAP_Volume_1WTrend"
-timeframe = "1d"
+name = "12h_BollingerBreakout_VolumeSpike_1DTrend"
+timeframe = "12h"
 leverage = 1.0
