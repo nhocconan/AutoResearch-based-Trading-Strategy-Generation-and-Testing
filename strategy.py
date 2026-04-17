@@ -1,13 +1,12 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-12h_1d_RangeBreakout_Volume_Trend
-Strategy: 12-hour breakout of 1d high/low with volume confirmation and 1d trend filter.
-Long: Price breaks above 1-day high + volume > 1.8x 20-period avg + price above 1d EMA50
-Short: Price breaks below 1-day low + volume > 1.8x 20-period avg + price below 1d EMA50
-Exit: Price returns to 12h VWAP
+12h_1d_TRIX_VolumeRegime
+Strategy: 12-hour TRIX momentum with volume spike and 1d chop regime filter.
+Long: TRIX crosses above zero + volume > 1.5x 20-period avg + 1d chop > 61.8 (range)
+Short: TRIX crosses below zero + volume > 1.5x 20-period avg + 1d chop > 61.8 (range)
+Exit: TRIX crosses back to zero
 Position size: 0.25
-Designed to capture breakouts aligned with daily trend in both bull and bear markets.
+Designed to capture momentum bursts in ranging markets with volume confirmation.
 Timeframe: 12h
 """
 
@@ -21,83 +20,98 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h VWAP for exit
-    typical_price = (high + low + close) / 3.0
-    vwap_num = (typical_price * volume).cumsum()
-    vwap_den = volume.cumsum()
-    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
+    # TRIX (12-period EMA applied 3 times)
+    close_series = pd.Series(close)
+    ema1 = close_series.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
+    trix = ema3.pct_change() * 100
     
-    # Calculate 1d high/low for breakout levels
+    # Volume confirmation (20-period MA on 12h)
+    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Get 1-day data for chop regime
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA50 for trend filter
-    close_series_1d = pd.Series(close_1d)
-    ema50_1d = close_series_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1-day chopiness index (14-period)
+    atr_1d = np.maximum(
+        high_1d[1:] - low_1d[1:],
+        np.maximum(
+            np.abs(high_1d[1:] - close_1d[:-1]),
+            np.abs(low_1d[1:] - close_1d[:-1])
+        )
+    )
+    # Pad ATR array to match length
+    atr_1d = np.concatenate([np.array([np.nan]), atr_1d])
     
-    # Align 1d levels to 12h timeframe
-    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
-    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # True range for chop calculation
+    tr_1d = atr_1d
+    atr_sum = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
     
-    # Volume confirmation (20-period MA on 12h)
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Max and min over 14 periods
+    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    
+    # Chop index: 100 * log10(ATR_sum / (max_high - min_low)) / log10(14)
+    range_1d = max_high - min_low
+    chop_1d = np.where(
+        (range_1d > 0) & (~np.isnan(range_1d)) & (~np.isnan(atr_sum)),
+        100 * np.log10(atr_sum / range_1d) / np.log10(14),
+        50  # default to neutral when invalid
+    )
+    
+    # Align 1d chop to 12h timeframe
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)
+    start_idx = max(14, 20)  # need chop and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(high_1d_aligned[i]) or 
-            np.isnan(low_1d_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or 
+        if (np.isnan(trix[i]) or 
+            np.isnan(chop_1d_aligned[i]) or 
             np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.8x 20-period average
-        volume_filter = volume[i] > (1.8 * volume_ma20[i])
+        # Volume filter: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
-        # Trend filter: price above/below 1d EMA50
-        price_above_ema = close[i] > ema50_1d_aligned[i]
-        price_below_ema = close[i] < ema50_1d_aligned[i]
+        # Chop filter: chop > 61.8 indicates ranging market
+        chop_filter = chop_1d_aligned[i] > 61.8
         
-        # Breakout conditions
-        breakout_up = close[i] > high_1d_aligned[i-1]  # break above previous day high
-        breakout_down = close[i] < low_1d_aligned[i-1]  # break below previous day low
-        
-        # Return to 12h VWAP for exit
-        return_to_vwap = abs(close[i] - vwap[i]) < 0.005 * close[i]  # within 0.5% of VWAP
+        # TRIX zero cross
+        trix_cross_up = (i > 0) and (trix[i-1] <= 0) and (trix[i] > 0)
+        trix_cross_down = (i > 0) and (trix[i-1] >= 0) and (trix[i] < 0)
         
         if position == 0:
-            # Long: breakout up + volume filter + price above EMA
-            if breakout_up and volume_filter and price_above_ema:
+            # Long: TRIX crosses up + volume filter + chop filter
+            if trix_cross_up and volume_filter and chop_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout down + volume filter + price below EMA
-            elif breakout_down and volume_filter and price_below_ema:
+            # Short: TRIX crosses down + volume filter + chop filter
+            elif trix_cross_down and volume_filter and chop_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: return to VWAP or break down
-            if return_to_vwap or breakout_down:
+            # Exit long: TRIX crosses back down
+            if trix_cross_down:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: return to VWAP or break up
-            if return_to_vwap or breakout_up:
+            # Exit short: TRIX crosses back up
+            if trix_cross_up:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_RangeBreakout_Volume_Trend"
+name = "12h_1d_TRIX_VolumeRegime"
 timeframe = "12h"
 leverage = 1.0
