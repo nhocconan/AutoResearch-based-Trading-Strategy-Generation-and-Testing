@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla Pivot R3/S3 Breakout with Volume Spike and ADX Trend Filter.
-Long when price breaks above R3 with volume > 1.5x average and ADX > 25 (trending).
-Short when price breaks below S3 with volume > 1.5x average and ADX > 25 (trending).
-Exit when price reverts to pivot point (PP) or ADX < 20 (trend weakens).
-Uses 1d for Camarilla pivot calculation and ADX, 12h for price/volume.
-Target: 50-150 total trades over 4 years (12-37/year). Uses tighter R3/S3 levels and trend filter to reduce false breakouts.
+Hypothesis: 4h Donchian(20) breakout with volume confirmation and ATR-based stoploss.
+Long when price breaks above upper Donchian channel with volume > 1.5x average.
+Short when price breaks below lower Donchian channel with volume > 1.5x average.
+Exit via ATR trailing stop (3x ATR) or opposite Donchian breakout.
+Uses 1d for ATR calculation to reduce noise. Target: 75-200 total trades over 4 years (19-50/year).
+Works in bull via trend continuation, in bear via short breakdowns with volatility expansion.
 """
 
 import numpy as np
@@ -22,90 +22,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and ADX
+    # Get 1d data for ATR calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Camarilla pivot levels (R3, S3, PP)
-    def calculate_camarilla(high, low, close):
-        pp = (high + low + close) / 3.0
-        r3 = close + (high - low) * 1.1 / 4.0
-        s3 = close - (high - low) * 1.1 / 4.0
-        return pp, r3, s3
-    
-    pp_1d = np.zeros_like(close_1d)
-    r3_1d = np.zeros_like(close_1d)
-    s3_1d = np.zeros_like(close_1d)
-    
-    for i in range(len(close_1d)):
-        pp, r3, s3 = calculate_camarilla(high_1d[i], low_1d[i], close_1d[i])
-        pp_1d[i] = pp
-        r3_1d[i] = r3
-        s3_1d[i] = s3
-    
-    # Calculate 1d ADX (14-period)
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr = np.zeros_like(high)
+    # Calculate 14-period ATR on 1d
+    def calculate_atr(high, low, close, period=14):
+        tr = np.zeros_like(close)
         for i in range(1, len(close)):
             tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
         
-        # Directional Movement
-        dm_plus = np.zeros_like(high)
-        dm_minus = np.zeros_like(high)
-        for i in range(1, len(close)):
-            up_move = high[i] - high[i-1]
-            down_move = low[i-1] - low[i]
-            dm_plus[i] = up_move if up_move > down_move and up_move > 0 else 0
-            dm_minus[i] = down_move if down_move > up_move and down_move > 0 else 0
-        
-        # Smoothed TR, DM+, DM- (Wilder's smoothing)
         atr = np.zeros_like(close)
-        dm_plus_smooth = np.zeros_like(close)
-        dm_minus_smooth = np.zeros_like(close)
-        
-        # Initial values
         atr[period] = np.mean(tr[1:period+1])
-        dm_plus_smooth[period] = np.mean(dm_plus[1:period+1])
-        dm_minus_smooth[period] = np.mean(dm_minus[1:period+1])
-        
-        # Wilder's smoothing
-        for i in range(period+1, len(close)):
+        for i in range(period+1, len(tr)):
             atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-            dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period-1) + dm_plus[i]) / period
-            dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period-1) + dm_minus[i]) / period
-        
-        # Directional Indicators
-        di_plus = np.zeros_like(close)
-        di_minus = np.zeros_like(close)
-        dx = np.zeros_like(close)
-        
-        for i in range(period, len(close)):
-            if atr[i] > 0:
-                di_plus[i] = 100 * dm_plus_smooth[i] / atr[i]
-                di_minus[i] = 100 * dm_minus_smooth[i] / atr[i]
-                if di_plus[i] + di_minus[i] > 0:
-                    dx[i] = 100 * abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])
-                else:
-                    dx[i] = 0
-        
-        # ADX (smoothed DX)
-        adx = np.zeros_like(close)
-        adx[2*period-1] = np.mean(dx[period:2*period])  # First ADX value
-        for i in range(2*period, len(close)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
+        return atr
     
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    atr_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Align 1d indicators to 12h timeframe
-    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Calculate 20-period Donchian channels on 4h
+    def calculate_donchian(high, low, period=20):
+        upper = np.zeros_like(high)
+        lower = np.zeros_like(low)
+        for i in range(period-1, len(high)):
+            upper[i] = np.max(high[i-period+1:i+1])
+            lower[i] = np.min(low[i-period+1:i+1])
+        return upper, lower
+    
+    upper_4h, lower_4h = calculate_donchian(high, low, 20)
     
     # Calculate volume spike (current volume > 1.5x 20-period average)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -113,51 +60,63 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    start_idx = 50  # warmup for indicators
+    start_idx = max(20, 14)  # warmup for Donchian and ATR
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pp_1d_aligned[i]) or 
-            np.isnan(r3_1d_aligned[i]) or 
-            np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(upper_4h[i]) or 
+            np.isnan(lower_4h[i]) or 
+            np.isnan(atr_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_spike = volume_spike[i]
-        adx_val = adx_1d_aligned[i]
-        pp = pp_1d_aligned[i]
-        r3 = r3_1d_aligned[i]
-        s3 = s3_1d_aligned[i]
-        
-        # Trend regime: ADX > 25 = strong trend (good for breakout)
-        is_trending = adx_val > 25
-        # Weak trend: ADX < 20 = trend weakening (exit signal)
-        is_weak_trend = adx_val < 20
+        atr = atr_1d_aligned[i]
+        upper = upper_4h[i]
+        lower = lower_4h[i]
         
         if position == 0:
-            # Long: price breaks above R3 with volume spike and strong trend
-            if price > r3 and vol_spike and is_trending:
+            # Long: price breaks above upper Donchian with volume spike
+            if price > upper and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 with volume spike and strong trend
-            elif price < s3 and vol_spike and is_trending:
+                entry_price = price
+                highest_since_entry = price
+            # Short: price breaks below lower Donchian with volume spike
+            elif price < lower and vol_spike:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
+                lowest_since_entry = price
         
         elif position == 1:
-            # Exit long: price returns to pivot point OR trend weakens
-            if price <= pp or is_weak_trend:
+            # Update highest price since entry
+            highest_since_entry = max(highest_since_entry, price)
+            # ATR trailing stop: exit if price drops 3*ATR from high
+            if price <= highest_since_entry - 3.0 * atr:
+                signals[i] = 0.0
+                position = 0
+            # Opposite Donchian breakout: exit if price breaks below lower channel
+            elif price < lower:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to pivot point OR trend weakens
-            if price >= pp or is_weak_trend:
+            # Update lowest price since entry
+            lowest_since_entry = min(lowest_since_entry, price)
+            # ATR trailing stop: exit if price rises 3*ATR from low
+            if price >= lowest_since_entry + 3.0 * atr:
+                signals[i] = 0.0
+                position = 0
+            # Opposite Donchian breakout: exit if price breaks above upper channel
+            elif price > upper:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -165,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_VolumeSpike_ADXTrend"
-timeframe = "12h"
+name = "4h_Donchian20_VolumeSpike_ATRStop"
+timeframe = "4h"
 leverage = 1.0
