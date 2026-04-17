@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_12h_1d_Alligator_ElderRay_v1
-Hypothesis: Combine Williams Alligator (trend filter) and Elder Ray (bull/bear power) on higher timeframes.
-Use 12h Alligator (jaw/teeth/lips) to define trend direction, and 1d Elder Ray to measure bull/bear power.
-Go long when price > Alligator teeth AND bull power > 0; short when price < Alligator teeth AND bear power < 0.
-Exit when price crosses Alligator jaw (trend change) or power weakens.
-Works in bull/bear because Alligator adapts to price action and Elder Ray measures underlying strength.
+4h_ADX_Trend_Plus_VolumeBreakout_V1
+Hypothesis: Use ADX to detect strong trending conditions (ADX > 25) on 4h timeframe.
+Enter long when price breaks above 4h high of previous 10 bars with volume confirmation (>1.5x average volume).
+Enter short when price breaks below 4h low of previous 10 bars with volume confirmation.
+Exit when ADX falls below 20 (trend weakening) or opposite breakout occurs.
+Uses volume breakout to capture momentum bursts in trending markets, works in both bull and bear.
 Target: 20-40 trades/year per symbol.
 """
 
@@ -27,42 +27,86 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # === 12h Data (for Alligator) ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # === 4h Data (HTF for trend confirmation) ===
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
     
-    # Williams Alligator (13,8,5 SMAs shifted forward)
-    # Jaw (13-period SMMA, shifted 8 bars)
-    jaw_12h = pd.Series(close_12h).rolling(window=13, min_periods=13).mean()
-    jaw_12h = jaw_12h.shift(8)  # future shift
-    # Teeth (8-period SMMA, shifted 5 bars)
-    teeth_12h = pd.Series(close_12h).rolling(window=8, min_periods=8).mean()
-    teeth_12h = teeth_12h.shift(5)  # future shift
-    # Lips (5-period SMMA, shifted 3 bars)
-    lips_12h = pd.Series(close_12h).rolling(window=5, min_periods=5).mean()
-    lips_12h = lips_12h.shift(3)  # future shift
+    # Calculate ADX on 4h (14-period)
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.nan], tr])  # align length
+        
+        # Directional Movement
+        up_move = high[1:] - high[:-1]
+        down_move = low[:-1] - low[1:]
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        plus_dm = np.concatenate([[np.nan], plus_dm])
+        minus_dm = np.concatenate([[np.nan], minus_dm])
+        
+        # Smoothed values
+        def smooth_wilder(arr, period):
+            result = np.full_like(arr, np.nan)
+            if len(arr) < period:
+                return result
+            # First value is simple average
+            result[period-1] = np.nansum(arr[1:period])  # skip first nan
+            # Wilder smoothing
+            for i in range(period, len(arr)):
+                if not np.isnan(arr[i]) and not np.isnan(result[i-1]):
+                    result[i] = (result[i-1] * (period-1) + arr[i]) / period
+            return result
+        
+        atr = smooth_wilder(tr, period)
+        plus_di = 100 * smooth_wilder(plus_dm, period) / atr
+        minus_di = 100 * smooth_wilder(minus_dm, period) / atr
+        dx = np.where((plus_di + minus_di) > 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+        adx = smooth_wilder(dx, period)
+        return adx
     
-    # Align to 6h timeframe (wait for 12h bar close)
-    jaw_12h_aligned = align_htf_to_ltf(prices, df_12h, jaw_12h.values)
-    teeth_12h_aligned = align_htf_to_ltf(prices, df_12h, teeth_12h.values)
-    lips_12h_aligned = align_htf_to_ltf(prices, df_12h, lips_12h.values)
+    adx_4h = calculate_adx(high_4h, low_4h, close_4h, 14)
+    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
     
-    # === 1d Data (for Elder Ray) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 4h rolling high/low for breakout (10-period)
+    def rolling_max(arr, window):
+        result = np.full_like(arr, np.nan)
+        for i in range(len(arr)):
+            if i < window - 1:
+                continue
+            window_slice = arr[max(0, i-window+1):i+1]
+            if np.all(np.isnan(window_slice)):
+                result[i] = np.nan
+            else:
+                result[i] = np.nanmax(window_slice)
+        return result
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean()
-    bull_power_1d = high_1d - ema13_1d.values
-    bear_power_1d = low_1d - ema13_1d.values
+    def rolling_min(arr, window):
+        result = np.full_like(arr, np.nan)
+        for i in range(len(arr)):
+            if i < window - 1:
+                continue
+            window_slice = arr[max(0, i-window+1):i+1]
+            if np.all(np.isnan(window_slice)):
+                result[i] = np.nan
+            else:
+                result[i] = np.nanmin(window_slice)
+        return result
     
-    # Align to 6h timeframe (wait for 1d bar close)
-    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    high_10_4h = rolling_max(high_4h, 10)
+    low_10_4h = rolling_min(low_4h, 10)
+    high_10_4h_aligned = align_htf_to_ltf(prices, df_4h, high_10_4h)
+    low_10_4h_aligned = align_htf_to_ltf(prices, df_4h, low_10_4h)
+    
+    # Volume confirmation on 4h
+    vol_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
     
     signals = np.zeros(n)
     
@@ -80,32 +124,41 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(jaw_12h_aligned[i]) or 
-            np.isnan(teeth_12h_aligned[i]) or
-            np.isnan(lips_12h_aligned[i]) or
-            np.isnan(bull_power_1d_aligned[i]) or
-            np.isnan(bear_power_1d_aligned[i])):
+        if (np.isnan(adx_4h_aligned[i]) or 
+            np.isnan(high_10_4h_aligned[i]) or
+            np.isnan(low_10_4h_aligned[i]) or
+            np.isnan(vol_ma_4h_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
+        # Get current 4h bar's volume for confirmation
+        vol_4h_current = align_htf_to_ltf(prices, df_4h, volume_4h)[i]
+        vol_confirmed = vol_4h_current > 1.5 * vol_ma_4h_aligned[i]
+        
+        # Trend filter: only trade when ADX > 25 (strong trend)
+        strong_trend = adx_4h_aligned[i] > 25
+        
+        # Exit when trend weakens (ADX < 20)
+        weak_trend = adx_4h_aligned[i] < 20
+        
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price > Alligator teeth AND bull power > 0
-            if close[i] > teeth_12h_aligned[i] and bull_power_1d_aligned[i] > 0:
+            # Long: price breaks above 10-period high with volume confirmation and strong trend
+            if close[i] > high_10_4h_aligned[i] and vol_confirmed and strong_trend:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price < Alligator teeth AND bear power < 0
-            elif close[i] < teeth_12h_aligned[i] and bear_power_1d_aligned[i] < 0:
+            # Short: price breaks below 10-period low with volume confirmation and strong trend
+            elif close[i] < low_10_4h_aligned[i] and vol_confirmed and strong_trend:
                 signals[i] = -0.25
                 position = -1
                 continue
         
-        # Exit logic: price crosses Alligator jaw (trend change) or power weakens
+        # Exit logic
         elif position == 1:
-            # Exit long: price crosses below jaw OR bull power <= 0
-            if close[i] <= jaw_12h_aligned[i] or bull_power_1d_aligned[i] <= 0:
+            # Exit conditions: trend weakening OR opposite breakout
+            if weak_trend or close[i] < low_10_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -113,8 +166,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above jaw OR bear power >= 0
-            if close[i] >= jaw_12h_aligned[i] or bear_power_1d_aligned[i] >= 0:
+            # Exit conditions: trend weakening OR opposite breakout
+            if weak_trend or close[i] > high_10_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -123,6 +176,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_1d_Alligator_ElderRay_v1"
-timeframe = "6h"
+name = "4h_ADX_Trend_Plus_VolumeBreakout_V1"
+timeframe = "4h"
 leverage = 1.0
