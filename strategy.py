@@ -13,121 +13,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Donchian Channel (20) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === 12h Donchian Channel (20-period) ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate Donchian channels
-    upper_20 = np.full_like(high_1d, np.nan)
-    lower_20 = np.full_like(low_1d, np.nan)
-    for i in range(len(high_1d)):
+    # Calculate Donchian upper/lower
+    upper_12h = np.full_like(high_12h, np.nan)
+    lower_12h = np.full_like(low_12h, np.nan)
+    for i in range(len(high_12h)):
         if i >= 19:
-            upper_20[i] = np.max(high_1d[i-19:i+1])
-            lower_20[i] = np.min(low_1d[i-19:i+1])
+            upper_12h[i] = np.max(high_12h[i-19:i+1])
+            lower_12h[i] = np.min(low_12h[i-19:i+1])
+        elif i > 0:
+            upper_12h[i] = np.max(high_12h[0:i+1])
+            lower_12h[i] = np.min(low_12h[0:i+1])
         else:
-            upper_20[i] = np.nan
-            lower_20[i] = np.nan
+            upper_12h[i] = high_12h[0]
+            lower_12h[i] = low_12h[0]
     
-    # === 1d ATR (14) for volatility filter ===
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close[:-1]) if len(close) > 1 else np.array([])
-    tr3 = np.abs(low_1d[1:] - close[:-1]) if len(close) > 1 else np.array([])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))]) if len(tr1) > 0 else np.array([np.nan])
+    # === 12h EMA(50) for trend filter ===
+    close_12h = df_12h['close'].values
+    ema_50_12h = np.full_like(close_12h, np.nan)
+    if len(close_12h) >= 50:
+        ema_50_12h[49] = np.mean(close_12h[:50])
+        for i in range(50, len(close_12h)):
+            ema_50_12h[i] = close_12h[i] * 0.0392 + ema_50_12h[i-1] * 0.9608  # alpha = 2/(50+1)
     
-    atr_14 = np.full_like(high_1d, np.nan)
-    for i in range(len(high_1d)):
+    # === 12h Volume spike detection ===
+    vol_12h = df_12h['volume'].values
+    vol_ma_20_12h = np.full_like(vol_12h, np.nan)
+    for i in range(len(vol_12h)):
+        if i >= 19:
+            vol_ma_20_12h[i] = np.mean(vol_12h[i-19:i+1])
+        elif i > 0:
+            vol_ma_20_12h[i] = np.mean(vol_12h[0:i+1])
+        else:
+            vol_ma_20_12h[i] = vol_12h[0]
+    
+    vol_spike_12h = vol_12h > (vol_ma_20_12h * 2.0)
+    
+    # === Align 12h indicators to 4h timeframe ===
+    upper_12h_aligned = align_htf_to_ltf(prices, df_12h, upper_12h)
+    lower_12h_aligned = align_htf_to_ltf(prices, df_12h, lower_12h)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    vol_spike_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_spike_12h)
+    
+    # === 4h ATR for volatility filter and stop management ===
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.concatenate([[close[0]], close[:-1]])), np.abs(low - np.concatenate([[close[0]], close[:-1]]))))
+    atr = np.full_like(close, np.nan)
+    for i in range(len(tr)):
         if i >= 13:
-            atr_14[i] = np.mean(tr[i-13:i+1])
+            atr[i] = np.mean(tr[i-13:i+1])
         elif i > 0:
-            atr_14[i] = np.mean(tr[1:i+1]) if i >= 1 else np.nan
+            atr[i] = np.mean(tr[0:i+1])
         else:
-            atr_14[i] = np.nan
+            atr[i] = tr[0]
     
-    # === 1d ADX (14) for trend strength ===
-    # +DM and -DM
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
-    
-    # Smoothed values
-    tr_14 = np.full_like(high_1d, np.nan)
-    plus_dm_14 = np.full_like(high_1d, np.nan)
-    minus_dm_14 = np.full_like(high_1d, np.nan)
-    for i in range(len(high_1d)):
-        if i >= 13:
-            tr_14[i] = np.sum(tr[i-13:i+1])
-            plus_dm_14[i] = np.sum(plus_dm[i-13:i+1])
-            minus_dm_14[i] = np.sum(minus_dm[i-13:i+1])
-        elif i > 0:
-            tr_14[i] = np.sum(tr[1:i+1])
-            plus_dm_14[i] = np.sum(plus_dm[1:i+1])
-            minus_dm_14[i] = np.sum(minus_dm[1:i+1])
-        else:
-            tr_14[i] = np.nan
-            plus_dm_14[i] = np.nan
-            minus_dm_14[i] = np.nan
-    
-    # Avoid division by zero
-    plus_di = np.full_like(high_1d, np.nan)
-    minus_di = np.full_like(high_1d, np.nan)
-    dx = np.full_like(high_1d, np.nan)
-    for i in range(len(high_1d)):
-        if not np.isnan(tr_14[i]) and tr_14[i] > 0:
-            plus_di[i] = 100 * plus_dm_14[i] / tr_14[i]
-            minus_di[i] = 100 * minus_dm_14[i] / tr_14[i]
-            if plus_di[i] + minus_di[i] > 0:
-                dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-            else:
-                dx[i] = 0.0
-        else:
-            plus_di[i] = np.nan
-            minus_di[i] = np.nan
-            dx[i] = np.nan
-    
-    adx = np.full_like(high_1d, np.nan)
-    for i in range(len(high_1d)):
-        if i >= 27:  # Need 14 for DX + 14 for smoothing
-            valid_dx = dx[i-13:i+1]
-            if not np.any(np.isnan(valid_dx)):
-                adx[i] = np.mean(valid_dx)
-        elif i > 0:
-            adx[i] = np.nan
-        else:
-            adx[i] = np.nan
-    
-    # === Align indicators to 4h timeframe ===
-    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # === 4h Volume confirmation ===
+    # === 4h volume confirmation ===
     vol_ma_20 = np.full_like(volume, np.nan)
     for i in range(len(volume)):
         if i >= 19:
             vol_ma_20[i] = np.mean(volume[i-19:i+1])
         elif i > 0:
-            vol_ma_20[i] = np.mean(volume[max(0, i-9):i+1])
+            vol_ma_20[i] = np.mean(volume[0:i+1])
         else:
             vol_ma_20[i] = volume[0]
     
-    vol_confirm = volume > vol_ma_20 * 1.5
+    vol_confirm = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
+    
+    # Warmup period
     warmup = 100
     
+    # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
-        if (np.isnan(upper_20_aligned[i]) or 
-            np.isnan(lower_20_aligned[i]) or 
-            np.isnan(atr_14_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or 
+        # Skip if any required data is NaN
+        if (np.isnan(upper_12h_aligned[i]) or 
+            np.isnan(lower_12h_aligned[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(vol_spike_12h_aligned[i]) or 
+            np.isnan(atr[i]) or 
             np.isnan(vol_confirm[i])):
             signals[i] = 0.0
             position = 0
@@ -135,16 +104,18 @@ def generate_signals(prices):
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: break above upper Donchian in strong trend (ADX > 25) with volume
-            if (close[i] > upper_20_aligned[i] and 
-                adx_aligned[i] > 25 and 
+            # Long: price breaks above upper Donchian in uptrend with volume spike
+            if (close[i] > upper_12h_aligned[i] and 
+                close[i] > ema_50_12h_aligned[i] and 
+                vol_spike_12h_aligned[i] and 
                 vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: break below lower Donchian in strong trend (ADX > 25) with volume
-            elif (close[i] < lower_20_aligned[i] and 
-                  adx_aligned[i] > 25 and 
+            # Short: price breaks below lower Donchian in downtrend with volume spike
+            elif (close[i] < lower_12h_aligned[i] and 
+                  close[i] < ema_50_12h_aligned[i] and 
+                  vol_spike_12h_aligned[i] and 
                   vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
@@ -152,9 +123,9 @@ def generate_signals(prices):
         
         # Exit logic
         elif position == 1:
-            # Exit long: price returns to lower Donchian OR trend weakens (ADX < 20)
-            if (close[i] < lower_20_aligned[i] or 
-                adx_aligned[i] < 20):
+            # Exit long: price closes below EMA(50) or ATR-based stop
+            if (close[i] < ema_50_12h_aligned[i]) or \
+               (close[i] < (upper_12h_aligned[i] - 2.0 * atr[i])):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -162,9 +133,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to upper Donchian OR trend weakens (ADX < 20)
-            if (close[i] > upper_20_aligned[i] or 
-                adx_aligned[i] < 20):
+            # Exit short: price closes above EMA(50) or ATR-based stop
+            if (close[i] > ema_50_12h_aligned[i]) or \
+               (close[i] > (lower_12h_aligned[i] + 2.0 * atr[i])):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -173,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_ADX25_VolumeFilter_v1"
+name = "4h_Donchian20_EMA50_VolumeSpike_ATR_v1"
 timeframe = "4h"
 leverage = 1.0
