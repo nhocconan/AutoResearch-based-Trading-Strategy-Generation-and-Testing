@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,91 +13,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h Williams Fractals (requires 2-bar confirmation) ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # === 1d ATR for volatility-based stoploss ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Williams Fractal: bearish = high[i] > high[i-1] and high[i] > high[i-2] and high[i] > high[i+1] and high[i] > high[i+2]
-    # bullish = low[i] < low[i-1] and low[i] < low[i-2] and low[i] < low[i+1] and low[i] < low[i+2]
-    bearish_fractal = np.zeros_like(high_12h, dtype=bool)
-    bullish_fractal = np.zeros_like(low_12h, dtype=bool)
+    # Calculate True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    for i in range(2, len(high_12h)-2):
-        if (high_12h[i] > high_12h[i-1] and high_12h[i] > high_12h[i-2] and 
-            high_12h[i] > high_12h[i+1] and high_12h[i] > high_12h[i+2]):
-            bearish_fractal[i] = True
-        if (low_12h[i] < low_12h[i-1] and low_12h[i] < low_12h[i-2] and 
-            low_12h[i] < low_12h[i+1] and low_12h[i] < low_12h[i+2]):
-            bullish_fractal[i] = True
-    
-    # Requires 2 extra bars for confirmation (per rule 2b)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_12h, bearish_fractal.astype(float), additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_12h, bullish_fractal.astype(float), additional_delay_bars=2)
-    
-    # === 6h Donchian Channel (20-period) ===
-    donchian_len = 20
-    highest_high = np.full_like(close, np.nan)
-    lowest_low = np.full_like(close, np.nan)
-    
-    for i in range(n):
-        if i >= donchian_len - 1:
-            highest_high[i] = np.max(high[i-donchian_len+1:i+1])
-            lowest_low[i] = np.min(low[i-donchian_len+1:i+1])
-    
-    # === 12h Volume Spike Confirmation ===
-    vol_ma_20 = np.full_like(df_12h['volume'].values, np.nan)
-    vol_12h = df_12h['volume'].values
-    for i in range(len(vol_12h)):
-        if i >= 19:
-            vol_ma_20[i] = np.mean(vol_12h[i-19:i+1])
+    atr_1d = np.full_like(close_1d, np.nan)
+    for i in range(len(close_1d)):
+        if i >= 14:
+            atr_1d[i] = np.mean(tr[i-14:i+1])
         elif i > 0:
-            vol_ma_20[i] = np.mean(vol_12h[max(0, i-9):i+1])
+            atr_1d[i] = np.mean(tr[1:i+1])
         else:
-            vol_ma_20[i] = vol_12h[0]
+            atr_1d[i] = np.nan
     
-    vol_spike = vol_12h > vol_ma_20 * 2.0  # 2x volume spike
-    vol_spike_aligned = align_htf_to_ltf(prices, df_12h, vol_spike.astype(float))
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # === 1d EMA50 for trend filter ===
+    ema50_1d = np.full_like(close_1d, np.nan)
+    for i in range(len(close_1d)):
+        if i < 50:
+            ema50_1d[i] = np.nan
+        else:
+            if i == 50:
+                ema50_1d[i] = np.mean(close_1d[:51])
+            else:
+                ema50_1d[i] = (close_1d[i] * 2 / 51) + ema50_1d[i-1] * (49 / 51)
+    
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # === 12h Donchian(20) channels ===
+    donchian_high = np.full_like(close, np.nan)
+    donchian_low = np.full_like(close, np.nan)
+    for i in range(len(close)):
+        if i < 20:
+            donchian_high[i] = np.nan
+            donchian_low[i] = np.nan
+        else:
+            donchian_high[i] = np.max(high[i-20:i+1])
+            donchian_low[i] = np.min(low[i-20:i+1])
     
     signals = np.zeros(n)
-    
-    # Warmup period
-    warmup = 100
-    
-    # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(warmup, n):
+    for i in range(200, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
-            np.isnan(vol_spike_aligned[i])):
+        if (np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: bullish fractal + price breaks above Donchian high + volume spike
-            if (bullish_fractal_aligned[i] > 0.5 and 
-                close[i] > highest_high[i] and 
-                vol_spike_aligned[i] > 0.5):
+            # Long: price breaks above Donchian high in uptrend (price > EMA50)
+            if close[i] > donchian_high[i] and close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: bearish fractal + price breaks below Donchian low + volume spike
-            elif (bearish_fractal_aligned[i] > 0.5 and 
-                  close[i] < lowest_low[i] and 
-                  vol_spike_aligned[i] > 0.5):
+            # Short: price breaks below Donchian low in downtrend (price < EMA50)
+            elif close[i] < donchian_low[i] and close[i] < ema50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price returns to Donchian low OR opposite fractal with volume
-            if (close[i] < lowest_low[i] or 
-                (bearish_fractal_aligned[i] > 0.5 and vol_spike_aligned[i] > 0.5)):
+            # Exit long: price falls below Donchian low OR stoploss hit
+            if close[i] < donchian_low[i] or close[i] < (ema50_1d_aligned[i] - 2.0 * atr_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -105,9 +98,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to Donchian high OR opposite fractal with volume
-            if (close[i] > highest_high[i] or 
-                (bullish_fractal_aligned[i] > 0.5 and vol_spike_aligned[i] > 0.5)):
+            # Exit short: price rises above Donchian high OR stoploss hit
+            if close[i] > donchian_high[i] or close[i] > (ema50_1d_aligned[i] + 2.0 * atr_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -116,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Fractal_DonchianBreakout_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Donchian20_EMA50_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
