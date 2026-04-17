@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Choppiness Index regime filter with 1d Volume Spike and Donchian breakout.
-# In choppy markets (CHOP > 61.8), fade Donchian breakouts (mean reversion).
-# In trending markets (CHOP < 38.2), follow Donchian breakouts.
-# Uses 1d volume spike (>2x 20-day avg) to confirm institutional participation.
-# Position size: 0.25. Target: 20-35 trades/year.
-# Works in bull/bear: chop regime adapts to market conditions.
+# Hypothesis: 4h KAMA + 1d RSI + Volume Spike - Trend following in trending markets, mean reversion in choppy.
+# Uses Kaufman Adaptive Moving Average (KAMA) for trend direction, 1d RSI for overbought/oversold,
+# and 1d volume spike for institutional confirmation. Position size 0.25.
+# KAMA adapts to market noise - fast in trends, slow in chop.
+# Works in bull/bear: adapts to market conditions automatically.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,86 +19,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data for volume spike filter ===
+    # === 1d data for RSI and volume spike ===
     df_1d = get_htf_data(prices, '1d')
     
+    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
+    
+    # 1d RSI(14)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    # 1d volume spike (>2x 20-day average)
     volume_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     volume_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma20_1d)
+    vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)
+    volume_spike = vol_1d_current > (2.0 * volume_ma20_1d_aligned)
     
-    # === 4h Choppiness Index (14-period) ===
-    def true_range(h, l, c_prev):
-        return np.maximum(h - l, np.maximum(np.abs(h - c_prev), np.abs(l - c_prev)))
+    # === 4h KAMA (10, 2, 30) ===
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, k=10, prepend=close[:10]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0)
+    # Vectorized volatility calculation
+    volatility_rolling = pd.Series(np.abs(np.diff(close, prepend=close[0]))).rolling(window=10, min_periods=1).sum().values
+    er = change / (volatility_rolling + 1e-10)
     
-    tr14 = np.zeros(n)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.zeros(n)
+    kama[0] = close[0]
     for i in range(1, n):
-        tr14[i] = true_range(high[i], low[i], close[i-1])
-    
-    atr14 = pd.Series(tr14).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate max(high, close_prev) and min(low, close_prev) over 14 periods
-    max_hc = np.maximum(high, np.concatenate([[close[0]], close[:-1]]))
-    min_lc = np.minimum(low, np.concatenate([[close[0]], close[:-1]]))
-    
-    max_range = pd.Series(max_hc - min_lc).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(atr14 * 14 / max_range) / np.log10(10)
-    
-    # === 4h Donchian Channels (20-period) ===
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if any required data is not available
-        if np.isnan(chop[i]) or np.isnan(volume_ma20_1d_aligned[i]) or \
-           np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
+        if np.isnan(rsi_1d_aligned[i]) or np.isnan(kama[i]) or np.isnan(volume_ma20_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Get current 1d volume (aligned to 4h)
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
-        volume_filter = vol_1d_current > (2.0 * volume_ma20_1d_aligned[i])
+        # Get current values
+        rsi = rsi_1d_aligned[i]
+        vol_spike = volume_spike[i]
+        price = close[i]
+        kama_val = kama[i]
         
-        # Chop regime: >61.8 = range/chop, <38.2 = trending
-        chop_value = chop[i]
-        is_choppy = chop_value > 61.8
-        is_trending = chop_value < 38.2
-        
-        # Donchian breakout signals
-        long_breakout = close[i] > highest_high[i-1]
-        short_breakout = close[i] < lowest_low[i-1]
-        
+        # Entry conditions
         if position == 0:
-            # In choppy market: fade breakouts (mean reversion)
-            if is_choppy and volume_filter:
-                if short_breakout:  # faded short (sell breakdown)
-                    signals[i] = 0.25
-                    position = -1
-                elif long_breakout:  # faded long (buy breakdown)
-                    signals[i] = -0.25
-                    position = 1
-            # In trending market: follow breakouts
-            elif is_trending and volume_filter:
-                if long_breakout:
-                    signals[i] = 0.25
-                    position = 1
-                elif short_breakout:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: price > KAMA, RSI < 70 (not overbought), volume spike
+            if price > kama_val and rsi < 70 and vol_spike:
+                signals[i] = 0.25
+                position = 1
+            # Short: price < KAMA, RSI > 30 (not oversold), volume spike
+            elif price < kama_val and rsi > 30 and vol_spike:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Long exit: opposite breakout or chop increases significantly
-            if short_breakout or chop_value > 70:
+            # Exit long: price < KAMA or RSI > 70 (overbought)
+            if price < kama_val or rsi > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: opposite breakout or chop increases significantly
-            if long_breakout or chop_value > 70:
+            # Exit short: price > KAMA or RSI < 30 (oversold)
+            if price > kama_val or rsi < 30:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Chop_Donchian_VolumeSpike"
+name = "4h_KAMA_RSI_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
