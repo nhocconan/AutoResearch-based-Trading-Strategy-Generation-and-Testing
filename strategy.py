@@ -1,67 +1,20 @@
 #!/usr/bin/env python3
 """
-4h Camarilla R1S1 Breakout with Volume Spike and ADX Trend Filter
-Long: Close > R1 + volume spike + ADX > 25
-Short: Close < S1 + volume spike + ADX > 25
-Exit: Opposite break of S1/R1
-Uses Camarilla levels from 1d, volume spike as confirmation, ADX for trend strength.
-Designed to capture breakouts in both bull and bear markets with controlled trade frequency.
-Target: 100-200 total trades over 4 years (25-50/year)
+1d Donchian Breakout with 1w Trend Filter and Volume Confirmation
+Long: Price breaks above 20-day high + 1w EMA20 rising + volume > 1.5x average
+Short: Price breaks below 20-day low + 1w EMA20 falling + volume > 1.5x average
+Exit: Opposite breakout or volatility contraction
+Designed to capture strong trends in both bull and bear markets with low trade frequency.
+Target: 50-100 total trades over 4 years (12-25/year)
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels"""
-    range_ = high - low
-    R1 = close + (range_ * 1.1 / 12)
-    S1 = close - (range_ * 1.1 / 12)
-    R2 = close + (range_ * 1.1 / 6)
-    S2 = close - (range_ * 1.1 / 6)
-    R3 = close + (range_ * 1.1 / 4)
-    S3 = close - (range_ * 1.1 / 4)
-    R4 = close + (range_ * 1.1 / 2)
-    S4 = close - (range_ * 1.1 / 2)
-    return R1, S1, R2, S2, R3, S3, R4, S4
-
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index)"""
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values
-    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=period, min_periods=period).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=period, min_periods=period).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * dm_plus_smooth / atr
-    minus_di = 100 * dm_minus_smooth / atr
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    dx = np.where((plus_di + minus_di) == 0, 0, dx)
-    adx = pd.Series(dx).rolling(window=period, min_periods=period).mean().values
-    
-    return adx
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 60:  # Need enough data for 20-day high/low and 20-week EMA
         return np.zeros(n)
     
     high = prices['high'].values
@@ -69,60 +22,67 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike: volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    # Calculate 20-day Donchian channels
+    period20_high = pd.Series(high).rolling(window=20, min_periods=20).max()
+    period20_low = pd.Series(low).rolling(window=20, min_periods=20).min()
     
-    # Get 1d data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate average volume for confirmation
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
-    # Calculate Camarilla levels for 1d
-    R1_1d, S1_1d, R2_1d, S2_1d, R3_1d, S3_1d, R4_1d, S4_1d = calculate_camarilla(high_1d, low_1d, close_1d)
+    # Get 1w data for trend filter (EMA20)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Align Camarilla levels to 4h
-    R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
-    S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
+    # Calculate 20-week EMA on 1w data
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate ADX on 4h for trend filter
-    adx = calculate_adx(high, low, close, 14)
+    # Align 1w EMA20 to daily
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Calculate EMA20 slope (1-period change) for trend filter
+    ema_20_slope = np.diff(ema_20_1w_aligned, prepend=ema_20_1w_aligned[0])
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 20  # need volume MA and ADX
+    start_idx = 20  # need Donchian calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(R1_1d_aligned[i]) or np.isnan(S1_1d_aligned[i]) or 
-            np.isnan(adx[i]) or np.isnan(volume_spike[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(period20_high[i]) or np.isnan(period20_low[i]) or
+            np.isnan(avg_volume[i]) or np.isnan(ema_20_1w_aligned[i]) or
+            np.isnan(ema_20_slope[i])):
             signals[i] = 0.0
             continue
-        
+            
         price = close[i]
+        vol = volume[i]
+        donch_high = period20_high[i]
+        donch_low = period20_low[i]
+        vol_threshold = avg_volume[i] * 1.5
+        ema_slope = ema_20_slope[i]
         
         if position == 0:
-            # Long: Close > R1 + volume spike + ADX > 25
-            if price > R1_1d_aligned[i] and volume_spike[i] and adx[i] > 25:
+            # Long: Price breaks above Donchian high + 1w EMA20 rising + volume spike
+            if price > donch_high and ema_slope > 0 and vol > vol_threshold:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close < S1 + volume spike + ADX > 25
-            elif price < S1_1d_aligned[i] and volume_spike[i] and adx[i] > 25:
+            # Short: Price breaks below Donchian low + 1w EMA20 falling + volume spike
+            elif price < donch_low and ema_slope < 0 and vol > vol_threshold:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Close < S1 (opposite level)
-            if price < S1_1d_aligned[i]:
+            # Long exit: Price breaks below Donchian low OR volatility contraction
+            if price < donch_low or vol < avg_volume[i] * 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Close > R1 (opposite level)
-            if price > R1_1d_aligned[i]:
+            # Short exit: Price breaks above Donchian high OR volatility contraction
+            if price > donch_high or vol < avg_volume[i] * 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -130,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_Volume_ADX"
-timeframe = "4h"
+name = "1d_Donchian_Breakout_1wEMA_Volume"
+timeframe = "1d"
 leverage = 1.0
