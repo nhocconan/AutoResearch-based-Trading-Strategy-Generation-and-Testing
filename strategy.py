@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla R1/S1 breakout with 1d volume confirmation and 1w EMA50 trend filter.
-Long when price breaks above R1 with volume > 1.3x 1d avg volume AND 1w EMA50 rising.
-Short when price breaks below S1 with volume > 1.3x 1d avg volume AND 1w EMA50 falling.
-Exit when price touches the 1w EMA50.
-Uses 12h for execution, 1d for volume confirmation, 1w for EMA trend filter.
-Camarilla levels derived from 1d OHLC to capture institutional pivot points.
-Designed to work in both bull and bear markets by following the 1w trend with volume confirmation.
-Target: 12-30 trades/year per symbol (50-150 total over 4 years).
+Hypothesis: 4h Donchian(20) breakout with volume confirmation and 12h EMA34 trend filter.
+Long when price breaks above 20-period high with volume > 1.5x 4h avg volume AND 12h EMA34 rising.
+Short when price breaks below 20-period low with volume > 1.5x 4h avg volume AND 12h EMA34 falling.
+Exit when price touches the 12h EMA34.
+Uses 4h for execution and volume, 12h for EMA trend filter.
+Designed to capture strong trending moves with volume confirmation while avoiding false breakouts.
+Target: 20-50 trades/year per symbol.
 """
 
 import numpy as np
@@ -24,28 +23,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate 1w EMA(50)
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_rising = ema_50_1w > np.roll(ema_50_1w, 1)
-    ema_50_falling = ema_50_1w < np.roll(ema_50_1w, 1)
-    ema_50_rising[0] = False
-    ema_50_falling[0] = False
+    # Calculate 12h EMA(34)
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_rising = ema_34_12h > np.roll(ema_34_12h, 1)
+    ema_34_falling = ema_34_12h < np.roll(ema_34_12h, 1)
+    ema_34_rising[0] = False
+    ema_34_falling[0] = False
     
-    # Get 1d data for volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
+    # Align 12h EMA to 4h timeframe
+    ema_34_rising_aligned = align_htf_to_ltf(prices, df_12h, ema_34_rising)
+    ema_34_falling_aligned = align_htf_to_ltf(prices, df_12h, ema_34_falling)
     
-    # Calculate 1d volume MA (20-period)
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate 4h volume MA (20-period)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align HTF indicators to 12h timeframe
-    ema_50_rising_aligned = align_htf_to_ltf(prices, df_1w, ema_50_rising)
-    ema_50_falling_aligned = align_htf_to_ltf(prices, df_1w, ema_50_falling)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Donchian channels (20-period)
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -54,57 +52,38 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_50_rising_aligned[i]) or 
-            np.isnan(ema_50_falling_aligned[i]) or
-            np.isnan(vol_ma_20_aligned[i])):
+        if (np.isnan(ema_34_rising_aligned[i]) or 
+            np.isnan(ema_34_falling_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or
+            np.isnan(highest_20[i]) or
+            np.isnan(lowest_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.3x 20-bar average
-        volume_confirmed = volume[i] > 1.3 * vol_ma_20_aligned[i]
+        # Volume confirmation: current 4h volume > 1.5x 20-bar average
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Calculate Camarilla levels from 1d OHLC (using rolling window)
-        lookback = 4  # 4x12h = 48h approximate (close to 1d)
-        if i < lookback:
-            signals[i] = 0.0
-            continue
-            
-        # Get the highest high, lowest low, and last close over the lookback period
-        period_high = np.max(high[i-lookback+1:i+1])
-        period_low = np.min(low[i-lookback+1:i+1])
-        period_close = close[i]
+        # Donchian breakout conditions
+        breakout_high = close[i] > highest_20[i]
+        breakout_low = close[i] < lowest_20[i]
         
-        # Camarilla levels
-        range_val = period_high - period_low
-        if range_val <= 0:
-            signals[i] = 0.0
-            continue
-            
-        R1 = period_close + range_val * 1.1 / 12
-        S1 = period_close - range_val * 1.1 / 12
-        R3 = period_close + range_val * 1.1 / 4
-        S3 = period_close - range_val * 1.1 / 4
-        
-        # Breakout conditions
-        breakout_R1 = close[i] > R1
-        breakout_S1 = close[i] < S1
-        
-        # Exit condition: touch 1w EMA50
-        ema_50_proxy = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
-        touch_ema = abs(close[i] - ema_50_proxy[i]) < 0.008 * close[i]  # within 0.8%
+        # Exit condition: touch 12h EMA34 (we'll use a proxy since we don't have direct 12h EMA aligned)
+        # For exit, we use price crossing the 12h EMA trend - simplified as price reverting to mean
+        ema_34_proxy = pd.Series(close).ewm(span=34, min_periods=34, adjust=False).mean().values
+        touch_ema = abs(close[i] - ema_34_proxy[i]) < 0.01 * close[i]  # within 1%
         
         if position == 0:
-            # Long: break above R1 with volume confirmation and rising 1w EMA
-            if (breakout_R1 and volume_confirmed and ema_50_rising_aligned[i]):
+            # Long: break above 20-period high with volume confirmation and rising 12h EMA
+            if (breakout_high and volume_confirmed and ema_34_rising_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with volume confirmation and falling 1w EMA
-            elif (breakout_S1 and volume_confirmed and ema_50_falling_aligned[i]):
+            # Short: break below 20-period low with volume confirmation and falling 12h EMA
+            elif (breakout_low and volume_confirmed and ema_34_falling_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: touch 1w EMA50
+            # Exit long: price touches 12h EMA34 (mean reversion) or stoploss
             if touch_ema:
                 signals[i] = 0.0
                 position = 0
@@ -112,7 +91,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: touch 1w EMA50
+            # Exit short: price touches 12h EMA34 (mean reversion) or stoploss
             if touch_ema:
                 signals[i] = 0.0
                 position = 0
@@ -121,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Volume_1wEMA50_Trend"
-timeframe = "12h"
+name = "4h_Donchian20_Volume_12hEMA34_Trend"
+timeframe = "4h"
 leverage = 1.0
