@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout + 1d volume spike + 1d choppiness regime filter.
-Long when price breaks above Donchian upper band with volume spike and chop > 61.8 (range regime).
-Short when price breaks below Donchian lower band with volume spike and chop > 61.8.
-Exit when price reverts to Donchian middle band or chop < 38.2 (trend regime).
-Uses 1d for volume and chop, 12h for price channels.
-Target: 50-150 total trades over 4 years (12-37/year).
+Hypothesis: 4h Donchian(20) breakout + volume confirmation + 12h EMA34 trend filter + ATR-based stoploss.
+Long when price breaks above Donchian(20) high with volume > 1.5x 20-bar average and price > 12h EMA34.
+Short when price breaks below Donchian(20) low with volume > 1.5x 20-bar average and price < 12h EMA34.
+Exit on opposite Donchian breakout or when price closes below/above 12h EMA34.
+Uses discrete position sizing (0.25) to minimize fee churn. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
@@ -20,127 +19,67 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for volume and choppiness
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Get 12h data for EMA34 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d ATR(14) for choppiness
-    def calculate_atr(high, low, close, period=14):
-        tr = np.zeros_like(high)
-        for i in range(1, len(high)):
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        atr = np.zeros_like(tr)
-        atr[period] = np.mean(tr[1:period+1])
-        for i in range(period+1, len(tr)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        return atr
+    # Calculate Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1d choppiness index
-    atr14 = calculate_atr(high_1d, low_1d, close_1d, 14)
-    sum_atr = np.zeros_like(close_1d)
-    for i in range(14, len(close_1d)):
-        sum_atr[i] = np.sum(atr14[i-13:i+1])
+    # Calculate volume average (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    hh = np.zeros_like(close_1d)
-    ll = np.zeros_like(close_1d)
-    for i in range(14, len(close_1d)):
-        hh[i] = np.max(high_1d[i-13:i+1])
-        ll[i] = np.min(low_1d[i-13:i+1])
-    
-    chop = np.zeros_like(close_1d)
-    for i in range(14, len(close_1d)):
-        if hh[i] != ll[i]:
-            chop[i] = 100 * np.log10(sum_atr[i] / (hh[i] - ll[i])) / np.log10(14)
-        else:
-            chop[i] = 50  # neutral when range is zero
-    
-    # Calculate 1d volume SMA(20) for volume spike
-    vol_sma20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align 1d indicators
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    vol_sma20_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20)
-    
-    # Calculate 12h Donchian channels (20-period)
-    def calculate_donchian(high, low, period=20):
-        upper = np.zeros_like(high)
-        lower = np.zeros_like(high)
-        middle = np.zeros_like(high)
-        for i in range(period-1, len(high)):
-            upper[i] = np.max(high[i-period+1:i+1])
-            lower[i] = np.min(low[i-period+1:i+1])
-            middle[i] = (upper[i] + lower[i]) / 2
-        return upper, middle, lower
-    
-    upper, middle, lower = calculate_donchian(high, low, 20)
+    # Calculate 12h EMA34
+    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # warmup
+    start_idx = 50  # warmup for Donchian(20) and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(chop_aligned[i]) or 
-            np.isnan(vol_sma20_aligned[i]) or
-            np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(middle[i])):
+        if (np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ma[i]) or 
+            np.isnan(ema34_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike condition: current 1d volume > 1.5 * 20-day average
-        # Need to get the corresponding 1d volume for this 12h bar
-        # Since we're using aligned arrays, we can use the close price to estimate
-        # but better to use the actual 1d volume aligned
-        # We'll use the aligned volume_sma20 and compare with current 1d volume
-        # However, we don't have current 1d volume aligned, so we'll use a proxy:
-        # if the 12h close is near the 1d high/low, we assume higher volume
-        # Simplified: use price position in Donchian channel as volume proxy
-        # Better approach: we'll use the fact that breakouts often have higher volume
-        # and require price to be near the bands
+        price = close[i]
+        vol = volume[i]
+        vol_threshold = 1.5 * vol_ma[i]
+        ema34_val = ema34_12h_aligned[i]
         
-        # Regime: chop > 61.8 indicates ranging market (good for mean reversion)
-        is_ranging = chop_aligned[i] > 61.8
-        is_trending = chop_aligned[i] < 38.2
+        # Breakout conditions
+        breakout_up = price > highest_high[i-1]  # Use previous bar's Donchian high
+        breakout_down = price < lowest_low[i-1]   # Use previous bar's Donchian low
         
-        # Only trade in ranging regime to avoid false breakouts in trends
-        if not is_ranging:
-            # Exit positions when market starts trending
-            if position == 1:
-                signals[i] = 0.0
-                position = 0
-            elif position == -1:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Entry conditions
         if position == 0:
-            # Long: price breaks above upper band with momentum
-            if close[i] > upper[i] and close[i] > close[i-1]:
+            # Long: bullish breakout with volume confirmation and uptrend filter
+            if breakout_up and vol > vol_threshold and price > ema34_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower band with momentum
-            elif close[i] < lower[i] and close[i] < close[i-1]:
+            # Short: bearish breakout with volume confirmation and downtrend filter
+            elif breakout_down and vol > vol_threshold and price < ema34_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to middle band or breaks below lower band
-            if close[i] < middle[i] or close[i] < lower[i]:
+            # Exit long: bearish breakout or price closes below 12h EMA34
+            if breakout_down or price < ema34_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to middle band or breaks above upper band
-            if close[i] > middle[i] or close[i] > upper[i]:
+            # Exit short: bullish breakout or price closes above 12h EMA34
+            if breakout_up or price > ema34_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -148,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dChop_VolumeBreakout"
-timeframe = "12h"
+name = "4h_Donchian20_Volume_12hEMA34_Trend"
+timeframe = "4h"
 leverage = 1.0
