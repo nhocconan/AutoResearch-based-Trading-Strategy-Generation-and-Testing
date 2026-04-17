@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout + 1d EMA50 trend filter + volume spike confirmation + ATR stoploss.
-Long when price breaks above Donchian upper band AND close > 1d EMA50 AND volume > 2.0x 20-period average.
-Short when price breaks below Donchian lower band AND close < 1d EMA50 AND volume > 2.0x 20-period average.
-Exit when price crosses the Donchian middle band (20-period mean) OR ATR-based stoploss hit.
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation.
+Long when price breaks above R1 AND close > 1d EMA34 AND volume > 1.8x 20-period average.
+Short when price breaks below S1 AND close < 1d EMA34 AND volume > 1.8x 20-period average.
+Exit when price crosses the Camarilla R3/S3 levels (stronger reversal) OR ATR-based stoploss.
 Uses 1d HTF for trend filter to improve robustness in both bull and bear markets.
 Target: 20-50 trades/year per symbol to avoid fee drag.
 """
@@ -22,45 +22,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian calculation (primary timeframe)
+    # Get 4h data for Camarilla calculation (primary timeframe)
     df_4h = get_htf_data(prices, '4h')
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
     volume_4h = df_4h['volume'].values
     
-    # Calculate Donchian channels (20-period)
-    def rolling_max(arr, window):
-        """Rolling maximum"""
-        result = np.full_like(arr, np.nan, dtype=float)
-        for i in range(window-1, len(arr)):
-            result[i] = np.max(arr[i-window+1:i+1])
-        return result
+    # Calculate Camarilla levels (based on previous day's range)
+    # R1 = Close + (High - Low) * 1.1/12
+    # S1 = Close - (High - Low) * 1.1/12
+    # R3 = Close + (High - Low) * 1.1/4
+    # S3 = Close - (High - Low) * 1.1/4
+    def calculate_camarilla(high_arr, low_arr, close_arr):
+        """Calculate Camarilla pivot levels"""
+        range_ = high_arr - low_arr
+        r1 = close_arr + range_ * 1.1 / 12
+        s1 = close_arr - range_ * 1.1 / 12
+        r3 = close_arr + range_ * 1.1 / 4
+        s3 = close_arr - range_ * 1.1 / 4
+        return r1, s1, r3, s3
     
-    def rolling_min(arr, window):
-        """Rolling minimum"""
-        result = np.full_like(arr, np.nan, dtype=float)
-        for i in range(window-1, len(arr)):
-            result[i] = np.min(arr[i-window+1:i+1])
-        return result
+    r1, s1, r3, s3 = calculate_camarilla(high_4h, low_4h, close_4h)
     
-    def rolling_mean(arr, window):
-        """Rolling mean"""
-        result = np.full_like(arr, np.nan, dtype=float)
-        for i in range(window-1, len(arr)):
-            result[i] = np.mean(arr[i-window+1:i+1])
-        return result
-    
-    upper_band = rolling_max(high_4h, 20)
-    lower_band = rolling_min(low_4h, 20)
-    middle_band = rolling_mean(close_4h, 20)
-    
-    # Get 1d data for EMA50 trend filter (higher timeframe)
+    # Get 1d data for EMA34 trend filter (higher timeframe)
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate EMA50 on 1d
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA34 on 1d
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Calculate volume average (20-period) on 4h
     volume_4h_series = pd.Series(volume_4h)
@@ -80,10 +70,11 @@ def generate_signals(prices):
     atr = calculate_atr(high_4h, low_4h, close_4h, 14)
     
     # Align all indicators to 4h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_4h, upper_band)
-    lower_aligned = align_htf_to_ltf(prices, df_4h, lower_band)
-    middle_aligned = align_htf_to_ltf(prices, df_4h, middle_band)
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_4h, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_4h, s1)
+    r3_aligned = align_htf_to_ltf(prices, df_4h, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_4h, s3)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     volume_ma_aligned = align_htf_to_ltf(prices, df_4h, volume_ma_4h)
     atr_aligned = align_htf_to_ltf(prices, df_4h, atr)
     
@@ -95,28 +86,30 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(middle_aligned[i]) or 
-            np.isnan(ema50_aligned[i]) or np.isnan(volume_ma_aligned[i]) or np.isnan(atr_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(ema34_aligned[i]) or np.isnan(volume_ma_aligned[i]) or 
+            np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             continue
         
-        upper = upper_aligned[i]
-        lower = lower_aligned[i]
-        middle = middle_aligned[i]
-        ema50 = ema50_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
+        ema34 = ema34_aligned[i]
         vol_ma = volume_ma_aligned[i]
         atr_val = atr_aligned[i]
         vol = volume[i]
         price = close[i]
         
         if position == 0:
-            # Long: Breakout above upper band + price > 1d EMA50 + volume spike
-            if price > upper and price > ema50 and vol > 2.0 * vol_ma:
+            # Long: Breakout above R1 + price > 1d EMA34 + volume spike
+            if price > r1_val and price > ema34 and vol > 1.8 * vol_ma:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: Breakout below lower band + price < 1d EMA50 + volume spike
-            elif price < lower and price < ema50 and vol > 2.0 * vol_ma:
+            # Short: Breakout below S1 + price < 1d EMA34 + volume spike
+            elif price < s1_val and price < ema34 and vol > 1.8 * vol_ma:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -125,12 +118,12 @@ def generate_signals(prices):
             # Exit conditions for long
             exit_signal = False
             
-            # Exit 1: Price crosses middle band (mean reversion)
-            if price < middle:
+            # Exit 1: Price crosses R3 (strong resistance)
+            if price > r3_val:
                 exit_signal = True
             
-            # Exit 2: ATR-based stoploss (2.5 * ATR below entry)
-            elif price < entry_price - 2.5 * atr_val:
+            # Exit 2: ATR-based stoploss (2.0 * ATR below entry)
+            elif price < entry_price - 2.0 * atr_val:
                 exit_signal = True
             
             if exit_signal:
@@ -143,12 +136,12 @@ def generate_signals(prices):
             # Exit conditions for short
             exit_signal = False
             
-            # Exit 1: Price crosses middle band (mean reversion)
-            if price > middle:
+            # Exit 1: Price crosses S3 (strong support)
+            if price < s3_val:
                 exit_signal = True
             
-            # Exit 2: ATR-based stoploss (2.5 * ATR above entry)
-            elif price > entry_price + 2.5 * atr_val:
+            # Exit 2: ATR-based stoploss (2.0 * ATR above entry)
+            elif price > entry_price + 2.0 * atr_val:
                 exit_signal = True
             
             if exit_signal:
@@ -159,6 +152,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA50_VolumeSpike_ATRStop"
+name = "4h_Camarilla_R1S1_1dEMA34_VolumeSpike_ATRStop"
 timeframe = "4h"
 leverage = 1.0
