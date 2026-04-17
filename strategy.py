@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_PriceChannel_VolumeRegime
-Strategy: 4h Donchian(20) breakout + volume confirmation + Chop regime filter.
-Long: Price breaks above Donchian upper + volume > 1.5x 20-bar avg + Chop > 61.8 (range)
-Short: Price breaks below Donchian lower + volume > 1.5x 20-bar avg + Chop > 61.8 (range)
-Exit: Price crosses back through Donchian midpoint (mean reversion in chop)
+12h_WPivot_R1S1_Breakout_Volume_Filter
+Strategy: 12h Camarilla pivot R1/S1 breakout + volume confirmation (1.5x 20-bar avg) + 1d Chop regime filter (>61.8 = range).
+Long: Price breaks above R1 + volume filter + 1d Chop > 61.8
+Short: Price breaks below S1 + volume filter + 1d Chop > 61.8
+Exit: Price crosses back through pivot point (mean reversion in chop)
 Position size: 0.25
-Uses 4h for structure, volume for confirmation, Chop for regime (avoid trending chop failures).
-Works in bull/bear: Chop filter avoids whipsaws in strong trends, Donchian provides clear levels.
+Uses 12h for structure, volume for confirmation, 1d Chop for regime filter to avoid trending chop failures.
+Designed to work in both bull and bear markets by filtering for range-bound conditions.
 """
 
 import numpy as np
@@ -24,37 +24,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian channels and Chop
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Get 12h data for Camarilla pivots
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Donchian(20) channels on 4h
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Calculate Camarilla pivot levels (R1, S1, pivot) on 12h
+    # Pivot = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    pivot_12h = (high_12h + low_12h + close_12h) / 3
+    r1_12h = close_12h + (high_12h - low_12h) * 1.1 / 12
+    s1_12h = close_12h - (high_12h - low_12h) * 1.1 / 12
     
-    # Calculate Chop(14) on 4h: 100 * log15(sum(ATR(1)) / (max(high)-min(low))) / log15(14)
-    atr_1 = np.maximum(np.maximum(high_4h - low_4h, np.abs(high_4h - np.roll(close_4h, 1))), np.abs(low_4h - np.roll(close_4h, 1)))
-    atr_1[0] = high_4h[0] - low_4h[0]  # first value
+    # Align 12h pivots to main timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
+    r1_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
+    s1_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    
+    # Get 12h volume for confirmation
+    volume_12h = df_12h['volume'].values
+    volume_ma20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_ma20_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_ma20_12h)
+    
+    # Get 1d data for Chop regime filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Chop(14) on 1d: 100 * log10(sum(ATR(1)) / (max(high)-min(low))) / log10(14)
+    atr_1 = np.maximum(np.maximum(high_1d - low_1d, np.abs(high_1d - np.roll(close_1d, 1))), np.abs(low_1d - np.roll(close_1d, 1)))
+    atr_1[0] = high_1d[0] - low_1d[0]  # first value
     sum_atr = pd.Series(atr_1).rolling(window=14, min_periods=14).sum().values
-    roll_max_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
-    roll_min_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+    roll_max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    roll_min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     range_14 = roll_max_high - roll_min_low
-    chop = 100 * (np.log10(sum_atr) - np.log10(range_14)) / np.log10(14)
-    chop = np.where(range_14 > 0, chop, 50)  # avoid division by zero
+    chop_1d = 100 * (np.log10(sum_atr) - np.log10(range_14)) / np.log10(14)
+    chop_1d = np.where(range_14 > 0, chop_1d, 50)  # avoid division by zero
     
-    # Align to 1h
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid)
-    chop_aligned = align_htf_to_ltf(prices, df_4h, chop)
-    
-    # Get 4h volume for confirmation
-    volume_4h = df_4h['volume'].values
-    volume_ma20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    volume_ma20_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_ma20_4h)
+    # Align 1d Chop to main timeframe
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,42 +73,43 @@ def generate_signals(prices):
     # Precompute session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    for i in range(20, n):  # warmup for Donchian(20)
+    for i in range(20, n):  # warmup for 20-bar volume MA
         # Session filter: 08-20 UTC
         if not (8 <= hours[i] <= 20):
             signals[i] = 0.0
             continue
         
         # Skip if any required data is not available
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or np.isnan(volume_ma20_4h_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(chop_1d_aligned[i]) or 
+            np.isnan(volume_ma20_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Current 4h volume aligned to 1h
-        vol_4h_current = align_htf_to_ltf(prices, df_4h, volume_4h)[i]
-        volume_filter = vol_4h_current > (1.5 * volume_ma20_4h_aligned[i])
-        chop_filter = chop_aligned[i] > 61.8  # range regime
+        # Current 12h volume aligned to main timeframe
+        vol_12h_current = align_htf_to_ltf(prices, df_12h, volume_12h)[i]
+        volume_filter = vol_12h_current > (1.5 * volume_ma20_12h_aligned[i])
+        chop_filter = chop_1d_aligned[i] > 61.8  # range regime on 1d
         
         # Breakout conditions
-        breakout_up = close[i] > donchian_high_aligned[i]
-        breakout_down = close[i] < donchian_low_aligned[i]
-        # Exit conditions: price crosses mid-line
-        exit_long = close[i] < donchian_mid_aligned[i]
-        exit_short = close[i] > donchian_mid_aligned[i]
+        breakout_up = close[i] > r1_aligned[i]
+        breakout_down = close[i] < s1_aligned[i]
+        # Exit conditions: price crosses back through pivot point
+        exit_long = close[i] < pivot_aligned[i]
+        exit_short = close[i] > pivot_aligned[i]
         
         if position == 0:
-            # Long: breakout up + volume + chop (range)
+            # Long: breakout above R1 + volume + chop (range)
             if breakout_up and volume_filter and chop_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout down + volume + chop (range)
+            # Short: breakout below S1 + volume + chop (range)
             elif breakout_down and volume_filter and chop_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below midpoint
+            # Exit long: price crosses below pivot
             if exit_long:
                 signals[i] = 0.0
                 position = 0
@@ -105,7 +117,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above midpoint
+            # Exit short: price crosses above pivot
             if exit_short:
                 signals[i] = 0.0
                 position = 0
@@ -114,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_PriceChannel_VolumeRegime"
-timeframe = "4h"
+name = "12h_WPivot_R1S1_Breakout_Volume_Filter"
+timeframe = "12h"
 leverage = 1.0
