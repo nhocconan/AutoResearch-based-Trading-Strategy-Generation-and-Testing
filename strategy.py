@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d volume spike and choppiness regime filter.
-Long when price breaks above upper Donchian channel (20-period high) AND 1d volume > 1.5x 20-bar average volume AND chop > 61.8 (range regime).
-Short when price breaks below lower Donchian channel (20-period low) AND 1d volume > 1.5x 20-bar average volume AND chop > 61.8.
-Exit when price touches the opposite Donchian channel level or after 5 bars (time-based exit).
-Uses 1d for volume confirmation and chop regime, 12h for execution and Donchian channels.
-Designed to capture breakouts in ranging markets with volume confirmation. Target: 12-37 trades/year per symbol.
+Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA trend filter and volume confirmation.
+Long when price breaks above R3 (1d) AND 12h EMA34 > 12h EMA50 (uptrend) AND 4h volume > 1.5x 20-bar average volume.
+Short when price breaks below S3 (1d) AND 12h EMA34 < 12h EMA50 (downtrend) AND 4h volume > 1.5x 20-bar average volume.
+Exit when price touches the 1d pivot point (PP) or opposite Camarilla level (S3 for long, R3 for short).
+Uses 1d for Camarilla levels, 12h for trend filter, 4h for execution and volume confirmation.
+Designed to capture institutional breakouts with trend alignment and volume confirmation. Target: 20-30 trades/year per symbol.
 """
 
 import numpy as np
@@ -20,118 +20,99 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    open_time = prices['open_time'].values  # for tracking bars in trade
+    volume = prices['volume'].values
     
-    # Get 1d data for volume and chop regime
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d volume MA for confirmation (20-bar)
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d Camarilla levels (R3/S3 are stronger breakout levels)
+    # R3 = Close + 1.1*(High-Low)
+    # S3 = Close - 1.1*(High-Low)
+    # PP = (High + Low + Close)/3
+    rng = high_1d - low_1d
+    r3 = close_1d + 1.1 * rng
+    s3 = close_1d - 1.1 * rng
+    pp = (high_1d + low_1d + close_1d) / 3
     
-    # Calculate 1d chop regime (choppiness index)
-    # True range
-    tr1 = np.maximum(high_1d - low_1d, 
-                     np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
-                                np.abs(low_1d - np.roll(close_1d, 1))))
-    tr1[0] = high_1d[0] - low_1d[0]  # first bar
-    atr14 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
-    sum_atr14 = pd.Series(atr14).rolling(window=14, min_periods=14).sum().values
-    log_sum = np.log10(sum_atr14 + 1e-10)
-    log_n = np.log10(14)
-    chop = 100 * log_sum / log_n
-    
-    # Calculate 12h Donchian channels (20-period)
-    # Need to resample to 12h for Donchian calculation, but we'll use HTF helper
+    # Get 12h data for EMA trend filter
     df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Upper channel: 20-period high
-    upper_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    # Lower channel: 20-period low
-    lower_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Calculate 12h EMAs for trend filter
+    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_12h = ema34_12h > ema50_12h  # True for uptrend
+    downtrend_12h = ema34_12h < ema50_12h  # True for downtrend
     
-    # Align all 1d indicators to 12h timeframe
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Calculate 4h volume MA for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align 12h Donchian channels to 12h timeframe (no alignment needed as we're already on 12h)
-    # But we need to align to the prices timeframe (which is 12h per experiment instructions)
-    # Since prices is already 12h timeframe, we can use the values directly
-    upper_20_aligned = upper_20
-    lower_20_aligned = lower_20
+    # Align all indicators to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    uptrend_aligned = align_htf_to_ltf(prices, df_12h, uptrend_12h)
+    downtrend_aligned = align_htf_to_ltf(prices, df_12h, downtrend_12h)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    bars_in_trade = 0  # track bars in current trade for time-based exit
     
     start_idx = 100  # need enough for indicators to warm up
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_20_aligned[i]) or 
-            np.isnan(lower_20_aligned[i]) or
-            np.isnan(vol_ma_20_1d_aligned[i]) or
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or
+            np.isnan(pp_aligned[i]) or
+            np.isnan(uptrend_aligned[i]) or
+            np.isnan(downtrend_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
-            bars_in_trade = 0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x 20-bar average
-        # We need to get the 1d volume for the current 12h bar
-        # Since we're on 12h timeframe, we use the aligned 1d volume MA
-        volume_confirmed = volume_1d[i // 12] > 1.5 * vol_ma_20_1d_aligned[i] if i // 12 < len(volume_1d) else False
-        
-        # Chop regime filter: only trade in ranging markets (chop > 61.8)
-        chop_filter = chop_aligned[i] > 61.8
+        # Volume confirmation: current 4h volume > 1.5x 20-bar average
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
         # Breakout conditions
-        breakout_upper = close[i] > upper_20_aligned[i]
-        breakout_lower = close[i] < lower_20_aligned[i]
+        breakout_r3 = close[i] > r3_aligned[i]
+        breakout_s3 = close[i] < s3_aligned[i]
         
-        # Exit conditions: touch opposite channel or time-based exit (5 bars)
-        touch_opposite = (position == 1 and close[i] < lower_20_aligned[i]) or \
-                         (position == -1 and close[i] > upper_20_aligned[i])
-        time_exit = bars_in_trade >= 5
+        # Exit conditions: touch pivot or opposite level
+        touch_pp = abs(close[i] - pp_aligned[i]) < 0.001 * close[i]  # within 0.1%
+        touch_opposite = (position == 1 and close[i] < s3_aligned[i]) or \
+                         (position == -1 and close[i] > r3_aligned[i])
         
         if position == 0:
-            # Long: break above upper channel with volume confirmation and chop regime
-            if (breakout_upper and volume_confirmed and chop_filter):
+            # Long: break above R3 with uptrend and volume confirmation
+            if (breakout_r3 and uptrend_aligned[i] and volume_confirmed):
                 signals[i] = 0.25
                 position = 1
-                bars_in_trade = 1
-            # Short: break below lower channel with volume confirmation and chop regime
-            elif (breakout_lower and volume_confirmed and chop_filter):
+            # Short: break below S3 with downtrend and volume confirmation
+            elif (breakout_s3 and downtrend_aligned[i] and volume_confirmed):
                 signals[i] = -0.25
                 position = -1
-                bars_in_trade = 1
         
         elif position == 1:
-            # Exit long: touch lower channel or time-based exit
-            if (touch_opposite or time_exit):
+            # Exit long: touch pivot or break below S3
+            if (touch_pp or touch_opposite):
                 signals[i] = 0.0
                 position = 0
-                bars_in_trade = 0
             else:
                 signals[i] = 0.25
-                bars_in_trade += 1
         
         elif position == -1:
-            # Exit short: touch upper channel or time-based exit
-            if (touch_opposite or time_exit):
+            # Exit short: touch pivot or break above R3
+            if (touch_pp or touch_opposite):
                 signals[i] = 0.0
                 position = 0
-                bars_in_trade = 0
             else:
                 signals[i] = -0.25
-                bars_in_trade += 1
     
     return signals
 
-name = "12h_Donchian20_1dVolumeSpike_ChopRegime"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_12hEMATrend_Volume"
+timeframe = "4h"
 leverage = 1.0
