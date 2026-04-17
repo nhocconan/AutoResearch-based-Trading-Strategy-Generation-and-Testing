@@ -3,14 +3,6 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot reversal with daily trend filter
-# - Fade at R3/S3 levels when price rejects extreme levels in ranging markets
-# - Continuation breakout at R4/S4 levels when price breaks with daily trend alignment
-# - Volume confirmation to avoid false breakouts
-# - Works in both bull/bear: mean reversion in ranges, trend following in breaks
-# Target: 50-150 total trades over 4 years (12-37/year)
-# Size: 0.25
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -21,83 +13,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and trend filter
+    # Get daily data for Bollinger Bands (HTF)
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels from previous day
-    # Formula: R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, etc.
-    # Using previous day's OHLC to avoid look-ahead
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate daily Bollinger Bands (20-period, 2.5 std)
+    period = 20
+    mult = 2.5
     
-    # Camarilla levels
-    R4 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
-    S4 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    # Bollinger Bands calculation
+    sma = pd.Series(close_1d).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close_1d).rolling(window=period, min_periods=period).std().values
     
-    # Daily EMA trend filter (34-period)
-    ema_34 = pd.Series(prev_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    upper = sma + mult * std
+    lower = sma - mult * std
     
-    # Align all daily levels to 6h timeframe
-    R4_6h = align_htf_to_ltf(prices, df_1d, R4)
-    R3_6h = align_htf_to_ltf(prices, df_1d, R3)
-    S3_6h = align_htf_to_ltf(prices, df_1d, S3)
-    S4_6h = align_htf_to_ltf(prices, df_1d, S4)
-    ema_34_6h = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Bandwidth for squeeze detection
+    bandwidth = (upper - lower) / sma
     
-    # Volume confirmation: current volume > 1.5 * 20-period average
+    # Align Bollinger Bands to 12h
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
+    bandwidth_aligned = align_htf_to_ltf(prices, df_1d, bandwidth)
+    
+    # 12h Bollinger Bands for entry/exit
+    sma_12h = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_12h = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_12h = sma_12h + 2.0 * std_12h
+    lower_12h = sma_12h - 2.0 * std_12h
+    
+    # Volume filter: current volume > 1.5 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 40  # Need daily data and volume MA
+    start_idx = 40  # Need daily and 12h BBands
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(R4_6h[i]) or np.isnan(R3_6h[i]) or 
-            np.isnan(S3_6h[i]) or np.isnan(S4_6h[i]) or 
-            np.isnan(ema_34_6h[i]) or np.isnan(volume_ma20[i])):
+        if (np.isnan(upper_aligned[i]) or 
+            np.isnan(lower_aligned[i]) or 
+            np.isnan(bandwidth_aligned[i]) or
+            np.isnan(upper_12h[i]) or 
+            np.isnan(lower_12h[i]) or 
+            np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter
+        # Volatility filter: daily bandwidth < 0.05 (low volatility squeeze)
+        vol_filter = bandwidth_aligned[i] < 0.05
+        
+        # Volume confirmation
         volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
         if position == 0:
-            # Long conditions:
-            # 1. Mean reversion: price rejects S3 level (long when price > S3 after being <= S3)
-            # 2. OR breakout: price breaks above R4 with daily uptrend
-            mean_reversion_long = (close[i-1] <= S3_6h[i-1] and close[i] > S3_6h[i])
-            breakout_long = (close[i] > R4_6h[i] and ema_34_6h[i] > ema_34_6h[i-1])
-            
-            if (mean_reversion_long or breakout_long) and volume_filter:
+            # Long: price breaks above 12h upper BB during low vol squeeze with volume
+            if (close[i] > upper_12h[i] and vol_filter and volume_filter):
                 signals[i] = 0.25
                 position = 1
-            
-            # Short conditions:
-            # 1. Mean reversion: price rejects R3 level (short when price < R3 after being >= R3)
-            # 2. OR breakout: price breaks below S4 with daily downtrend
-            mean_reversion_short = (close[i-1] >= R3_6h[i-1] and close[i] < R3_6h[i])
-            breakout_short = (close[i] < S4_6h[i] and ema_34_6h[i] < ema_34_6h[i-1])
-            
-            if (mean_reversion_short or breakout_short) and volume_filter:
+            # Short: price breaks below 12h lower BB during low vol squeeze with volume
+            elif (close[i] < lower_12h[i] and vol_filter and volume_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price reaches R3 (profit target) or S4 (stop)
-            if close[i] >= R3_6h[i] or close[i] <= S4_6h[i]:
+            # Exit long: price returns to 12h middle band
+            if close[i] < sma_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price reaches S3 (profit target) or R4 (stop)
-            if close[i] <= S3_6h[i] or close[i] >= R4_6h[i]:
+            # Exit short: price returns to 12h middle band
+            if close[i] > sma_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S3_R4_S4_MeanRev_Breakout"
-timeframe = "6h"
+name = "12h_BollingerSqueeze_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
