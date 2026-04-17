@@ -27,7 +27,7 @@ def generate_signals(prices):
     r2_1d = pivot_1d + (range_1d * 2.0)
     s2_1d = pivot_1d - (range_1d * 2.0)
     
-    # Align pivot levels to 12h timeframe
+    # Align pivot levels to 4h timeframe
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
@@ -93,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_R1S1_R2S2_Breakout_Volume_WeeklyTrend"
-timeframe = "12h"
+name = "4h_Pivot_R1S1_R2S2_Breakout_Volume_WeeklyTrend"
+timeframe = "4h"
 leverage = 1.0
