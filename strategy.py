@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-12h Prior Day High/Low Breakout with Volume Spike and Volume Oscillator Filter
-Long: Price > prior 1D high AND volume > 1.5x 12h volume MA AND volume oscillator > 0
-Short: Price < prior 1D low AND volume > 1.5x 12h volume MA AND volume oscillator < 0
+6h 1D High/Low Breakout with Volume and 1D Trend Filter
+Long: Price breaks above prior 1D high + volume > 1.5x 6h volume MA + price > 1D EMA50
+Short: Price breaks below prior 1D low + volume > 1.5x 6h volume MA + price < 1D EMA50
 Exit: Opposite break of prior 1D level
-Volume oscillator: (volume - volume MA(24)) / volume MA(24) on 12h timeframe
-Filters out low-momentum breakouts and adds momentum confirmation
+Uses 1D EMA50 to align with longer-term bias and reduce false breakouts in chop
 Target: 20-30 trades/year per symbol
 """
 
@@ -23,21 +22,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for prior high/low
+    # Get 1D data for prior high/low and trend filter
     df_1d = get_htf_data(prices, '1d')
     prior_1d_high = df_1d['high'].shift(1)  # Prior day's high
     prior_1d_low = df_1d['low'].shift(1)    # Prior day's low
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     prior_1d_high_aligned = align_htf_to_ltf(prices, df_1d, prior_1d_high.values)
     prior_1d_low_aligned = align_htf_to_ltf(prices, df_1d, prior_1d_low.values)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Get 12h data for volume MA and volume oscillator
-    df_12h = get_htf_data(prices, '12h')
-    volume_ma_24 = pd.Series(df_12h['volume']).rolling(window=24, min_periods=24).mean()
-    volume_osc = (pd.Series(df_12h['volume']) - volume_ma_24) / volume_ma_24
-    
-    volume_ma_24_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_24.values)
-    volume_osc_aligned = align_htf_to_ltf(prices, df_12h, volume_osc.values)
+    # 6h volume moving average (4-period for confirmation)
+    df_6h = get_htf_data(prices, '6h')
+    volume_ma_4 = pd.Series(df_6h['volume']).rolling(window=4, min_periods=4).mean()
+    volume_ma_4_6h = align_htf_to_ltf(prices, df_6h, volume_ma_4.values)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
@@ -47,23 +45,22 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if (np.isnan(prior_1d_high_aligned[i]) or np.isnan(prior_1d_low_aligned[i]) or 
-            np.isnan(volume_ma_24_aligned[i]) or np.isnan(volume_osc_aligned[i])):
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ma_4_6h[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = volume_ma_24_aligned[i]
-        vol_osc = volume_osc_aligned[i]
+        vol_ma = volume_ma_4_6h[i]
         
         if position == 0:
-            # Long: break above prior 1D high + volume spike + positive volume oscillator
-            if price > prior_1d_high_aligned[i] and vol > 1.5 * vol_ma and vol_osc > 0:
+            # Long: break above prior 1D high + volume + 1D trend
+            if price > prior_1d_high_aligned[i] and vol > 1.5 * vol_ma and price > ema_50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: break below prior 1D low + volume spike + negative volume oscillator
-            elif price < prior_1d_low_aligned[i] and vol > 1.5 * vol_ma and vol_osc < 0:
+            # Short: break below prior 1D low + volume + 1D trend
+            elif price < prior_1d_low_aligned[i] and vol > 1.5 * vol_ma and price < ema_50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -86,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Prior1D_HL_Breakout_VolumeSpike_VolOsc"
-timeframe = "12h"
+name = "6h_Prior1D_HL_Breakout_Volume_1DTrend"
+timeframe = "6h"
 leverage = 1.0
