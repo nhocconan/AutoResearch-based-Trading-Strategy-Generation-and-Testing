@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Williams %R Extreme Reversal with 1d EMA200 filter and volume spike confirmation.
-Long when Williams %R(14) crosses above -80 (oversold reversal) AND price > 1d EMA200 AND volume > 2.0x 20-period average.
-Short when Williams %R(14) crosses below -20 (overbought reversal) AND price < 1d EMA200 AND volume > 2.0x 20-period average.
-Exit when Williams %R returns to opposite extreme (-20 for longs, -80 for shorts).
-Designed to capture mean reversion in 6h timeframe with institutional volume confirmation.
-Works in both bull and bear markets by fading extremes with trend filter.
-Target: 50-150 total trades over 4 years = 12-37/year.
+Hypothesis: 12h Williams Alligator + Elder Ray combination with volume confirmation.
+Long when Alligator jaws (13) < teeth (8) < lips (5) AND Bull Power > 0 AND volume > 1.5x 20-period average.
+Short when Alligator jaws > teeth > lips AND Bear Power < 0 AND volume > 1.5x 20-period average.
+Exit when Alligator lines re-cross (jaws-teeth-lips convergence) or volume drops below average.
+Uses proven Williams Alligator trend identification with Elder Ray power measurement.
+Designed for low trade frequency (12-37/year) on 12h timeframe to minimize fee drag.
 """
 
 import numpy as np
@@ -23,32 +22,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams %R and EMA200
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Get 12h data for indicator calculation (primary timeframe)
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate Williams %R (14-period) on 1d
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate Williams Alligator (SMMA = smoothed moving average)
+    def smma(arr, period):
+        """Smoothed Moving Average"""
+        if len(arr) < period:
+            return np.full_like(arr, np.nan, dtype=float)
+        result = np.full_like(arr, np.nan, dtype=float)
+        # First value is simple SMA
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (prev_SMMA * (period-1) + current_price) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Calculate EMA200 on 1d close
-    close_1d_series = pd.Series(close_1d)
-    ema200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Alligator lines: Jaw (13, 8), Teeth (8, 5), Lips (5, 3)
+    jaw = smma(close_12h, 13)
+    teeth = smma(close_12h, 8)
+    lips = smma(close_12h, 5)
     
-    # Calculate volume average (20-period) on 1d
-    volume_1d_series = pd.Series(volume_1d)
-    volume_ma_1d = volume_1d_series.rolling(window=20, min_periods=20).mean().values
+    # Calculate Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema13_12h = pd.Series(close_12h).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high_12h - ema13_12h
+    bear_power = low_12h - ema13_12h
     
-    # Align all 1d indicators to 6h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
+    # Calculate volume average (20-period) on 12h
+    volume_12h_series = pd.Series(volume_12h)
+    volume_ma_12h = volume_12h_series.rolling(window=20, min_periods=20).mean().values
+    
+    # Align all indicators to 12h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
+    bull_power_aligned = align_htf_to_ltf(prices, df_12h, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_12h, bear_power)
+    volume_ma_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_12h)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -57,38 +71,42 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema200_aligned[i]) or 
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
+            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
             np.isnan(volume_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        wr = williams_r_aligned[i]
-        ema200 = ema200_aligned[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        bull = bull_power_aligned[i]
+        bear = bear_power_aligned[i]
         vol_ma = volume_ma_aligned[i]
         vol = volume[i]
         price = close[i]
         
         if position == 0:
-            # Long: Williams %R crosses above -80 (from below) AND price > 1d EMA200 AND volume spike
-            if i > start_idx and williams_r_aligned[i-1] <= -80 and wr > -80 and price > ema200 and vol > 2.0 * vol_ma:
+            # Long: Alligator aligned (JAW < TEETH < LIPS) AND Bull Power > 0 AND volume > 1.5x avg
+            if jaw_val < teeth_val < lips_val and bull > 0 and vol > 1.5 * vol_ma:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R crosses below -20 (from above) AND price < 1d EMA200 AND volume spike
-            elif i > start_idx and williams_r_aligned[i-1] >= -20 and wr < -20 and price < ema200 and vol > 2.0 * vol_ma:
+            # Short: Alligator aligned (JAW > TEETH > LIPS) AND Bear Power < 0 AND volume > 1.5x avg
+            elif jaw_val > teeth_val > lips_val and bear < 0 and vol > 1.5 * vol_ma:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Williams %R returns to -20 (overbought territory)
-            if wr >= -20:
+            # Exit long: Alligator lines converge (JAW >= TEETH or TEETH >= LIPS) OR volume < average
+            if jaw_val >= teeth_val or teeth_val >= lips_val or vol < vol_ma:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Williams %R returns to -80 (oversold territory)
-            if wr <= -80:
+            # Exit short: Alligator lines converge (JAW <= TEETH or TEETH <= LIPS) OR volume < average
+            if jaw_val <= teeth_val or teeth_val <= lips_val or vol < vol_ma:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_EMA200_VolumeSpike"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_ElderRay_Volume"
+timeframe = "12h"
 leverage = 1.0
