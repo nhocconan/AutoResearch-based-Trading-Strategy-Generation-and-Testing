@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA200 trend filter and volume confirmation.
-# Enters long when price breaks above Donchian upper band with volume and above 1d EMA200.
-# Enters short when price breaks below Donchian lower band with volume and below 1d EMA200.
-# Exits when price crosses back below/above Donchian mid-band or reverses trend.
-# Designed to capture strong breakouts with low turnover (target: 19-50 trades/year).
-# Works in bull markets (breakout momentum) and bear markets (trend filter avoids false breakouts).
+# Hypothesis: 12h Williams %R reversal with 1d EMA50 trend filter and volume confirmation.
+# Uses Williams %R(14) on 12h to identify overbought/oversold conditions.
+# Enters long when Williams %R crosses above -80 (oversold) with volume and price above 1d EMA50.
+# Enters short when Williams %R crosses below -20 (overbought) with volume and price below 1d EMA50.
+# Williams %R is effective in ranging markets (2025-2026) and captures reversals in trends.
+# Designed for low turnover (target: 15-35 trades/year) with clear entry/exit rules.
+# Works in bull markets (buying oversold dips) and bear markets (selling overbought rallies).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,83 +21,104 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA200 trend filter
+    # Get 12h data for Williams %R calculation
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # Calculate Williams %R(14) on 12h
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    period = 14
+    highest_high = pd.Series(high_12h).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low_12h).rolling(window=period, min_periods=period).min().values
+    # Avoid division by zero
+    rr = highest_high - lowest_low
+    rr = np.where(rr == 0, 1e-10, rr)
+    williams_r = ((highest_high - close_12h) / rr) * -100
+    
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA200 for trend filter
+    # Calculate 1d EMA50
     close_1d_series = pd.Series(close_1d)
-    ema200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA200 to 4h timeframe
-    ema200_4h = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Align indicators to main timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate Donchian channels (20-period) on 4h data
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper = high_roll
-    donchian_lower = low_roll
-    donchian_middle = (donchian_upper + donchian_lower) / 2
-    
-    # Volume filter: current volume > 1.8 * 20-period average
+    # Volume filter: current volume > 1.5 * 20-period average (moderate to balance frequency)
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 200  # Need sufficient data for EMA200
+    start_idx = max(50, 20)  # Need sufficient data for EMA50 and Williams %R
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema200_4h[i]) or 
-            np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or 
-            np.isnan(donchian_middle[i]) or 
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(ema50_aligned[i]) or 
             np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: spike > 1.8x average (strict to reduce trades)
-        volume_filter = volume[i] > (1.8 * volume_ma20[i])
+        # Volume filter: spike > 1.5x average
+        volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
-        # Trend filter: price above/below 1d EMA200
-        price_above_ema = close[i] > ema200_4h[i]
-        price_below_ema = close[i] < ema200_4h[i]
+        # Williams %R conditions
+        wr = williams_r_aligned[i]
+        wr_above_oversold = wr > -80  # Rising from oversold
+        wr_below_overbought = wr < -20  # Falling from overbought
         
-        # Price relative to Donchian channels
-        price_above_upper = close[i] > donchian_upper[i]
-        price_below_lower = close[i] < donchian_lower[i]
-        price_above_middle = close[i] > donchian_middle[i]
-        price_below_middle = close[i] < donchian_middle[i]
+        # Trend filter: price relative to 1d EMA50
+        price_above_ema = close[i] > ema50_aligned[i]
+        price_below_ema = close[i] < ema50_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above Donchian upper band with volume and above 1d EMA200
-            if (price_above_upper and price_above_ema and volume_filter):
-                signals[i] = 0.25
-                position = 1
-            # Short: Price breaks below Donchian lower band with volume and below 1d EMA200
-            elif (price_below_lower and price_below_ema and volume_filter):
-                signals[i] = -0.25
-                position = -1
+            # Long: Williams %R crosses above -80 from below with volume and above EMA50
+            if i > start_idx:
+                wr_prev = williams_r_aligned[i-1]
+                wr_cross_above_80 = (wr_prev <= -80) and (wr > -80)
+                if wr_cross_above_80 and price_above_ema and volume_filter:
+                    signals[i] = 0.25
+                    position = 1
+            # Short: Williams %R crosses below -20 from above with volume and below EMA50
+            if i > start_idx:
+                wr_prev = williams_r_aligned[i-1]
+                wr_cross_below_20 = (wr_prev >= -20) and (wr < -20)
+                if wr_cross_below_20 and price_below_ema and volume_filter:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Exit long: Price crosses below Donchian middle OR below 1d EMA200
-            if (price_below_middle) or (not price_above_ema):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
+            # Exit long: Williams %R crosses below -50 OR price crosses below EMA50
+            if i > start_idx:
+                wr_prev = williams_r_aligned[i-1]
+                wr_cross_below_50 = (wr_prev >= -50) and (wr < -50)
+                price_cross_below_ema = (close[i-1] >= ema50_aligned[i-1]) and (close[i] < ema50_aligned[i])
+                if wr_cross_below_50 or price_cross_below_ema:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price crosses above Donchian middle OR above 1d EMA200
-            if (price_above_middle) or (not price_below_ema):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+            # Exit short: Williams %R crosses above -50 OR price crosses above EMA50
+            if i > start_idx:
+                wr_prev = williams_r_aligned[i-1]
+                wr_cross_above_50 = (wr_prev <= -50) and (wr > -50)
+                price_cross_above_ema = (close[i-1] <= ema50_aligned[i-1]) and (close[i] > ema50_aligned[i])
+                if wr_cross_above_50 or price_cross_above_ema:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
 
-name = "4h_Donchian20_1dEMA200_Volume"
-timeframe = "4h"
+name = "12h_WilliamsR_1dEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
