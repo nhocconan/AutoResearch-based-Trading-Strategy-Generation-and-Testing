@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: On the 4-hour timeframe, price respects the 1-day high/low as key support/resistance levels.
-We combine this with a 1-day EMA50 trend filter and volume confirmation to capture breakouts.
-Long when price breaks above prior 1-day high with volume > 2x average and price above 1-day EMA50.
-Short when price breaks below prior 1-day low with volume > 2x average and price below 1-day EMA50.
-Exit when price returns to the prior 1-day midpoint (mean reversion) or on opposite breakout.
-Designed for 4h to work in trending (breakouts) and ranging (mean reversion to mid-point) markets with ~20-50 trades per year.
+Hypothesis: On the 4-hour timeframe, we combine the 1-day True Range (ATR) for volatility,
+the 1-day RSI for mean-reversion signals, and a 1-day ADX for trend strength to filter
+entries. We go long when price is below the 1-day low plus 0.5*ATR (oversold bounce) with
+RSI < 30 and ADX < 25 (ranging market). We go short when price is above the 1-day high
+minus 0.5*ATR (overbought rejection) with RSI > 70 and ADX < 25. Exit when RSI crosses
+50 or on opposite signal. Designed for low-frequency mean reversion in ranging markets
+with ~20-40 trades per year to avoid fee drag.
 """
 
 import numpy as np
@@ -14,73 +15,94 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for prior period's high/low and EMA50
+    # Get 1d data for ATR, RSI, ADX
     df_1d = get_htf_data(prices, '1d')
     
-    # Prior 1d high and low (use shift(1) to avoid look-ahead: use completed period's levels)
-    phigh = df_1d['high'].shift(1).values
-    plow = df_1d['low'].shift(1).values
-    pclose = df_1d['close'].values
+    # Calculate 1-day ATR(14)
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Prior 1d midpoint for mean reversion exit
-    pmid = (phigh + plow) / 2
+    # Calculate 1-day RSI(14)
+    delta = df_1d['close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi_1d = (100 - (100 / (1 + rs))).values
     
-    # Calculate 1d EMA50 for trend filter (use prior period's close to avoid look-ahead)
-    ema_50 = pd.Series(pclose).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1-day ADX(14)
+    plus_dm = df_1d['high'].diff()
+    minus_dm = df_1d['low'].diff()
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0)
+    tr_14 = tr.rolling(window=14, min_periods=14).mean()
+    plus_di = 100 * (plus_dm.rolling(window=14, min_periods=14).mean() / tr_14)
+    minus_di = 100 * (minus_dm.rolling(window=14, min_periods=14).mean() / tr_14)
+    dx = (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.nan)) * 100
+    adx_1d = dx.rolling(window=14, min_periods=14).mean().values
     
-    # Align all 1d levels to 4h timeframe (waits for 1d bar to close)
-    phigh_4h = align_htf_to_ltf(prices, df_1d, phigh)
-    plow_4h = align_htf_to_ltf(prices, df_1d, plow)
-    pmid_4h = align_htf_to_ltf(prices, df_1d, pmid)
-    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Align all 1d indicators to 4h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Volume confirmation: 20-period volume MA on 4h
-    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    # 1-day high and low for entry levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
+    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 60  # warmup for EMA50 and volume MA
+    start_idx = 50  # warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(phigh_4h[i]) or np.isnan(plow_4h[i]) or np.isnan(pmid_4h[i]) or
-            np.isnan(ema_50_4h[i]) or np.isnan(volume_ma_20.iloc[i])):
+        if (np.isnan(atr_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or
+            np.isnan(adx_1d_aligned[i]) or np.isnan(high_1d_aligned[i]) or
+            np.isnan(low_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol = volume[i]
-        vol_ma = volume_ma_20.iloc[i]
+        atr = atr_1d_aligned[i]
+        rsi = rsi_1d_aligned[i]
+        adx = adx_1d_aligned[i]
+        high_1d_val = high_1d_aligned[i]
+        low_1d_val = low_1d_aligned[i]
         
         if position == 0:
-            # Long: price breaks above prior 1d high with volume spike and above 1d EMA50
-            if price > phigh_4h[i] and vol > 2.0 * vol_ma and price > ema_50_4h[i]:
+            # Long: price near 1d low (oversold bounce) in ranging market
+            if price <= low_1d_val + 0.5 * atr and rsi < 30 and adx < 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below prior 1d low with volume spike and below 1d EMA50
-            elif price < plow_4h[i] and vol > 2.0 * vol_ma and price < ema_50_4h[i]:
+            # Short: price near 1d high (overbought rejection) in ranging market
+            elif price >= high_1d_val - 0.5 * atr and rsi > 70 and adx < 25:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to prior 1d midpoint (mean reversion) OR breaks below prior 1d low (invalidates breakout)
-            if price < pmid_4h[i] or price < plow_4h[i]:
+            # Long exit: RSI crosses above 50 or price reaches 1d high
+            if rsi >= 50 or price >= high_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to prior 1d midpoint (mean reversion) OR breaks above prior 1d high (invalidates breakout)
-            if price > pmid_4h[i] or price > phigh_4h[i]:
+            # Short exit: RSI crosses below 50 or price reaches 1d low
+            if rsi <= 50 or price <= low_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Prior1D_HL_Breakout_MeanRev"
+name = "4h_1d_ATR_RSI_ADX_MeanReversion"
 timeframe = "4h"
 leverage = 1.0
