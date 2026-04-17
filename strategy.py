@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Donchian(20) breakout with 12h volume confirmation and 1d ADX trend filter.
-Long when price breaks above 20-bar high with volume > 1.3x 12h average volume AND 1d ADX > 25.
-Short when price breaks below 20-bar low with volume > 1.3x 12h average volume AND 1d ADX > 25.
-Exit when price touches the opposite Donchian level or ADX < 20 (trend weakening).
-Uses 12h for volume confirmation and 1d for ADX trend filter.
-Designed to capture strong trends in both bull and bear markets with volume confirmation.
-Target: 12-25 trades/year per symbol (50-100 total over 4 years).
+Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 1d ADX(14) trend filter.
+Long when price breaks above Donchian upper with volume > 1.5x 1d average volume AND 1d ADX > 25.
+Short when price breaks below Donchian lower with volume > 1.5x 1d average volume AND 1d ADX > 25.
+Exit when price touches the opposite Donchian level.
+Designed to capture strong trends with volume confirmation, avoiding choppy markets via ADX filter.
+Target: 20-40 trades/year per symbol (80-160 total over 4 years).
 """
 
 import numpy as np
@@ -23,67 +22,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for volume MA
-    df_12h = get_htf_data(prices, '12h')
-    volume_12h = df_12h['volume'].values
-    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
-    
-    # Get 1d data for ADX
+    # Get 1d data for volume MA and ADX
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate ADX (14-period)
-    plus_dm = np.zeros_like(high_1d)
-    minus_dm = np.zeros_like(low_1d)
-    tr = np.zeros_like(high_1d)
+    # 1d volume MA(20)
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    for i in range(1, len(high_1d)):
-        plus_dm[i] = max(0, high_1d[i] - high_1d[i-1])
-        minus_dm[i] = max(0, low_1d[i-1] - low_1d[i])
-        tr[i] = max(high_1d[i] - low_1d[i], 
-                    abs(high_1d[i] - close_1d[i-1]), 
-                    abs(low_1d[i] - close_1d[i-1]))
+    # 1d ADX(14)
+    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    plus_dm = np.insert(plus_dm, 0, 0)
+    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    minus_dm = np.insert(minus_dm, 0, 0)
     
-    # Smooth with Wilder's smoothing (alpha = 1/period)
-    period = 14
-    alpha = 1.0 / period
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr[0] = tr1[0]  # First TR is just high-low
     
-    tr14 = np.zeros_like(tr)
-    plus_dm14 = np.zeros_like(plus_dm)
-    minus_dm14 = np.zeros_like(minus_dm)
-    
-    # Initial values
-    tr14[period] = np.nansum(tr[1:period+1])
-    plus_dm14[period] = np.nansum(plus_dm[1:period+1])
-    minus_dm14[period] = np.nansum(minus_dm[1:period+1])
-    
-    # Wilder smoothing
-    for i in range(period+1, len(tr)):
-        tr14[i] = tr14[i-1] - (tr14[i-1] / period) + tr[i]
-        plus_dm14[i] = plus_dm14[i-1] - (plus_dm14[i-1] / period) + plus_dm[i]
-        minus_dm14[i] = minus_dm14[i-1] - (minus_dm14[i-1] / period) + minus_dm[i]
-    
-    # Avoid division by zero
-    dx = np.zeros_like(tr14)
-    mask = tr14 != 0
-    dx[mask] = (np.abs(plus_dm14[mask] - minus_dm14[mask]) / tr14[mask]) * 100
-    
-    # ADX is smoothed DX
-    adx = np.zeros_like(dx)
-    adx[2*period] = np.nanmean(dx[period:2*period]) if np.any(~np.isnan(dx[period:2*period])) else 0
-    
-    for i in range(2*period+1, len(dx)):
-        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    dx = np.where((plus_di + minus_di) == 0, 0, dx)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx[0:13] = np.nan  # Warmup period
     
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # 4h Donchian(20)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = max(50, 2*14+1)  # warmup period
+    start_idx = 50  # warmup period
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
@@ -92,46 +73,37 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x 12h average volume
-        volume_confirmed = volume[i] > 1.3 * vol_ma_20_aligned[i]
+        # Volume confirmation: current volume > 1.5x 1d average volume
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20_aligned[i]
         
-        # ADX trend filter: ADX > 25 for strong trend
-        strong_trend = adx_aligned[i] > 25
-        weak_trend = adx_aligned[i] < 20  # exit condition
-        
-        # Donchian channels (20-period)
-        if i >= 20:
-            donch_high = np.max(high[i-20:i])
-            donch_low = np.min(low[i-20:i])
-        else:
-            donch_high = np.max(high[:i+1]) if i > 0 else high[i]
-            donch_low = np.min(low[:i+1]) if i > 0 else low[i]
+        # Trend filter: 1d ADX > 25
+        trend_filter = adx_aligned[i] > 25
         
         # Breakout conditions
-        breakout_high = close[i] > donch_high
-        breakout_low = close[i] < donch_low
+        breakout_upper = close[i] > donch_high[i]
+        breakout_lower = close[i] < donch_low[i]
         
         if position == 0:
-            # Long: break above Donchian high with volume confirmation and strong trend
-            if (breakout_high and volume_confirmed and strong_trend):
+            # Long: break above upper with volume confirmation and ADX > 25
+            if (breakout_upper and volume_confirmed and trend_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian low with volume confirmation and strong trend
-            elif (breakout_low and volume_confirmed and strong_trend):
+            # Short: break below lower with volume confirmation and ADX > 25
+            elif (breakout_lower and volume_confirmed and trend_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price touches Donchian low OR trend weakens
-            if (close[i] <= donch_low) or weak_trend:
+            # Exit long: price touches lower Donchian
+            if close[i] <= donch_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price touches Donchian high OR trend weakens
-            if (close[i] >= donch_high) or weak_trend:
+            # Exit short: price touches upper Donchian
+            if close[i] >= donch_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -139,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_Volume_12h_1dADX_Trend"
-timeframe = "6h"
+name = "4h_Donchian20_Volume_1dADX_Trend"
+timeframe = "4h"
 leverage = 1.0
