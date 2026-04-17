@@ -13,49 +13,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Donchian Channel (20-period) ===
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # === 1d Williams %R (14-period) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Donchian upper/lower bands
-    upper_4h = np.full_like(high_4h, np.nan)
-    lower_4h = np.full_like(low_4h, np.nan)
-    period = 20
-    for i in range(len(high_4h)):
+    # Calculate Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = np.full_like(high_1d, np.nan)
+    lowest_low = np.full_like(low_1d, np.nan)
+    period = 14
+    for i in range(len(high_1d)):
         if i >= period - 1:
-            upper_4h[i] = np.max(high_4h[i-(period-1):i+1])
-            lower_4h[i] = np.min(low_4h[i-(period-1):i+1])
+            highest_high[i] = np.max(high_1d[i-(period-1):i+1])
+            lowest_low[i] = np.min(low_1d[i-(period-1):i+1])
         elif i > 0:
-            upper_4h[i] = np.max(high_4h[0:i+1])
-            lower_4h[i] = np.min(low_4h[0:i+1])
+            highest_high[i] = np.max(high_1d[0:i+1])
+            lowest_low[i] = np.min(low_1d[0:i+1])
         else:
-            upper_4h[i] = high_4h[0]
-            lower_4h[i] = low_4h[0]
+            highest_high[i] = high_1d[0]
+            lowest_low[i] = low_1d[0]
     
-    # === Align Donchian bands to 4h timeframe ===
-    upper_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_4h)
-    lower_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_4h)
+    williams_r = np.full_like(close_1d, np.nan)
+    for i in range(len(close_1d)):
+        if highest_high[i] != lowest_low[i]:
+            williams_r[i] = (highest_high[i] - close_1d[i]) / (highest_high[i] - lowest_low[i]) * -100
+        else:
+            williams_r[i] = -50  # neutral when no range
     
-    # === 12h EMA(34) for trend filter ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # === 1d Williams %R smoothing (3-period) to reduce noise ===
+    williams_r_smooth = np.full_like(williams_r, np.nan)
+    for i in range(len(williams_r)):
+        if i >= 2:
+            williams_r_smooth[i] = np.mean(williams_r[i-2:i+1])
+        elif i > 0:
+            williams_r_smooth[i] = np.mean(williams_r[0:i+1])
+        else:
+            williams_r_smooth[i] = williams_r[0]
     
-    # Calculate EMA(34)
-    ema_34_12h = np.full_like(close_12h, np.nan)
-    if len(close_12h) >= 34:
-        ema_34_12h[33] = np.mean(close_12h[:34])  # seed
+    # === 1d EMA(34) for trend filter ===
+    ema_34 = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 34:
+        ema_34[33] = np.mean(close_1d[:34])  # seed
         alpha = 2 / (34 + 1)
-        for i in range(34, len(close_12h)):
-            ema_34_12h[i] = alpha * close_12h[i] + (1 - alpha) * ema_34_12h[i-1]
+        for i in range(34, len(close_1d)):
+            ema_34[i] = alpha * close_1d[i] + (1 - alpha) * ema_34[i-1]
     else:
-        for i in range(len(close_12h)):
-            ema_34_12h[i] = np.mean(close_12h[:i+1]) if i >= 0 else close_12h[0]
+        for i in range(len(close_1d)):
+            ema_34[i] = np.mean(close_1d[:i+1]) if i >= 0 else close_1d[0]
     
-    # === Align EMA to 4h timeframe ===
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # === Align indicators to 1h timeframe ===
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r_smooth)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # === Volume confirmation ===
+    # === 1h Volume confirmation ===
     # Calculate 20-period average volume
     vol_ma_20 = np.full_like(volume, np.nan)
     for i in range(len(volume)):
@@ -69,7 +80,15 @@ def generate_signals(prices):
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_confirm = volume > vol_ma_20 * 1.5
     
+    # === Williams %R levels ===
+    OVERBOUGHT = -20
+    OVERSOLD = -80
+    
     signals = np.zeros(n)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     # Warmup period
     warmup = 100
@@ -79,52 +98,54 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_4h_aligned[i]) or 
-            np.isnan(lower_4h_aligned[i]) or 
-            np.isnan(ema_34_12h_aligned[i]) or 
-            np.isnan(vol_confirm[i])):
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or 
+            np.isnan(vol_confirm[i]) or
+            not in_session[i]):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: Price breaks above Donchian upper band AND above EMA34 AND volume confirmation
-            if (close[i] > upper_4h_aligned[i] and 
-                close[i] > ema_34_12h_aligned[i] and 
-                vol_confirm[i]):
-                signals[i] = 0.25
+            # Long: Williams %R crosses above -80 from below AND price above EMA34
+            if (williams_r_aligned[i] > OVERSOLD and 
+                williams_r_aligned[i-1] <= OVERSOLD and  # crossed up
+                close[i] > ema_34_aligned[i]):
+                signals[i] = 0.20
                 position = 1
                 continue
-            # Short: Price breaks below Donchian lower band AND below EMA34 AND volume confirmation
-            elif (close[i] < lower_4h_aligned[i] and 
-                  close[i] < ema_34_12h_aligned[i] and 
-                  vol_confirm[i]):
-                signals[i] = -0.25
+            # Short: Williams %R crosses below -20 from above AND price below EMA34
+            elif (williams_r_aligned[i] < OVERBOUGHT and 
+                  williams_r_aligned[i-1] >= OVERBOUGHT and  # crossed down
+                  close[i] < ema_34_aligned[i]):
+                signals[i] = -0.20
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: Price crosses below Donchian lower band
-            if close[i] < lower_4h_aligned[i]:
+            # Exit long: Williams %R crosses below -50 OR crosses above -20
+            if (williams_r_aligned[i] < -50 and williams_r_aligned[i-1] >= -50) or \
+               (williams_r_aligned[i] < OVERBOUGHT and williams_r_aligned[i-1] >= OVERBOUGHT):
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: Price crosses above Donchian upper band
-            if close[i] > upper_4h_aligned[i]:
+            # Exit short: Williams %R crosses above -50 OR crosses below -80
+            if (williams_r_aligned[i] > -50 and williams_r_aligned[i-1] <= -50) or \
+               (williams_r_aligned[i] > OVERSOLD and williams_r_aligned[i-1] <= OVERSOLD):
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Donchian20_EMA34_VolumeFilter_Trend"
-timeframe = "4h"
+name = "1h_WilliamsR_EMA34_VolumeFilter_v1"
+timeframe = "1h"
 leverage = 1.0
