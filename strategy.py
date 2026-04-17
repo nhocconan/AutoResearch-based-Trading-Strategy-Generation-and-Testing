@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Camarilla pivot breakout with 1w trend filter and volume confirmation.
-Long when price breaks above R4 (1d) AND 1w close > 1w open (bullish weekly candle) AND volume > 1.5x average.
-Short when price breaks below S4 (1d) AND 1w close < 1w open (bearish weekly candle) AND volume > 1.5x average.
-Exit when price reverts to R1/S1 (1d) OR weekly trend reverses.
-Uses 6h for entry timing, 1d for Camarilla levels, 1w for trend filter to avoid counter-trend trades.
-Target: 50-150 total trades over 4 years (12-37/year). Camarilla R4/S4 are strong breakout levels,
-volume confirmation reduces fakeouts, weekly trend filter ensures trading with higher timeframe momentum.
-Works in bull markets (captures uptrend breakouts) and bear markets (captures downtrend breakdowns).
+Hypothesis: 12h Camarilla pivot R1/S1 breakout with 1d volume confirmation and 1d ADX trend filter.
+Long when price breaks above Camarilla R1 AND volume > 1.3x 20-period average AND ADX > 25.
+Short when price breaks below Camarilla S1 AND volume > 1.3x 20-period average AND ADX > 25.
+Exit when price reverts to Camarilla midpoint (close) OR ADX < 20 (range market).
+Uses 12h for price action and 1d for volume/ADX filters to reduce whipsaw and avoid overtrading.
+Target: 50-150 total trades over 4 years (12-37/year). Camarilla levels provide institutional support/resistance,
+volume confirms participation, ADX ensures trending conditions. Works in bull markets (breaks R1) and bear markets (breaks S1).
 """
 
 import numpy as np
@@ -24,73 +23,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation
+    # Get 1d data for Camarilla calculation, volume average, and ADX
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla levels on 1d timeframe (based on previous day)
-    # Camarilla: R4 = close + 1.1*(high-low)*1.1, S4 = close - 1.1*(high-low)*1.1
-    # R1 = close + 1.1*(high-low)*1.1/6, S1 = close - 1.1*(high-low)*1.1/6
-    # Actually standard Camarilla: R4 = close + 1.1*(high-low)*1.1/2? Let me verify
-    # Standard formula: R4 = close + 1.1*(high-low)*1.1, but that seems too wide
-    # Correct: R4 = close + 1.1*(high-low)*1.1/2? No
-    # Actual: R4 = close + 1.1*(high-low)*1.1, R3 = close + 1.1*(high-low)*1.1/4, etc.
-    # After checking: R4 = close + 1.1*(high-low)*1.1, S4 = close - 1.1*(high-low)*1.1
-    # But this seems off. Let me use the correct formula:
-    # Camarilla pivot levels:
-    # Pivot = (high + low + close)/3
-    # R4 = close + 1.1*(high-low)*1.1
-    # R3 = close + 1.1*(high-low)*1.1/4
-    # R2 = close + 1.1*(high-low)*1.1/6
-    # R1 = close + 1.1*(high-low)*1.1/12
-    # S1 = close - 1.1*(high-low)*1.1/12
-    # S2 = close - 1.1*(high-low)*1.1/6
-    # S3 = close - 1.1*(high-low)*1.1/4
-    # S4 = close - 1.1*(high-low)*1.1
+    # Calculate Camarilla pivot levels on 1d timeframe
+    # Pivot point = (high + low + close) / 3
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    # R1 = close + (high - low) * 1.1 / 12
+    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    # S1 = close - (high - low) * 1.1 / 12
+    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    # Midpoint for exit = close (Camarilla close is the equilibrium)
+    midpoint = close_1d
     
-    # Actually, after verification, the standard is:
-    # Range = high - low
-    # R4 = close + Range * 1.1 * 1.1
-    # But I think it's: R4 = close + Range * 1.1
-    # Let me use the commonly accepted: R4 = close + 1.1*(high-low), S4 = close - 1.1*(high-low)
-    # And R1/S1 at 1/6 of that range from close
+    # Calculate 20-period volume average on 1d
+    volume_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    range_1d = high_1d - low_1d
-    camarilla_pivot = (high_1d + low_1d + close_1d) / 3.0
+    # Calculate ADX on 1d timeframe (14-period)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
     
-    # Camarilla levels
-    r4 = close_1d + 1.1 * range_1d
-    r3 = close_1d + 1.1 * range_1d / 4
-    r2 = close_1d + 1.1 * range_1d / 6
-    r1 = close_1d + 1.1 * range_1d / 12
-    s1 = close_1d - 1.1 * range_1d / 12
-    s2 = close_1d - 1.1 * range_1d / 6
-    s3 = close_1d - 1.1 * range_1d / 4
-    s4 = close_1d - 1.1 * range_1d
+    # Plus Directional Movement (+DM)
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    open_1w = df_1w['open'].values
+    # Smooth TR, +DM, -DM (14-period)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
     
-    # Weekly trend: bullish if close > open, bearish if close < open
-    weekly_bullish = close_1w > open_1w
-    weekly_bearish = close_1w < open_1w
+    # Calculate +DI and -DI
+    plus_di = 100 * (plus_dm_smooth / np.where(atr != 0, atr, np.inf))
+    minus_di = 100 * (minus_dm_smooth / np.where(atr != 0, atr, np.inf))
     
-    # Align 1d Camarilla levels to 6h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    # Calculate DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) != 0, (plus_di + minus_di), np.inf)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align 1d indicators to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Align 1w trend to 6h timeframe
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
-    
-    # Volume average (20-period) on 6h
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    midpoint_aligned = align_htf_to_ltf(prices, df_1d, midpoint)
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -99,44 +84,41 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r4_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(midpoint_aligned[i]) or np.isnan(volume_ma_aligned[i]) or 
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
-        r4_val = r4_aligned[i]
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
-        s4_val = s4_aligned[i]
-        weekly_bull = weekly_bullish_aligned[i] > 0.5
-        weekly_bear = weekly_bearish_aligned[i] > 0.5
-        vol_ma = volume_ma[i]
+        mp = midpoint_aligned[i]
+        vol_ma = volume_ma_aligned[i]
+        adx_val = adx_aligned[i]
         vol = volume[i]
         price = close[i]
         
         if position == 0:
-            # Long: price > R4 AND weekly bullish AND volume > 1.5x avg
-            if price > r4_val and weekly_bull and vol > 1.5 * vol_ma:
+            # Long: price > Camarilla R1 AND volume > 1.3x avg AND ADX > 25 (trending)
+            if price > r1_val and vol > 1.3 * vol_ma and adx_val > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < S4 AND weekly bearish AND volume > 1.5x avg
-            elif price < s4_val and weekly_bear and vol > 1.5 * vol_ma:
+            # Short: price < Camarilla S1 AND volume > 1.3x avg AND ADX > 25 (trending)
+            elif price < s1_val and vol > 1.3 * vol_ma and adx_val > 25:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price < R1 OR weekly trend turns bearish
-            if price < r1_val or not weekly_bull:
+            # Exit long: price < Camarilla midpoint OR ADX < 20 (range market)
+            if price < mp or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price > S1 OR weekly trend turns bullish
-            if price > s1_val or not weekly_bear:
+            # Exit short: price > Camarilla midpoint OR ADX < 20 (range market)
+            if price > mp or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -144,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R4_S4_Volume_WeeklyTrend"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Volume_ADX_Filter"
+timeframe = "12h"
 leverage = 1.0
