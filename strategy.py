@@ -1,3 +1,14 @@
+# 4h Donchian Breakout with Volume Confirmation and Volatility Filter
+# Strategy: Long when price breaks above 4h Donchian upper channel (20-period) with volume confirmation (>1.5x 20-period avg volume)
+#           Short when price breaks below 4h Donchian lower channel (20-period) with volume confirmation
+#           Exit when price crosses the Donchian midline (10-period average of upper/lower)
+#           Uses 1d ATR for volatility filter (only trade when ATR > 50th percentile of 50-period ATR)
+#           Designed for 4h timeframe with 20-50 trades/year target
+# Works in bull (breakouts continue) and bear (breakdowns continue) markets due to symmetric long/short logic
+# Volume confirmation reduces false breakouts
+# Volatility filter avoids choppy markets
+# Position size: 0.25 (25% of capital)
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,107 +24,132 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h EMA34 (trend filter) ===
+    # === 4h Donchian Channels (20-period) ===
     df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
-    # === 1d RSI (14) ===
+    # Calculate Donchian channels
+    donchian_high = np.full_like(high_4h, np.nan)
+    donchian_low = np.full_like(low_4h, np.nan)
+    for i in range(len(high_4h)):
+        if i >= 19:
+            donchian_high[i] = np.max(high_4h[i-19:i+1])
+            donchian_low[i] = np.min(low_4h[i-19:i+1])
+        elif i > 0:
+            donchian_high[i] = np.max(high_4h[max(0, i-9):i+1])
+            donchian_low[i] = np.min(low_4h[max(0, i-9):i+1])
+        else:
+            donchian_high[i] = high_4h[0]
+            donchian_low[i] = low_4h[0]
+    
+    # Donchian midline (for exit)
+    donchian_mid = (donchian_high + donchian_low) / 2
+    
+    # === 4h Volume Confirmation ===
+    volume_4h = df_4h['volume'].values
+    vol_ma_20 = np.full_like(volume_4h, np.nan)
+    for i in range(len(volume_4h)):
+        if i >= 19:
+            vol_ma_20[i] = np.mean(volume_4h[i-19:i+1])
+        elif i > 0:
+            vol_ma_20[i] = np.mean(volume_4h[max(0, i-9):i+1])
+        else:
+            vol_ma_20[i] = volume_4h[0]
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_confirm = volume_4h > vol_ma_20 * 1.5
+    
+    # === 1d ATR Volatility Filter ===
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.full_like(gain, np.nan)
-    avg_loss = np.full_like(loss, np.nan)
-    for i in range(len(gain)):
+    
+    # Calculate True Range
+    tr = np.zeros_like(high_1d)
+    tr[0] = high_1d[0] - low_1d[0]
+    for i in range(1, len(high_1d)):
+        tr[i] = max(high_1d[i] - low_1d[i], 
+                   abs(high_1d[i] - close_1d[i-1]),
+                   abs(low_1d[i] - close_1d[i-1]))
+    
+    # Calculate ATR (14-period)
+    atr_14 = np.full_like(tr, np.nan)
+    for i in range(len(tr)):
         if i < 14:
             if i == 0:
-                avg_gain[i] = gain[i]
-                avg_loss[i] = loss[i]
+                atr_14[i] = tr[i]
             else:
-                avg_gain[i] = (avg_gain[i-1] * (i-1) + gain[i]) / i
-                avg_loss[i] = (avg_loss[i-1] * (i-1) + loss[i]) / i
+                atr_14[i] = np.mean(tr[:i+1])
         else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d[avg_loss == 0] = 100
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+            atr_14[i] = np.mean(tr[i-13:i+1])
     
-    # === 1d Volume (average over last 5 days) ===
-    vol_1d = df_1d['volume'].values
-    vol_ma_5 = np.full_like(vol_1d, np.nan)
-    for i in range(len(vol_1d)):
-        if i >= 4:
-            vol_ma_5[i] = np.mean(vol_1d[i-4:i+1])
+    # ATR percentile (50-period) for volatility regime
+    atr_percentile = np.full_like(atr_14, np.nan)
+    for i in range(len(atr_14)):
+        if i >= 49:
+            window = atr_14[i-49:i+1]
+            rank = np.sum(window <= atr_14[i]) / len(window)
+            atr_percentile[i] = rank * 100
         elif i > 0:
-            vol_ma_5[i] = np.mean(vol_1d[max(0, i-2):i+1])
+            window = atr_14[max(0, i-24):i+1]
+            rank = np.sum(window <= atr_14[i]) / len(window)
+            atr_percentile[i] = rank * 100
         else:
-            vol_ma_5[i] = vol_1d[0]
-    vol_ma_5_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_5)
+            atr_percentile[i] = 50.0
     
-    # === 1h Volume confirmation ===
-    vol_ma_20 = np.full_like(volume, np.nan)
-    for i in range(len(volume)):
-        if i >= 19:
-            vol_ma_20[i] = np.mean(volume[i-19:i+1])
-        elif i > 0:
-            vol_ma_20[i] = np.mean(volume[max(0, i-9):i+1])
-        else:
-            vol_ma_20[i] = volume[0]
+    # Volatility filter: only trade when ATR > 50th percentile (avoid choppy markets)
+    vol_filter = atr_percentile >= 50
     
-    # Session filter (08-20 UTC)
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # === Align indicators to main timeframe ===
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid)
+    vol_confirm_aligned = align_htf_to_ltf(prices, df_4h, vol_confirm)
+    vol_filter_aligned = align_htf_to_ltf(prices, df_1d, vol_filter)
     
     signals = np.zeros(n)
-    warmup = 100
+    
+    # Warmup period
+    warmup = 50
+    
+    # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_4h_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(vol_ma_5_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i]) or 
+            np.isnan(vol_confirm_aligned[i]) or 
+            np.isnan(vol_filter_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
-        
-        # Skip if outside session
-        if not session_filter[i]:
-            signals[i] = 0.0
-            position = 0
-            continue
-        
-        # Volume confirmation: current 1h volume > 1.5x 5-day average 1d volume
-        vol_confirm = volume[i] > vol_ma_5_aligned[i] * 1.5
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price above EMA34(4h) + RSI < 40 + volume confirmation
-            if (close[i] > ema_34_4h_aligned[i] and 
-                rsi_1d_aligned[i] < 40 and 
-                vol_confirm):
+            # Long: price breaks above Donchian high + volume confirmation + volatility filter
+            if (close[i] > donchian_high_aligned[i] and 
+                vol_confirm_aligned[i] and 
+                vol_filter_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price below EMA34(4h) + RSI > 60 + volume confirmation
-            elif (close[i] < ema_34_4h_aligned[i] and 
-                  rsi_1d_aligned[i] > 60 and 
-                  vol_confirm):
+            # Short: price breaks below Donchian low + volume confirmation + volatility filter
+            elif (close[i] < donchian_low_aligned[i] and 
+                  vol_confirm_aligned[i] and 
+                  vol_filter_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: RSI crosses above 50 OR price closes below EMA34(4h)
-            if (rsi_1d_aligned[i] > 50 or 
-                close[i] < ema_34_4h_aligned[i]):
+            # Exit long: price crosses below Donchian midline
+            if close[i] < donchian_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -121,9 +157,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI crosses below 50 OR price closes above EMA34(4h)
-            if (rsi_1d_aligned[i] < 50 or 
-                close[i] > ema_34_4h_aligned[i]):
+            # Exit short: price crosses above Donchian midline
+            if close[i] > donchian_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -132,6 +167,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA34_RSI14_VolFilter_v1"
-timeframe = "1h"
+name = "4h_Donchian_Breakout_Volume_VolatilityFilter_v1"
+timeframe = "4h"
 leverage = 1.0
