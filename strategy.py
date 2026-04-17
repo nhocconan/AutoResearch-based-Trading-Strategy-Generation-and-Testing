@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Camarilla pivot R1/S1 breakout with volume confirmation and 1w ADX trend filter.
-Long when price breaks above Camarilla R1 AND volume > 2x average AND 1w ADX > 20 (trending).
-Short when price breaks below Camarilla S1 AND volume > 2x average AND 1w ADX > 20.
-Exit when price reverts to Camarilla midpoint (close) OR 1w ADX < 15 (range market).
-Uses 1d for Camarilla calculation and 1w for ADX filter to reduce whipsaw and capture major trends.
-Target: 30-100 total trades over 4 years (7-25/year). Camarilla levels provide intraday support/resistance,
-volume confirmation filters fakeouts, weekly ADX avoids ranging markets and chop.
-Works in bull markets (captures uptrends) and bear markets (captures downtrends).
+Hypothesis: 6h Williams %R extreme reversal with 12h volume spike and 1d EMA200 trend filter.
+Long when Williams %R < -80 (oversold) AND volume > 2x 12h average AND price > 1d EMA200 (uptrend).
+Short when Williams %R > -20 (overbought) AND volume > 2x 12h average AND price < 1d EMA200 (downtrend).
+Exit when Williams %R reverts to -50 (mean reversion) OR volume < 1.2x average (momentum fade).
+Uses 6h for Williams %R calculation, 12h for volume confirmation, and 1d for EMA200 trend filter.
+Targets 50-150 total trades over 4 years (12-37/year). Williams %R captures reversals at extremes,
+volume spike confirms institutional interest, EMA200 filter ensures alignment with higher timeframe trend.
+Works in bull markets (buying oversold dips in uptrend) and bear markets (selling overbought rallies in downtrend).
 """
 
 import numpy as np
@@ -24,116 +24,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation
+    # Get 6h data for Williams %R calculation
+    df_6h = get_htf_data(prices, '6h')
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    
+    # Calculate Williams %R on 6h timeframe (14-period)
+    highest_high = pd.Series(high_6h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_6h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * ((highest_high - close_6h) / np.where((highest_high - lowest_low) != 0, (highest_high - lowest_low), np.inf))
+    
+    # Get 12h data for volume average
+    df_12h = get_htf_data(prices, '12h')
+    volume_12h = df_12h['volume'].values
+    volume_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    
+    # Get 1d data for EMA200 filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate Camarilla pivot levels on 1d timeframe
-    # Pivot = (H + L + C) / 3
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    # Range = H - L
-    rang = high_1d - low_1d
-    # Camarilla levels
-    r1 = pivot + (rang * 1.1 / 12)  # R1
-    s1 = pivot - (rang * 1.1 / 12)  # S1
-    # Midpoint for exit (close price)
-    midpoint = close_1d
-    
-    # Get 1w data for ADX filter
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate ADX on 1w timeframe (14-period)
-    high_1w_series = pd.Series(high_1w)
-    low_1w_series = pd.Series(low_1w)
-    close_1w_series = pd.Series(close_1w)
-    
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
-    
-    # Plus Directional Movement (+DM)
-    up_move = high_1w - np.roll(high_1w, 1)
-    down_move = np.roll(low_1w, 1) - low_1w
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smooth TR, +DM, -DM (14-period)
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate +DI and -DI
-    plus_di = 100 * (plus_dm_smooth / np.where(atr != 0, atr, np.inf))
-    minus_di = 100 * (minus_dm_smooth / np.where(atr != 0, atr, np.inf))
-    
-    # Calculate DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) != 0, (plus_di + minus_di), np.inf)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align 1d Camarilla to 1d timeframe (no alignment needed)
-    pivot_aligned = pivot
-    r1_aligned = r1
-    s1_aligned = s1
-    midpoint_aligned = midpoint
-    
-    # Align 1w ADX to 1d timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Volume average (20-period) on 1d
-    volume_1d = df_1d['volume'].values
-    volume_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
+    # Align indicators to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_6h, williams_r)
+    volume_ma_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_12h)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 100  # warmup for indicators
+    start_idx = 200  # warmup for EMA200
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(midpoint_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(volume_ma_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(volume_ma_aligned[i]) or 
+            np.isnan(ema_200_aligned[i])):
             signals[i] = 0.0
             continue
         
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        mp = midpoint_aligned[i]
-        adx_val = adx_aligned[i]
+        wr = williams_r_aligned[i]
         vol_ma = volume_ma_aligned[i]
+        ema_200 = ema_200_aligned[i]
         vol = volume[i]
         price = close[i]
         
         if position == 0:
-            # Long: price > Camarilla R1 AND volume > 2x avg AND ADX > 20 (trending)
-            if price > r1_val and vol > 2.0 * vol_ma and adx_val > 20:
+            # Long: Williams %R < -80 (oversold) AND volume > 2x average AND price > EMA200 (uptrend)
+            if wr < -80 and vol > 2.0 * vol_ma and price > ema_200:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < Camarilla S1 AND volume > 2x avg AND ADX > 20 (trending)
-            elif price < s1_val and vol > 2.0 * vol_ma and adx_val > 20:
+            # Short: Williams %R > -20 (overbought) AND volume > 2x average AND price < EMA200 (downtrend)
+            elif wr > -20 and vol > 2.0 * vol_ma and price < ema_200:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price < Camarilla midpoint OR ADX < 15 (range market)
-            if price < mp or adx_val < 15:
+            # Exit long: Williams %R > -50 (mean reversion) OR volume < 1.2x average (momentum fade)
+            if wr > -50 or vol < 1.2 * vol_ma:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price > Camarilla midpoint OR ADX < 15 (range market)
-            if price > mp or adx_val < 15:
+            # Exit short: Williams %R < -50 (mean reversion) OR volume < 1.2x average (momentum fade)
+            if wr < -50 or vol < 1.2 * vol_ma:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -141,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1S1_Volume_1wADX_Filter"
-timeframe = "1d"
+name = "6h_WilliamsR_Extreme_VolumeSpike_EMA200_Filter"
+timeframe = "6h"
 leverage = 1.0
