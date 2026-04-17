@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-1h_4H1D_Trend_Filter_Momentum
-Strategy: 1h momentum with 4h/1d trend filter
-Long: RSI(14) > 55 + price > EMA(20) + 4h close > EMA(50) + 1d close > EMA(100)
-Short: RSI(14) < 45 + price < EMA(20) + 4h close < EMA(50) + 1d close < EMA(100)
-Exit: RSI returns to neutral zone (45-55)
-Position size: 0.20
-Session filter: 08-20 UTC
-Designed to capture momentum bursts only in strong multi-timeframe trends.
+4h_Vortex_Trend_Plus_Volume_Regime
+Strategy: 4h Vortex Indicator trend + volume spike + chop regime filter.
+Long: VI+ > VI- + volume > 1.5x 20-period avg + CHOP > 61.8 (range)
+Short: VI- > VI+ + volume > 1.5x 20-period avg + CHOP > 61.8 (range)
+Exit: Trend reversal (VI cross) or volume/volatility fails
+Position size: 0.25
+Designed to capture trend moves in ranging markets with volume confirmation.
+Timeframe: 4h
 """
 
 import numpy as np
@@ -16,90 +16,91 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate EMAs
-    close_series = pd.Series(close)
-    ema_20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate True Range components
+    tr1 = high - low
+    tr2 = np.abs(np.concatenate([[high[0]], high[:-1]]) - np.concatenate([[close[0]], close[:-1]]))
+    tr3 = np.abs(np.concatenate([[low[0]], low[:-1]]) - np.concatenate([[close[0]], close[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Calculate RSI
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate Vortex Indicator components
+    vm_plus = np.abs(high - np.concatenate([[low[0]], low[:-1]]))
+    vm_minus = np.abs(low - np.concatenate([[high[0]], high[:-1]]))
     
-    # Calculate 4h EMA50 (trend filter)
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Sum over 14 periods
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    vm_plus14 = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
+    vm_minus14 = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
     
-    # Calculate 1d EMA100 (trend filter)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
-    ema_100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_100_1d)
+    # VI+ and VI-
+    vi_plus = np.divide(vm_plus14, tr14, out=np.zeros_like(vm_plus14), where=tr14!=0)
+    vi_minus = np.divide(vm_minus14, tr14, out=np.zeros_like(vm_minus14), where=tr14!=0)
     
-    # Session filter (08-20 UTC)
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Chopiness Index (using 14-period)
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    highest_high14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr14 / (highest_high14 - lowest_low14)) / np.log10(14)
+    
+    # Volume confirmation (20-period MA)
+    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)
+    start_idx = max(34, 20)  # Need enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_20[i]) or np.isnan(ema_50[i]) or 
-            np.isnan(rsi[i]) or np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(ema_100_1d_aligned[i]) or not session_filter[i]):
+        if (np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or 
+            np.isnan(chop[i]) or np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
+        # Volume filter: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        
+        # Chop filter: CHOP > 61.8 indicates ranging market (good for mean reversion)
+        chop_filter = chop[i] > 61.8
+        
         # Entry conditions
         if position == 0:
-            # Long: RSI > 55 + price > EMA20 + 4h trend up + 1d trend up
-            if (rsi[i] > 55 and close[i] > ema_20[i] and 
-                ema_50_4h_aligned[i] > ema_50[i] and 
-                ema_100_1d_aligned[i] > ema_100[i]):
-                signals[i] = 0.20
+            # Long: VI+ > VI- + volume + chop
+            if (vi_plus[i] > vi_minus[i] and 
+                volume_filter and chop_filter):
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI < 45 + price < EMA20 + 4h trend down + 1d trend down
-            elif (rsi[i] < 45 and close[i] < ema_20[i] and 
-                  ema_50_4h_aligned[i] < ema_50[i] and 
-                  ema_100_1d_aligned[i] < ema_100[i]):
-                signals[i] = -0.20
+            # Short: VI- > VI+ + volume + chop
+            elif (vi_minus[i] > vi_plus[i] and 
+                  volume_filter and chop_filter):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI drops below 50
-            if rsi[i] < 50:
+            # Exit long: VI- crosses above VI+ or filters fail
+            if vi_minus[i] > vi_plus[i] or not volume_filter or not chop_filter:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI rises above 50
-            if rsi[i] > 50:
+            # Exit short: VI+ crosses above VI- or filters fail
+            if vi_plus[i] > vi_minus[i] or not volume_filter or not chop_filter:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_4H1D_Trend_Filter_Momentum"
-timeframe = "1h"
+name = "4h_Vortex_Trend_Plus_Volume_Regime"
+timeframe = "4h"
 leverage = 1.0
