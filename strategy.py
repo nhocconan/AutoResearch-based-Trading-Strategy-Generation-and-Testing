@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_Donchian_20_Breakout_Volume_Trend_HTF
-Strategy: 1d Donchian(20) breakout with volume confirmation and 1w trend filter.
-- Long when price breaks above 20-day high + volume > 1.8x 20-day avg + 1w close > 1w EMA34
-- Short when price breaks below 20-day low + volume > 1.8x 20-day avg + 1w close < 1w EMA34
-- Exit when price returns to 20-day midpoint or opposite breakout occurs
+12h_1d_Pivot_R1_S1_Breakout_Volume_MR
+Strategy: 12h Camarilla Pivot (R1/S1) breakout with volume confirmation and mean-reversion filter.
+- Long when price breaks above R1 + volume > 1.8x 12-period avg + price < S1 (mean-reversion setup)
+- Short when price breaks below S1 + volume > 1.8x 12-period avg + price > R1 (mean-reversion setup)
+- Exit when price reaches opposite pivot level (S1 for long, R1 for short) or midpoint
 - Position size: ±0.25
-- Uses 1d timeframe as primary with 1w for trend filter
+- Uses 12h timeframe as primary with 1d for Pivot levels
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,70 +23,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 20-day Donchian channels and midpoint
-    high_max20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (high_max20 + low_min20) / 2.0
+    # Get 1d data for Pivot levels (Camarilla)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume confirmation (20-day MA)
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate Camarilla pivot levels for 1d
+    # Pivot = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Align 1d Pivot levels to 12h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Calculate 1w EMA34 for trend filter
-    close_series_1w = pd.Series(close_1w)
-    ema34_1w = close_series_1w.ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align 1w EMA to 1d timeframe
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Volume confirmation (12-period MA on 12h)
+    volume_ma12 = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = max(20, 20, 34)  # Donchian20, volume MA20, EMA34
+    start_idx = max(12, 12)  # volume MA12, 1d data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(high_max20[i]) or 
-            np.isnan(low_min20[i]) or 
-            np.isnan(volume_ma20[i]) or 
-            np.isnan(ema34_1w_aligned[i])):
+        if (np.isnan(pivot_1d_aligned[i]) or 
+            np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(volume_ma12[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.8x 20-day average
-        volume_filter = volume[i] > (1.8 * volume_ma20[i])
+        # Volume filter: current volume > 1.8x 12-period average
+        volume_filter = volume[i] > (1.8 * volume_ma12[i])
         
         # Breakout conditions
-        breakout_up = close[i] > high_max20[i-1]  # break above 20-day high
-        breakout_down = close[i] < low_min20[i-1]  # break below 20-day low
+        breakout_r1 = close[i] > r1_1d_aligned[i]  # break above R1
+        breakout_s1 = close[i] < s1_1d_aligned[i]  # break below S1
         
-        # Return to midpoint for exit
-        return_to_mid = abs(close[i] - donchian_mid[i]) < 0.002 * close[i]  # within 0.2% of midpoint
+        # Mean-reversion condition: price near opposite level
+        near_s1 = abs(close[i] - s1_1d_aligned[i]) < 0.005 * close[i]  # within 0.5% of S1
+        near_r1 = abs(close[i] - r1_1d_aligned[i]) < 0.005 * close[i]  # within 0.5% of R1
         
         if position == 0:
-            # Long: breakout up + volume filter + 1w uptrend
-            if breakout_up and volume_filter and close[i] > ema34_1w_aligned[i]:
+            # Long: breakout above R1 + volume filter + price near S1 (mean-reversion setup)
+            if breakout_r1 and volume_filter and near_s1:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout down + volume filter + 1w downtrend
-            elif breakout_down and volume_filter and close[i] < ema34_1w_aligned[i]:
+            # Short: breakout below S1 + volume filter + price near R1 (mean-reversion setup)
+            elif breakout_s1 and volume_filter and near_r1:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: return to midpoint or opposite breakout
-            if return_to_mid or breakout_down:
+            # Exit long: price reaches S1 or breaks below R1
+            if near_s1 or close[i] < r1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: return to midpoint or opposite breakout
-            if return_to_mid or breakout_up:
+            # Exit short: price reaches R1 or breaks above S1
+            if near_r1 or close[i] > s1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian_20_Breakout_Volume_Trend_HTF"
-timeframe = "1d"
+name = "12h_1d_Pivot_R1_S1_Breakout_Volume_MR"
+timeframe = "12h"
 leverage = 1.0
