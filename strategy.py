@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d ADX regime filter and volume confirmation.
-Long when price breaks above Donchian upper band AND 1d ADX > 25 (trending) AND volume > 1.5x 20-period average.
-Short when price breaks below Donchian lower band AND 1d ADX > 25 (trending) AND volume > 1.5x 20-period average.
-Exit when price touches Donchian middle band (mean of upper/lower) OR ADX < 20 (range regime).
-Uses 1d for ADX trend regime filter, 4h for Donchian breakout and volume.
-Target: 75-200 total trades over 4 years (19-50/year). Donchian provides clear breakout levels,
-ADX filter avoids whipsaws in ranging markets, volume confirmation ensures breakout strength.
+Hypothesis: 12h Williams %R Reversal with 1d Volume Spike and ADX Trend Filter.
+Long when Williams %R < -80 (oversold) + volume > 1.5 * 20-period average volume + ADX > 25 (trending market).
+Short when Williams %R > -20 (overbought) + volume > 1.5 * 20-period average volume + ADX > 25.
+Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts) or volume drops below average.
+Uses 1d for volume spike and ADX calculation to avoid lower-timeframe noise.
+Target: 50-150 total trades over 4 years (12-37/year). Williams %R captures extreme reversals,
+volume spike confirms institutional interest, ADX ensures we trade in trending conditions to avoid chop losses.
 """
 
 import numpy as np
@@ -23,119 +23,104 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX regime filter
+    # Get 1d data for volume spike and ADX trend filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d ADX (14-period)
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = np.abs(high[1:] - low[1:])
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])  # align with original indices
-        
-        # Directional Movement
-        up_move = high[1:] - high[:-1]
-        down_move = low[:-1] - low[1:]
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        plus_dm = np.concatenate([[np.nan], plus_dm])
-        minus_dm = np.concatenate([[np.nan], minus_dm])
-        
-        # Smoothed TR, +DM, -DM using Wilder's smoothing (EMA with alpha=1/period)
-        def wilder_smoothing(data, period):
-            result = np.full_like(data, np.nan)
-            alpha = 1.0 / period
-            # First value is simple average
-            first_valid = ~np.isnan(data)
-            if np.any(first_valid):
-                first_idx = np.where(first_valid)[0][0]
-                if first_idx + period < len(data):
-                    result[first_idx + period - 1] = np.nanmean(data[first_idx:first_idx + period])
-            # Wilder smoothing: today = (prev * (period-1) + current) / period
-            for i in range(first_idx + period, len(data)):
-                if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                    result[i] = (result[i-1] * (period - 1) + data[i]) / period
-            return result
-        
-        atr = wilder_smoothing(tr, period)
-        plus_dm_smooth = wilder_smoothing(plus_dm, period)
-        minus_dm_smooth = wilder_smoothing(minus_dm, period)
-        
-        # Directional Indicators
-        plus_di = 100 * plus_dm_smooth / (atr + 1e-10)
-        minus_di = 100 * minus_dm_smooth / (atr + 1e-10)
-        
-        # DX and ADX
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-        adx = wilder_smoothing(dx, period)
-        return adx
+    # Calculate 1d Williams %R (14-period)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r_1d = (highest_high_1d - close_1d) / (highest_high_1d - lowest_low_1d) * -100
+    # Handle division by zero (when high == low)
+    williams_r_1d = np.where((highest_high_1d - lowest_low_1d) == 0, -50, williams_r_1d)
     
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    # Calculate 1d ADX (14-period) for trend strength
+    # ADX requires +DI, -DI, and DX calculation
+    # +DM = High_t - High_{t-1} (if positive and > Low_{t-1} - Low_t)
+    # -DM = Low_{t-1} - Low_t (if positive and > High_t - High_{t-1})
+    # TR = max(High-Low, |High-PrevClose|, |Low-PrevClose|)
+    # +DI = 100 * EWMA(+DM) / ATR
+    # -DI = 100 * EWMA(-DM) / ATR
+    # DX = 100 * |+DI - -DI| / (+DI + -DI)
+    # ADX = EWMA(DX)
     
-    # Align 1d ADX to 4h timeframe
+    # Calculate +DM and -DM
+    high_diff = np.diff(high_1d, prepend=high_1d[0])
+    low_diff = np.diff(low_1d, prepend=low_1d[0])
+    
+    plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0)
+    minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0)
+    
+    # Calculate True Range (TR)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(np.diff(high_1d, prepend=high_1d[0]))
+    tr3 = np.abs(np.diff(low_1d, prepend=low_1d[0]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Calculate ATR using Wilder's smoothing (EWM with alpha=1/period)
+    atr_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate +DI and -DI
+    plus_di_1d = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
+    minus_di_1d = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
+    
+    # Calculate DX and ADX
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    # Handle division by zero (when both DI are 0)
+    dx_1d = np.where((plus_di_1d + minus_di_1d) == 0, 0, dx_1d)
+    adx_1d = pd.Series(dx_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate 1d volume spike (current volume > 1.5 * 20-period average volume)
+    avg_volume_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = volume_1d > (1.5 * avg_volume_1d)
+    
+    # Align 1d indicators to 12h timeframe
+    williams_r_1d_aligned = align_htf_to_ltf(prices, df_1d, williams_r_1d)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Calculate Donchian channels on 4h (20-period)
-    lookback = 20
-    upper_band = np.full(n, np.nan)
-    lower_band = np.full(n, np.nan)
-    middle_band = np.full(n, np.nan)
-    
-    for i in range(lookback - 1, n):
-        upper_band[i] = np.max(high[i - lookback + 1:i + 1])
-        lower_band[i] = np.min(low[i - lookback + 1:i + 1])
-        middle_band[i] = (upper_band[i] + lower_band[i]) / 2.0
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    volume_ma = np.full(n, np.nan)
-    for i in range(20 - 1, n):
-        volume_ma[i] = np.mean(volume[i - 20 + 1:i + 1])
-    volume_ratio = volume / (volume_ma + 1e-10)
+    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = max(50, 20)  # warmup for indicators
+    start_idx = 50  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if np.isnan(adx_1d_aligned[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(volume_ma[i]):
+        if (np.isnan(williams_r_1d_aligned[i]) or 
+            np.isnan(adx_1d_aligned[i]) or 
+            np.isnan(volume_spike_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
+        wr = williams_r_1d_aligned[i]
         adx = adx_1d_aligned[i]
-        price = close[i]
-        vol_ratio = volume_ratio[i]
-        upper = upper_band[i]
-        lower = lower_band[i]
-        middle = middle_band[i]
+        vol_spike = volume_spike_1d_aligned[i] > 0.5  # boolean
         
         if position == 0:
-            # Long: price breaks above upper band AND ADX > 25 (trending) AND volume confirmation
-            if price > upper and adx > 25 and vol_ratio > 1.5:
+            # Long: Oversold + volume spike + trending market
+            if wr < -80 and vol_spike and adx > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower band AND ADX > 25 (trending) AND volume confirmation
-            elif price < lower and adx > 25 and vol_ratio > 1.5:
+            # Short: Overbought + volume spike + trending market
+            elif wr > -20 and vol_spike and adx > 25:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price touches middle band OR ADX < 20 (range regime)
-            if price <= middle or adx < 20:
+            # Exit long: Williams %R crosses above -50 (reversing from oversold) OR no volume spike
+            if wr > -50 or not vol_spike:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price touches middle band OR ADX < 20 (range regime)
-            if price >= middle or adx < 20:
+            # Exit short: Williams %R crosses below -50 (reversing from overbought) OR no volume spike
+            if wr < -50 or not vol_spike:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -143,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_ADXRegime_VolumeConfirm"
-timeframe = "4h"
+name = "12h_WilliamsR_VolumeSpike_ADXFilter"
+timeframe = "12h"
 leverage = 1.0
