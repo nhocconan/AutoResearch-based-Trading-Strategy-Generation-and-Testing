@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w EMA trend filter and ATR-based position sizing.
-Long when price breaks above 20-day high with 1w EMA(50) confirming uptrend.
-Short when price breaks below 20-day low with 1w EMA(50) confirming downtrend.
-Position size scaled by inverse ATR volatility (0.25 max size) to reduce drawdown.
-Uses discrete position sizes (0.0, ±0.25) to minimize fee churn.
-Target: 30-100 total trades over 4 years (7-25/year).
+Hypothesis: 12h Camarilla Pivot R1/S1 Breakout with Volume Spike and ADX Trend Filter.
+Long when price breaks above R1 with volume > 1.8x average and ADX > 25 (trending market).
+Short when price breaks below S1 with volume > 1.8x average and ADX > 25.
+Exit when price reverts to pivot point (PP) or ADX < 20 (range begins).
+Uses 1d for Camarilla pivot and ADX calculation, 12h for price/volume.
+Target: 80-120 total trades over 4 years (20-30/year) to balance edge and fee drag.
 """
 
 import numpy as np
@@ -14,126 +14,166 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels
+    # Get 1d data for Camarilla pivots and ADX
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Get 1w data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Calculate 1d Camarilla pivot levels (R1, S1, PP)
+    def calculate_camarilla(high, low, close):
+        pp = (high + low + close) / 3.0
+        r1 = close + (high - low) * 1.1 / 12.0
+        s1 = close - (high - low) * 1.1 / 12.0
+        return pp, r1, s1
     
-    # Calculate 1d Donchian channels (20-period)
-    def calculate_donchian(high, low, period=20):
-        upper = np.full_like(high, np.nan)
-        lower = np.full_like(high, np.nan)
-        for i in range(period-1, len(high)):
-            upper[i] = np.max(high[i-period+1:i+1])
-            lower[i] = np.min(low[i-period+1:i+1])
-        return upper, lower
+    pp_1d = np.zeros_like(close_1d)
+    r1_1d = np.zeros_like(close_1d)
+    s1_1d = np.zeros_like(close_1d)
     
-    donchian_upper_1d, donchian_lower_1d = calculate_donchian(high_1d, low_1d, 20)
+    for i in range(len(close_1d)):
+        pp, r1, s1 = calculate_camarilla(high_1d[i], low_1d[i], close_1d[i])
+        pp_1d[i] = pp
+        r1_1d[i] = r1
+        s1_1d[i] = s1
     
-    # Calculate 1w EMA(50) for trend filter
-    def calculate_ema_close(close, span=50):
-        ema = np.full_like(close, np.nan)
-        if len(close) >= span:
-            multiplier = 2 / (span + 1)
-            ema[span-1] = np.mean(close[:span])
-            for i in range(span, len(close)):
-                ema[i] = (close[i] * multiplier) + (ema[i-1] * (1 - multiplier))
-        return ema
-    
-    ema_50_1w = calculate_ema_close(close_1w, 50)
-    
-    # Calculate 1d ATR(14) for volatility-based position sizing
-    def calculate_atr(high, low, close, period=14):
-        tr = np.zeros_like(close)
-        atr = np.zeros_like(close)
-        for i in range(1, len(close)):
+    # Calculate 1d ADX (14-period)
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr = np.zeros_like(high)
+        for i in range(1, len(high)):
             tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        # Wilder's ATR
-        if len(tr) >= period:
-            atr[period] = np.mean(tr[1:period+1])
-            for i in range(period+1, len(tr)):
-                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        return atr
+        tr[0] = high[0] - low[0]
+        
+        # Directional Movement
+        dm_plus = np.zeros_like(high)
+        dm_minus = np.zeros_like(high)
+        for i in range(1, len(high)):
+            up_move = high[i] - high[i-1]
+            down_move = low[i-1] - low[i]
+            if up_move > down_move and up_move > 0:
+                dm_plus[i] = up_move
+            else:
+                dm_plus[i] = 0
+            if down_move > up_move and down_move > 0:
+                dm_minus[i] = down_move
+            else:
+                dm_minus[i] = 0
+        
+        # Smoothed TR, DM+, DM- (Wilder's smoothing)
+        tr_period = np.zeros_like(high)
+        dm_plus_period = np.zeros_like(high)
+        dm_minus_period = np.zeros_like(high)
+        
+        tr_period[period] = np.mean(tr[1:period+1])
+        dm_plus_period[period] = np.mean(dm_plus[1:period+1])
+        dm_minus_period[period] = np.mean(dm_minus[1:period+1])
+        
+        for i in range(period+1, len(high)):
+            tr_period[i] = (tr_period[i-1] * (period-1) + tr[i]) / period
+            dm_plus_period[i] = (dm_plus_period[i-1] * (period-1) + dm_plus[i]) / period
+            dm_minus_period[i] = (dm_minus_period[i-1] * (period-1) + dm_minus[i]) / period
+        
+        # Directional Indicators
+        di_plus = np.zeros_like(high)
+        di_minus = np.zeros_like(high)
+        for i in range(period, len(high)):
+            if tr_period[i] > 0:
+                di_plus[i] = 100 * dm_plus_period[i] / tr_period[i]
+                di_minus[i] = 100 * dm_minus_period[i] / tr_period[i]
+            else:
+                di_plus[i] = 0
+                di_minus[i] = 0
+        
+        # DX and ADX
+        dx = np.zeros_like(high)
+        for i in range(period, len(high)):
+            if di_plus[i] + di_minus[i] > 0:
+                dx[i] = 100 * abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])
+            else:
+                dx[i] = 0
+        
+        adx = np.zeros_like(high)
+        adx[2*period-1] = np.mean(dx[period:2*period])
+        for i in range(2*period, len(high)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    atr_14_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    # Align indicators to primary timeframe (1d)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper_1d)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower_1d)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Align 1d indicators to 12h timeframe
+    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Calculate volume spike (current volume > 1.8x 20-period average)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (volume_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 60  # warmup for indicators
+    start_idx = 50  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_upper_aligned[i]) or 
-            np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(atr_14_1d_aligned[i])):
+        if (np.isnan(pp_1d_aligned[i]) or 
+            np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(adx_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper = donchian_upper_aligned[i]
-        lower = donchian_lower_aligned[i]
-        ema_trend = ema_50_1w_aligned[i]
-        atr_val = atr_14_1d_aligned[i]
+        vol_spike = volume_spike[i]
+        adx_val = adx_1d_aligned[i]
+        pp = pp_1d_aligned[i]
+        r1 = r1_1d_aligned[i]
+        s1 = s1_1d_aligned[i]
         
-        # Avoid division by zero
-        if atr_val <= 0:
-            atr_val = 0.001
-        
-        # Volatility-adjusted position size (max 0.25)
-        # Size inversely proportional to ATR (higher volatility = smaller position)
-        base_size = 0.25
-        vol_factor = min(2.0, max(0.5, 0.01 / atr_val))  # normalize ATR
-        pos_size = base_size * vol_factor
-        pos_size = min(0.25, max(0.05, pos_size))  # clamp between 0.05 and 0.25
+        # Trend regime: ADX > 25 = trending (good for breakout)
+        is_trending = adx_val > 25
+        # Range regime: ADX < 20 = ranging (avoid false breakouts)
+        is_ranging = adx_val < 20
         
         if position == 0:
-            # Long: price breaks above Donchian upper with 1w EMA uptrend
-            if price > upper and price > ema_trend:
-                signals[i] = pos_size
+            # Long: price breaks above R1 with volume spike in trending market
+            if price > r1 and vol_spike and is_trending:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower with 1w EMA downtrend
-            elif price < lower and price < ema_trend:
-                signals[i] = -pos_size
+            # Short: price breaks below S1 with volume spike in trending market
+            elif price < s1 and vol_spike and is_trending:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to Donchian lower OR trend reverses
-            if price < lower or price < ema_trend:
+            # Exit long: price returns to pivot point OR trend ends (ranging begins)
+            if price <= pp or is_ranging:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = pos_size
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to Donchian upper OR trend reverses
-            if price > upper or price > ema_trend:
+            # Exit short: price returns to pivot point OR trend ends (ranging begins)
+            if price >= pp or is_ranging:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -pos_size
+                signals[i] = -0.25
     
     return signals
 
-name = "1d_Donchian20_1wEMA50_ATRSize"
-timeframe = "1d"
+name = "12h_Camarilla_R1S1_VolumeSpike_ADXTrend"
+timeframe = "12h"
 leverage = 1.0
