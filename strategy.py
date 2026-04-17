@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
 """
-4h_Keltner_Channel_20_MeanReversion
-Strategy: Mean reversion at Keltner Channel bands with volume confirmation and 1D trend filter.
-- Long when price touches lower Keltner Channel (20, 2.0) + volume > 1.5x 20-period avg + 1D close > 1D EMA50
-- Short when price touches upper Keltner Channel (20, 2.0) + volume > 1.5x 20-period avg + 1D close < 1D EMA50
-- Exit when price returns to 20-period EMA or opposite touch occurs
+6h_WeeklyPivot_R1_S1_Breakout_VolumeFilter
+Strategy: 6h breakout at weekly pivot R1/S1 with volume confirmation.
+- Long when price breaks above weekly R1 + volume > 1.5x 20-period avg
+- Short when price breaks below weekly S1 + volume > 1.5x 20-period avg
+- Exit when price returns to weekly pivot point or opposite breakout occurs
 - Position size: ±0.25
-- Uses 4h timeframe as primary with 1D for trend filter
+- Uses weekly pivot levels (calculated from prior week) for structure
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf
+
+def weekly_pivot(high, low, close):
+    """Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    return pivot, r1, s1
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,81 +30,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate EMA20 for Keltner middle line
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Get weekly data for pivot calculation
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) == 0:
+        return np.zeros(n)
     
-    # Calculate ATR(20) for Keltner width
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    atr20 = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate weekly pivot points
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # Keltner Channel bands
-    kc_upper = ema20 + (2.0 * atr20)
-    kc_lower = ema20 - (2.0 * atr20)
+    # Calculate pivot, R1, S1 for each week
+    weekly_pivot_val, weekly_r1, weekly_s1 = weekly_pivot(weekly_high, weekly_low, weekly_close)
     
-    # Volume confirmation (20-period MA)
+    # Align weekly levels to 6h timeframe (using previous week's values)
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot_val)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
+    
+    # Volume confirmation (20-period MA on 6h)
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Get 1D data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1D EMA50 for trend filter
-    close_series_1d = pd.Series(close_1d)
-    ema50_1d = close_series_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 1D EMA to 4h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = max(20, 20, 50)  # EMA20, ATR20, volume MA20, EMA50
+    start_idx = max(20, 1)  # volume MA20 and weekly data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema20[i]) or 
-            np.isnan(kc_upper[i]) or 
-            np.isnan(kc_lower[i]) or 
-            np.isnan(volume_ma20[i]) or 
-            np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(volume_ma20[i]) or 
+            np.isnan(pivot_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter: current volume > 1.5x 20-period average
         volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
-        # Keltner Channel touch conditions
-        touch_lower = low[i] <= kc_lower[i]  # touch or penetrate lower band
-        touch_upper = high[i] >= kc_upper[i]  # touch or penetrate upper band
+        # Breakout conditions at weekly R1/S1
+        breakout_up = close[i] > r1_aligned[i-1]  # break above weekly R1
+        breakout_down = close[i] < s1_aligned[i-1]  # break below weekly S1
         
-        # Return to EMA20 for exit
-        return_to_ema = abs(close[i] - ema20[i]) < (0.001 * ema20[i])  # within 0.1% of EMA20
+        # Return to weekly pivot for exit
+        return_to_pivot = abs(close[i] - pivot_aligned[i]) < 0.005 * close[i]  # within 0.5% of pivot
         
         if position == 0:
-            # Long: touch lower band + volume filter + 1D uptrend
-            if touch_lower and volume_filter and close[i] > ema50_1d_aligned[i]:
+            # Long: breakout above R1 + volume filter
+            if breakout_up and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: touch upper band + volume filter + 1D downtrend
-            elif touch_upper and volume_filter and close[i] < ema50_1d_aligned[i]:
+            # Short: breakout below S1 + volume filter
+            elif breakout_down and volume_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: return to EMA20 or opposite touch
-            if return_to_ema or touch_upper:
+            # Exit long: return to pivot or opposite breakout
+            if return_to_pivot or breakout_down:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: return to EMA20 or opposite touch
-            if return_to_ema or touch_lower:
+            # Exit short: return to pivot or opposite breakout
+            if return_to_pivot or breakout_up:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Keltner_Channel_20_MeanReversion"
-timeframe = "4h"
+name = "6h_WeeklyPivot_R1_S1_Breakout_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
