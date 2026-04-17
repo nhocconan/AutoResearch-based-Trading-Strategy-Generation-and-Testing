@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyDonchian_Breakout_RSI_Filter_v1
-Hypothesis: 1d Donchian breakout with weekly trend filter (price above/below 10-week SMA) and RSI(14) filter (RSI<70 for longs, RSI>30 for shorts) to avoid overextended entries. Works in bull (breakouts) and bear (fades from weekly extremes) by requiring alignment with weekly trend. Target: 20-60 trades over 4 years (5-15/year).
+6h_Williams_Alligator_ElderRay_v1
+Williams Alligator (Jaw/Teeth/Lips) + Elder Ray (Bull/Bear Power) + EMA34 filter.
+Long when: Lips > Teeth > Jaw (bullish alignment) AND Bull Power > 0 AND close > EMA34.
+Short when: Lips < Teeth < Jaw (bearish alignment) AND Bear Power < 0 AND close < EMA34.
+Exit when: Alligator alignment breaks OR EMA34 cross fails.
+Uses 1d timeframe for EMA34 trend filter.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -17,64 +22,64 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     
-    # === Donchian Channel (20) ===
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === Williams Alligator (13,8,5) ===
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
+    jaw = np.concatenate([np.full(8, np.nan), jaw[8:]])  # shift 8 bars forward
     
-    # === RSI(14) ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values
+    teeth = np.concatenate([np.full(5, np.nan), teeth[5:]])  # shift 5 bars forward
     
-    # === Weekly 10 SMA for trend filter ===
-    df_1w = get_htf_data(prices, '1w')
-    sma_10_1w = pd.Series(df_1w['close'].values).rolling(window=10, min_periods=10).mean().values
-    sma_10_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_10_1w)
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values
+    lips = np.concatenate([np.full(3, np.nan), lips[3:]])  # shift 3 bars forward
+    
+    # === Elder Ray (Bull/Bear Power) ===
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
+    
+    # === 1d EMA34 for trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 50
+    warmup = 40
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(sma_10_1w_aligned[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(ema_34_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
+        # Alligator alignment
+        bullish_align = (lips[i] > teeth[i]) and (teeth[i] > jaw[i])
+        bearish_align = (lips[i] < teeth[i]) and (teeth[i] < jaw[i])
+        
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price breaks above Donchian high, above weekly SMA10, RSI not overbought
-            if (close[i] > highest_high[i] and 
-                close[i] > sma_10_1w_aligned[i] and 
-                rsi[i] < 70):
+            # Long: bullish alignment + bull power > 0 + close > EMA34
+            if bullish_align and (bull_power[i] > 0) and (close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price breaks below Donchian low, below weekly SMA10, RSI not oversold
-            elif (close[i] < lowest_low[i] and 
-                  close[i] < sma_10_1w_aligned[i] and 
-                  rsi[i] > 30):
+            # Short: bearish alignment + bear power < 0 + close < EMA34
+            elif bearish_align and (bear_power[i] < 0) and (close[i] < ema_34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price breaks below Donchian low OR RSI overbought
-            if (close[i] < lowest_low[i] or 
-                rsi[i] > 70):
+            # Exit long: alignment breaks OR EMA34 cross fails
+            if not bullish_align or (close[i] <= ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -82,9 +87,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above Donchian high OR RSI oversold
-            if (close[i] > highest_high[i] or 
-                rsi[i] < 30):
+            # Exit short: alignment breaks OR EMA34 cross fails
+            if not bearish_align or (close[i] >= ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -93,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyDonchian_Breakout_RSI_Filter_v1"
-timeframe = "1d"
+name = "6h_Williams_Alligator_ElderRay_v1"
+timeframe = "6h"
 leverage = 1.0
