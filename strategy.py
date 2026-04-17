@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d strategy using 1w EMA34 trend filter with Camarilla H3/L3 breakout and volume confirmation.
-- Uses 1w EMA34 for trend bias (long when rising, short when falling) to avoid counter-trend trades
-- Breakout triggers when price closes beyond 1d H3 (long) or L3 (short) with volume > 2.0x 20-period 1d MA
+Hypothesis: 6h strategy using 1d Williams %R extremes with 1d EMA50 trend filter and 6h volume confirmation
+- Williams %R(14) on 1d: long when < -80 (oversold) and EMA50 rising, short when > -20 (overbought) and EMA50 falling
+- Volume confirmation: 6h volume > 1.5x 20-period 6h MA to avoid false signals in low volatility
 - Fixed position size 0.25 to limit fee churn and manage drawdown
-- ATR-based trailing stop (2.0x ATR) on 1d timeframe to lock in profits
-- Designed for low trade frequency (target: 20-60 trades/year) to minimize fee drag in bear markets
-- Works in bull markets (buying H3 breakouts in uptrends) and bear markets (selling L3 breakdowns in downtrends)
+- Designed to work in bull markets (buying oversold dips in uptrends) and bear markets (selling overbought rallies in downtrends)
+- Uses 1d timeframe for Williams %R and EMA50 to reduce noise, 6h for entry timing and volume filter
+- Target: 50-150 total trades over 4 years to avoid fee drag
 """
 
 import numpy as np
@@ -23,109 +23,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots, volume MA, and ATR (primary timeframe)
+    # Get 1d data for Williams %R and EMA50 (HTF)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Camarilla levels (based on previous day's range)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d[0] = high_1d[0]
-    prev_low_1d[0] = low_1d[0]
-    prev_close_1d[0] = close_1d[0]
+    # Calculate 1d Williams %R(14)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14) * -100
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
     
-    camarilla_h3 = prev_close_1d + 1.1 * (prev_high_1d - prev_low_1d) / 2
-    camarilla_l3 = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d) / 2
+    # Calculate 1d EMA50 and its slope
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_slope = np.gradient(ema50_1d)  # slope of EMA50
     
-    # Volume average (20-period) on 1d
-    volume_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Get 6h data for volume confirmation (primary timeframe)
+    df_6h = get_htf_data(prices, '6h')
+    volume_6h = df_6h['volume'].values
     
-    # ATR (14-period) on 1d for stoploss
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Volume average (20-period) on 6h
+    volume_ma_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
     
-    # Get 1w data for EMA34 trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate 1w EMA34 and its slope
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_slope = np.gradient(ema34_1w)  # slope of EMA34
-    
-    # Align all indicators to 1d timeframe (primary)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    ema34_slope_aligned = align_htf_to_ltf(prices, df_1w, ema34_slope)
+    # Align all indicators to 6h timeframe (primary)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    ema50_slope_aligned = align_htf_to_ltf(prices, df_1d, ema50_slope)
+    volume_ma_aligned = align_htf_to_ltf(prices, df_6h, volume_ma_20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    entry_price = 0.0
-    atr_stop = 0.0
     
     start_idx = 100  # warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(volume_ma_aligned[i]) or np.isnan(atr_aligned[i]) or 
-            np.isnan(ema34_slope_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema50_slope_aligned[i]) or 
+            np.isnan(volume_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        h3_val = h3_aligned[i]
-        l3_val = l3_aligned[i]
-        ema_slope = ema34_slope_aligned[i]
+        wr = williams_r_aligned[i]
+        ema_slope = ema50_slope_aligned[i]
         vol_ma = volume_ma_aligned[i]
-        atr_val = atr_aligned[i]
         vol = volume[i]
-        price = close[i]
         
         if position == 0:
-            # Look for breakouts with volume confirmation and trend filter
-            # Long: price closes above H3 + volume spike + EMA34 rising
-            if price > h3_val and vol > 2.0 * vol_ma and ema_slope > 0:
+            # Look for mean reversion entries with volume confirmation and trend filter
+            # Long: Williams %R < -80 (oversold) + volume spike + EMA50 rising
+            if wr < -80 and vol > 1.5 * vol_ma and ema_slope > 0:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-                atr_stop = entry_price - 2.0 * atr_val
-            # Short: price closes below L3 + volume spike + EMA34 falling
-            elif price < l3_val and vol > 2.0 * vol_ma and ema_slope < 0:
+            # Short: Williams %R > -20 (overbought) + volume spike + EMA50 falling
+            elif wr > -20 and vol > 1.5 * vol_ma and ema_slope < 0:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
-                atr_stop = entry_price + 2.0 * atr_val
         
         elif position == 1:
-            # Check stoploss
-            if price <= atr_stop:
+            # Exit long when Williams %R rises above -50 (mean reversion) or EMA50 turns down
+            if wr > -50 or ema_slope < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-                # Trail stop: raise stop if price moves favorably
-                atr_stop = max(atr_stop, price - 1.5 * atr_val)
         
         elif position == -1:
-            # Check stoploss
-            if price >= atr_stop:
+            # Exit short when Williams %R falls below -50 (mean reversion) or EMA50 turns up
+            if wr < -50 or ema_slope > 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
-                # Trail stop: lower stop if price moves favorably
-                atr_stop = min(atr_stop, price + 1.5 * atr_val)
     
     return signals
 
-name = "1d_Camarilla_H3L3_1wEMA34_VolumeSpike_ATRTrail"
-timeframe = "1d"
+name = "6h_WilliamsR_1dEMA50_VolumeSpike_MeanRev"
+timeframe = "6h"
 leverage = 1.0
