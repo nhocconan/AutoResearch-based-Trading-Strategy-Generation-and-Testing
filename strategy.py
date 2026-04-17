@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h timeframe with 1d Williams %R extreme + volume confirmation + ADX trend filter.
-Long when 1d Williams %R < -80 (oversold) with volume > 1.3x 20-period average and ADX > 20.
-Short when 1d Williams %R > -20 (overbought) with volume > 1.3x 20-period average and ADX > 20.
-Williams %R captures exhaustion points; volume confirms conviction; ADX ensures trend context.
-Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag. Uses discrete sizing 0.25.
-Works in bull (buy oversold dips) and bear (sell overbought rallies) via mean reversion within trend.
+Hypothesis: 4h timeframe with 12h Camarilla R1/S1 breakout + volume confirmation + ADX trend filter.
+Long when price breaks above 12h Camarilla R1 with volume > 1.5x 20-period average and ADX > 25.
+Short when price breaks below 12h Camarilla S1 with volume > 1.5x 20-period average and ADX > 25.
+Camarilla pivot levels from 12h provide intraday structure; breakouts with volume and trend filter reduce false signals.
+Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag. Uses discrete sizing 0.25.
+Works in both bull (trend continuation) and bear (mean reversion after volatility spikes).
 """
 
 import numpy as np
@@ -22,32 +22,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Williams %R, volume, and ADX
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Get 12h data for Camarilla levels, volume, and ADX
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate daily Williams %R (14-period)
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
-    # Handle division by zero (when high == low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate 12h Camarilla levels (R1, S1)
+    # Pivot = (high + low + close) / 3
+    # Range = high - low
+    # R1 = close + Range * 1.1 / 12
+    # S1 = close - Range * 1.1 / 12
+    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
+    range_12h = high_12h - low_12h
+    r1_12h = close_12h + range_12h * 1.1 / 12.0
+    s1_12h = close_12h - range_12h * 1.1 / 12.0
     
-    # Calculate daily ADX (14-period)
+    # Calculate 12h ADX (14-period)
     # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr1 = np.abs(high_12h[1:] - low_12h[1:])
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])  # align length
     
     # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
+    up_move = high_12h[1:] - high_12h[:-1]
+    down_move = low_12h[:-1] - low_12h[1:]
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     plus_dm = np.concatenate([[0.0], plus_dm])
@@ -66,60 +68,62 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Get 1d volume 20-period average
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Get 12h volume 20-period average
+    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
     
-    # Align all to 12h
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+    # Align all to 4h
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    vol_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
+    volume_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_12h)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # need enough for Williams %R and ADX
+    start_idx = 50  # need enough for ADX and Camarilla
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(volume_1d_aligned[i])):
+        if (np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20_12h_aligned[i]) or 
+            np.isnan(volume_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.3x 20-period average
-        volume_confirmed = volume_1d_aligned[i] > 1.3 * vol_ma_20_1d_aligned[i]
+        # Volume confirmation: current 12h volume > 1.5x 20-period average
+        volume_confirmed = volume_12h_aligned[i] > 1.5 * vol_ma_20_12h_aligned[i]
         
-        # Trend filter: ADX > 20 indicates sufficient trend strength
-        trend_filter = adx_aligned[i] > 20
+        # Trend filter: ADX > 25 indicates strong trend
+        trend_filter = adx_aligned[i] > 25
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) with volume and trend
-            if (williams_r_aligned[i] < -80 and 
+            # Long: price breaks above 12h Camarilla R1 with volume and trend
+            if (close[i] > r1_12h_aligned[i] and 
                 volume_confirmed and 
                 trend_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (> -20) with volume and trend
-            elif (williams_r_aligned[i] > -20 and 
+            # Short: price breaks below 12h Camarilla S1 with volume and trend
+            elif (close[i] < s1_12h_aligned[i] and 
                   volume_confirmed and 
                   trend_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Williams %R returns above -50 (mean reversion) or trend weakens
-            if (williams_r_aligned[i] > -50 or 
-                adx_aligned[i] < 15):  # exit when trend weakens significantly
+            # Exit long: price falls back below 12h Camarilla pivot or trend weakens
+            if (close[i] < pivot_12h_aligned[i] or 
+                adx_aligned[i] < 20):  # exit when trend weakens
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Williams %R returns below -50 (mean reversion) or trend weakens
-            if (williams_r_aligned[i] < -50 or 
-                adx_aligned[i] < 15):  # exit when trend weakens significantly
+            # Exit short: price rises back above 12h Camarilla pivot or trend weakens
+            if (close[i] > pivot_12h_aligned[i] or 
+                adx_aligned[i] < 20):  # exit when trend weakens
                 signals[i] = 0.0
                 position = 0
             else:
@@ -127,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dWilliamsR_Volume_ADX"
-timeframe = "12h"
+name = "4h_12hCamarillaR1S1_Volume_ADX"
+timeframe = "4h"
 leverage = 1.0
