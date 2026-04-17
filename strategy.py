@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla R1/S1 breakout with 1d volume confirmation and 1w ADX trend filter.
-Long when price breaks above R1 AND 12h volume > 1.5x 20-bar avg AND weekly ADX > 25.
-Short when price breaks below S1 AND 12h volume > 1.5x 20-bar avg AND weekly ADX > 25.
-Exit when price touches H4/L4 or opposite Camarilla level.
-Uses 1w for ADX trend regime and 1d for Camarilla pivots, 12h for execution and volume.
-Designed to capture institutional order flow at key pivot levels with volume confirmation.
-Target: 12-30 trades/year per symbol.
+Hypothesis: 4h Donchian(20) breakout with volume confirmation and 12h EMA trend filter.
+Long when price breaks above 20-bar high AND 4h volume > 1.5x 20-bar avg AND 12h EMA(34) rising.
+Short when price breaks below 20-bar low AND 4h volume > 1.5x 20-bar avg AND 12h EMA(34) falling.
+Exit when price touches 12-bar midpoint.
+Uses 4h for execution and volume, 12h for EMA trend filter.
+Designed to capture strong trends with volume confirmation across bull and bear markets.
+Target: 20-50 trades/year per symbol.
 """
 
 import numpy as np
@@ -23,74 +23,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate 1w ADX (14-period)
-    # True Range
-    tr1 = np.maximum(high_1w - low_1w, 
-                     np.absolute(high_1w - np.roll(close_1w, 1)),
-                     np.absolute(low_1w - np.roll(close_1w, 1)))
-    tr1[0] = high_1w[0] - low_1w[0]
-    # Directional Movement
-    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w),
-                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)),
-                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    # Smoothed TR, DM+-, DX
-    tr14 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
-    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
-    dm_plus_sum = pd.Series(dm_plus_14).rolling(window=14, min_periods=14).sum().values
-    dm_minus_sum = pd.Series(dm_minus_14).rolling(window=14, min_periods=14).sum().values
-    tr14_sum = pd.Series(tr14).rolling(window=14, min_periods=14).sum().values
-    dx = 100 * np.abs(dm_plus_sum - dm_minus_sum) / (dm_plus_sum + dm_minus_sum + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Get 1d data for Camarilla pivot levels (using previous day's OHLC)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels for each 1d bar
-    # R4 = close + ((high-low)*1.1/2)
-    # R3 = close + ((high-low)*1.1/4)
-    # R2 = close + ((high-low)*1.1/6)
-    # R1 = close + ((high-low)*1.1/12)
-    # PP = (high+low+close)/3
-    # S1 = close - ((high-low)*1.1/12)
-    # S2 = close - ((high-low)*1.1/6)
-    # S3 = close - ((high-low)*1.1/4)
-    # S4 = close - ((high-low)*1.1/2)
-    range_1d = high_1d - low_1d
-    r1 = close_1d + (range_1d * 1.1 / 12)
-    s1 = close_1d - (range_1d * 1.1 / 12)
-    r4 = close_1d + (range_1d * 1.1 / 2)
-    s4 = close_1d - (range_1d * 1.1 / 2)
-    
-    # Get 12h data for execution and volume
+    # Get 12h data for EMA trend filter
     df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
     
-    # Calculate 12h volume MA (20-period)
-    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    # Calculate 12h EMA(34)
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_rising = ema_34_12h > np.roll(ema_34_12h, 1)
+    ema_34_falling = ema_34_12h < np.roll(ema_34_12h, 1)
+    ema_34_rising[0] = False
+    ema_34_falling[0] = False
+    
+    # Get 4h data for Donchian channels and volume
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
+    
+    # Calculate 4h Donchian channels (20-period)
+    donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2
+    
+    # Calculate 4h volume MA (20-period)
+    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     
     # Align all indicators to primary timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
+    ema_34_rising_aligned = align_htf_to_ltf(prices, df_12h, ema_34_rising)
+    ema_34_falling_aligned = align_htf_to_ltf(prices, df_12h, ema_34_falling)
+    donch_high_aligned = align_htf_to_ltf(prices, df_4h, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_4h, donch_low)
+    donch_mid_aligned = align_htf_to_ltf(prices, df_4h, donch_mid)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -99,52 +64,46 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(adx_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
-            np.isnan(r4_aligned[i]) or
-            np.isnan(s4_aligned[i]) or
+        if (np.isnan(ema_34_rising_aligned[i]) or 
+            np.isnan(ema_34_falling_aligned[i]) or
+            np.isnan(donch_high_aligned[i]) or
+            np.isnan(donch_low_aligned[i]) or
+            np.isnan(donch_mid_aligned[i]) or
             np.isnan(vol_ma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x 20-bar average
+        # Volume confirmation: current 4h volume > 1.5x 20-bar average
         volume_confirmed = volume[i] > 1.5 * vol_ma_20_aligned[i]
         
-        # Trend filter: ADX > 25 indicates strong trend
-        trending = adx_aligned[i] > 25
-        
         # Breakout conditions
-        breakout_r1 = close[i] > r1_aligned[i]
-        breakout_s1 = close[i] < s1_aligned[i]
+        breakout_high = close[i] > donch_high_aligned[i]
+        breakout_low = close[i] < donch_low_aligned[i]
         
-        # Exit conditions: touch R4/S4 or opposite Camarilla level
-        touch_r4 = abs(close[i] - r4_aligned[i]) < 0.001 * close[i]  # within 0.1%
-        touch_s4 = abs(close[i] - s4_aligned[i]) < 0.001 * close[i]  # within 0.1%
-        touch_opposite = (position == 1 and close[i] < s1_aligned[i]) or \
-                         (position == -1 and close[i] > r1_aligned[i])
+        # Exit condition: touch midpoint
+        touch_mid = abs(close[i] - donch_mid_aligned[i]) < 0.001 * close[i]  # within 0.1%
         
         if position == 0:
-            # Long: break above R1 with volume confirmation and trend
-            if (breakout_r1 and volume_confirmed and trending):
+            # Long: break above Donchian high with volume confirmation and rising EMA
+            if (breakout_high and volume_confirmed and ema_34_rising_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with volume confirmation and trend
-            elif (breakout_s1 and volume_confirmed and trending):
+            # Short: break below Donchian low with volume confirmation and falling EMA
+            elif (breakout_low and volume_confirmed and ema_34_falling_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: touch R4 or break below S1
-            if (touch_r4 or touch_opposite):
+            # Exit long: touch midpoint
+            if touch_mid:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: touch S4 or break above R1
-            if (touch_s4 or touch_opposite):
+            # Exit short: touch midpoint
+            if touch_mid:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -152,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Volume_ADX_Trend"
-timeframe = "12h"
+name = "4h_Donchian20_Volume_12hEMA34_Trend"
+timeframe = "4h"
 leverage = 1.0
