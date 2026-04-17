@@ -1,3 +1,12 @@
+# The strategy uses 12h timeframe with 1w higher timeframe for trend context and volume confirmation.
+# It combines 1-week EMA20 trend filter with 12h price action and volume confirmation.
+# Entry occurs when price breaks above/below 12h EMA20 with volume confirmation and trend alignment.
+# Exit occurs when price crosses back through the 12h EMA20.
+# This approach aims to capture medium-term trends while avoiding whipsaws in ranging markets.
+# The 1w EMA20 provides trend filter, reducing trades in unfavorable conditions.
+# Volume confirmation ensures momentum behind moves.
+# Designed to work in both bull (trend following) and bear (avoiding false signals) markets.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,99 +22,106 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h Donchian(20) for structure ===
+    # === 1-week EMA20 for trend filter ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Calculate EMA20 with proper smoothing
+    alpha = 2.0 / (20 + 1)  # Standard EMA smoothing factor
+    ema_20_1w = np.full_like(close_1w, np.nan)
+    if len(close_1w) > 0:
+        ema_20_1w[0] = close_1w[0]
+        for i in range(1, len(close_1w)):
+            ema_20_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_20_1w[i-1]
+    
+    # Align 1w EMA20 to 12h timeframe
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # === 12h EMA20 for entry/exit signal ===
     df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Upper/lower bands
-    upper_20 = np.full_like(high_12h, np.nan)
-    lower_20 = np.full_like(low_12h, np.nan)
-    for i in range(len(high_12h)):
-        if i >= 19:
-            upper_20[i] = np.max(high_12h[i-19:i+1])
-            lower_20[i] = np.min(low_12h[i-19:i+1])
-        else:
-            upper_20[i] = np.max(high_12h[0:i+1]) if i > 0 else high_12h[0]
-            lower_20[i] = np.min(low_12h[0:i+1]) if i > 0 else low_12h[0]
+    # Calculate EMA20 on 12h data
+    ema_20_12h = np.full_like(close_12h, np.nan)
+    if len(close_12h) > 0:
+        ema_20_12h[0] = close_12h[0]
+        for i in range(1, len(close_12h)):
+            ema_20_12h[i] = alpha * close_12h[i] + (1 - alpha) * ema_20_12h[i-1]
     
-    upper_aligned = align_htf_to_ltf(prices, df_12h, upper_20)
-    lower_aligned = align_htf_to_ltf(prices, df_12h, lower_20)
+    # Align 12h EMA20 to 12h timeframe (no additional delay needed)
+    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
     
-    # === 1d ATR(14) for volatility filter ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 12h Volume confirmation ===
+    volume_12h = df_12h['volume'].values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate 20-period EMA of volume on 12h timeframe
+    vol_ema_20_12h = np.full_like(volume_12h, np.nan)
+    if len(volume_12h) > 0:
+        vol_ema_20_12h[0] = volume_12h[0]
+        for i in range(1, len(volume_12h)):
+            vol_ema_20_12h[i] = alpha * volume_12h[i] + (1 - alpha) * vol_ema_20_12h[i-1]
     
-    # Wilder's smoothing
-    atr_14 = np.full_like(tr, np.nan)
-    if len(tr) >= 14:
-        atr_14[13] = np.mean(tr[:14])
-        for i in range(14, len(tr)):
-            atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
+    # Align volume EMA to 12h timeframe
+    vol_ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ema_20_12h)
     
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    
-    # === 4h Volume spike confirmation ===
-    vol_ma_20 = np.zeros_like(volume)
-    for i in range(len(volume)):
-        if i >= 19:
-            vol_ma_20[i] = np.mean(volume[i-19:i+1])
-        else:
-            vol_ma_20[i] = np.mean(volume[max(0, i-9):i+1]) if i > 0 else volume[0]
-    vol_spike = volume > vol_ma_20 * 1.5
+    # Volume confirmation: current 12h volume > 1.5x 20-period EMA of volume
+    vol_confirm_12h = volume_12h > vol_ema_20_12h * 1.5
+    vol_confirm_aligned = align_htf_to_ltf(prices, df_12h, vol_confirm_12h.astype(float))
     
     signals = np.zeros(n)
+    
+    # Warmup period - ensure we have enough data for all indicators
     warmup = 50
-    position = 0
+    
+    # Track position state
+    position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
-        if np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(atr_14_aligned[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(ema_20_12h_aligned[i]) or 
+            np.isnan(vol_confirm_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Volatility filter: ATR > 0.5% of price
-        vol_filter = atr_14_aligned[i] > 0.005 * close[i]
-        
+        # Entry logic: only enter when flat AND conditions are met
         if position == 0:
-            # Long: break above upper band with volume spike
-            if close[i] > upper_aligned[i] and vol_spike[i] and vol_filter:
+            # Long: price above 12h EMA20 AND above 1w EMA20 (uptrend) AND volume confirmation
+            if (close[i] > ema_20_12h_aligned[i] and 
+                ema_20_12h_aligned[i] > ema_20_1w_aligned[i] and  # price above 12h EMA and 12h EMA above 1w EMA (uptrend)
+                vol_confirm_aligned[i] > 0.5):  # volume confirmation
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower band with volume spike
-            elif close[i] < lower_aligned[i] and vol_spike[i] and vol_filter:
+                continue
+            # Short: price below 12h EMA20 AND below 1w EMA20 (downtrend) AND volume confirmation
+            elif (close[i] < ema_20_12h_aligned[i] and 
+                  ema_20_12h_aligned[i] < ema_20_1w_aligned[i] and  # price below 12h EMA and 12h EMA below 1w EMA (downtrend)
+                  vol_confirm_aligned[i] > 0.5):  # volume confirmation
                 signals[i] = -0.25
                 position = -1
-            else:
-                signals[i] = 0.0
+                continue
+        
+        # Exit logic
         elif position == 1:
-            # Exit long: close below lower band
-            if close[i] < lower_aligned[i]:
+            # Exit long: price crosses below 12h EMA20
+            if close[i] < ema_20_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
+                continue
             else:
                 signals[i] = 0.25
+        
         elif position == -1:
-            # Exit short: close above upper band
-            if close[i] > upper_aligned[i]:
+            # Exit short: price crosses above 12h EMA20
+            if close[i] > ema_20_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
+                continue
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "Donchian12_VolumeSpike_ATRFilter_v1"
-timeframe = "4h"
+name = "12h_EMA20_Trend_Filter_Volume_Confirmation"
+timeframe = "12h"
 leverage = 1.0
