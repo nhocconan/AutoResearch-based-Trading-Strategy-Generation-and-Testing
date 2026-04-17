@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_Volume_TrendFilter
-Strategy: 4h Camarilla pivot breakout with volume confirmation and 1d trend filter.
-Long: Price breaks above daily S1 + price above 1d EMA34 + volume > 1.5x average
-Short: Price breaks below daily S1 + price below 1d EMA34 + volume > 1.5x average
-Exit: Price moves back inside daily pivot range
+4h_RSI_Momentum_Trend_Filter
+Strategy: 4h RSI momentum with 1d trend filter.
+Long: RSI > 50 and rising + price above 1d EMA34 + volume > 1.5x average
+Short: RSI < 50 and falling + price below 1d EMA34 + volume > 1.5x average
+Exit: RSI crosses back to 50
 Position size: 0.25
-Designed to capture breakouts from daily pivot levels with trend alignment and volume confirmation.
+Designed to capture momentum moves aligned with daily trend.
 Timeframe: 4h
 """
 
@@ -16,13 +16,25 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # Calculate RSI(14)
+    delta = np.diff(close)
+    delta = np.insert(delta, 0, 0)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
     # Calculate daily EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -37,14 +49,19 @@ def generate_signals(prices):
     # Volume confirmation (20-period MA on 4h)
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # RSI momentum: current RSI vs previous RSI
+    rsi_momentum = rsi - np.roll(rsi, 1)
+    rsi_momentum[0] = 0
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)
+    start_idx = max(34, 20, 14)
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema34_1d_aligned[i]) or 
+        if (np.isnan(rsi[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or 
             np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
@@ -56,67 +73,40 @@ def generate_signals(prices):
         price_above_ema = close[i] > ema34_1d_aligned[i]
         price_below_ema = close[i] < ema34_1d_aligned[i]
         
-        # Calculate daily pivot and S1 from previous day
-        if i >= 6:  # Need at least 6 4h bars (1 day) to get previous day
-            # Get daily data for S1 calculation
-            df_1d_pivot = get_htf_data(prices, '1d')
-            
-            # Find previous day's index in 1d data
-            current_time = prices['open_time'].iloc[i]
-            prev_day = current_time - pd.Timedelta(days=1)
-            
-            # Get previous day's OHLC from 1d data
-            day_mask = df_1d_pivot['open_time'].dt.date == prev_day.date()
-            if day_mask.any():
-                prev_day_data = df_1d_pivot[day_mask].iloc[0]
-                prev_high = prev_day_data['high']
-                prev_low = prev_day_data['low']
-                prev_close = prev_day_data['close']
-                
-                # Calculate daily pivot and S1
-                pivot = (prev_high + prev_low + prev_close) / 3
-                range_val = prev_high - prev_low
-                if range_val > 0:
-                    s1 = pivot - (range_val * 1.1 / 12)
-                    
-                    # Entry conditions: price breaks above/below S1
-                    price_above_s1 = close[i] > s1
-                    price_below_s1 = close[i] < s1
-                    
-                    if position == 0:
-                        # Long: breaks above S1 + price above EMA + volume filter
-                        if price_above_s1 and price_above_ema and volume_filter:
-                            signals[i] = 0.25
-                            position = 1
-                        # Short: breaks below S1 + price below EMA + volume filter
-                        elif price_below_s1 and price_below_ema and volume_filter:
-                            signals[i] = -0.25
-                            position = -1
-                    
-                    elif position == 1:
-                        # Exit long: price moves back inside pivot range
-                        if close[i] < pivot:
-                            signals[i] = 0.0
-                            position = 0
-                        else:
-                            signals[i] = 0.25
-                    
-                    elif position == -1:
-                        # Exit short: price moves back inside pivot range
-                        if close[i] > pivot:
-                            signals[i] = 0.0
-                            position = 0
-                        else:
-                            signals[i] = -0.25
-                else:
-                    signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        # RSI conditions
+        rsi_above_50 = rsi[i] > 50
+        rsi_below_50 = rsi[i] < 50
+        rsi_rising = rsi_momentum[i] > 0
+        rsi_falling = rsi_momentum[i] < 0
+        
+        if position == 0:
+            # Long: RSI > 50 and rising + price above EMA + volume filter
+            if rsi_above_50 and rsi_rising and price_above_ema and volume_filter:
+                signals[i] = 0.25
+                position = 1
+            # Short: RSI < 50 and falling + price below EMA + volume filter
+            elif rsi_below_50 and rsi_falling and price_below_ema and volume_filter:
+                signals[i] = -0.25
+                position = -1
+        
+        elif position == 1:
+            # Exit long: RSI falls back to 50
+            if rsi[i] < 50:
+                signals[i] = 0.0
+                position = 0
             else:
-                signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-        else:
-            signals[i] = 0.0
+                signals[i] = 0.25
+        
+        elif position == -1:
+            # Exit short: RSI rises back to 50
+            if rsi[i] > 50:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_Volume_TrendFilter"
+name = "4h_RSI_Momentum_Trend_Filter"
 timeframe = "4h"
 leverage = 1.0
