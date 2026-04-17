@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-6h ADX + Volume-Weighted RSI with 12h Trend Filter
-Long: ADX > 25, VW-RSI < 30, price > 12h EMA50
-Short: ADX > 25, VW-RSI > 70, price < 12h EMA50
-Exit: ADX < 20 or price crosses 12h EMA50
-Combines trend strength (ADX) with mean reversion (VW-RSI) and higher timeframe trend filter.
-Designed to work in both trending and ranging markets by requiring ADX for trend and VW-RSI for entry timing.
-Target: 50-150 total trades over 4 years (12-37/year)
+4h_Camarilla_R1S1_Breakout_Volume_12hEMA34
+Long: Close > R1 + Volume spike + 12h EMA34 rising
+Short: Close < S1 + Volume spike + 12h EMA34 falling
+Exit: Opposite signal or price crosses H3/L3 (wider exit)
+Uses Camarilla pivot levels from daily + volume confirmation + 12h trend filter.
+Designed to work in both bull and bear markets by filtering with 12h EMA trend.
+Target: 75-200 total trades over 4 years (19-50/year)
 """
 
 import numpy as np
@@ -23,72 +23,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
+    # Get daily data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels: R1, S1, H3, L3
+    # R1 = Close + (High - Low) * 1.12 / 12
+    # S1 = Close - (High - Low) * 1.12 / 12
+    # H3 = Close + (High - Low) * 1.12 / 4
+    # L3 = Close - (High - Low) * 1.12 / 4
+    range_1d = high_1d - low_1d
+    r1 = close_1d + range_1d * 1.12 / 12
+    s1 = close_1d - range_1d * 1.12 / 12
+    h3 = close_1d + range_1d * 1.12 / 4
+    l3 = close_1d - range_1d * 1.12 / 4
+    
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    
+    # Get 12h data for EMA34 trend filter
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
     
-    # Calculate 12h EMA(50) for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 12h EMA(34) for trend filter
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Calculate ADX (14)
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    tr = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - close[:-1]), np.absolute(low[1:] - close[:-1]))
-    atr = np.zeros_like(close)
-    atr[0] = tr[0] if len(tr) > 0 else 0
-    for i in range(1, len(tr)):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-    plus_di = 100 * (np.convolve(plus_dm, np.ones(14)/14, mode='full')[:len(close)] / np.where(atr == 0, 1, atr))
-    minus_di = 100 * (np.convolve(minus_dm, np.ones(14)/14, mode='full')[:len(close)] / np.where(atr == 0, 1, atr))
-    dx = 100 * np.absolute(plus_di - minus_di) / np.where((plus_di + minus_di) == 0, 1, (plus_di + minus_di))
-    adx = np.convolve(dx, np.ones(14)/14, mode='full')[:len(close)]
-    
-    # Volume-Weighted RSI (14)
-    price_change = np.diff(close, prepend=close[0])
-    up = np.where(price_change > 0, price_change, 0)
-    down = np.where(price_change < 0, -price_change, 0)
-    vw_up = up * volume
-    vw_down = down * volume
-    vw_rs = np.convolve(vw_up, np.ones(14)/14, mode='full')[:len(close)] / np.where(np.convolve(vw_down, np.ones(14)/14, mode='full')[:len(close)] == 0, 1, np.convolve(vw_down, np.ones(14)/14, mode='full')[:len(close)])
-    vw_rsi = 100 - (100 / (1 + vw_rs))
+    # Calculate volume spike: volume > 2x 20-period SMA
+    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = max(50, 30)  # need EMA50 and ADX/VW-RSI
+    start_idx = max(34, 20)  # need EMA34 and volume SMA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(adx[i]) or np.isnan(vw_rsi[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_50_val = ema_50_12h_aligned[i]
-        adx_val = adx[i]
-        vw_rsi_val = vw_rsi[i]
+        vol = volume[i]
+        vol_sma_val = vol_sma_20[i]
+        ema_34_val = ema_34_12h_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        h3_val = h3_aligned[i]
+        l3_val = l3_aligned[i]
         
         if position == 0:
-            # Long: Strong trend + oversold + above 12h EMA50
-            if adx_val > 25 and vw_rsi_val < 30 and price > ema_50_val:
+            # Long: Close > R1 + Volume spike + 12h EMA34 rising
+            if price > r1_val and vol > 2.0 * vol_sma_val and ema_34_val > ema_34_12h[i-1]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Strong trend + overbought + below 12h EMA50
-            elif adx_val > 25 and vw_rsi_val > 70 and price < ema_50_val:
+            # Short: Close < S1 + Volume spike + 12h EMA34 falling
+            elif price < s1_val and vol > 2.0 * vol_sma_val and ema_34_val < ema_34_12h[i-1]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Weak trend or price below 12h EMA50
-            if adx_val < 20 or price < ema_50_val:
+            # Long exit: Close < H3 (wider exit) or 12h EMA34 turns down
+            if price < h3_val or ema_34_val < ema_34_12h[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Weak trend or price above 12h EMA50
-            if adx_val < 20 or price > ema_50_val:
+            # Short exit: Close > L3 (wider exit) or 12h EMA34 turns up
+            if price > l3_val or ema_34_val > ema_34_12h[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ADX_VWRSI_12hEMA50"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_Breakout_Volume_12hEMA34"
+timeframe = "4h"
 leverage = 1.0
