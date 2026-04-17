@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h timeframe with 1d Donchian breakout + volume confirmation + ATR stop.
-Long when price breaks above 1d Donchian(20) high with volume > 1.5x 20-period average and ATR(14) > 0.
-Short when price breaks below 1d Donchian(20) low with same conditions.
-Uses discrete position sizing 0.25 to limit fee drag. Target: 75-200 total trades over 4 years.
-Donchian channels provide structural support/resistance; volume confirms participation; ATR ensures sufficient volatility.
-Designed to work in bull markets (breakout continuation) and bear markets (strong trend continuation).
+Hypothesis: 6h timeframe with 1d Bollinger Band squeeze (BB width < 20th percentile) as regime filter,
+combined with 1w Donchian channel breakout (20-period) for entry direction.
+Long when price breaks above weekly Donchian high during low volatility regime.
+Short when price breaks below weekly Donchian low during low volatility regime.
+Uses discrete position sizing 0.25 to limit fee drag. Target: 50-150 total trades over 4 years.
+The Bollinger squeeze identifies periods of low volatility that often precede explosive moves,
+while weekly Donchian breaks capture the direction of the ensuing volatility expansion.
+Works in both bull and bear markets by trading breakouts in the direction of the weekly trend.
 """
 
 import numpy as np
@@ -20,82 +22,83 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels and volume
+    # Get 1d data for Bollinger Band width regime filter
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Donchian channels (20-period)
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Get 1w data for Donchian channel breakout
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d volume 20-period average
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    ma_20 = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).mean().values
+    bb_std_dev = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_bb = ma_20 + (bb_std * bb_std_dev)
+    lower_bb = ma_20 - (bb_std * bb_std_dev)
+    bb_width = (upper_bb - lower_bb) / ma_20  # Normalized width
     
-    # Calculate ATR(14) for 1d
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with index 0
+    # Calculate 1d BB width percentile rank (20-period lookback)
+    # Low volatility regime: BB width < 20th percentile
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
+    ).values
+    low_volatility_regime = bb_width_percentile < 0.20  # Bottom 20% = squeeze
     
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate weekly Donchian channel (20-period)
+    donch_period = 20
+    donch_high = pd.Series(high_1w).rolling(window=donch_period, min_periods=donch_period).max().values
+    donch_low = pd.Series(low_1w).rolling(window=donch_period, min_periods=donch_period).min().values
     
-    # Align all to 4h
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    # Align all to 6h
+    low_volatility_aligned = align_htf_to_ltf(prices, df_1d, low_volatility_regime)
+    donch_high_aligned = align_htf_to_ltf(prices, df_1w, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1w, donch_low)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # need enough for Donchian and volume MA
+    start_idx = 60  # need enough for BB width percentile and Donchian
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(volume_1d_aligned[i]) or 
-            np.isnan(atr_aligned[i])):
+        if (np.isnan(low_volatility_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
+            np.isnan(donch_low_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x 20-period average
-        volume_confirmed = volume_1d_aligned[i] > 1.5 * vol_ma_20_1d_aligned[i]
-        # Volatility filter: ATR > 0 ensures sufficient volatility
-        sufficient_volatility = atr_aligned[i] > 0
-        
         if position == 0:
-            # Long: price breaks above 1d Donchian high with volume and volatility
-            if (close[i] > donchian_high_aligned[i] and 
-                volume_confirmed and 
-                sufficient_volatility):
+            # Long: price breaks above weekly Donchian high during low volatility regime
+            if (close[i] > donch_high_aligned[i] and 
+                low_volatility_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 1d Donchian low with volume and volatility
-            elif (close[i] < donchian_low_aligned[i] and 
-                  volume_confirmed and 
-                  sufficient_volatility):
+            # Short: price breaks below weekly Donchian low during low volatility regime
+            elif (close[i] < donch_low_aligned[i] and 
+                  low_volatility_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below 1d Donchian low
-            if close[i] < donchian_low_aligned[i]:
+            # Exit long: price falls back below weekly Donchian midline
+            donch_mid = (donch_high_aligned[i] + donch_low_aligned[i]) / 2
+            if close[i] < donch_mid:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above 1d Donchian high
-            if close[i] > donchian_high_aligned[i]:
+            # Exit short: price rises back above weekly Donchian midline
+            donch_mid = (donch_high_aligned[i] + donch_low_aligned[i]) / 2
+            if close[i] > donch_mid:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -103,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dDonchian20_Volume_Confirm_ATRFilter"
-timeframe = "4h"
+name = "6h_1dBBSqueeze_1wDonchian20_Breakout"
+timeframe = "6h"
 leverage = 1.0
