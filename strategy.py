@@ -1,7 +1,10 @@
-#!/usr/bin/env python3
+# 4H_ADX_DMI_TREND_FOLLOW: 4h trend following with ADX trend strength filter and DMI crossover
+# Uses ADX > 25 to filter strong trends and DMI crossover for entry/exit
+# Works in both bull and bear markets by following established trends
+# Target: 20-50 trades/year to minimize fee drag
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtr_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -11,47 +14,44 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # === 1d RSI (14) with Wilder's smoothing ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # === 4h ADX and DMI (14) ===
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Calculate RSI
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Directional Movement
+    up_move = high[1:] - high[:-1]
+    down_move = low[:-1] - low[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
     
-    # Wilder's smoothing
-    avg_gain = np.zeros(len(gain))
-    avg_loss = np.zeros(len(loss))
-    if len(gain) > 0:
-        avg_gain[0] = gain[0]
-        avg_loss[0] = loss[0]
-        for i in range(1, len(gain)):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            result[period-1] = np.nansum(data[:period])
+            for i in range(period, len(data)):
+                result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    atr = wilders_smooth(tr, 14)
+    plus_di = 100 * wilders_smooth(plus_dm, 14) / atr
+    minus_di = 100 * wilders_smooth(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilders_smooth(dx, 14)
     
-    # Calculate 20-period volume average
-    vol_ma_20_1d = np.zeros(len(volume_1d))
-    for i in range(len(volume_1d)):
-        if i >= 19:
-            vol_ma_20_1d[i] = np.mean(volume_1d[i-19:i+1])
-        else:
-            vol_ma_20_1d[i] = np.mean(volume_1d[max(0, i-9):i+1]) if i > 0 else volume_1d[0]
-    
-    # Align to 4h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+    # === 4h EMA (21) for trend bias ===
+    close_series = pd.Series(close)
+    ema_21 = close_series.ewm(span=21, adjust=False).mean().values
     
     signals = np.zeros(n)
     
-    # Warmup
+    # Warmup period
     warmup = 50
     
     # Track position
@@ -59,32 +59,30 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or 
-            np.isnan(vol_1d_aligned[i])):
+        if (np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i]) or 
+            np.isnan(ema_21[i])):
             signals[i] = 0.0
-            position = 0
             continue
-        
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = vol_1d_aligned[i] > vol_ma_20_1d_aligned[i] * 1.5
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: RSI < 30 (oversold) with volume confirmation
-            if rsi_1d_aligned[i] < 30 and vol_confirm:
-                signals[i] = 0.25
-                position = 1
-                continue
-            # Short: RSI > 70 (overbought) with volume confirmation
-            elif rsi_1d_aligned[i] > 70 and vol_confirm:
-                signals[i] = -0.25
-                position = -1
-                continue
+            # Strong trend required: ADX > 25
+            if adx[i] > 25:
+                # Long: +DI crosses above -DI and price above EMA21
+                if plus_di[i] > minus_di[i] and plus_di[i-1] <= minus_di[i-1] and close[i] > ema_21[i]:
+                    signals[i] = 0.25
+                    position = 1
+                    continue
+                # Short: -DI crosses above +DI and price below EMA21
+                elif minus_di[i] > plus_di[i] and minus_di[i-1] <= plus_di[i-1] and close[i] < ema_21[i]:
+                    signals[i] = -0.25
+                    position = -1
+                    continue
         
-        # Exit logic: RSI returns to neutral (40-60)
+        # Exit logic
         elif position == 1:
-            # Exit long: RSI >= 40
-            if rsi_1d_aligned[i] >= 40:
+            # Exit long: -DI crosses above +DI or ADX weakens (< 20) or price crosses below EMA21
+            if (minus_di[i] > plus_di[i] and minus_di[i-1] <= plus_di[i-1]) or adx[i] < 20 or close[i] < ema_21[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -92,8 +90,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI <= 60
-            if rsi_1d_aligned[i] <= 60:
+            # Exit short: +DI crosses above -DI or ADX weakens (< 20) or price crosses above EMA21
+            if (plus_di[i] > minus_di[i] and plus_di[i-1] <= minus_di[i-1]) or adx[i] < 20 or close[i] > ema_21[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -102,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_RSI30_70_VolumeConfirmation"
+name = "4H_ADX_DMI_TREND_FOLLOW"
 timeframe = "4h"
 leverage = 1.0
