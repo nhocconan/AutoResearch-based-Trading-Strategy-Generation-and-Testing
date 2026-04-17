@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and ATR-based stop.
-Long when price breaks above 20-day high with 1w EMA50 uptrend.
-Short when price breaks below 20-day low with 1w EMA50 downtrend.
-Exit on opposite Donchian break or ATR trailing stop (2.5x ATR).
-Uses discrete position sizing (0.25) to limit fee drag. Target: 30-80 trades over 4 years.
-Works in bull via breakouts, in bear via short breakdowns with trend filter.
+Hypothesis: 12h Donchian(20) breakout with 1d ADX trend filter and volume confirmation.
+Long when price breaks above 20-period high with volume > 1.5x average and 1d ADX > 25.
+Short when price breaks below 20-period low with volume > 1.5x average and 1d ADX > 25.
+Exit when price reverts to 20-period midpoint or ADX < 20 (trend weakening).
+Uses 1d for ADX calculation, 12h for price/volume/DDonchian.
+Target: 50-150 total trades over 4 years (12-37/year). Focus on strong trends with volume confirmation to avoid choppy markets and reduce false breakouts.
 """
 
 import numpy as np
@@ -14,124 +14,136 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels
+    # Get 1d data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate 1d Donchian channels (20-period)
-    def donchian_channels(high, low, period=20):
-        upper = np.full_like(high, np.nan)
-        lower = np.full_like(high, np.nan)
-        for i in range(period-1, len(high)):
-            upper[i] = np.max(high[i-period+1:i+1])
-            lower[i] = np.min(low[i-period+1:i+1])
-        return upper, lower
-    
-    upper_1d, lower_1d = donchian_channels(high_1d, low_1d, 20)
-    
-    # Calculate 1w EMA50
-    def calculate_ema(values, period):
-        ema = np.full_like(values, np.nan)
-        if len(values) < period:
-            return ema
-        multiplier = 2 / (period + 1)
-        ema[period-1] = np.mean(values[:period])
-        for i in range(period, len(values)):
-            ema[i] = (values[i] - ema[i-1]) * multiplier + ema[i-1]
-        return ema
-    
-    ema_50_1w = calculate_ema(close_1w, 50)
-    
-    # Calculate ATR for stoploss (using 1d data)
-    def calculate_atr(high, low, close, period=14):
-        tr = np.zeros_like(high)
-        for i in range(1, len(high)):
+    # Calculate 1d ADX (Average Directional Index)
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr = np.zeros_like(close)
+        for i in range(1, len(close)):
             tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        atr = np.zeros_like(high)
+        
+        # Directional Movement
+        plus_dm = np.zeros_like(close)
+        minus_dm = np.zeros_like(close)
+        for i in range(1, len(close)):
+            up_move = high[i] - high[i-1]
+            down_move = low[i-1] - low[i]
+            plus_dm[i] = up_move if up_move > down_move and up_move > 0 else 0
+            minus_dm[i] = down_move if down_move > up_move and down_move > 0 else 0
+        
+        # Smoothed TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
+        atr = np.zeros_like(close)
+        plus_dm_smooth = np.zeros_like(close)
+        minus_dm_smooth = np.zeros_like(close)
+        
+        # Initial values
         atr[period] = np.mean(tr[1:period+1])
-        for i in range(period+1, len(tr)):
+        plus_dm_smooth[period] = np.mean(plus_dm[1:period+1])
+        minus_dm_smooth[period] = np.mean(minus_dm[1:period+1])
+        
+        # Wilder's smoothing
+        for i in range(period+1, len(close)):
             atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        return atr
+            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
+            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
+        
+        # Directional Indicators
+        plus_di = np.zeros_like(close)
+        minus_di = np.zeros_like(close)
+        dx = np.zeros_like(close)
+        
+        for i in range(period, len(close)):
+            if atr[i] > 0:
+                plus_di[i] = (plus_dm_smooth[i] / atr[i]) * 100
+                minus_di[i] = (minus_dm_smooth[i] / atr[i]) * 100
+                if plus_di[i] + minus_di[i] > 0:
+                    dx[i] = abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i]) * 100
+                else:
+                    dx[i] = 0
+        
+        # ADX: smoothed DX
+        adx = np.zeros_like(close)
+        adx[2*period-1] = np.mean(dx[period:2*period])  # First ADX value
+        for i in range(2*period, len(close)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    atr_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    # Align indicators to primary timeframe (1d)
-    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
-    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Align 1d ADX to 12h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Calculate 12h Donchian channels (20-period)
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    midpoint = (highest_high + lowest_low) / 2.0
+    
+    # Calculate volume spike (current volume > 1.5x 20-period average)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    start_idx = 60  # warmup for indicators
+    start_idx = max(50, lookback)  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_1d_aligned[i]) or 
-            np.isnan(lower_1d_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(atr_1d_aligned[i])):
+        if (np.isnan(adx_1d_aligned[i]) or 
+            np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or 
+            np.isnan(midpoint[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper = upper_1d_aligned[i]
-        lower = lower_1d_aligned[i]
-        ema_trend = ema_50_1w_aligned[i]
-        atr = atr_1d_aligned[i]
+        vol_spike = volume_spike[i]
+        adx_val = adx_1d_aligned[i]
+        high_ch = highest_high[i]
+        low_ch = lowest_low[i]
+        mid_pt = midpoint[i]
+        
+        # Trend regime: ADX > 25 = strong trend (good for breakout)
+        is_strong_trend = adx_val > 25
+        # Weak trend: ADX < 20 = avoid breakouts
+        is_weak_trend = adx_val < 20
         
         if position == 0:
-            # Long: price breaks above upper Donchian with 1w EMA50 uptrend
-            if price > upper and ema_trend > 0:
+            # Long: price breaks above Donchian high with volume spike and strong trend
+            if price > high_ch and vol_spike and is_strong_trend:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-                highest_since_entry = price
-            # Short: price breaks below lower Donchian with 1w EMA50 downtrend
-            elif price < lower and ema_trend < 0:
+            # Short: price breaks below Donchian low with volume spike and strong trend
+            elif price < low_ch and vol_spike and is_strong_trend:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
-                lowest_since_entry = price
         
         elif position == 1:
-            # Update highest price since entry
-            highest_since_entry = max(highest_since_entry, price)
-            
-            # Exit conditions:
-            # 1. Price breaks below lower Donchian (contrarian signal)
-            # 2. ATR trailing stop: price drops 2.5*ATR from highest since entry
-            if price < lower or price < highest_since_entry - 2.5 * atr:
+            # Exit long: price returns to midpoint OR trend weakens
+            if price <= mid_pt or is_weak_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Update lowest price since entry
-            lowest_since_entry = min(lowest_since_entry, price)
-            
-            # Exit conditions:
-            # 1. Price breaks above upper Donchian (contrarian signal)
-            # 2. ATR trailing stop: price rises 2.5*ATR from lowest since entry
-            if price > upper or price > lowest_since_entry + 2.5 * atr:
+            # Exit short: price returns to midpoint OR trend weakens
+            if price >= mid_pt or is_weak_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -139,6 +151,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wEMA50_ATRTrail"
-timeframe = "1d"
+name = "12h_Donchian20_ADXTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
