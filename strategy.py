@@ -24,14 +24,16 @@ def generate_signals(prices):
     r1_1d = 2 * pivot_1d - low_1d
     s1_1d = 2 * pivot_1d - high_1d
     
-    # Align daily pivot levels to 4h timeframe (use previous day's levels)
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align daily pivot levels to 1h timeframe (use previous day's levels)
+    pivot_1h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1h = align_htf_to_ltf(prices, df_1d, s1_1d)
     
     # Calculate 4h EMA34 for trend filter
-    close_series = pd.Series(close)
-    ema34 = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1h = align_htf_to_ltf(prices, df_4h, ema34_4h)
     
     # Volume filter: current volume > 1.5 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -43,8 +45,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
-            np.isnan(ema34[i]) or np.isnan(volume_ma20[i])):
+        if (np.isnan(pivot_1h[i]) or np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or
+            np.isnan(ema34_1h[i]) or np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
@@ -52,37 +54,37 @@ def generate_signals(prices):
         volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
         # Trend filter: price relative to EMA34
-        price_above_ema = close[i] > ema34[i]
-        price_below_ema = close[i] < ema34[i]
+        price_above_ema = close[i] > ema34_1h[i]
+        price_below_ema = close[i] < ema34_1h[i]
         
         if position == 0:
             # Long breakout: price breaks above R1 with volume and above EMA34
-            if (close[i] > r1_4h[i] and volume_filter and price_above_ema):
-                signals[i] = 0.25
+            if (close[i] > r1_1h[i] and volume_filter and price_above_ema):
+                signals[i] = 0.20
                 position = 1
             # Short breakdown: price breaks below S1 with volume and below EMA34
-            elif (close[i] < s1_4h[i] and volume_filter and price_below_ema):
-                signals[i] = -0.25
+            elif (close[i] < s1_1h[i] and volume_filter and price_below_ema):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
             # Exit long: price falls below pivot or EMA34
-            if close[i] < pivot_4h[i] or close[i] < ema34[i]:
+            if close[i] < pivot_1h[i] or close[i] < ema34_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
             # Exit short: price rises above pivot or EMA34
-            if close[i] > pivot_4h[i] or close[i] > ema34[i]:
+            if close[i] > pivot_1h[i] or close[i] > ema34_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_DailyPivot_Breakout_EMA34_Volume"
-timeframe = "4h"
+name = "1h_DailyPivot_Breakout_EMA34_Volume"
+timeframe = "1h"
 leverage = 1.0
