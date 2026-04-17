@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: Daily pivot points act as strong support/resistance levels on lower timeframes.
-When price approaches the daily pivot with increased volume and shows rejection (long lower shadow for longs,
-long upper shadow for shorts), it often reverses. This strategy captures these reversals by entering 
-long when price bounces off the pivot from below with bullish rejection and volume confirmation,
-and short when price is rejected from the pivot from above with bearish rejection and volume confirmation.
-Exits occur when price moves to the opposite pivot level (S1 for longs, R1 for shorts) or when
-the rejection signal fails. Designed for 4h timeframe to work in both trending and ranging markets.
+Hypothesis: On the 6-hour timeframe, price often respects the previous day's high/low as key support/resistance levels. 
+We combine this with a 1-day EMA50 trend filter and volume confirmation to capture breakouts and reversals. 
+Long when price breaks above prior day's high with volume > 2x average and price above daily EMA50. 
+Short when price breaks below prior day's low with volume > 2x average and price below daily EMA50. 
+Exit when price returns to the prior day's midpoint (mean reversion) or on opposite breakout. 
+Designed for 6h to work in trending (breakouts) and ranging (mean reversion to mid-point) markets with ~15-25 trades per year.
 """
 
 import numpy as np
@@ -23,82 +22,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculation
+    # Get daily data for prior day's high/low and EMA50
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily pivot and support/resistance levels
-    phigh = df_1d['high'].values
-    plow = df_1d['low'].values
+    # Prior day's high and low (use shift(1) to avoid look-ahead: use completed day's levels)
+    phigh = df_1d['high'].shift(1).values
+    plow = df_1d['low'].shift(1).values
     pclose = df_1d['close'].values
     
-    pivot = (phigh + plow + pclose) / 3
-    range_ = phigh - plow
+    # Prior day's midpoint for mean reversion exit
+    pmid = (phigh + plow) / 2
     
-    # Calculate support and resistance levels
-    s1 = 2 * pivot - phigh
-    r1 = 2 * pivot - plow
-    
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1-day EMA50 for trend filter (use prior day's close to avoid look-ahead)
     ema_50 = pd.Series(pclose).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align all daily levels to 4h timeframe (waits for daily bar to close)
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Align all daily levels to 6h timeframe (waits for daily bar to close)
+    phigh_6h = align_htf_to_ltf(prices, df_1d, phigh)
+    plow_6h = align_htf_to_ltf(prices, df_1d, plow)
+    pmid_6h = align_htf_to_ltf(prices, df_1d, pmid)
+    ema_50_6h = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Volume confirmation: 20-period volume MA on 4h
+    # Volume confirmation: 20-period volume MA on 6h
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # warmup for all indicators
+    start_idx = 50  # warmup for EMA50 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_4h[i]) or np.isnan(s1_4h[i]) or np.isnan(r1_4h[i]) or
-            np.isnan(ema_50_4h[i]) or np.isnan(volume_ma_20.iloc[i])):
+        if (np.isnan(phigh_6h[i]) or np.isnan(plow_6h[i]) or np.isnan(pmid_6h[i]) or
+            np.isnan(ema_50_6h[i]) or np.isnan(volume_ma_20.iloc[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        high_price = high[i]
-        low_price = low[i]
         vol = volume[i]
         vol_ma = volume_ma_20.iloc[i]
         
-        # Calculate candle body and shadows
-        body = abs(price - close[i-1]) if i > 0 else 0
-        lower_shadow = min(close[i-1], price) - low_price if i > 0 else 0
-        upper_shadow = high_price - max(close[i-1], price) if i > 0 else 0
-        
         if position == 0:
-            # Long: price near S1 with bullish rejection (long lower shadow) and volume spike
-            if (price <= s1_4h[i] * 1.005 and  # near S1 (within 0.5%)
-                lower_shadow > body * 1.5 and   # long lower shadow
-                vol > 1.5 * vol_ma):            # volume spike
+            # Long: price breaks above prior day's high with volume spike and above daily EMA50
+            if price > phigh_6h[i] and vol > 2.0 * vol_ma and price > ema_50_6h[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price near R1 with bearish rejection (long upper shadow) and volume spike
-            elif (price >= r1_4h[i] * 0.995 and  # near R1 (within 0.5%)
-                  upper_shadow > body * 1.5 and   # long upper shadow
-                  vol > 1.5 * vol_ma):            # volume spike
+            # Short: price breaks below prior day's low with volume spike and below daily EMA50
+            elif price < plow_6h[i] and vol > 2.0 * vol_ma and price < ema_50_6h[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price reaches pivot or shows bearish rejection at resistance
-            if (price >= pivot_4h[i] or  # reached pivot
-                (price >= r1_4h[i] * 0.995 and upper_shadow > body * 1.5)):  # rejected at R1
+            # Long exit: price returns to prior day's midpoint (mean reversion) OR breaks below prior day's low (invalidates breakout)
+            if price < pmid_6h[i] or price < plow_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price reaches pivot or shows bullish rejection at support
-            if (price <= pivot_4h[i] or  # reached pivot
-                (price <= s1_4h[i] * 1.005 and lower_shadow > body * 1.5)):  # rejected at S1
+            # Short exit: price returns to prior day's midpoint (mean reversion) OR breaks above prior day's high (invalidates breakout)
+            if price > pmid_6h[i] or price > phigh_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Pivot_Rejection_Volume"
-timeframe = "4h"
+name = "6h_PriorDayHL_Breakout_MeanRev"
+timeframe = "6h"
 leverage = 1.0
