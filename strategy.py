@@ -13,6 +13,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly EMA34 for trend filter
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1w = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    
     # Get daily data for pivot points
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
@@ -24,12 +32,12 @@ def generate_signals(prices):
     r1_1d = 2 * pivot_1d - low_1d
     s1_1d = 2 * pivot_1d - high_1d
     
-    # Align daily pivot levels to 6h timeframe (use previous day's levels)
-    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_6h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_6h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align daily pivot levels to 4h timeframe (use previous day's levels)
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Volume filter: current volume > 1.5 * 20-period average (20 periods = 5 days at 6h)
+    # Volume filter: current volume > 1.5 * 20-period average (20 periods = 10 days at 4h)
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -39,8 +47,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or
-            np.isnan(volume_ma20[i])):
+        if (np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
+            np.isnan(volume_ma20[i]) or np.isnan(trend_1w[i])):
             signals[i] = 0.0
             continue
         
@@ -48,26 +56,26 @@ def generate_signals(prices):
         volume_filter = volume[i] > (1.5 * volume_ma20[i])
         
         if position == 0:
-            # Long breakout: price breaks above R1 with volume
-            if (close[i] > r1_6h[i] and volume_filter):
+            # Long: price breaks above R1 with volume AND above weekly trend
+            if (close[i] > r1_4h[i] and volume_filter and close[i] > trend_1w[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below S1 with volume
-            elif (close[i] < s1_6h[i] and volume_filter):
+            # Short: price breaks below S1 with volume AND below weekly trend
+            elif (close[i] < s1_4h[i] and volume_filter and close[i] < trend_1w[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls below S1
-            if close[i] < s1_6h[i]:
+            # Exit long: price falls below S1 or drops below weekly trend
+            if close[i] < s1_4h[i] or close[i] < trend_1w[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises above R1
-            if close[i] > r1_6h[i]:
+            # Exit short: price rises above R1 or rises above weekly trend
+            if close[i] > r1_4h[i] or close[i] > trend_1w[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -75,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_DailyPivot_Breakout_Volume"
-timeframe = "6h"
+name = "4h_WeeklyTrend_PivotBreakout_Volume"
+timeframe = "4h"
 leverage = 1.0
