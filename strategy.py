@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h timeframe with weekly Donchian(20) breakout + 1d ADX trend filter + volume confirmation.
-Long when price breaks above weekly Donchian high(20) with 1d ADX > 25 and volume > 1.5x 20-period 1d volume average.
-Short when price breaks below weekly Donchian low(20) with 1d ADX > 25 and volume > 1.5x 20-period 1d volume average.
+Hypothesis: 12h timeframe with 1d ATR-based volatility filter + weekly Donchian(20) breakout + volume confirmation.
+Long when price breaks above weekly Donchian high with 1d ATR(14) < 1d ATR(50) (low volatility) and volume > 1.5x 20-period 1d volume average.
+Short when price breaks below weekly Donchian low with 1d ATR(14) < 1d ATR(50) and volume > 1.5x 20-period 1d volume average.
 Uses discrete position sizing 0.25 to limit fee drag. Target: 50-150 total trades over 4 years.
-Weekly Donchian provides structural breakout levels; ADX filters for trending markets only; volume confirms participation.
-Designed to work in trending markets (both bull and bear) by capturing breakouts with trend and volume confirmation.
+Weekly Donchian provides structural breakout levels; low volatility filter avoids false breakouts in choppy markets; volume confirms institutional participation.
+Designed to work in bull markets (trend continuation) and bear markets (mean reversion after volatility contraction).
 """
 
 import numpy as np
@@ -22,7 +22,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX and volume
+    # Get 1d data for ATR and volume
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -34,94 +34,75 @@ def generate_signals(prices):
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     
-    # Calculate 1d ADX (14-period)
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
+    # Calculate 1d ATR(14)
+    tr1 = high_1d[1:] - low_1d[:-1]
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # prepend NaN for first element
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
-    
-    # Smoothed TR, +DM, -DM (using Wilder's smoothing = EMA with alpha=1/period)
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # +DI and -DI
-    plus_di = 100 * plus_dm_smooth / atr
-    minus_di = 100 * minus_dm_smooth / atr
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Calculate 1d ATR(50)
+    atr_50_1d = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
     
     # Calculate 1d volume 20-period average
     vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
     # Calculate weekly Donchian channels (20-period)
-    # Donchian High = max(high, lookback=20)
-    # Donchian Low = min(low, lookback=20)
-    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    donchian_high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Align all to 6h
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align all to 12h
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    atr_50_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_50_1d)
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_20)
+    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # need enough for ADX and Donchian
+    start_idx = 50  # need enough for ATR and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or 
-            np.isnan(volume_1d_aligned[i])):
+        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(atr_50_1d_aligned[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(volume_1d_aligned[i]) or 
+            np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Volatility filter: ATR(14) < ATR(50) (low volatility regime)
+        low_volatility = atr_14_1d_aligned[i] < atr_50_1d_aligned[i]
+        
         # Volume confirmation: current 1d volume > 1.5x 20-period average
         volume_confirmed = volume_1d_aligned[i] > 1.5 * vol_ma_20_1d_aligned[i]
-        # ADX filter: trending market (ADX > 25)
-        trending = adx_aligned[i] > 25
         
         if position == 0:
-            # Long: price breaks above weekly Donchian high with ADX > 25 and volume
-            if (close[i] > donchian_high_aligned[i] and 
-                trending and 
+            # Long: price breaks above weekly Donchian high with low volatility and volume
+            if (close[i] > donchian_high_20_aligned[i] and 
+                low_volatility and 
                 volume_confirmed):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly Donchian low with ADX > 25 and volume
-            elif (close[i] < donchian_low_aligned[i] and 
-                  trending and 
+            # Short: price breaks below weekly Donchian low with low volatility and volume
+            elif (close[i] < donchian_low_20_aligned[i] and 
+                  low_volatility and 
                   volume_confirmed):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below weekly Donchian low (stop and reverse)
-            if close[i] < donchian_low_aligned[i]:
+            # Exit long: price falls back below weekly Donchian low
+            if close[i] < donchian_low_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above weekly Donchian high (stop and reverse)
-            if close[i] > donchian_high_aligned[i]:
+            # Exit short: price rises back above weekly Donchian high
+            if close[i] > donchian_high_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -129,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1dADX_1wDonchian20_Volume_Confirm"
-timeframe = "6h"
+name = "12h_1dATR_VolFilter_1wDonchian20_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
