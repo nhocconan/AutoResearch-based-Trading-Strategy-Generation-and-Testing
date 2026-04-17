@@ -1,13 +1,4 @@
 #!/usr/bin/env python3
-"""
-1d_Weekly_Channel_Breakout_Volume
-Hypothesis: Price breaking out of weekly Donchian channels with volume confirmation and weekly trend alignment captures strong moves in both bull and bear markets while limiting trades to avoid fee drag.
-Long when price > weekly high (lookback 2) + volume > 1.5x 20-period average + weekly close > weekly EMA34.
-Short when price < weekly low (lookback 2) + volume > 1.5x 20-period average + weekly close < weekly EMA34.
-Exit on opposite signal or trend reversal. Position size: ±0.25.
-Uses 1d for entry/exit and 1w for trend filter and breakout levels.
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -22,70 +13,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume confirmation (20-period MA on 1d)
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation (10-period MA on 6h)
+    volume_ma10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     
-    # Get 1w data for trend filter and breakout levels
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Get daily data for trend filter and breakout levels
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 1w EMA34 for trend filter
-    close_series_1w = pd.Series(close_1w)
-    ema34_1w = close_series_1w.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate daily EMA34 for trend filter
+    close_series_1d = pd.Series(close_1d)
+    ema34_1d = close_series_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1w EMA to 1d timeframe
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Align daily EMA to 6h timeframe
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate 1w rolling high (2 periods) and low (2 periods)
-    high_1w_series = pd.Series(high_1w)
-    low_1w_series = pd.Series(low_1w)
-    high_2_1w = high_1w_series.rolling(window=2, min_periods=2).max().values
-    low_2_1w = low_1w_series.rolling(window=2, min_periods=2).min().values
+    # Calculate daily rolling high (10 periods) and low (10 periods) for breakout levels
+    high_1d_series = pd.Series(high_1d)
+    low_1d_series = pd.Series(low_1d)
+    high_10_1d = high_1d_series.rolling(window=10, min_periods=10).max().values
+    low_10_1d = low_1d_series.rolling(window=10, min_periods=10).min().values
     
-    # Align 1w high/low to 1d timeframe
-    high_2_1w_aligned = align_htf_to_ltf(prices, df_1w, high_2_1w)
-    low_2_1w_aligned = align_htf_to_ltf(prices, df_1w, low_2_1w)
+    # Align 1d high/low to 6h timeframe
+    high_10_1d_aligned = align_htf_to_ltf(prices, df_1d, high_10_1d)
+    low_10_1d_aligned = align_htf_to_ltf(prices, df_1d, low_10_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = max(20, 2, 34)  # volume MA20, 1w high/low lookback, EMA34
+    start_idx = max(10, 34)  # volume MA10, daily EMA34
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(volume_ma20[i]) or 
-            np.isnan(high_2_1w_aligned[i]) or 
-            np.isnan(low_2_1w_aligned[i]) or 
-            np.isnan(ema34_1w_aligned[i])):
+        if (np.isnan(volume_ma10[i]) or 
+            np.isnan(high_10_1d_aligned[i]) or 
+            np.isnan(low_10_1d_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        # Volume filter: current volume > 1.5x 10-period average
+        volume_filter = volume[i] > (1.5 * volume_ma10[i])
         
         if position == 0:
-            # Long: price > 1w high (2) + volume filter + 1w uptrend
-            if close[i] > high_2_1w_aligned[i] and volume_filter and close[i] > ema34_1w_aligned[i]:
+            # Long: price > 1d high (10) + volume filter + daily uptrend
+            if close[i] > high_10_1d_aligned[i] and volume_filter and close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < 1w low (2) + volume filter + 1w downtrend
-            elif close[i] < low_2_1w_aligned[i] and volume_filter and close[i] < ema34_1w_aligned[i]:
+            # Short: price < 1d low (10) + volume filter + daily downtrend
+            elif close[i] < low_10_1d_aligned[i] and volume_filter and close[i] < ema34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price < 1w low (2) or 1w trend turns down
-            if close[i] < low_2_1w_aligned[i] or close[i] < ema34_1w_aligned[i]:
+            # Exit long: price < 1d low (10) or daily trend turns down
+            if close[i] < low_10_1d_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price > 1w high (2) or 1w trend turns up
-            if close[i] > high_2_1w_aligned[i] or close[i] > ema34_1w_aligned[i]:
+            # Exit short: price > 1d high (10) or daily trend turns up
+            if close[i] > high_10_1d_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,6 +84,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Weekly_Channel_Breakout_Volume"
-timeframe = "1d"
+name = "6h_1d_HighLowBreakout_VolumeConfirmation"
+timeframe = "6h"
 leverage = 1.0
