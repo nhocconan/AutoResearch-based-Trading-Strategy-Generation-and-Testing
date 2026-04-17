@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and ATR-based position sizing.
-Long when price breaks above 20-day high with 1w EMA50 uptrend.
-Short when price breaks below 20-day low with 1w EMA50 downtrend.
-Exit when price reverts to 10-day EMA or ATR stoploss hit.
-Uses discrete position sizing (0.0, ±0.25) to minimize fee churn.
-Target: 30-100 total trades over 4 years (7-25/year).
+Hypothesis: 6h Camarilla Pivot R3/S3 Reversal with Volume Divergence Filter.
+In ranging markets (CHOP > 61.8 on 1d), fade extreme Camarilla levels (R3/S3) on volume divergence:
+- Long when price touches S3 AND current volume < 0.7x 20-period average (weak selling pressure)
+- Short when price touches R3 AND current volume < 0.7x 20-period average (weak buying pressure)
+Exit when price reverts to midpoint (PP) or chop regime ends (CHOP < 38.2 = trending).
+Uses 1d for Camarilla pivot calculation and chop filter, 6h for price/volume.
+Target: 50-150 total trades over 4 years (12-37/year). Volume divergence reduces false breakouts in chop.
 """
 
 import numpy as np
@@ -20,134 +21,122 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels and EMA10
+    # Get 1d data for Camarilla pivots and chop filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Calculate 1d Camarilla pivot levels (R3, S3, PP)
+    def calculate_camarilla(high, low, close):
+        pp = (high + low + close) / 3.0
+        r3 = close + (high - low) * 1.1 / 4.0
+        s3 = close - (high - low) * 1.1 / 4.0
+        return pp, r3, s3
     
-    # Calculate 1d Donchian channels (20-period)
-    def calculate_donchian(high, low, period=20):
-        upper = np.full_like(high, np.nan)
-        lower = np.full_like(high, np.nan)
-        for i in range(period-1, len(high)):
-            upper[i] = np.max(high[i-period+1:i+1])
-            lower[i] = np.min(low[i-period+1:i+1])
-        return upper, lower
+    pp_1d = np.zeros_like(close_1d)
+    r3_1d = np.zeros_like(close_1d)
+    s3_1d = np.zeros_like(close_1d)
     
-    donch_upper_1d, donch_lower_1d = calculate_donchian(high_1d, low_1d, 20)
+    for i in range(len(close_1d)):
+        pp, r3, s3 = calculate_camarilla(high_1d[i], low_1d[i], close_1d[i])
+        pp_1d[i] = pp
+        r3_1d[i] = r3
+        s3_1d[i] = s3
     
-    # Calculate 1d EMA10 for exit
-    def calculate_ema(values, period):
-        ema = np.full_like(values, np.nan)
-        if len(values) >= period:
-            multiplier = 2 / (period + 1)
-            ema[period-1] = np.mean(values[:period])
-            for i in range(period, len(values)):
-                ema[i] = (values[i] * multiplier) + (ema[i-1] * (1 - multiplier))
-        return ema
-    
-    ema10_1d = calculate_ema(close_1d, 10)
-    
-    # Calculate 1w EMA50 for trend filter
-    ema50_1w = calculate_ema(close_1w, 50)
-    
-    # Calculate ATR(14) for stoploss
-    def calculate_atr(high, low, close, period=14):
+    # Calculate 1d Choppiness Index (CHOP)
+    def calculate_chop(high, low, close, period=14):
+        atr = np.zeros_like(close)
         tr = np.zeros_like(close)
+        
         for i in range(1, len(close)):
             tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
         
-        atr = np.zeros_like(close)
-        if len(tr) >= period:
-            atr[period] = np.mean(tr[1:period+1])
-            for i in range(period+1, len(tr)):
-                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        return atr
+        # Wilder's ATR
+        atr[period] = np.mean(tr[1:period+1])
+        for i in range(period+1, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        # Sum of ATR over period
+        atr_sum = np.zeros_like(close)
+        for i in range(period, len(close)):
+            atr_sum[i] = np.sum(atr[i-period+1:i+1])
+        
+        # Max true range over period
+        max_tr = np.zeros_like(close)
+        for i in range(period, len(close)):
+            max_tr[i] = np.max(tr[i-period+1:i+1])
+        
+        # Chop formula: 100 * log10(atr_sum / max_tr) / log10(period)
+        chop = np.zeros_like(close)
+        for i in range(period, len(close)):
+            if max_tr[i] > 0:
+                chop[i] = 100 * np.log10(atr_sum[i] / max_tr[i]) / np.log10(period)
+            else:
+                chop[i] = 50  # neutral
+        return chop
     
-    atr_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
+    chop_1d = calculate_chop(high_1d, low_1d, close_1d, 14)
     
-    # Align 1d indicators to 1d timeframe (no alignment needed for same timeframe)
-    donch_upper_1d_aligned = donch_upper_1d
-    donch_lower_1d_aligned = donch_lower_1d
-    ema10_1d_aligned = ema10_1d
-    atr_1d_aligned = atr_1d
+    # Align 1d indicators to 6h timeframe
+    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Align 1w EMA50 to 1d timeframe
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate volume filter (current volume < 0.7x 20-period average = weak pressure)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_weak = volume < (volume_ma * 0.7)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    entry_price = 0.0
-    atr_multiplier = 2.5  # ATR stoploss multiplier
     
     start_idx = 50  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donch_upper_1d_aligned[i]) or 
-            np.isnan(donch_lower_1d_aligned[i]) or 
-            np.isnan(ema10_1d_aligned[i]) or 
-            np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i])):
+        if (np.isnan(pp_1d_aligned[i]) or 
+            np.isnan(r3_1d_aligned[i]) or 
+            np.isnan(s3_1d_aligned[i]) or 
+            np.isnan(chop_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper = donch_upper_1d_aligned[i]
-        lower = donch_lower_1d_aligned[i]
-        ema10 = ema10_1d_aligned[i]
-        atr = atr_1d_aligned[i]
-        ema50 = ema50_1w_aligned[i]
+        vol_weak = volume_weak[i]
+        chop_val = chop_1d_aligned[i]
+        pp = pp_1d_aligned[i]
+        r3 = r3_1d_aligned[i]
+        s3 = s3_1d_aligned[i]
         
-        # Determine 1w trend: price above/below 50 EMA
-        uptrend = price > ema50
-        downtrend = price < ema50
+        # Chop regime: CHOP > 61.8 = ranging (good for mean reversion at pivots)
+        is_choppy = chop_val > 61.8
+        # Exit chop regime: CHOP < 38.2 = trending (avoid false signals)
+        is_trending = chop_val < 38.2
         
         if position == 0:
-            # Long: price breaks above Donchian upper with 1w uptrend
-            if price > upper and uptrend:
+            # Long: price touches S3 with weak volume (selling exhaustion) in choppy market
+            if price <= s3 and vol_weak and is_choppy:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-            # Short: price breaks below Donchian lower with 1w downtrend
-            elif price < lower and downtrend:
+            # Short: price touches R3 with weak volume (buying exhaustion) in choppy market
+            elif price >= r3 and vol_weak and is_choppy:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
         
         elif position == 1:
-            # Exit conditions for long
-            exit_signal = False
-            # Exit if price reverts to EMA10
-            if price <= ema10:
-                exit_signal = True
-            # Exit if ATR stoploss hit (using close price)
-            elif price < entry_price - (atr_multiplier * atr):
-                exit_signal = True
-            
-            if exit_signal:
+            # Exit long: price reverts to midpoint OR chop regime ends (trending)
+            if price >= pp or is_trending:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit conditions for short
-            exit_signal = False
-            # Exit if price reverts to EMA10
-            if price >= ema10:
-                exit_signal = True
-            # Exit if ATR stoploss hit (using close price)
-            elif price > entry_price + (atr_multiplier * atr):
-                exit_signal = True
-            
-            if exit_signal:
+            # Exit short: price reverts to midpoint OR chop regime ends (trending)
+            if price <= pp or is_trending:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -155,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wEMA50_EMA10_ATRStop"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_VolumeWeak_ChopRegime"
+timeframe = "6h"
 leverage = 1.0
