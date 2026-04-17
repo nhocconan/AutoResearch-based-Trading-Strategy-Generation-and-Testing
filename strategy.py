@@ -30,7 +30,7 @@ def generate_signals(prices):
     r4_1d = pivot_1d + 3 * (high_1d - low_1d)
     s4_1d = pivot_1d - 3 * (high_1d - low_1d)
     
-    # Align pivot levels to 6h timeframe
+    # Align pivot levels to 1h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
@@ -50,10 +50,14 @@ def generate_signals(prices):
     ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Calculate 6h ATR for volatility filter
+    # Calculate 1h ATR for volatility filter
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Session filter: 8-20 UTC (pre-market to post-US close)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -69,6 +73,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
+        # Apply session filter
+        if not session_filter[i]:
+            signals[i] = 0.0
+            continue
+        
         # Trend filter: price above weekly EMA50 for long, below for short
         long_trend = close[i] > ema50_1w_aligned[i]
         short_trend = close[i] < ema50_1w_aligned[i]
@@ -79,11 +88,11 @@ def generate_signals(prices):
         if position == 0:
             # Long: price breaks above S3 with trend alignment
             if long_trend and vol_filter and close[i] > s3_1d_aligned[i]:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             # Short: price breaks below R3 with trend alignment
             elif short_trend and vol_filter and close[i] < r3_1d_aligned[i]:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
@@ -92,7 +101,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
             # Exit short: price breaks above R2 or reverses at S4
@@ -100,10 +109,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "6h_Pivot_S3R3_Breakout_WeeklyTrend"
-timeframe = "6h"
+name = "1h_Pivot_S3R3_Breakout_WeeklyTrend_Session"
+timeframe = "1h"
 leverage = 1.0
