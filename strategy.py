@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Donchian20_Breakout_Volume_Trend_1d
-Hypothesis: On 12h timeframe, enter long when price breaks above 20-bar Donchian high with volume confirmation and daily close above daily EMA50; enter short when price breaks below 20-bar Donchian low with volume confirmation and daily close below daily EMA50. Uses daily EMA50 as trend filter to align with higher timeframe trend. Designed for low trade frequency (12-37/year) to minimize fee decay while capturing strong trending moves in both bull and bear markets.
+4h_RSI_Trend_Filter_V1
+Hypothesis: On 4h timeframe, enter long when RSI(14) > 50 with bullish momentum and volume confirmation; enter short when RSI(14) < 50 with bearish momentum and volume confirmation. Uses 1-day EMA50 as trend filter to align with higher timeframe trend. Designed for moderate trade frequency (20-50/year) to capture momentum shifts in both bull and bear markets while minimizing false signals in ranging conditions.
 """
 
 import numpy as np
@@ -10,25 +10,31 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 12h Donchian Channels (20-period) ===
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === RSI(14) ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # === 1d EMA50 trend filter ===
+    # === 1-day EMA50 trend filter ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # === 1d volume average for confirmation ===
+    # === 1-day volume average for confirmation ===
     volume_1d = df_1d['volume'].values
     vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
@@ -36,15 +42,14 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 20  # For Donchian and volume average
+    warmup = 50  # For RSI and volume average
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or
+        if (np.isnan(rsi[i]) or 
             np.isnan(ema50_1d_aligned[i]) or
             np.isnan(vol_avg_20_1d_aligned[i])):
             signals[i] = 0.0
@@ -54,30 +59,30 @@ def generate_signals(prices):
         # Get current daily bar's volume for confirmation
         vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
         
-        # Volume filter: current volume > 1.5x daily average volume
-        vol_filter = vol_1d_current > 1.5 * vol_avg_20_1d_aligned[i]
+        # Volume filter: current volume > 1.3x daily average volume
+        vol_filter = vol_1d_current > 1.3 * vol_avg_20_1d_aligned[i]
         
-        # Daily trend filters
-        daily_uptrend = close[i] > ema50_1d_aligned[i]
-        daily_downtrend = close[i] < ema50_1d_aligned[i]
+        # Momentum filters
+        rsi_bullish = rsi[i] > 50
+        rsi_bearish = rsi[i] < 50
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: break above Donchian high + volume filter + daily uptrend
-            if close[i] > donchian_high[i] and vol_filter and daily_uptrend:
+            # Long: RSI > 50 + volume filter + price above daily EMA50
+            if rsi_bullish and vol_filter and close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: break below Donchian low + volume filter + daily downtrend
-            elif close[i] < donchian_low[i] and vol_filter and daily_downtrend:
+            # Short: RSI < 50 + volume filter + price below daily EMA50
+            elif rsi_bearish and vol_filter and close[i] < ema50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit when price closes below Donchian low (reversal signal)
-            if close[i] < donchian_low[i]:
+            # Exit when RSI falls below 50 (momentum shift)
+            if rsi[i] < 50:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -85,8 +90,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price closes above Donchian high (reversal signal)
-            if close[i] > donchian_high[i]:
+            # Exit when RSI rises above 50 (momentum shift)
+            if rsi[i] > 50:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -95,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Breakout_Volume_Trend_1d"
-timeframe = "12h"
+name = "4h_RSI_Trend_Filter_V1"
+timeframe = "4h"
 leverage = 1.0
