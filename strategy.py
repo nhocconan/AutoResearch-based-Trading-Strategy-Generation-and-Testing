@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Camarilla_Breakout_VolumeFilter
-Strategy: Daily price breakout at weekly Camarilla pivot levels with volume confirmation.
-Long: Price breaks above weekly Camarilla R1 + volume > 1.8x daily average
-Short: Price breaks below weekly Camarilla S1 + volume > 1.8x daily average
-Exit: Price returns to weekly Camarilla pivot midpoint
-Position size: 0.25
-Designed to capture institutional breakout levels with volume validation.
-Timeframe: 1d
+4h_Camarilla_R1S1_Breakout_Volume_Trend
+Strategy: 4-hour Camarilla R1/S1 breakout with volume confirmation and 1d trend filter.
+Long: Price breaks above Camarilla R1 + volume > 1.5x average + price above 1d EMA34
+Short: Price breaks below Camarilla S1 + volume > 1.5x average + price below 1d EMA34
+Exit: Price returns to Camarilla pivot point
+Position size: 0.30
+Designed to capture breakouts aligned with daily trend in both bull and bear markets.
+Timeframe: 4h
 """
 
 import numpy as np
@@ -24,80 +24,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate weekly Camarilla pivot levels from weekly OHLC
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate Camarilla levels (based on previous day's range)
+    # Pivot = (High + Low + Close) / 3
+    # Range = High - Low
+    # R1 = Close + (Range * 1.1 / 12)
+    # S1 = Close - (Range * 1.1 / 12)
     
-    pivot = (high_1w + low_1w + close_1w) / 3
-    range_1w = high_1w - low_1w
+    # Get daily data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Camarilla levels
-    r1 = close_1w + (range_1w * 1.1 / 12)
-    s1 = close_1w - (range_1w * 1.1 / 12)
-    midpoint = (r1 + s1) / 2
+    # Calculate Camarilla levels for each day
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r1_1d = close_1d + (range_1d * 1.1 / 12)
+    s1_1d = close_1d - (range_1d * 1.1 / 12)
+    pivot_point_1d = pivot_1d  # for exit condition
     
-    # Align weekly levels to daily timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    midpoint_aligned = align_htf_to_ltf(prices, df_1w, midpoint)
+    # Align 1d Camarilla levels to 4h timeframe
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_point_1d)
     
-    # Volume confirmation (20-day average)
+    # Calculate daily EMA34 for trend filter
+    close_series_1d = pd.Series(close_1d)
+    ema34_1d = close_series_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume confirmation (20-period MA on 4h)
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # wait for volume MA
+    start_idx = max(34, 1)  # need EMA34 and at least 1 day of data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(midpoint_aligned[i]) or 
+        if (np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(pivot_1d_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or 
             np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.8x 20-day average
-        volume_filter = volume[i] > (1.8 * volume_ma20[i])
+        # Volume filter: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        
+        # Trend filter: price above/below 1d EMA34
+        price_above_ema = close[i] > ema34_1d_aligned[i]
+        price_below_ema = close[i] < ema34_1d_aligned[i]
         
         # Breakout conditions
-        breakout_up = close[i] > r1_aligned[i-1]  # break above previous day's R1
-        breakout_down = close[i] < s1_aligned[i-1]  # break below previous day's S1
+        breakout_up = close[i] > r1_1d_aligned[i]  # break above Camarilla R1
+        breakout_down = close[i] < s1_1d_aligned[i]  # break below Camarilla S1
         
-        # Return to midpoint
-        return_to_mid = abs(close[i] - midpoint_aligned[i]) < 0.15 * (r1_aligned[i] - s1_aligned[i])
+        # Return to pivot point (exit condition)
+        return_to_pivot = abs(close[i] - pivot_1d_aligned[i]) < 0.1 * (r1_1d_aligned[i] - s1_1d_aligned[i])
         
         if position == 0:
-            # Long: breakout above R1 + volume filter
-            if breakout_up and volume_filter:
-                signals[i] = 0.25
+            # Long: breakout up + volume filter + price above EMA
+            if breakout_up and volume_filter and price_above_ema:
+                signals[i] = 0.30
                 position = 1
-            # Short: breakout below S1 + volume filter
-            elif breakout_down and volume_filter:
-                signals[i] = -0.25
+            # Short: breakout down + volume filter + price below EMA
+            elif breakout_down and volume_filter and price_below_ema:
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
-            # Exit long: return to midpoint or break below S1
-            if return_to_mid or breakout_down:
+            # Exit long: return to pivot or break down through S1
+            if return_to_pivot or breakout_down:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Exit short: return to midpoint or break above R1
-            if return_to_mid or breakout_up:
+            # Exit short: return to pivot or break up through R1
+            if return_to_pivot or breakout_up:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "1d_Weekly_Camarilla_Breakout_VolumeFilter"
-timeframe = "1d"
+name = "4h_Camarilla_R1S1_Breakout_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
