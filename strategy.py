@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Camarilla Pivot R1/S1 Breakout with 4h Trend Filter and Session Filter.
-Long when price breaks above R1 AND 4h close > 4h open (bullish 4h candle).
-Short when price breaks below S1 AND 4h close < 4h open (bearish 4h candle).
-Exit when price returns to Camarilla pivot point (PP) or opposite session.
-Uses 4h for trend direction (bullish/bearish candle), 1h for Camarilla calculation and entry timing.
-Session filter: 08-20 UTC to avoid low-volume periods.
-Target: 60-150 total trades over 4 years = 15-37/year for 1h.
+Hypothesis: 12h Donchian(20) breakout with 1d volume spike and chop regime filter.
+Long when price breaks above Donchian upper (20-period high) AND 1d volume > 1.5x 20-period average 
+AND 1d chop > 61.8 (ranging market - mean reversion setup).
+Short when price breaks below Donchian lower (20-period low) AND 1d volume > 1.5x 20-period average 
+AND 1d chop > 61.8 (ranging market - mean reversion setup).
+Exit on opposite Donchian break or when chop < 38.2 (trending market - exit ranges).
+Uses 1d for volume/chop filters to avoid lower-timeframe noise, 12h for Donchian breakouts.
+Target: 50-150 total trades over 4 years (12-37/year). Donchian captures breakouts, 
+volume confirms conviction, chop filter ensures we trade ranges where mean reversion works.
+In bear markets like 2025, ranging behavior increases, making this strategy more relevant.
 """
 
 import numpy as np
@@ -15,99 +18,94 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     
-    # Get 4h data for trend filter (bullish/bearish candle)
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    open_4h = df_4h['open'].values
+    # Get 1d data for volume and chop filters
+    df_1d = get_htf_data(prices, '1d')
+    vol_1d = df_1d['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 4h candle direction: 1 for bullish (close > open), -1 for bearish (close < open), 0 for doji
-    bullish_4h = close_4h > open_4h
-    bearish_4h = close_4h < open_4h
-    candle_dir_4h = np.where(bullish_4h, 1, np.where(bearish_4h, -1, 0))
+    # Calculate 1d volume SMA(20)
+    vol_1d_series = pd.Series(vol_1d)
+    vol_sma_1d = vol_1d_series.rolling(window=20, min_periods=20).mean().values
     
-    # Align 4h candle direction to 1h timeframe
-    candle_dir_4h_aligned = align_htf_to_ltf(prices, df_4h, candle_dir_4h)
+    # Calculate 1d Chopiness Index(14)
+    # CHOP = 100 * log10(sum(ATR(1),14) / (log10(HH(14)-LL(14)) * sqrt(14)))
+    tr1 = np.maximum(high_1d[1:] - low_1d[:-1], 
+                     np.maximum(np.abs(high_1d[1:] - close_1d[:-1]),
+                                np.abs(low_1d[1:] - close_1d[:-1])))
+    tr1 = np.concatenate([[np.nan], tr1])  # align with index 0
+    atr1 = pd.Series(tr1).rolling(window=1, min_periods=1).mean().values  # ATR(1) = TR
+    sum_atr1 = pd.Series(atr1).rolling(window=14, min_periods=14).sum().values
+    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    range_14 = hh_14 - ll_14
+    chop_1d = 100 * np.log10(sum_atr1 / (np.log10(range_14) * np.sqrt(14)))
     
-    # Calculate Camarilla pivots on 1h timeframe using previous bar's OHLC
-    # Camarilla equations:
-    # PP = (High + Low + Close) / 3
-    # R1 = Close + (High - Low) * 1.1 / 12
-    # S1 = Close - (High - Low) * 1.1 / 12
-    # We need previous bar's data to avoid look-ahead
-    pp = (np.roll(high, 1) + np.roll(low, 1) + np.roll(close, 1)) / 3.0
-    r1 = np.roll(close, 1) + (np.roll(high, 1) - np.roll(low, 1)) * 1.1 / 12.0
-    s1 = np.roll(close, 1) - (np.roll(high, 1) - np.roll(low, 1)) * 1.1 / 12.0
+    # Align 1d filters to 12h timeframe
+    vol_sma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_1d)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Set first bar to NaN since we don't have previous bar
-    pp[0] = np.nan
-    r1[0] = np.nan
-    s1[0] = np.nan
+    # Calculate 12h Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donch_hi = high_series.rolling(window=20, min_periods=20).max().values
+    donch_lo = low_series.rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 1  # warmup for pivot calculation
-    
-    # Pre-compute session filter: 08-20 UTC
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    in_session = (hours >= 8) & (hours <= 20)
+    start_idx = 60  # warmup for indicators (max of 20, 14, 20)
     
     for i in range(start_idx, n):
-        # Skip if required data is not available
-        if np.isnan(pp[i]) or np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(candle_dir_4h_aligned[i]):
+        # Skip if any required data is not available
+        if (np.isnan(vol_sma_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or 
+            np.isnan(donch_hi[i]) or np.isnan(donch_lo[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade during 08-20 UTC
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
+        vol_1d_now = vol_1d[i // 16] if i // 16 < len(vol_1d) else vol_1d[-1]  # approximate 12h->1d volume
+        vol_avg = vol_sma_1d_aligned[i]
+        chop = chop_1d_aligned[i]
         price = close[i]
-        pp_val = pp[i]
-        r1_val = r1[i]
-        s1_val = s1[i]
-        trend = candle_dir_4h_aligned[i]  # 1=bullish, -1=bearish, 0=doji
+        upper = donch_hi[i]
+        lower = donch_lo[i]
         
         if position == 0:
-            # Long: price breaks above R1 AND 4h candle is bullish
-            if price > r1_val and trend == 1:
-                signals[i] = 0.20
+            # Long: price > Donchian upper AND volume spike AND chop > 61.8 (range)
+            if price > upper and vol_1d_now > 1.5 * vol_avg and chop > 61.8:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 AND 4h candle is bearish
-            elif price < s1_val and trend == -1:
-                signals[i] = -0.20
+            # Short: price < Donchian lower AND volume spike AND chop > 61.8 (range)
+            elif price < lower and vol_1d_now > 1.5 * vol_avg and chop > 61.8:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to pivot point (PP) or 4h candle turns bearish
-            if price <= pp_val or trend == -1:
+            # Exit long: price < Donchian lower OR chop < 38.2 (trend)
+            if price < lower or chop < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to pivot point (PP) or 4h candle turns bullish
-            if price >= pp_val or trend == 1:
+            # Exit short: price > Donchian upper OR chop < 38.2 (trend)
+            if price > upper or chop < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_R1S1_Breakout_4hCandleTrend_Session"
-timeframe = "1h"
+name = "12h_Donchian20_VolumeSpike_ChopFilter"
+timeframe = "12h"
 leverage = 1.0
