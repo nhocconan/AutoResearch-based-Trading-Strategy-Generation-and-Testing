@@ -13,32 +13,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for daily high/low and range calculation
+    # Get 1d data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate previous day's range (high - low)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    daily_range = prev_high - prev_low
+    # Calculate daily pivot points (standard formula)
+    # P = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    r2 = pivot + (high_1d - low_1d)
+    s2 = pivot - (high_1d - low_1d)
+    r3 = high_1d + 2 * (pivot - low_1d)
+    s3 = low_1d - 2 * (high_1d - pivot)
     
-    # Define breakout levels: today's open +/- 0.5 * previous day's range
-    # Today's open is previous day's close in crypto
-    daily_open = np.roll(close_1d, 1)
-    daily_open[0] = np.nan
-    upper_break = daily_open + 0.5 * daily_range
-    lower_break = daily_open - 0.5 * daily_range
+    # Shift to use previous day's pivots (avoid look-ahead)
+    r1_prev = np.roll(r1, 1)
+    s1_prev = np.roll(s1, 1)
+    r2_prev = np.roll(r2, 1)
+    s2_prev = np.roll(s2, 1)
+    r3_prev = np.roll(r3, 1)
+    s3_prev = np.roll(s3, 1)
+    r1_prev[0] = np.nan
+    s1_prev[0] = np.nan
+    r2_prev[0] = np.nan
+    s2_prev[0] = np.nan
+    r3_prev[0] = np.nan
+    s3_prev[0] = np.nan
     
-    # Align daily breakout levels to 1d timeframe
-    upper_break_1d = align_htf_to_ltf(prices, df_1d, upper_break)
-    lower_break_1d = align_htf_to_ltf(prices, df_1d, lower_break)
+    # Align daily pivot levels to 6h timeframe
+    r1_6h = align_htf_to_ltf(prices, df_1d, r1_prev)
+    s1_6h = align_htf_to_ltf(prices, df_1d, s1_prev)
+    r2_6h = align_htf_to_ltf(prices, df_1d, r2_prev)
+    s2_6h = align_htf_to_ltf(prices, df_1d, s2_prev)
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3_prev)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3_prev)
     
-    # Volume confirmation: current volume > 1.5 * 20-period average
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: current volume > 1.8 * 24-period average (6h * 4 = 24h)
+    volume_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     # ATR filter to avoid low volatility environments
     tr1 = high - low
@@ -54,44 +71,48 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 20  # Need volume MA20 and ATR MA20
+    start_idx = 24  # Need volume MA24 and ATR MA20
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(volume_ma20[i]) or 
+        if (np.isnan(volume_ma24[i]) or 
             np.isnan(atr[i]) or 
             np.isnan(atr_ma20[i]) or 
-            np.isnan(upper_break_1d[i]) or 
-            np.isnan(lower_break_1d[i])):
+            np.isnan(r1_6h[i]) or 
+            np.isnan(s1_6h[i]) or 
+            np.isnan(r2_6h[i]) or 
+            np.isnan(s2_6h[i]) or 
+            np.isnan(r3_6h[i]) or 
+            np.isnan(s3_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        # Volume filter: current volume > 1.8x 24-period average
+        volume_filter = volume[i] > (1.8 * volume_ma24[i])
         # Volatility filter: ATR > ATR MA20 (avoid low volatility)
         volatility_filter = atr[i] > atr_ma20[i]
         
         if position == 0:
-            # Long: price breaks above upper level with volume and volatility
-            if close[i] > upper_break_1d[i] and volume_filter and volatility_filter:
+            # Long: price breaks above R3 with volume and volatility (strong breakout)
+            if close[i] > r3_6h[i] and volume_filter and volatility_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower level with volume and volatility
-            elif close[i] < lower_break_1d[i] and volume_filter and volatility_filter:
+            # Short: price breaks below S3 with volume and volatility (strong breakdown)
+            elif close[i] < s3_6h[i] and volume_filter and volatility_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns below the breakout level or volatility drops
-            if close[i] < upper_break_1d[i] or not volatility_filter:
+            # Exit long: price returns below R1 or volatility drops
+            if close[i] < r1_6h[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns above the breakout level or volatility drops
-            if close[i] > lower_break_1d[i] or not volatility_filter:
+            # Exit short: price returns above S1 or volatility drops
+            if close[i] > s1_6h[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_DailyRangeBreakout_VolVol"
-timeframe = "1d"
+name = "6h_Pivot_R3_S3_Breakout_VolVol"
+timeframe = "6h"
 leverage = 1.0
