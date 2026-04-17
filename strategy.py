@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h strategy using Williams %R on 1-day timeframe with volume confirmation and ATR-based stop.
-- Williams %R measures momentum overbought/oversold levels on daily timeframe
-- Long when Williams %R crosses above -80 (oversold) with volume > 1.5x 20-period volume MA
-- Short when Williams %R crosses below -20 (overbought) with volume > 1.5x 20-period volume MA
-- Exit when Williams %R crosses back through -50 (momentum midpoint)
-- Uses ATR(14) for dynamic stoploss: exit when price moves against position by 2x ATR
-- Position size 0.25 to manage drawdown in volatile markets
-- Designed for 4h timeframe with daily momentum filter to reduce whipsaw
+Hypothesis: 1d strategy using 1-week Donchian channel breakout with volume confirmation and ADX trend filter.
+- Long when price breaks above weekly Donchian high (20-period) with volume > 1.5x 20-day volume MA and ADX > 25
+- Short when price breaks below weekly Donchian low (20-period) with volume > 1.5x 20-day volume MA and ADX > 25
+- Exit when price returns to weekly Donchian midpoint or ADX < 20 (trend weakening)
+- Uses weekly timeframe for structure to avoid whipsaws, daily for execution
+- Designed for low trade frequency (target: 20-50 trades over 4 years) to minimize fee drag
 """
 
 import numpy as np
@@ -16,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,86 +22,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for Williams %R calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get weekly data for Donchian channels and ADX
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 30:
         return np.zeros(n)
     
-    # Calculate Williams %R on 1-day data: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - df_1d['close']) / (highest_high - lowest_low)
-    williams_r = williams_r.replace([np.inf, -np.inf], np.nan).fillna(50).values  # neutral when undefined
+    # Weekly Donchian channels (20-period)
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    donchian_high = pd.Series(weekly_high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(weekly_low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Align Williams %R to 4h timeframe (with 1-bar delay for completed daily bar)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Align weekly Donchian levels to daily
+    donchian_high_daily = align_htf_to_ltf(prices, df_weekly, donchian_high)
+    donchian_low_daily = align_htf_to_ltf(prices, df_weekly, donchian_low)
+    donchian_mid_daily = align_htf_to_ltf(prices, df_weekly, donchian_mid)
     
-    # Volume confirmation: 20-period volume MA on 4h data
+    # Weekly ADX for trend strength (14-period)
+    weekly_close = df_weekly['close'].values
+    # Calculate True Range components
+    tr1 = np.abs(weekly_high[1:] - weekly_low[1:])
+    tr2 = np.abs(weekly_high[1:] - weekly_close[:-1])
+    tr3 = np.abs(weekly_low[1:] - weekly_close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Directional Movement
+    dm_plus = np.where((weekly_high[1:] - weekly_high[:-1]) > (weekly_low[:-1] - weekly_low[1:]), 
+                       np.maximum(weekly_high[1:] - weekly_high[:-1], 0), 0)
+    dm_minus = np.where((weekly_low[:-1] - weekly_low[1:]) > (weekly_high[1:] - weekly_high[:-1]), 
+                        np.maximum(weekly_low[:-1] - weekly_low[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
+    # Smoothed values (14-period)
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    # DI and DX
+    di_plus = 100 * dm_plus14 / tr14
+    di_minus = 100 * dm_minus14 / tr14
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_weekly, adx)
+    
+    # Daily volume confirmation: 20-day volume MA
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    
-    # ATR for dynamic stoploss
-    atr_period = 14
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr2.iloc[0] = tr1.iloc[0]  # first period
-    tr3.iloc[0] = tr1.iloc[0]
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    entry_price = 0.0
     
-    start_idx = max(20, 14)  # warmup for volume MA and Williams %R
+    start_idx = 40  # warmup for weekly indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(volume_ma_20.iloc[i]) or 
-            np.isnan(williams_r_aligned[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(donchian_high_daily[i]) or np.isnan(donchian_low_daily[i]) or
+            np.isnan(donchian_mid_daily[i]) or np.isnan(adx_aligned[i]) or
+            np.isnan(volume_ma_20.iloc[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_ma = volume_ma_20.iloc[i]
-        wr = williams_r_aligned[i]
-        atr_val = atr[i]
-        
-        # Dynamic stoploss based on ATR
-        if position == 1 and price < entry_price - 2.0 * atr_val:
-            signals[i] = 0.0
-            position = 0
-            continue
-        elif position == -1 and price > entry_price + 2.0 * atr_val:
-            signals[i] = 0.0
-            position = 0
-            continue
+        adx_val = adx_aligned[i]
         
         if position == 0:
-            # Look for Williams %R signals with volume confirmation
-            # Long: Williams %R crosses above -80 from below (bullish momentum)
-            if i > start_idx and williams_r_aligned[i-1] <= -80 and wr > -80 and vol > 1.5 * vol_ma:
+            # Look for breakout with volume confirmation and strong trend
+            # Long: price breaks above weekly Donchian high
+            if price > donchian_high_daily[i] and vol > 1.5 * vol_ma and adx_val > 25:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-            # Short: Williams %R crosses below -20 from above (bearish momentum)
-            elif i > start_idx and williams_r_aligned[i-1] >= -20 and wr < -20 and vol > 1.5 * vol_ma:
+            # Short: price breaks below weekly Donchian low
+            elif price < donchian_low_daily[i] and vol > 1.5 * vol_ma and adx_val > 25:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
         
         elif position == 1:
-            # Exit long when Williams %R crosses below -50 (momentum fading)
-            if wr < -50:
+            # Long: exit when price returns to midpoint or trend weakens
+            if price < donchian_mid_daily[i] or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when Williams %R crosses above -50 (momentum fading)
-            if wr > -50:
+            # Short: exit when price returns to midpoint or trend weakens
+            if price > donchian_mid_daily[i] or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -111,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_Volume_ATRStop"
-timeframe = "4h"
+name = "1d_WeeklyDonchian_Breakout_Volume_ADX"
+timeframe = "1d"
 leverage = 1.0
