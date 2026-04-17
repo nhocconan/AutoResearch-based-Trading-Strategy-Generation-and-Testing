@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_VolumeSpike_Regime
-Strategy: Use TRIX momentum with volume spike confirmation and choppiness regime filter.
-Long: TRIX > 0 + volume > 1.5x average + CHOP > 61.8 (ranging market)
-Short: TRIX < 0 + volume > 1.5x average + CHOP > 61.8 (ranging market)
-Exit: TRIX crosses zero or volatility breaks out (CHOP < 38.2)
-Position size: 0.25
-Designed to capture mean-reversion moves in ranging markets with momentum confirmation.
-Timeframe: 4h
+1h_4h_1d_CCI_MeanReversion
+Strategy: Mean reversion at CCI extremes with trend filter.
+- Uses 4h CCI(20) for mean reversion signals (long when CCI < -100, short when CCI > +100)
+- 1d EMA34/100 filter to align with higher timeframe trend
+- Volume confirmation (1.5x 20-bar average)
+- Session filter: 08-20 UTC to avoid low liquidity periods
+- Fixed position size: 0.20
+Designed to work in both bull and bear markets by fading extremes in the direction of higher timeframe trend.
+Timeframe: 1h
 """
 
 import numpy as np
@@ -16,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,85 +25,101 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate TRIX (15-period EMA of EMA of EMA of ROC)
-    # TRIX = EMA(EMA(EMA(ROC, 15), 15), 15)
-    roc = np.diff(np.log(close), prepend=np.log(close[0])) * 100  # approximate ROC %
+    # Calculate 4h CCI(20)
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Three-fold EMA smoothing
-    ema1 = pd.Series(roc).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = ema3
+    # Typical price and moving average
+    tp_4h = (high_4h + low_4h + close_4h) / 3.0
+    tp_ma = pd.Series(tp_4h).rolling(window=20, min_periods=20).mean().values
+    # Mean deviation
+    tp_md = pd.Series(tp_4h).rolling(window=20, min_periods=20).apply(
+        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
+    ).values
+    # CCI calculation
+    cci_4h = (tp_4h - tp_ma) / (0.015 * tp_md)
+    cci_4h = np.where(tp_md > 0, cci_4h, 0.0)  # Avoid division by zero
     
-    # Volume confirmation (20-period average)
+    # Align 4h CCI to 1h timeframe
+    cci_4h_aligned = align_htf_to_ltf(prices, df_4h, cci_4h)
+    
+    # Calculate 1d EMA34 and EMA100 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    
+    close_series_1d = pd.Series(close_1d)
+    ema34_1d = close_series_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema100_1d = close_series_1d.ewm(span=100, adjust=False, min_periods=100).mean().values
+    
+    # Align 1d EMAs to 1h timeframe
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema100_1d)
+    
+    # Volume confirmation (1.5x 20-bar average)
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Choppiness Index (14-period) for regime detection
-    # CHOP = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(n)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = high[0] - low[0]  # first TR
-    
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    sum_atr14 = pd.Series(atr14).rolling(window=14, min_periods=14).sum().values
-    
-    max_high14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    range14 = max_high14 - min_low14
-    
-    # Avoid division by zero
-    chop = np.full_like(close, 50.0)  # default to neutral
-    mask = (range14 > 0) & (~np.isnan(range14))
-    chop[mask] = 100 * np.log10(sum_atr14[mask] / range14[mask]) / np.log10(14)
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(15, 20, 14)  # max of TRIX, volume MA, CHOP periods
+    start_idx = max(100, 20)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(trix[i]) or np.isnan(volume_ma20[i]) or 
-            np.isnan(chop[i])):
+        if (np.isnan(cci_4h_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(ema100_1d_aligned[i]) or np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        # Apply filters
+        vol_filter = volume[i] > (1.5 * volume_ma20[i])
+        sess_filter = session_filter[i]
         
-        # Regime filter: CHOP > 61.8 indicates ranging market (good for mean reversion)
-        ranging_filter = chop[i] > 61.8
+        if not (vol_filter and sess_filter):
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+            continue
+        
+        # Trend filter from 1d EMAs
+        uptrend = ema34_1d_aligned[i] > ema100_1d_aligned[i]
+        downtrend = ema34_1d_aligned[i] < ema100_1d_aligned[i]
+        
+        # CCI mean reversion signals
+        cci_oversold = cci_4h_aligned[i] < -100
+        cci_overbought = cci_4h_aligned[i] > 100
         
         if position == 0:
-            # Long: TRIX positive + volume spike + ranging market
-            if trix[i] > 0 and volume_filter and ranging_filter:
-                signals[i] = 0.25
+            # Long: CCI oversold + uptrend
+            if cci_oversold and uptrend:
+                signals[i] = 0.20
                 position = 1
-            # Short: TRIX negative + volume spike + ranging market
-            elif trix[i] < 0 and volume_filter and ranging_filter:
-                signals[i] = -0.25
+            # Short: CCI overbought + downtrend
+            elif cci_overbought and downtrend:
+                signals[i] = -0.20
                 position = -1
-        
+            else:
+                signals[i] = 0.0
         elif position == 1:
-            # Exit long: TRIX turns negative OR market breaks out of range (CHOP < 38.2)
-            if trix[i] <= 0 or chop[i] < 38.2:
+            # Exit long: CCI returns to neutral or trend changes
+            if cci_4h_aligned[i] >= -50 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
-        
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: TRIX turns positive OR market breaks out of range (CHOP < 38.2)
-            if trix[i] >= 0 or chop[i] < 38.2:
+            # Exit short: CCI returns to neutral or trend changes
+            if cci_4h_aligned[i] <= 50 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_TRIX_VolumeSpike_Regime"
-timeframe = "4h"
+name = "1h_4h_1d_CCI_MeanReversion"
+timeframe = "1h"
 leverage = 1.0
