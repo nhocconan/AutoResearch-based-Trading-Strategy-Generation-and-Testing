@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with Volume Spike and ADX Trend Filter
-Long: Price breaks above Donchian(20) high + volume > 2x 20-period volume MA + ADX > 25
-Short: Price breaks below Donchian(20) low + volume > 2x 20-period volume MA + ADX > 25
-Exit: Opposite Donchian break or ADX < 20 (trend weakens)
-ATR-based stop: exit if price moves against position by 2.5x ATR(20)
-Target: 20-30 trades/year per symbol
+6h Weekly Pivot Reversal with Volume Confirmation
+Hypothesis: Price reverses at weekly pivot levels (R1/S1, R2/S2) on 6h timeframe with volume confirmation.
+Works in bull/bear: Mean reversion at extreme weekly levels, with volume filter to avoid false signals.
+Targets 15-30 trades/year per symbol.
 """
 
 import numpy as np
@@ -22,121 +20,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period high/low)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Get weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
     
-    # Volume confirmation: 20-period volume moving average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate weekly pivot points (using prior week's OHLC)
+    # P = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    weekly_high = df_1w['high'].shift(1)  # Prior week's high
+    weekly_low = df_1w['low'].shift(1)    # Prior week's low
+    weekly_close = df_1w['close'].shift(1) # Prior week's close
     
-    # ADX calculation (14-period)
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(high[i] - high[i-1], 0) if high[i] - high[i-1] > low[i-1] - low[i] else 0
-            minus_dm[i] = max(low[i-1] - low[i], 0) if low[i-1] - low[i] > high[i] - high[i-1] else 0
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Smooth using Wilder's smoothing (equivalent to EMA with alpha=1/period)
-        atr = np.zeros_like(tr)
-        atr[period] = np.mean(tr[1:period+1])
-        for i in range(period+1, len(tr)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        
-        plus_di = np.zeros_like(high)
-        minus_di = np.zeros_like(high)
-        dx = np.zeros_like(high)
-        
-        if atr[period] > 0:
-            plus_dm_sm = np.zeros_like(high)
-            minus_dm_sm = np.zeros_like(high)
-            plus_dm_sm[period] = np.mean(plus_dm[1:period+1])
-            minus_dm_sm[period] = np.mean(minus_dm[1:period+1])
-            
-            for i in range(period+1, len(high)):
-                plus_dm_sm[i] = (plus_dm_sm[i-1] * (period-1) + plus_dm[i]) / period
-                minus_dm_sm[i] = (minus_dm_sm[i-1] * (period-1) + minus_dm[i]) / period
-                
-                plus_di[i] = 100 * plus_dm_sm[i] / atr[i]
-                minus_di[i] = 100 * minus_dm_sm[i] / atr[i]
-                dx[i] = (abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])) * 100
-        
-        # ADX is smoothed DX
-        adx = np.zeros_like(high)
-        adx[2*period] = np.mean(dx[period+1:2*period+1]) if (2*period+1) <= len(dx) else 0
-        for i in range(2*period+1, len(dx)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
+    pivot_point = (weekly_high + weekly_low + weekly_close) / 3
+    r1 = 2 * pivot_point - weekly_low
+    s1 = 2 * pivot_point - weekly_high
+    r2 = pivot_point + (weekly_high - weekly_low)
+    s2 = pivot_point - (weekly_high - weekly_low)
     
-    adx = calculate_adx(high, low, close, 14)
+    # Align weekly pivot levels to 6h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1.values)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2.values)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2.values)
     
-    # ATR for stop loss (20-period)
-    def calculate_atr(high, low, close, period=20):
-        tr = np.zeros_like(high)
-        for i in range(1, len(high)):
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        atr = np.zeros_like(high)
-        atr[period] = np.mean(tr[1:period+1])
-        for i in range(period+1, len(tr)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        return atr
-    
-    atr = calculate_atr(high, low, close, 20)
+    # Volume confirmation: 6h volume > 1.5x 24-period MA
+    volume_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean()
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
-    entry_price = 0.0
     
-    start_idx = 40  # warmup for ADX/ATR
+    start_idx = 24  # warmup for volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(adx[i]) or np.isnan(atr[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
+        vol_ma = volume_ma[i]
         
-        # Exit conditions first
-        if position == 1:
-            # Long exit: price breaks below Donchian low OR ADX weakens OR ATR stop
-            if price < lowest_low[i] or adx[i] < 20 or price < entry_price - 2.5 * atr[i]:
+        # Volume filter: require volume > 1.5x average
+        volume_ok = vol > 1.5 * vol_ma
+        
+        if position == 0:
+            # Long reversal signals: price at or below S1/S2 with volume
+            if price <= s1_aligned[i] and volume_ok:
+                signals[i] = 0.25
+                position = 1
+            elif price <= s2_aligned[i] and volume_ok:
+                signals[i] = 0.25
+                position = 1
+            # Short reversal signals: price at or above R1/R2 with volume
+            elif price >= r1_aligned[i] and volume_ok:
+                signals[i] = -0.25
+                position = -1
+            elif price >= r2_aligned[i] and volume_ok:
+                signals[i] = -0.25
+                position = -1
+        
+        elif position == 1:
+            # Long exit: price reaches pivot point or R1
+            if price >= pivot_point[i] or price >= r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above Donchian high OR ADX weakens OR ATR stop
-            if price > highest_high[i] or adx[i] < 20 or price > entry_price + 2.5 * atr[i]:
+            # Short exit: price reaches pivot point or S1
+            if price <= pivot_point[i] or price <= s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
-        
-        else:  # position == 0
-            # Long entry: break above Donchian high + volume spike + strong trend
-            if price > highest_high[i] and vol > 2.0 * vol_ma[i] and adx[i] > 25:
-                signals[i] = 0.25
-                position = 1
-                entry_price = price
-            # Short entry: break below Donchian low + volume spike + strong trend
-            elif price < lowest_low[i] and vol > 2.0 * vol_ma[i] and adx[i] > 25:
-                signals[i] = -0.25
-                position = -1
-                entry_price = price
-            else:
-                signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian20_VolumeSpike_ADX25_ATRStop"
-timeframe = "4h"
+name = "6h_WeeklyPivot_Reversal_Volume"
+timeframe = "6h"
 leverage = 1.0
