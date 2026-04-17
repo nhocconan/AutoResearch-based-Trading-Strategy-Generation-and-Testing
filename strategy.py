@@ -1,12 +1,14 @@
+# 6H_1D_RSI_MEANREV_OVERSOLD
+
 #!/usr/bin/env python3
 """
-1h strategy with 4h and 1d filters for trend and volatility regime.
-Trend: 4h EMA21 > EMA50 (bull) or < (bear).
-Volatility regime: 1d ATR(14) > SMA(50) of ATR = high vol (breakout mode).
-Entry: On 1h, price breaks 4h Donchian(20) high/low in trend direction with volume > 1.5x 20-bar avg.
-Exit: Opposite Donchian break or time-based (48 bars).
-Only trade 08-20 UTC to avoid low-liquidity hours.
-Position size: 0.20.
+Hypothesis: On 6-hour timeframe, RSI(14) extreme readings with daily trend filter
+capture mean-reversion opportunities in both bull and bear markets.
+- Long when RSI < 30 and price > daily EMA50 (oversold in uptrend)
+- Short when RSI > 70 and price < daily EMA50 (overbought in downtrend)
+- Exit when RSI returns to neutral zone (40-60)
+Uses daily EMA50 for trend filter to avoid counter-trend trades.
+Designed for ~25-40 trades/year with discrete sizing to minimize fee drag.
 """
 
 import numpy as np
@@ -15,105 +17,75 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 4h data for trend and Donchian
-    df_4h = get_htf_data(prices, '4h')
-    # 4h EMA21 and EMA50 for trend
-    ema21_4h = pd.Series(df_4h['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # 4h Donchian(20) for breakout levels
-    donch_high_4h = pd.Series(df_4h['high']).rolling(window=20, min_periods=20).max().values
-    donch_low_4h = pd.Series(df_4h['low']).rolling(window=20, min_periods=20).min().values
-    
-    # Get 1d data for volatility regime
+    # Get daily data for EMA50 and RSI calculation
     df_1d = get_htf_data(prices, '1d')
-    # 1d ATR(14)
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr14_1d = tr.rolling(window=14, min_periods=14).mean().values
-    atr_ma50_1d = pd.Series(atr14_1d).rolling(window=50, min_periods=50).mean().values
-    high_vol = atr14_1d > atr_ma50_1d  # high volatility regime
     
-    # Align all 4h and 1d factors to 1h
-    ema21_4h_1h = align_htf_to_ltf(prices, df_4h, ema21_4h)
-    ema50_4h_1h = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    donch_high_4h_1h = align_htf_to_ltf(prices, df_4h, donch_high_4h)
-    donch_low_4h_1h = align_htf_to_ltf(prices, df_4h, donch_low_4h)
-    high_vol_1h = align_htf_to_ltf(prices, df_1d, high_vol)
+    # Calculate daily RSI(14)
+    delta = pd.Series(df_1d['close']).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # 1h volume filter
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    # Calculate daily EMA50 for trend filter
+    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Align daily indicators to 6h timeframe
+    rsi_6h = align_htf_to_ltf(prices, df_1d, rsi_values)
+    ema_50_6h = align_htf_to_ltf(prices, df_1d, ema_50)
     
     signals = np.zeros(n)
-    position = 0  # -1 short, 0 flat, 1 long
-    bars_since_entry = 0
+    position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = max(100, 50)  # warmup
+    start_idx = 60  # warmup for daily indicators
     
     for i in range(start_idx, n):
-        if not in_session[i]:
+        if np.isnan(rsi_6h[i]) or np.isnan(ema_50_6h[i]):
             signals[i] = 0.0
-            position = 0
-            bars_since_entry = 0
             continue
             
-        if np.any([np.isnan(ema21_4h_1h[i]), np.isnan(ema50_4h_1h[i]),
-                   np.isnan(donch_high_4h_1h[i]), np.isnan(donch_low_4h_1h[i]),
-                   np.isnan(high_vol_1h[i]), np.isnan(vol_ma_20.iloc[i])]):
-            signals[i] = 0.0
-            continue
-        
         price = close[i]
-        vol = volume[i]
-        vol_ma = vol_ma_20.iloc[i]
-        trend_up = ema21_4h_1h[i] > ema50_4h_1h[i]
-        trend_down = ema21_4h_1h[i] < ema50_4h_1h[i]
-        vol_ok = vol > 1.5 * vol_ma
+        rsi_val = rsi_6h[i]
+        ema_val = ema_50_6h[i]
         
         if position == 0:
-            bars_since_entry = 0
-            # Long: uptrend, high vol, break above 4h Donchian high
-            if trend_up and high_vol_1h[i] and price > donch_high_4h_1h[i] and vol_ok:
-                signals[i] = 0.20
+            # Long: RSI oversold (<30) and price above daily EMA50 (uptrend)
+            if rsi_val < 30 and price > ema_val:
+                signals[i] = 0.25
                 position = 1
-            # Short: downtrend, high vol, break below 4h Donchian low
-            elif trend_down and high_vol_1h[i] and price < donch_low_4h_1h[i] and vol_ok:
-                signals[i] = -0.20
+            # Short: RSI overbought (>70) and price below daily EMA50 (downtrend)
+            elif rsi_val > 70 and price < ema_val:
+                signals[i] = -0.25
                 position = -1
-        
+                
         elif position == 1:
-            bars_since_entry += 1
-            # Exit: downtrend, break below 4h Donchian low, or timeout (48 bars)
-            if (not trend_up and price < donch_low_4h_1h[i]) or bars_since_entry >= 48:
+            # Long exit: RSI returns to neutral (>=40) or turns overbought
+            if rsi_val >= 40:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
-        
+                signals[i] = 0.25
+                
         elif position == -1:
-            bars_since_entry += 1
-            # Exit: uptrend, break above 4h Donchian high, or timeout (48 bars)
-            if (not trend_down and price > donch_high_4h_1h[i]) or bars_since_entry >= 48:
+            # Short exit: RSI returns to neutral (<=60) or turns oversold
+            if rsi_val <= 60:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_4hTrend_1dVol_Breakout"
-timeframe = "1h"
+name = "6H_1D_RSI_MEANREV_OVERSOLD"
+timeframe = "6h"
 leverage = 1.0
