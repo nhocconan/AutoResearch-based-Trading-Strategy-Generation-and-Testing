@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_ForceIndex_Combo
-Hypothesis: Elder Ray (Bull/Bear Power) identifies trend strength via EMA13 deviation, 
-while Force Index (FI) confirms momentum with volume. Combined, they filter false 
-breakouts in chop and capture sustained moves. Works in bull via upward FI divergence, 
-in bear via downward FI divergence. Uses 1w trend filter to avoid counter-trend trades.
+1d_KAMA_Trend_WeeklyTrend_Filter
+Hypothesis: Daily KAMA trend with weekly trend filter to avoid whipsaw in choppy markets.
+Long when KAMA slope turns up + price > KAMA + weekly close > weekly EMA34.
+Short when KAMA slope turns down + price < KAMA + weekly close < weekly EMA34.
+Exit on opposite signal. Position size: ±0.25. Designed to work in both bull and bear regimes.
 """
 
 import numpy as np
@@ -21,75 +21,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate EMA13 for Elder Ray
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate KAMA (Kaufman Adaptive Moving Average)
+    def kama(close, er_length=10, fast=2, slow=30):
+        change = np.abs(np.diff(close, prepend=close[0]))
+        volatility = np.abs(np.diff(close))
+        er = np.zeros_like(close)
+        for i in range(1, len(close)):
+            if volatility[i-er_length+1:i+1].sum() > 0:
+                er[i] = change[i-er_length+1:i+1].sum() / volatility[i-er_length+1:i+1].sum()
+            else:
+                er[i] = 0
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        kama = np.zeros_like(close)
+        kama[0] = close[0]
+        for i in range(1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    # Elder Ray components
-    bull_power = high - ema13
-    bear_power = low - ema13
+    kama_vals = kama(close, 10, 2, 30)
     
-    # Force Index (1-period)
-    price_change = np.diff(close, prepend=close[0])
-    fi_raw = price_change * volume
-    fi_smooth = pd.Series(fi_raw).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate KAMA slope (1-period change)
+    kama_slope = np.diff(kama_vals, prepend=0)
     
-    # Get 1w data for trend filter
+    # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # Calculate 1w EMA40 for trend filter
+    # Calculate weekly EMA34 for trend filter
     close_series_1w = pd.Series(close_1w)
-    ema40_1w = close_series_1w.ewm(span=40, adjust=False, min_periods=40).mean().values
+    ema34_1w = close_series_1w.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1w EMA to 6h timeframe
-    ema40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema40_1w)
+    # Align weekly EMA to daily timeframe
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = max(13, 13)  # EMA13, FI smooth
+    start_idx = max(10, 34)  # KAMA and weekly EMA34
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema13[i]) or 
-            np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or 
-            np.isnan(fi_smooth[i]) or 
-            np.isnan(ema40_1w_aligned[i])):
+        if (np.isnan(kama_vals[i]) or 
+            np.isnan(kama_slope[i]) or 
+            np.isnan(ema34_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Elder Ray signals: bull power > 0 and bear power < 0 indicates trend
-        # But we use zero-crossing for early signals
-        bull_power_cross_up = bull_power[i] > 0 and bull_power[i-1] <= 0
-        bear_power_cross_down = bear_power[i] < 0 and bear_power[i-1] >= 0
-        
-        # Force Index signals: rising FI confirms bullish momentum, falling FI confirms bearish
-        fi_rising = fi_smooth[i] > fi_smooth[i-1]
-        fi_falling = fi_smooth[i] < fi_smooth[i-1]
+        # KAMA-based signals
+        kama_bullish = kama_slope[i] > 0 and close[i] > kama_vals[i]
+        kama_bearish = kama_slope[i] < 0 and close[i] < kama_vals[i]
         
         if position == 0:
-            # Long: bull power crosses above zero + FI rising + 1w uptrend
-            if bull_power_cross_up and fi_rising and close[i] > ema40_1w_aligned[i]:
+            # Long: KAMA bullish + weekly uptrend
+            if kama_bullish and close[i] > ema34_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: bear power crosses below zero + FI falling + 1w downtrend
-            elif bear_power_cross_down and fi_falling and close[i] < ema40_1w_aligned[i]:
+            # Short: KAMA bearish + weekly downtrend
+            elif kama_bearish and close[i] < ema34_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: bear power crosses above zero OR FI turns negative
-            if bear_power[i] > 0 or fi_smooth[i] < 0:
+            # Exit long: KAMA turns bearish
+            if kama_bearish:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bull power crosses below zero OR FI turns positive
-            if bull_power[i] < 0 or fi_smooth[i] > 0:
+            # Exit short: KAMA turns bullish
+            if kama_bullish:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_ForceIndex_Combo"
-timeframe = "6h"
+name = "1d_KAMA_Trend_WeeklyTrend_Filter"
+timeframe = "1d"
 leverage = 1.0
