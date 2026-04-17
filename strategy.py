@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V1
-12-hour strategy using Camarilla pivot levels (R1/S1) from 1d with volume confirmation and ATR filter.
-Enters long when price breaks above R1 with volume above average and ATR-based volatility filter.
-Enters short when price breaks below S1 with volume above average and ATR-based volatility filter.
-Exits when price returns to the pivot point (PP) or ATR filter fails.
-Uses 1d ATR for volatility regime filter to avoid whipsaws in low volatility.
-Target: 50-150 total trades over 4 years (12-37/year).
+4h_Donchian20_Breakout_Volume_Trend_Filter_v1
+4h strategy using Donchian channel breakout with volume confirmation and EMA trend filter.
+Enters long when price breaks above Donchian upper band with volume above average and EMA(50) rising.
+Enters short when price breaks below Donchian lower band with volume above average and EMA(50) falling.
+Exits when price returns to the Donchian middle (mean) or trend filter fails.
+Uses 1d EMA(50) as higher timeframe trend filter to avoid counter-trend trades.
+Target: 100-200 total trades over 4 years (25-50/year).
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,94 +23,72 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Calculate 1d Camarilla Pivot Levels ===
+    # === Calculate Donchian Channel (20) on 4h ===
+    # Upper band: 20-period high
+    upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    # Lower band: 20-period low
+    lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Middle band: average of upper and lower
+    middle = (upper + lower) / 2
+    
+    # === Calculate 1d EMA(50) for Trend Filter ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Trend: 1 if EMA rising, -1 if falling
+    ema_trend = np.where(ema_50_1d_aligned > np.roll(ema_50_1d_aligned, 1), 1, -1)
+    ema_trend[0] = 1  # initialize
     
-    # Camarilla pivot calculation
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    
-    # Resistance and support levels
-    R1 = pivot + (range_1d * 1.1 / 12)
-    S1 = pivot - (range_1d * 1.1 / 12)
-    R4 = pivot + (range_1d * 1.1 / 2)
-    S4 = pivot - (range_1d * 1.1 / 2)
-    
-    # Align Camarilla levels to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
-    
-    # === 1d ATR for Volatility Filter ===
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr[0] = high_1d[0] - low_1d[0]
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma_1d = pd.Series(atr_1d).rolling(window=10, min_periods=10).mean().values
-    atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
-    
-    # === 1d Volume for Confirmation ===
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # === 4h Volume for Confirmation ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 30
+    warmup = 50
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or 
-            np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or 
-            np.isnan(atr_ma_1d_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(upper[i]) or 
+            np.isnan(lower[i]) or 
+            np.isnan(middle[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Get current 12h bar's volume for confirmation
-        vol_12h_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
-        vol_confirmed = vol_12h_current > 1.5 * vol_ma_1d_aligned[i]
-        
-        # Volatility filter: only trade when ATR is above its MA (avoid low volatility)
-        vol_filter = atr_1d[i] > atr_ma_1d_aligned[i]
+        # Volume confirmation: current volume above average
+        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         # Breakout conditions
-        breakout_long = close[i] > R1_aligned[i]
-        breakout_short = close[i] < S1_aligned[i]
+        breakout_long = close[i] > upper[i]
+        breakout_short = close[i] < lower[i]
         
-        # Reversion to pivot (exit condition)
-        revert_to_pivot = (abs(close[i] - pivot_aligned[i]) < 0.001 * pivot_aligned[i])
+        # Return to middle (exit condition)
+        return_to_middle = abs(close[i] - middle[i]) < 0.001 * middle[i]
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: break above R1 with volume and volatility filter
-            if breakout_long and vol_confirmed and vol_filter:
+            # Long: break above upper with volume and uptrend
+            if breakout_long and vol_confirmed and ema_trend[i] == 1:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: break below S1 with volume and volatility filter
-            elif breakout_short and vol_confirmed and vol_filter:
+            # Short: break below lower with volume and downtrend
+            elif breakout_short and vol_confirmed and ema_trend[i] == -1:
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price returns to pivot OR volatility filter fails
-            if revert_to_pivot or not vol_filter:
+            # Exit long: price returns to middle OR trend turns down
+            if return_to_middle or ema_trend[i] == -1:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -118,8 +96,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to pivot OR volatility filter fails
-            if revert_to_pivot or not vol_filter:
+            # Exit short: price returns to middle OR trend turns up
+            if return_to_middle or ema_trend[i] == 1:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -128,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_Volume_Trend_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
