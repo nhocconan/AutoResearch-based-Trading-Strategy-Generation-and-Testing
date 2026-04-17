@@ -1,3 +1,9 @@
+# 6h_Ichimoku_Kumo_Twist_Trend_Filter_v1
+# Ichimoku system with Kumo twist detection and trend filter on 6h timeframe
+# Uses TK cross + cloud color + Kumo twist (Senkou Span A/B cross) for high-probability entries
+# Designed to work in both bull and bear markets by filtering with trend direction
+# Target: 50-150 total trades over 4 years (12-37/year)
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,97 +19,149 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Weekly Donchian Channel (20-period) ===
+    # === 1d Ichimoku Components ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 20-period highest high and lowest low
-    highest_high = np.full_like(high_1d, np.nan)
-    lowest_low = np.full_like(low_1d, np.nan)
-    period = 20
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period_tenkan = 9
+    highest_high_tenkan = np.full_like(high_1d, np.nan)
+    lowest_low_tenkan = np.full_like(low_1d, np.nan)
     for i in range(len(high_1d)):
-        if i >= period - 1:
-            highest_high[i] = np.max(high_1d[i-(period-1):i+1])
-            lowest_low[i] = np.min(low_1d[i-(period-1):i+1])
+        if i >= period_tenkan - 1:
+            highest_high_tenkan[i] = np.max(high_1d[i-(period_tenkan-1):i+1])
+            lowest_low_tenkan[i] = np.min(low_1d[i-(period_tenkan-1):i+1])
+        elif i > 0:
+            highest_high_tenkan[i] = np.max(high_1d[0:i+1])
+            lowest_low_tenkan[i] = np.min(low_1d[0:i+1])
         else:
-            highest_high[i] = np.max(high_1d[0:i+1]) if i >= 0 else high_1d[0]
-            lowest_low[i] = np.min(low_1d[0:i+1]) if i >= 0 else low_1d[0]
+            highest_high_tenkan[i] = high_1d[0]
+            lowest_low_tenkan[i] = low_1d[0]
     
-    # === 1d RSI (14-period) ===
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    tenkan_sen = np.full_like(high_1d, np.nan)
+    for i in range(len(high_1d)):
+        if not (np.isnan(highest_high_tenkan[i]) or np.isnan(lowest_low_tenkan[i])):
+            tenkan_sen[i] = (highest_high_tenkan[i] + lowest_low_tenkan[i]) / 2
     
-    # Wilder's smoothing
-    avg_gain = np.full_like(gain, np.nan)
-    avg_loss = np.full_like(loss, np.nan)
-    rsi_period = 14
-    for i in range(len(gain)):
-        if i < rsi_period:
-            if i == 0:
-                avg_gain[i] = gain[i]
-                avg_loss[i] = loss[i]
-            else:
-                avg_gain[i] = (avg_gain[i-1] * (i-1) + gain[i]) / i if i > 0 else gain[i]
-                avg_loss[i] = (avg_loss[i-1] * (i-1) + loss[i]) / i if i > 0 else loss[i]
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period_kijun = 26
+    highest_high_kijun = np.full_like(high_1d, np.nan)
+    lowest_low_kijun = np.full_like(low_1d, np.nan)
+    for i in range(len(high_1d)):
+        if i >= period_kijun - 1:
+            highest_high_kijun[i] = np.max(high_1d[i-(period_kijun-1):i+1])
+            lowest_low_kijun[i] = np.min(low_1d[i-(period_kijun-1):i+1])
+        elif i > 0:
+            highest_high_kijun[i] = np.max(high_1d[0:i+1])
+            lowest_low_kijun[i] = np.min(low_1d[0:i+1])
         else:
-            avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
-            avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
+            highest_high_kijun[i] = high_1d[0]
+            lowest_low_kijun[i] = low_1d[0]
     
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.where(avg_loss == 0, 100, rsi)
-    rsi = np.where(avg_gain == 0, 0, rsi)
+    kijun_sen = np.full_like(high_1d, np.nan)
+    for i in range(len(high_1d)):
+        if not (np.isnan(highest_high_kijun[i]) or np.isnan(lowest_low_kijun[i])):
+            kijun_sen[i] = (highest_high_kijun[i] + lowest_low_kijun[i]) / 2
     
-    # === 1d EMA(20) for trend filter ===
-    ema_20 = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 20:
-        ema_20[19] = np.mean(close_1d[:20])  # seed
-        alpha = 2 / (20 + 1)
-        for i in range(20, len(close_1d)):
-            ema_20[i] = alpha * close_1d[i] + (1 - alpha) * ema_20[i-1]
-    else:
-        for i in range(len(close_1d)):
-            ema_20[i] = np.mean(close_1d[:i+1]) if i >= 0 else close_1d[0]
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = np.full_like(high_1d, np.nan)
+    for i in range(len(high_1d)):
+        if not (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i])):
+            senkou_span_a[i] = (tenkan_sen[i] + kijun_sen[i]) / 2
     
-    # === Align indicators to 1d timeframe (same timeframe, no alignment needed) ===
-    # Since we're using 1d data on 1d timeframe, we can use the values directly
-    highest_high_aligned = highest_high
-    lowest_low_aligned = lowest_low
-    rsi_aligned = rsi
-    ema_20_aligned = ema_20
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period_senkou_b = 52
+    highest_high_senkou_b = np.full_like(high_1d, np.nan)
+    lowest_low_senkou_b = np.full_like(low_1d, np.nan)
+    for i in range(len(high_1d)):
+        if i >= period_senkou_b - 1:
+            highest_high_senkou_b[i] = np.max(high_1d[i-(period_senkou_b-1):i+1])
+            lowest_low_senkou_b[i] = np.min(low_1d[i-(period_senkou_b-1):i+1])
+        elif i > 0:
+            highest_high_senkou_b[i] = np.max(high_1d[0:i+1])
+            lowest_low_senkou_b[i] = np.min(low_1d[0:i+1])
+        else:
+            highest_high_senkou_b[i] = high_1d[0]
+            lowest_low_senkou_b[i] = low_1d[0]
     
-    # === Volume confirmation (using 1d volume) ===
-    vol_ma_20 = np.full_like(df_1d['volume'].values, np.nan)
-    vol_1d = df_1d['volume'].values
-    for i in range(len(vol_1d)):
+    senkou_span_b = np.full_like(high_1d, np.nan)
+    for i in range(len(high_1d)):
+        if not (np.isnan(highest_high_senkou_b[i]) or np.isnan(lowest_low_senkou_b[i])):
+            senkou_span_b[i] = (highest_high_senkou_b[i] + lowest_low_senkou_b[i]) / 2
+    
+    # Kumo Twist: Senkou Span A crosses Senkou Span B
+    # Bullish twist: Senkou Span A crosses above Senkou Span B
+    # Bearish twist: Senkou Span A crosses below Senkou Span B
+    senkou_span_a_shift = np.roll(senkou_span_a, 1)
+    senkou_span_b_shift = np.roll(senkou_span_b, 1)
+    senkou_span_a_shift[0] = np.nan
+    senkou_span_b_shift[0] = np.nan
+    
+    bullish_twist = (senkou_span_a > senkou_span_b) & (senkou_span_a_shift <= senkou_span_b_shift)
+    bearish_twist = (senkou_span_a < senkou_span_b) & (senkou_span_a_shift >= senkou_span_b_shift)
+    
+    # Kumo Cloud: Future cloud (shifted 26 periods ahead)
+    senkou_span_a_leading = np.roll(senkou_span_a, -period_kijun)
+    senkou_span_b_leading = np.roll(senkou_span_b, -period_kijun)
+    # Handle edge cases
+    senkou_span_a_leading[-period_kijun:] = np.nan
+    senkou_span_b_leading[-period_kijun:] = np.nan
+    
+    # Kumo Top/Bottom for current price comparison
+    kumo_top = np.maximum(senkou_span_a, senkou_span_b)
+    kumo_bottom = np.minimum(senkou_span_a, senkou_span_b)
+    
+    # TK Cross: Tenkan-sen crosses Kijun-sen
+    tenkan_shift = np.roll(tenkan_sen, 1)
+    kijun_shift = np.roll(kijun_sen, 1)
+    tenkan_shift[0] = np.nan
+    kijun_shift[0] = np.nan
+    
+    tk_bullish_cross = (tenkan_sen > kijun_sen) & (tenkan_shift <= kijun_shift)
+    tk_bearish_cross = (tenkan_sen < kijun_sen) & (tenkan_shift >= kijun_shift)
+    
+    # === Align Ichimoku components to 6h timeframe ===
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    kumo_top_aligned = align_htf_to_ltf(prices, df_1d, kumo_top)
+    kumo_bottom_aligned = align_htf_to_ltf(prices, df_1d, kumo_bottom)
+    bullish_twist_aligned = align_htf_to_ltf(prices, df_1d, bullish_twist.astype(float))
+    bearish_twist_aligned = align_htf_to_ltf(prices, df_1d, bearish_twist.astype(float))
+    tk_bullish_cross_aligned = align_htf_to_ltf(prices, df_1d, tk_bullish_cross.astype(float))
+    tk_bearish_cross_aligned = align_htf_to_ltf(prices, df_1d, tk_bearish_cross.astype(float))
+    
+    # === 6h Volume confirmation ===
+    # Calculate 20-period average volume
+    vol_ma_20 = np.full_like(volume, np.nan)
+    for i in range(len(volume)):
         if i >= 19:
-            vol_ma_20[i] = np.mean(vol_1d[i-19:i+1])
+            vol_ma_20[i] = np.mean(volume[i-19:i+1])
+        elif i > 0:
+            vol_ma_20[i] = np.mean(volume[max(0, i-9):i+1])
         else:
-            vol_ma_20[i] = np.mean(vol_1d[0:i+1]) if i >= 0 else vol_1d[0]
+            vol_ma_20[i] = volume[0]
     
-    # Align volume MA to 1d timeframe
-    vol_ma_20_aligned = vol_ma_20
-    
-    # Volume confirmation: current volume > 1.3x 20-period average
-    vol_confirm = vol_1d > vol_ma_20_aligned * 1.3
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_confirm = volume > vol_ma_20 * 1.5
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 50
+    warmup = 100
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high_aligned[i]) or 
-            np.isnan(lowest_low_aligned[i]) or 
-            np.isnan(rsi_aligned[i]) or 
-            np.isnan(ema_20_aligned[i]) or 
+        if (np.isnan(tenkan_sen_aligned[i]) or 
+            np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(kumo_top_aligned[i]) or 
+            np.isnan(kumo_bottom_aligned[i]) or
             np.isnan(vol_confirm[i])):
             signals[i] = 0.0
             position = 0
@@ -111,25 +169,39 @@ def generate_signals(prices):
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: Close breaks above 20-day high AND RSI > 50 AND volume confirmation
-            if (close[i] > highest_high_aligned[i] and 
-                rsi_aligned[i] > 50 and 
-                vol_confirm[i]):
+            # Long conditions:
+            # 1. Price above Kumo (bullish bias)
+            # 2. TK bullish cross OR Kumo bullish twist
+            # 3. Volume confirmation
+            price_above_kumo = close[i] > kumo_top_aligned[i]
+            tk_bullish = tk_bullish_cross_aligned[i] > 0.5
+            kumobull_twist = bullish_twist_aligned[i] > 0.5
+            
+            if price_above_kumo and (tk_bullish or kumobull_twist) and vol_confirm[i]:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: Close breaks below 20-day low AND RSI < 50 AND volume confirmation
-            elif (close[i] < lowest_low_aligned[i] and 
-                  rsi_aligned[i] < 50 and 
-                  vol_confirm[i]):
+            
+            # Short conditions:
+            # 1. Price below Kumo (bearish bias)
+            # 2. TK bearish cross OR Kumo bearish twist
+            # 3. Volume confirmation
+            price_below_kumo = close[i] < kumo_bottom_aligned[i]
+            tk_bearish = tk_bearish_cross_aligned[i] > 0.5
+            kumobear_twist = bearish_twist_aligned[i] > 0.5
+            
+            if price_below_kumo and (tk_bearish or kumobear_twist) and vol_confirm[i]:
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: Close crosses below 20-day EMA OR RSI < 40
-            if (close[i] < ema_20_aligned[i]) or (rsi_aligned[i] < 40):
+            # Exit long: Price drops below Kumo bottom OR TK bearish cross
+            price_below_kumo_bottom = close[i] < kumo_bottom_aligned[i]
+            tk_bearish_exit = tk_bearish_cross_aligned[i] > 0.5
+            
+            if price_below_kumo_bottom or tk_bearish_exit:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -137,8 +209,11 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Close crosses above 20-day EMA OR RSI > 60
-            if (close[i] > ema_20_aligned[i]) or (rsi_aligned[i] > 60):
+            # Exit short: Price rises above Kumo top OR TK bullish cross
+            price_above_kumo_top = close[i] > kumo_top_aligned[i]
+            tk_bullish_exit = tk_bullish_cross_aligned[i] > 0.5
+            
+            if price_above_kumo_top or tk_bullish_exit:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -147,6 +222,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyDonchian20_RSI50_EMA20_VolumeFilter"
-timeframe = "1d"
+name = "6h_Ichimoku_Kumo_Twist_Trend_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
