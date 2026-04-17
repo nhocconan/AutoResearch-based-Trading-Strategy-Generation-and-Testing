@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_1d_RSI_2DMA_Cross_v1
-Long when 1d EMA21 > EMA50 and RSI14 > 50; short when EMA21 < EMA50 and RSI14 < 50.
-Exit when RSI crosses back to neutral (40-60).
-Uses 1d trend filter to align with higher timeframe momentum.
-Target: 20-40 trades per year (~80-160 total over 4 years).
+12h_1w_Donchian_Breakout_Retest_v1
+Breakout of weekly Donchian channel (20) with retest of breakout level.
+Trades only in direction of 1d EMA200 trend filter.
+Exit on opposite Donchian breakout or close below/above 1d EMA50.
+Designed for low-frequency, high-conviction trades in both bull and bear markets.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -13,74 +14,82 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # === RSI(14) ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # === Weekly Donchian Channel (20) ===
+    df_1w = get_htf_data(prices, '1w')
+    dh_20 = pd.Series(df_1w['high'].values).rolling(window=20, min_periods=20).max().values
+    dl_20 = pd.Series(df_1w['low'].values).rolling(window=20, min_periods=20).min().values
+    dh_20_aligned = align_htf_to_ltf(prices, df_1w, dh_20)
+    dl_20_aligned = align_htf_to_ltf(prices, df_1w, dl_20)
     
-    # === 1d EMA21 and EMA50 ===
+    # === Daily EMAs for trend and exit filters ===
     df_1d = get_htf_data(prices, '1d')
-    ema21_1d = pd.Series(df_1d['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema21_1d)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 60
+    warmup = 200
     
-    # Track position state
+    # Track position state and breakout levels
     position = 0  # 0: flat, 1: long, -1: short
+    long_breakout_level = 0.0
+    short_breakout_level = 0.0
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi[i]) or 
-            np.isnan(ema21_1d_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(dh_20_aligned[i]) or 
+            np.isnan(dl_20_aligned[i]) or 
+            np.isnan(ema_200_1d_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: EMA21 > EMA50 and RSI > 50
-            if (ema21_1d_aligned[i] > ema50_1d_aligned[i] and 
-                rsi[i] > 50):
+            # Long: break above weekly Donchian high, retest, and above 1d EMA200
+            if (high[i] > dh_20_aligned[i] and 
+                low[i] <= dh_20_aligned[i] * 1.001 and  # retest within 0.1%
+                close[i] > ema_200_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
+                long_breakout_level = dh_20_aligned[i]
                 continue
-            # Short: EMA21 < EMA50 and RSI < 50
-            elif (ema21_1d_aligned[i] < ema50_1d_aligned[i] and 
-                  rsi[i] < 50):
+            # Short: break below weekly Donchian low, retest, and below 1d EMA200
+            elif (low[i] < dl_20_aligned[i] and 
+                  high[i] >= dl_20_aligned[i] * 0.999 and  # retest within 0.1%
+                  close[i] < ema_200_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
+                short_breakout_level = dl_20_aligned[i]
                 continue
         
-        # Exit logic
+        # Exit logic for long
         elif position == 1:
-            # Exit long: RSI < 40 (overbought exit)
-            if rsi[i] < 40:
+            # Exit: break below weekly Donchian low OR close below 1d EMA50
+            if (low[i] < dl_20_aligned[i] or 
+                close[i] < ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
             else:
                 signals[i] = 0.25
         
+        # Exit logic for short
         elif position == -1:
-            # Exit short: RSI > 60 (oversold exit)
-            if rsi[i] > 60:
+            # Exit: break above weekly Donchian high OR close above 1d EMA50
+            if (high[i] > dh_20_aligned[i] or 
+                close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -89,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_RSI_2DMA_Cross_v1"
-timeframe = "4h"
+name = "12h_1w_Donchian_Breakout_Retest_v1"
+timeframe = "12h"
 leverage = 1.0
