@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,112 +13,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ADX calculation
+    # Get 4h data for trend direction and volatility
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # Calculate 4h ATR for volatility filtering
+    tr1 = high_4h[1:] - low_4h[1:]
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    tr_4h = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_4h = pd.Series(tr_4h).ewm(span=14, min_periods=14).mean().values
+    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    
+    # Get 1d data for trend confirmation
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    # 1d EMA34 for trend direction
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 14-period ADX on daily data
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothing (Wilder's smoothing)
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            # First value is simple average
-            result[period-1] = np.nansum(data[:period]) / period
-            # Subsequent values
-            for i in range(period, len(data)):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    period = 14
-    tr_smooth = wilders_smooth(tr, period)
-    plus_dm_smooth = wilders_smooth(plus_dm, period)
-    minus_dm_smooth = wilders_smooth(minus_dm, period)
-    
-    # DI values
-    plus_di = np.where(tr_smooth != 0, 100 * plus_dm_smooth / tr_smooth, 0)
-    minus_di = np.where(tr_smooth != 0, 100 * minus_dm_smooth / tr_smooth, 0)
-    
-    # DX and ADX
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = wilders_smooth(dx, period)
-    
-    # Align ADX to 6h timeframe
-    adx_6h = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume filter: current volume > 1.5 * 20-period average (20 periods = ~5 days at 6h)
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # 6-period RSI for entry timing
-    rsi_period = 6
-    delta = np.diff(close, prepend=close[0])
+    # Calculate 1h RSI for entry timing
+    delta = np.diff(close)
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, min_periods=14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, min_periods=14, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
+    
+    # Pre-compute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = max(50, 20)  # Need sufficient data for all indicators
+    start_idx = 34  # Need sufficient data for EMA34
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(adx_6h[i]) or np.isnan(volume_ma20[i]) or np.isnan(rsi[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_4h_aligned[i]) or 
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
-        # ADX trend filter: only trade when trending strongly (ADX > 25)
-        trend_filter = adx_6h[i] > 25
+        # Session filter: 08-20 UTC only
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
         
-        # Volume filter
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        if not in_session:
+            signals[i] = 0.0
+            continue
+        
+        # Trend filter: price above/below 1d EMA34
+        trend_up = close[i] > ema_34_1d_aligned[i]
+        trend_down = close[i] < ema_34_1d_aligned[i]
+        
+        # Volatility filter: ATR > 0 (always true, but ensures data validity)
+        vol_filter = atr_4h_aligned[i] > 0
         
         if position == 0:
-            # Long entry: RSI oversold (< 30) in uptrend with volume
-            if (rsi[i] < 30 and trend_filter and volume_filter):
-                signals[i] = 0.25
+            # Long entry: uptrend + RSI oversold bounce
+            if trend_up and rsi[i] < 35 and vol_filter:
+                signals[i] = 0.20
                 position = 1
-            # Short entry: RSI overbought (> 70) in uptrend with volume
-            elif (rsi[i] > 70 and trend_filter and volume_filter):
-                signals[i] = -0.25
+            # Short entry: downtrend + RSI overbought bounce
+            elif trend_down and rsi[i] > 65 and vol_filter:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI overbought (> 70) or trend weakens
-            if (rsi[i] > 70) or (adx_6h[i] < 20):
+            # Exit long: trend reversal or RSI overbought
+            if not trend_up or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: RSI oversold (< 30) or trend weakens
-            if (rsi[i] < 30) or (adx_6h[i] < 20):
+            # Exit short: trend reversal or RSI oversold
+            if not trend_down or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "6h_ADX_RSI_MeanReversion_TrendFilter"
-timeframe = "6h"
+name = "1h_EMA34_RSI_Session_Filter"
+timeframe = "1h"
 leverage = 1.0
