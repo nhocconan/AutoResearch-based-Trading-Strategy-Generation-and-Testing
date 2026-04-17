@@ -1,12 +1,7 @@
-#!/usr/bin/env python3
-"""
-Hypothesis: 4-hour RSI(14) mean reversion with 1-day ADX(14) trend filter and volume confirmation.
-- RSI < 30 for long, RSI > 70 for short on 4h timeframe
-- Only trade when 1d ADX > 25 (strong trend) to avoid false signals in chop
-- Require 1d volume > 1.5x 20-period average for institutional participation
-- Exit when RSI returns to neutral zone (40-60) or trend weakens
-- Designed for 4h timeframe to capture mean reversion in trending markets with moderate frequency
-"""
+# 4h_RSI14_1dADX25_Volume1.5x
+# Hypothesis: RSI mean reversion on 4h with 1d ADX trend filter and volume confirmation.
+# Works in bull/bear: RSI identifies overextended moves, ADX ensures trading with trend,
+# volume confirms institutional interest. Target 20-50 trades/year to avoid fee drag.
 
 import numpy as np
 import pandas as pd
