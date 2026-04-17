@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA trend filter and volume confirmation.
-Long when price breaks above R3 (1d) AND 12h EMA34 > 12h EMA50 (uptrend) AND 4h volume > 1.5x 20-bar average volume.
-Short when price breaks below S3 (1d) AND 12h EMA34 < 12h EMA50 (downtrend) AND 4h volume > 1.5x 20-bar average volume.
-Exit when price touches the 1d pivot point (PP) or opposite Camarilla level (S3 for long, R3 for short).
-Uses 1d for Camarilla levels, 12h for trend filter, 4h for execution and volume confirmation.
-Designed to capture institutional breakouts with trend alignment and volume confirmation. Target: 20-30 trades/year per symbol.
+Hypothesis: 1d Williams %R mean reversion with 1w trend filter and volume confirmation.
+Long when Williams %R < -80 (oversold) AND price > 1w EMA34 (bullish trend) AND 1d volume > 1.5x 20-bar average volume.
+Short when Williams %R > -20 (overbought) AND price < 1w EMA34 (bearish trend) AND 1d volume > 1.5x 20-bar average volume.
+Exit when Williams %R crosses above -50 (for long) or below -50 (for short).
+Uses 1d for Williams %R and volume, 1w for trend filter. Designed to capture reversals in both bull and bear markets.
+Target: 10-25 trades/year per symbol.
 """
 
 import numpy as np
@@ -22,40 +22,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels
+    # Get 1d data for Williams %R and volume
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Camarilla levels (R3/S3 are stronger breakout levels)
-    # R3 = Close + 1.1*(High-Low)
-    # S3 = Close - 1.1*(High-Low)
-    # PP = (High + Low + Close)/3
-    rng = high_1d - low_1d
-    r3 = close_1d + 1.1 * rng
-    s3 = close_1d - 1.1 * rng
-    pp = (high_1d + low_1d + close_1d) / 3
+    # Calculate 1d Williams %R (14-period)
+    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close_1d) / (highest_high - lowest_low + 1e-10) * -100
     
-    # Get 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Calculate 1d volume MA for confirmation
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 12h EMAs for trend filter
-    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_12h = ema34_12h > ema50_12h  # True for uptrend
-    downtrend_12h = ema34_12h < ema50_12h  # True for downtrend
+    # Get 1w data for EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 4h volume MA for confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all indicators to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    uptrend_aligned = align_htf_to_ltf(prices, df_12h, uptrend_12h)
-    downtrend_aligned = align_htf_to_ltf(prices, df_12h, downtrend_12h)
+    # Align all 1d indicators to 1d timeframe (no alignment needed as we're using 1d timeframe)
+    # But we need to align 1w EMA to 1d timeframe
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -64,48 +54,47 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or
-            np.isnan(pp_aligned[i]) or
-            np.isnan(uptrend_aligned[i]) or
-            np.isnan(downtrend_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(williams_r[i]) or 
+            np.isnan(vol_ma_20[i]) or
+            np.isnan(ema34_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x 20-bar average
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume confirmation: current 1d volume > 1.5x 20-bar average
+        volume_confirmed = volume_1d[i] > 1.5 * vol_ma_20[i]
         
-        # Breakout conditions
-        breakout_r3 = close[i] > r3_aligned[i]
-        breakout_s3 = close[i] < s3_aligned[i]
+        # Williams %R conditions
+        oversold = williams_r[i] < -80
+        overbought = williams_r[i] > -20
+        exit_long = williams_r[i] > -50
+        exit_short = williams_r[i] < -50
         
-        # Exit conditions: touch pivot or opposite level
-        touch_pp = abs(close[i] - pp_aligned[i]) < 0.001 * close[i]  # within 0.1%
-        touch_opposite = (position == 1 and close[i] < s3_aligned[i]) or \
-                         (position == -1 and close[i] > r3_aligned[i])
+        # Trend filter: price vs 1w EMA34
+        # Note: we're on 1d timeframe, so we use daily close vs aligned 1w EMA
+        price_above_ema = close[i] > ema34_1w_aligned[i]
+        price_below_ema = close[i] < ema34_1w_aligned[i]
         
         if position == 0:
-            # Long: break above R3 with uptrend and volume confirmation
-            if (breakout_r3 and uptrend_aligned[i] and volume_confirmed):
+            # Long: oversold + bullish trend + volume confirmation
+            if (oversold and price_above_ema and volume_confirmed):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S3 with downtrend and volume confirmation
-            elif (breakout_s3 and downtrend_aligned[i] and volume_confirmed):
+            # Short: overbought + bearish trend + volume confirmation
+            elif (overbought and price_below_ema and volume_confirmed):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: touch pivot or break below S3
-            if (touch_pp or touch_opposite):
+            # Exit long: Williams %R crosses above -50
+            if exit_long:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: touch pivot or break above R3
-            if (touch_pp or touch_opposite):
+            # Exit short: Williams %R crosses below -50
+            if exit_short:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_12hEMATrend_Volume"
-timeframe = "4h"
+name = "1d_WilliamsR_MeanReversion_1wEMA34_Volume"
+timeframe = "1d"
 leverage = 1.0
