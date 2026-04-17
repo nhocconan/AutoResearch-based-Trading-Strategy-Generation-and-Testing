@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Camarilla R3/S3 fade with 1d volume spike filter and 1w trend filter.
-Long when price touches S3 and 1d volume > 1.5x 20-period average AND 1w close > 1w open (bullish weekly candle).
-Short when price touches R3 and 1d volume > 1.5x 20-period average AND 1w close < 1w open (bearish weekly candle).
-Exit when price reverses to Camarilla R1/S1 or volume condition fails.
-Uses 1d for volume and Camarilla levels, 1w for trend filter.
+Hypothesis: 12h Williams Alligator + 1w/1d Regime Filter.
+Long when Jaw < Teeth < Lips (bullish alignment) and 1w ADX > 25 (trending up).
+Short when Jaw > Teeth > Lips (bearish alignment) and 1w ADX > 25 (trending down).
+Exit when alignment breaks or ADX < 20 (range regime).
+Uses 1w for ADX regime, 12h for Alligator (SMAs based on Williams Alligator).
 Target: 50-150 total trades over 4 years (12-37/year).
 """
 
@@ -20,52 +20,73 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and volume
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
-    
-    # Calculate 1d volume SMA (20-period)
-    volume_sma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Get 1w data for trend filter
+    # Get 1w data for regime filter (ADX)
     df_1w = get_htf_data(prices, '1w')
-    open_1w = df_1w['open'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate 1d Camarilla levels (based on previous day's OHLC)
-    camarilla_s1 = np.zeros_like(close_1d)
-    camarilla_s3 = np.zeros_like(close_1d)
-    camarilla_r1 = np.zeros_like(close_1d)
-    camarilla_r3 = np.zeros_like(close_1d)
-    
-    for i in range(1, len(close_1d)):
-        # Previous day's OHLC
-        ph = high_1d[i-1]
-        pl = low_1d[i-1]
-        pc = close_1d[i-1]
+    # Calculate 1w ADX (14-period)
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
         
-        camarilla_s1[i] = pc - 1.1 * (ph - pl) / 12
-        camarilla_s3[i] = pc - 1.1 * (ph - pl) / 4
-        camarilla_r1[i] = pc + 1.1 * (ph - pl) / 12
-        camarilla_r3[i] = pc + 1.1 * (ph - pl) / 4
+        for i in range(1, len(high)):
+            plus_dm[i] = max(high[i] - high[i-1], 0)
+            minus_dm[i] = max(low[i-1] - low[i], 0)
+            if plus_dm[i] < minus_dm[i]:
+                plus_dm[i] = 0
+            if minus_dm[i] < plus_dm[i]:
+                minus_dm[i] = 0
+            if plus_dm[i] == minus_dm[i]:
+                plus_dm[i] = 0
+                minus_dm[i] = 0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Wilder's smoothing
+        atr = np.zeros_like(tr)
+        atr[period] = np.mean(tr[1:period+1])
+        for i in range(period+1, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        plus_di = 100 * (pd.Series(plus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr)
+        minus_di = 100 * (pd.Series(minus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr)
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = pd.Series(dx).ewm(alpha=1/period, adjust=False).mean().values
+        return adx
     
-    # Align 1d indicators
-    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    # Calculate 1w ADX
+    adx_14_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
+    adx_14_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_14_1w)
     
-    # Align 1w trend filter (bullish/bearish weekly candle)
-    weekly_bullish = close_1w > open_1w
-    weekly_bearish = close_1w < open_1w
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
+    # Calculate 12h Williams Alligator
+    # Jaw: 13-period SMMA, shifted 8 bars forward
+    # Teeth: 8-period SMMA, shifted 5 bars forward  
+    # Lips: 5-period SMMA, shifted 3 bars forward
+    def smma(values, period):
+        """Smoothed Moving Average (Williams Alligator)"""
+        sma = np.zeros_like(values)
+        sma[period-1] = np.mean(values[:period])
+        for i in range(period, len(values)):
+            sma[i] = (sma[i-1] * (period-1) + values[i]) / period
+        return sma
+    
+    # Calculate SMMA for different periods
+    smma13 = smma(close, 13)
+    smma8 = smma(close, 8)
+    smma5 = smma(close, 5)
+    
+    # Apply shifts (Williams Alligator specific)
+    jaw = np.roll(smma13, 8)   # Jaw: 13-period SMMA shifted 8 bars
+    teeth = np.roll(smma8, 5)  # Teeth: 8-period SMMA shifted 5 bars
+    lips = np.roll(smma5, 3)   # Lips: 5-period SMMA shifted 3 bars
+    
+    # Fill NaN values from roll with initial values
+    jaw[:8] = jaw[8] if len(jaw) > 8 else 0
+    teeth[:5] = teeth[5] if len(teeth) > 5 else 0
+    lips[:3] = lips[3] if len(lips) > 3 else 0
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -74,45 +95,46 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(volume_sma_20_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(weekly_bullish_aligned[i]) or
-            np.isnan(weekly_bearish_aligned[i])):
+        if np.isnan(adx_14_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current 1d volume > 1.5x 20-period average
-        # Note: We use the 1d volume from the completed daily bar
-        vol_condition = volume_1d[min(i // 24, len(volume_1d)-1)] > 1.5 * volume_sma_20[min(i // 24, len(volume_sma_20)-1)] if i // 24 < len(volume_1d) else False
+        # Regime determination from 1w ADX
+        adx_val = adx_14_1w_aligned[i]
+        is_trending = adx_val > 25
+        is_ranging = adx_val < 20
         
-        # Simplified volume check using aligned data (approximation)
-        # For better accuracy, we'd need to map 6h bars to exact 1d volume, but this works as filter
-        vol_cond_approx = True  # Volume condition handled separately below
+        # Williams Alligator signals
+        jaw_val = jaw[i]
+        teeth_val = teeth[i]
+        lips_val = lips[i]
+        
+        # Bullish alignment: Jaw < Teeth < Lips
+        bullish_alignment = jaw_val < teeth_val and teeth_val < lips_val
+        # Bearish alignment: Jaw > Teeth > Lips
+        bearish_alignment = jaw_val > teeth_val and teeth_val > lips_val
         
         if position == 0:
-            # Long: price touches or goes below S3 AND volume spike AND weekly bullish
-            if low[i] <= camarilla_s3_aligned[i] and vol_condition and weekly_bullish_aligned[i] > 0.5:
+            # Long: Bullish alignment AND trending regime
+            if bullish_alignment and is_trending:
                 signals[i] = 0.25
                 position = 1
-            # Short: price touches or goes above R3 AND volume spike AND weekly bearish
-            elif high[i] >= camarilla_r3_aligned[i] and vol_condition and weekly_bearish_aligned[i] > 0.5:
+            # Short: Bearish alignment AND trending regime
+            elif bearish_alignment and is_trending:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to S1 or volume condition fails or weekly turns bearish
-            if high[i] >= camarilla_s1_aligned[i] or not vol_condition or weekly_bullish_aligned[i] <= 0.5:
+            # Exit long: Bullish alignment breaks OR regime becomes ranging
+            if not bullish_alignment or is_ranging:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to R1 or volume condition fails or weekly turns bullish
-            if low[i] <= camarilla_r1_aligned[i] or not vol_condition or weekly_bearish_aligned[i] <= 0.5:
+            # Exit short: Bearish alignment breaks OR regime becomes ranging
+            if not bearish_alignment or is_ranging:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -120,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3S3_VolumeSpike_1wTrend"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1wADX_Regime"
+timeframe = "12h"
 leverage = 1.0
