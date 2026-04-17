@@ -1,9 +1,11 @@
-# NOTE: This strategy is being submitted as a complete rewrite in order to align with the new requirements (12h primary timeframe, HTF=1d). The hypothesis is that combining a Donchian breakout with 1-day trend confirmation and volume filters will yield fewer, higher-quality trades suitable for the 12h timeframe, with proper risk controls to avoid overtrading and ensure robustness across bull and bear markets.
-
 #!/usr/bin/env python3
 """
-12h_Donchian_20_Breakout_1D_Trend_VolumeFilter
-Hypothesis: Donchian channel breakouts capture strong momentum. Filtering by 1-day trend (price > EMA50) and volume spikes avoids false signals in chop. Works in bull markets by riding breakouts and in bear markets by avoiding counter-trend entries. Target: 20-50 trades over 4 years.
+1d_Weekly_Pivot_R1_S1_Breakout_Volume_Trend
+Hypothesis: Weekly pivot levels (R1/S1) act as strong support/resistance on daily chart.
+Long when price breaks above R1 with volume > 1.5x average and weekly close > weekly EMA34 (uptrend).
+Short when price breaks below S1 with volume > 1.5x average and weekly close < weekly EMA34 (downtrend).
+Exit on opposite signal. Position size: ±0.25. Uses 1d primary with 1w trend filter.
+Designed for low-frequency, high-conviction trades in both bull and bear markets.
 """
 
 import numpy as np
@@ -20,69 +22,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period)
-    def donchian_channel(high, low, window):
-        upper = np.full_like(high, np.nan)
-        lower = np.full_like(low, np.nan)
-        for i in range(window - 1, len(high)):
-            upper[i] = np.max(high[i - window + 1:i + 1])
-            lower[i] = np.min(low[i - window + 1:i + 1])
-        return upper, lower
+    # Calculate weekly pivot points (R1, S1, PP)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    upper, lower = donchian_channel(high, low, 20)
+    # Pivot point calculation: PP = (H + L + C) / 3
+    pp = (high_1w + low_1w + close_1w) / 3.0
+    # R1 = 2*PP - L, S1 = 2*PP - H
+    r1 = 2 * pp - low_1w
+    s1 = 2 * pp - high_1w
     
-    # Volume confirmation: 20-period moving average
+    # Align weekly levels to daily timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    
+    # Weekly EMA34 for trend filter
+    close_series_1w = pd.Series(close_1w)
+    ema34_1w = close_series_1w.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    
+    # Volume confirmation (20-period MA on 1d)
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1d EMA50 for trend filter
-    close_series_1d = pd.Series(close_1d)
-    ema50_1d = close_series_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 1d EMA50 to 12h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = max(20, 20, 50)  # Donchian, volume MA20, EMA50
+    start_idx = max(20, 34)  # Volume MA20, EMA34
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper[i]) or 
-            np.isnan(lower[i]) or 
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
             np.isnan(volume_ma20[i]) or 
-            np.isnan(ema50_1d_aligned[i])):
+            np.isnan(ema34_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2.0x 20-period average
-        volume_filter = volume[i] > (2.0 * volume_ma20[i])
+        # Volume filter: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        
+        # Breakout conditions
+        breakout_long = close[i] > r1_aligned[i]
+        breakout_short = close[i] < s1_aligned[i]
         
         if position == 0:
-            # Long: price breaks above upper Donchian + volume filter + 1d uptrend
-            if close[i] > upper[i] and volume_filter and close[i] > ema50_1d_aligned[i]:
+            # Long: break above R1 + volume filter + weekly uptrend
+            if breakout_long and volume_filter and close[i] > ema34_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian + volume filter + 1d downtrend
-            elif close[i] < lower[i] and volume_filter and close[i] < ema50_1d_aligned[i]:
+            # Short: break below S1 + volume filter + weekly downtrend
+            elif breakout_short and volume_filter and close[i] < ema34_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below lower Donchian
-            if close[i] < lower[i]:
+            # Exit long: price breaks below S1 (opposite level)
+            if close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above upper Donchian
-            if close[i] > upper[i]:
+            # Exit short: price breaks above R1 (opposite level)
+            if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_20_Breakout_1D_Trend_VolumeFilter"
-timeframe = "12h"
+name = "1d_Weekly_Pivot_R1_S1_Breakout_Volume_Trend"
+timeframe = "1d"
 leverage = 1.0
