@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Trend_Filter_V1
-Strategy: 4h Kaufman Adaptive Moving Average (KAMA) with trend filter and volume confirmation.
-Long: Price > KAMA(10,2,30) + volume > 1.3x 20-period avg
-Short: Price < KAMA(10,2,30) + volume > 1.3x 20-period avg
-Exit: Opposite condition
+4h_CCI_Trend_Filter_V1
+Strategy: 4h Commodity Channel Index (CCI) with daily EMA34 trend filter and volume confirmation.
+Long: CCI(20) > -100 + price > daily EMA34 + volume > 1.3x 20-period average
+Short: CCI(20) < 100 + price < daily EMA34 + volume > 1.3x 20-period average
+Exit: Opposite condition or trend reversal
 Position size: 0.25
-Uses daily EMA34 as trend filter to avoid counter-trend trades.
-Designed to work in both bull and bear markets by adapting to market noise.
+Designed to capture mean-reversion in ranging markets while respecting trend.
 Timeframe: 4h
 """
 
@@ -25,37 +24,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA on close
-    def kama(close, er_length=10, fast_sc=2, slow_sc=30):
-        n = len(close)
-        kama_out = np.full(n, np.nan)
-        if n < er_length:
-            return kama_out
+    # Calculate CCI(20)
+    def cci(high, low, close, window=20):
+        n = len(high)
+        cci_out = np.full(n, np.nan)
+        if n < window:
+            return cci_out
         
-        # Efficiency Ratio
-        change = np.abs(close[er_length:] - close[:-er_length])
-        volatility = np.sum(np.abs(np.diff(close[:er_length+1])) if len(close) >= er_length+1 else 0)
-        er = np.zeros(n)
-        for i in range(er_length, n):
-            if volatility > 0:
-                er[i] = change[i-er_length] / volatility
+        # Typical Price
+        tp = (high + low + close) / 3
+        
+        # Moving Average of TP
+        tp_ma = pd.Series(tp).rolling(window=window, min_periods=window).mean().values
+        
+        # Mean Deviation
+        md = np.zeros(n)
+        for i in range(window-1, n):
+            md[i] = np.mean(np.abs(tp[i-window+1:i+1] - tp_ma[i]))
+        
+        # CCI
+        for i in range(window-1, n):
+            if md[i] > 0:
+                cci_out[i] = (tp[i] - tp_ma[i]) / (0.015 * md[i])
             else:
-                er[i] = 0
+                cci_out[i] = 0
         
-        # Smoothing constants
-        sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
-        
-        # Initialize KAMA
-        kama_out[er_length] = close[er_length]
-        
-        # Calculate KAMA
-        for i in range(er_length + 1, n):
-            kama_out[i] = kama_out[i-1] + sc[i] * (close[i] - kama_out[i-1])
-        
-        return kama_out
+        return cci_out
     
-    # Calculate KAMA
-    kama_val = kama(close, 10, 2, 30)
+    cci_val = cci(high, low, close, 20)
     
     # Calculate daily EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -84,7 +80,7 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is not available
-        if (np.isnan(kama_val[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(cci_val[i]) or np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(volume_ma20_4h_aligned[i])):
             signals[i] = 0.0
             continue
@@ -99,26 +95,26 @@ def generate_signals(prices):
         
         # Entry signals
         if position == 0:
-            # Long: Price > KAMA + volume filter + trend up
-            if close[i] > kama_val[i] and volume_filter and trend_up:
+            # Long: CCI > -100 (not deeply oversold) + volume filter + trend up
+            if cci_val[i] > -100 and volume_filter and trend_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price < KAMA + volume filter + trend down
-            elif close[i] < kama_val[i] and volume_filter and trend_down:
+            # Short: CCI < 100 (not deeply overbought) + volume filter + trend down
+            elif cci_val[i] < 100 and volume_filter and trend_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price < KAMA or trend down
-            if close[i] < kama_val[i] or not trend_up:
+            # Exit long: CCI < -100 (deeply oversold) or trend down
+            if cci_val[i] < -100 or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price > KAMA or trend up
-            if close[i] > kama_val[i] or not trend_down:
+            # Exit short: CCI > 100 (deeply overbought) or trend up
+            if cci_val[i] > 100 or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -126,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_Trend_Filter_V1"
+name = "4h_CCI_Trend_Filter_V1"
 timeframe = "4h"
 leverage = 1.0
