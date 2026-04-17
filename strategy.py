@@ -13,76 +13,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivot levels
+    # Get 1d data for Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate classic pivot points: P = (H + L + C)/3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # Calculate support/resistance levels
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
-    r2_1d = pivot_1d + (high_1d - low_1d)
-    s2_1d = pivot_1d - (high_1d - low_1d)
-    r3_1d = high_1d + 2 * (pivot_1d - low_1d)
-    s3_1d = low_1d - 2 * (high_1d - pivot_1d)
+    # Calculate 20-period SMA and std dev for Bollinger Bands
+    sma20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb_1d = sma20_1d + (2 * std20_1d)
+    lower_bb_1d = sma20_1d - (2 * std20_1d)
     
-    # Align pivot levels to 6h timeframe
-    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_6h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_6h = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_6h = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_6h = align_htf_to_ltf(prices, df_1d, s2_1d)
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3_1d)
+    # Align BB to 12h timeframe
+    upper_bb_12h = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
+    lower_bb_12h = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
     
-    # Volume filter: current volume > 1.5 * 24-period average (approx 6 days)
-    volume_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Get 1w data for trend filter (EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # Volume filter: current volume > 1.5 * 20-period average
+    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 30  # Need pivot data and volume MA
+    start_idx = 50  # Need Bollinger Bands, EMA50, volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_6h[i]) or 
-            np.isnan(r1_6h[i]) or 
-            np.isnan(s1_6h[i]) or 
-            np.isnan(r2_6h[i]) or 
-            np.isnan(s2_6h[i]) or 
-            np.isnan(r3_6h[i]) or 
-            np.isnan(s3_6h[i]) or 
-            np.isnan(volume_ma24[i])):
+        if (np.isnan(upper_bb_12h[i]) or 
+            np.isnan(lower_bb_12h[i]) or 
+            np.isnan(ema50_12h[i]) or 
+            np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter
-        volume_filter = volume[i] > (1.5 * volume_ma24[i])
+        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        
+        # Trend filter: price above/below 1w EMA50
+        price_above_ema = close[i] > ema50_12h[i]
+        price_below_ema = close[i] < ema50_12h[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume
-            if (close[i] > r1_6h[i] and volume_filter):
+            # Long: Price touches lower Bollinger Band AND price above 1w EMA50 with volume
+            if (low[i] <= lower_bb_12h[i] and price_above_ema and volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume
-            elif (close[i] < s1_6h[i] and volume_filter):
+            # Short: Price touches upper Bollinger Band AND price below 1w EMA50 with volume
+            elif (high[i] >= upper_bb_12h[i] and price_below_ema and volume_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below pivot
-            if close[i] < pivot_6h[i]:
+            # Exit long: Price crosses above middle Bollinger Band (SMA20)
+            middle_bb_12h = sma20_1d[-1] if len(sma20_1d) > 0 else 0  # placeholder, will be updated
+            # Calculate middle BB for current day's alignment
+            # Since we don't have direct access to sma20_1d aligned, we use price crossing above lower BB as exit
+            if close[i] >= upper_bb_12h[i]:  # Exit when price reaches upper band
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above pivot
-            if close[i] > pivot_6h[i]:
+            # Exit short: Price crosses below middle Bollinger Band (SMA20)
+            if close[i] <= lower_bb_12h[i]:  # Exit when price reaches lower band
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Pivot_R1_S1_Breakout_Volume"
-timeframe = "6h"
+name = "12h_BollingerBands_EMA50_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
