@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_WPivot_R1_S1_Breakout_Volume_Trend
-Strategy: Weekly Pivot R1/S1 breakout on 12h with 1d trend filter and volume confirmation.
-Long: Close breaks above R1 + 1d EMA34 > EMA144 + volume > 1.5x average
-Short: Close breaks below S1 + 1d EMA34 < EMA144 + volume > 1.5x average
-Exit: Close returns to weekly pivot or trend reverses
+12h_S1_S2_Short_Long_Average
+Strategy: Trade S1/S2 bounce on 12h with 1d EMA filter and volume spike.
+Long: Price near S1/S2 average + 1d EMA34 > EMA144 + volume > 2x average
+Short: Price near S1/S2 average + 1d EMA34 < EMA144 + volume > 2x average
+Exit: Price moves away from S1/S2 or trend reverses
 Position size: 0.25
-Designed to capture institutional breakouts with trend alignment and volume confirmation.
+Designed to capture mean-reversion bounces at key weekly support/resistance with trend alignment.
 Timeframe: 12h
 """
 
@@ -51,23 +51,20 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        # Volume filter: current volume > 2x 20-period average
+        volume_filter = volume[i] > (2.0 * volume_ma20[i])
         
         # Trend filter: 1d EMA34 > EMA144 for long, < for short
         ema34_gt_ema144 = ema34_1d_aligned[i] > ema144_1d_aligned[i]
         ema34_lt_ema144 = ema34_1d_aligned[i] < ema144_1d_aligned[i]
         
-        # Calculate weekly pivot levels from previous week's OHLC
-        # Need previous week's data - use weekly OHLC from 1w timeframe
+        # Calculate weekly S1 and S2 from previous week's OHLC
         if i >= 14:  # Need at least 14 12h bars (1 week) to get previous week
-            # Get weekly data for pivot calculation
+            # Get weekly data for S1/S2 calculation
             df_1w = get_htf_data(prices, '1w')
             
             # Find previous week's index in 1w data
-            # Current 12h bar timestamp
             current_time = prices['open_time'].iloc[i]
-            # Previous week's date (7 days ago)
             prev_week = current_time - pd.Timedelta(days=7)
             
             # Get previous week's OHLC from 1w data
@@ -78,35 +75,38 @@ def generate_signals(prices):
                 prev_low = prev_week_data['low']
                 prev_close = prev_week_data['close']
                 
-                # Calculate weekly pivot levels
+                # Calculate weekly pivot and S1/S2
+                pivot = (prev_high + prev_low + prev_close) / 3
                 range_val = prev_high - prev_low
                 if range_val > 0:
-                    weekly_pivot = (prev_high + prev_low + prev_close) / 3
-                    weekly_r1 = weekly_pivot + (range_val * 1.1 / 12)
-                    weekly_s1 = weekly_pivot - (range_val * 1.1 / 12)
+                    s1 = pivot - (range_val * 1.1 / 12)
+                    s2 = pivot - (2 * range_val * 1.1 / 12)
+                    s1_s2_avg = (s1 + s2) / 2
                     
-                    # Entry conditions
+                    # Entry conditions: price near S1/S2 average (within 0.5%)
+                    price_near_s1s2 = abs(close[i] - s1_s2_avg) / s1_s2_avg < 0.005
+                    
                     if position == 0:
-                        # Long: Close breaks above R1 + trend up + volume
-                        if (close[i] > weekly_r1 and ema34_gt_ema144 and volume_filter):
+                        # Long: near S1/S2 + uptrend + volume spike
+                        if price_near_s1s2 and ema34_gt_ema144 and volume_filter:
                             signals[i] = 0.25
                             position = 1
-                        # Short: Close breaks below S1 + trend down + volume
-                        elif (close[i] < weekly_s1 and ema34_lt_ema144 and volume_filter):
+                        # Short: near S1/S2 + downtrend + volume spike
+                        elif price_near_s1s2 and ema34_lt_ema144 and volume_filter:
                             signals[i] = -0.25
                             position = -1
                     
                     elif position == 1:
-                        # Exit long: Close returns to pivot or trend reverses
-                        if close[i] < weekly_pivot or not ema34_gt_ema144:
+                        # Exit long: price moves away from S1/S2 or trend reverses
+                        if abs(close[i] - s1_s2_avg) / s1_s2_avg > 0.02 or not ema34_gt_ema144:
                             signals[i] = 0.0
                             position = 0
                         else:
                             signals[i] = 0.25
                     
                     elif position == -1:
-                        # Exit short: Close returns to pivot or trend reverses
-                        if close[i] > weekly_pivot or not ema34_lt_ema144:
+                        # Exit short: price moves away from S1/S2 or trend reverses
+                        if abs(close[i] - s1_s2_avg) / s1_s2_avg > 0.02 or not ema34_lt_ema144:
                             signals[i] = 0.0
                             position = 0
                         else:
@@ -120,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WPivot_R1_S1_Breakout_Volume_Trend"
+name = "12h_S1_S2_Short_Long_Average"
 timeframe = "12h"
 leverage = 1.0
