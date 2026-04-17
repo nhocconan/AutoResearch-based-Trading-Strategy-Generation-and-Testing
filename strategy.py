@@ -1,12 +1,8 @@
-#!/usr/bin/env python3
-"""
-6h Elder Ray + ADX + Volume Spike
-Long: Bull Power > 0, Bear Power < 0, ADX > 25, Volume > 1.5x 20-period MA
-Short: Bull Power < 0, Bear Power > 0, ADX > 25, Volume > 1.5x 20-period MA
-Exit: Opposite Elder Ray condition
-Uses 1d EMA13 for Bull/Bear Power and 1d ADX for trend strength
-Target: 20-30 trades/year per symbol
-"""
+# 6h Weekly Pivot Breakout with Volume Confirmation
+# Hypothesis: Weekly pivots act as strong support/resistance levels. Breakouts above weekly R1/R2 or below S1/S2 with volume confirmation capture institutional flow.
+# Works in bull/bear: In bull markets, breaks above R1/R2 continue upward; in bear markets, breaks below S1/S2 continue downward.
+# Uses 6h timeframe for balance of signal frequency and noise reduction.
+# Target: 15-25 trades/year per symbol (60-100 total over 4 years).
 
 import numpy as np
 import pandas as pd
@@ -14,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,110 +18,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Elder Ray and ADX
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for pivot points (using prior week's OHLC)
+    df_1w = get_htf_data(prices, '1w')
+    # Calculate weekly pivot points: PP = (H+L+C)/3, R1 = 2*PP - L, S1 = 2*PP - H
+    # R2 = PP + (H - L), S2 = PP - (H - L)
+    # Using prior week's data to avoid look-ahead
+    weekly_high = df_1w['high'].shift(1)
+    weekly_low = df_1w['low'].shift(1)
+    weekly_close = df_1w['close'].shift(1)
     
-    # EMA13 for Elder Ray
-    ema13 = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate pivot levels
+    pp = (weekly_high + weekly_low + weekly_close) / 3.0
+    r1 = 2 * pp - weekly_low
+    s1 = 2 * pp - weekly_high
+    r2 = pp + (weekly_high - weekly_low)
+    s2 = pp - (weekly_high - weekly_low)
     
-    # Bull Power = High - EMA13
-    bull_power = df_1d['high'].values - ema13
-    # Bear Power = Low - EMA13
-    bear_power = df_1d['low'].values - ema13
+    # Align to 6h timeframe (waits for weekly bar to close)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1.values)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2.values)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2.values)
     
-    # ADX calculation
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros(len(high))
-        minus_dm = np.zeros(len(high))
-        tr = np.zeros(len(high))
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(high[i] - high[i-1], 0)
-            minus_dm[i] = max(low[i-1] - low[i], 0)
-            if plus_dm[i] < minus_dm[i]:
-                plus_dm[i] = 0
-            if minus_dm[i] < plus_dm[i]:
-                minus_dm[i] = 0
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Smooth TR, +DM, -DM
-        atr = np.zeros(len(high))
-        plus_dm_smooth = np.zeros(len(high))
-        minus_dm_smooth = np.zeros(len(high))
-        
-        atr[period] = np.sum(tr[1:period+1])
-        plus_dm_smooth[period] = np.sum(plus_dm[1:period+1])
-        minus_dm_smooth[period] = np.sum(minus_dm[1:period+1])
-        
-        for i in range(period+1, len(high)):
-            atr[i] = atr[i-1] - (atr[i-1] / period) + tr[i]
-            plus_dm_smooth[i] = plus_dm_smooth[i-1] - (plus_dm_smooth[i-1] / period) + plus_dm[i]
-            minus_dm_smooth[i] = minus_dm_smooth[i-1] - (minus_dm_smooth[i-1] / period) + minus_dm[i]
-        
-        plus_di = np.zeros(len(high))
-        minus_di = np.zeros(len(high))
-        dx = np.zeros(len(high))
-        
-        for i in range(period, len(high)):
-            if atr[i] != 0:
-                plus_di[i] = 100 * plus_dm_smooth[i] / atr[i]
-                minus_di[i] = 100 * minus_dm_smooth[i] / atr[i]
-                if plus_di[i] + minus_di[i] != 0:
-                    dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-        
-        adx = np.zeros(len(high))
-        adx[2*period-1] = np.sum(dx[period:2*period])
-        for i in range(2*period, len(high)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
-    
-    adx_values = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values)
-    
-    # Align to 6h timeframe
-    ema13_aligned = align_htf_to_ltf(prices, df_1d, ema13)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
-    
-    # Volume MA (20-period)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: 6h volume > 1.5x 24-period EMA of volume
+    volume_ema_24 = pd.Series(volume).ewm(span=24, adjust=False, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 30  # warmup for indicators
+    start_idx = 100  # warmup for weekly data and volume EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema13_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
+            np.isnan(volume_ema_24[i])):
             signals[i] = 0.0
             continue
         
+        price = close[i]
+        vol = volume[i]
+        vol_ema = volume_ema_24[i]
+        
         if position == 0:
-            # Long: Bull Power > 0, Bear Power < 0, ADX > 25, Volume spike
-            if (bull_power_aligned[i] > 0 and bear_power_aligned[i] < 0 and 
-                adx_aligned[i] > 25 and volume[i] > 1.5 * volume_ma[i]):
+            # Long: break above R1 or R2 with volume confirmation
+            if (price > r1_aligned[i] or price > r2_aligned[i]) and vol > 1.5 * vol_ema:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bull Power < 0, Bear Power > 0, ADX > 25, Volume spike
-            elif (bull_power_aligned[i] < 0 and bear_power_aligned[i] > 0 and 
-                  adx_aligned[i] > 25 and volume[i] > 1.5 * volume_ma[i]):
+            # Short: break below S1 or S2 with volume confirmation
+            elif (price < s1_aligned[i] or price < s2_aligned[i]) and vol > 1.5 * vol_ema:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Bull Power <= 0 or Bear Power >= 0
-            if bull_power_aligned[i] <= 0 or bear_power_aligned[i] >= 0:
+            # Long exit: price falls below S1 (invalidates bullish breakout)
+            if price < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Bull Power >= 0 or Bear Power <= 0
-            if bull_power_aligned[i] >= 0 or bear_power_aligned[i] <= 0:
+            # Short exit: price rises above R1 (invalidates bearish breakout)
+            if price > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -133,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_ADX_VolumeSpike"
+name = "6h_WeeklyPivot_Breakout_Volume"
 timeframe = "6h"
 leverage = 1.0
