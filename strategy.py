@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d KAMA trend direction with RSI momentum filter and weekly choppiness regime filter.
-Long when KAMA is rising (bullish trend) AND RSI < 30 (oversold bounce) AND weekly chop < 38.2 (trending regime).
-Short when KAMA is falling (bearish trend) AND RSI > 70 (overbought bounce) AND weekly chop < 38.2 (trending regime).
-Exit when RSI crosses 50 (mean reversion) or chop > 61.8 (range regime).
-Uses 1w for choppiness regime filter and 1d for execution.
-Designed to catch mean-reversion bounces within strong trends across bull and bear markets.
-Target: 15-25 trades/year per symbol.
+Hypothesis: 6h Williams %R mean reversion with 1d trend filter and volume spike confirmation.
+Long when Williams %R < -80 (oversold) AND price > 1d EMA50 (uptrend) AND volume > 1.5x 20-bar average.
+Short when Williams %R > -20 (overbought) AND price < 1d EMA50 (downtrend) AND volume > 1.5x 20-bar average.
+Exit when Williams %R returns to -50 (mean reversion) or opposite extreme is hit.
+Uses 1d for EMA trend regime and 6h for execution, Williams %R, and volume.
+Designed to capture mean reversion in ranging markets and pullbacks in trending markets across bull and bear.
+Target: 12-30 trades/year per symbol.
 """
 
 import numpy as np
@@ -15,111 +15,84 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for KAMA and RSI
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate 1d KAMA (10-period)
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)  # placeholder, will compute properly below
-    # Recompute volatility correctly: sum of absolute changes over 10 periods
-    volatility = pd.Series(np.abs(np.diff(close_1d, prepend=close_1d[0]))).rolling(window=10, min_periods=1).sum().values
-    er = np.where(volatility > 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (0.6667 - 0.0645) + 0.0645) ** 2
-    # KAMA
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Calculate 1d EMA50
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 1d RSI (14-period)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate 6h Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
     
-    # Get 1w data for choppiness regime
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 6h volume MA (20-period)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1w Choppiness Index (14-period)
-    # True Range
-    tr1 = np.maximum(high_1w - low_1w, 
-                     np.absolute(high_1w - np.roll(close_1w, 1)),
-                     np.absolute(low_1w - np.roll(close_1w, 1)))
-    tr1[0] = high_1w[0] - low_1w[0]
-    # Sum of TR over 14 periods
-    tr_sum_14 = pd.Series(tr1).rolling(window=14, min_periods=14).sum().values
-    # Highest high and lowest low over 14 periods
-    hh_14 = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    # Choppiness Index
-    chop = 100 * np.log10(tr_sum_14 / (hh_14 - ll_14)) / np.log10(14)
-    
-    # Align all indicators to primary timeframe (1d)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
+    # Align all indicators to primary timeframe (6h)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)  # Williams %R needs no extra delay
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # warmup period
+    start_idx = 100  # warmup period
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(kama_aligned[i]) or 
-            np.isnan(rsi_aligned[i]) or
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(williams_r_aligned[i]) or
+            np.isnan(vol_ma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # KAMA direction: rising or falling
-        kama_rising = kama_aligned[i] > kama_aligned[i-1]
-        kama_falling = kama_aligned[i] < kama_aligned[i-1]
+        # Volume confirmation: current 6h volume > 1.5x 20-bar average
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20_aligned[i]
         
-        # RSI conditions
-        rsi_oversold = rsi_aligned[i] < 30
-        rsi_overbought = rsi_aligned[i] > 70
-        rsi_mean = abs(rsi_aligned[i] - 50) < 1  # near 50 for exit
+        # Trend filter: price relative to 1d EMA50
+        above_ema = close[i] > ema_50_1d_aligned[i]
+        below_ema = close[i] < ema_50_1d_aligned[i]
         
-        # Chop regime: trending (< 38.2) or ranging (> 61.8)
-        chop_trending = chop_aligned[i] < 38.2
-        chop_ranging = chop_aligned[i] > 61.8
+        # Williams %R conditions
+        oversold = williams_r_aligned[i] < -80
+        overbought = williams_r_aligned[i] > -20
+        mean_revert = abs(williams_r_aligned[i] + 50) < 5  # near -50
+        
+        # Exit conditions: mean reversion or opposite extreme
+        exit_long = mean_revert or williams_r_aligned[i] > -20
+        exit_short = mean_revert or williams_r_aligned[i] < -80
         
         if position == 0:
-            # Long: KAMA rising, RSI oversold, trending regime
-            if (kama_rising and rsi_oversold and chop_trending):
+            # Long: oversold + uptrend + volume confirmation
+            if (oversold and above_ema and volume_confirmed):
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA falling, RSI overbought, trending regime
-            elif (kama_falling and rsi_overbought and chop_trending):
+            # Short: overbought + downtrend + volume confirmation
+            elif (overbought and below_ema and volume_confirmed):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI mean reversion or chop becomes ranging
-            if (rsi_mean or chop_ranging):
+            # Exit long: mean reversion or overbought
+            if exit_long:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI mean reversion or chop becomes ranging
-            if (rsi_mean or chop_ranging):
+            # Exit short: mean reversion or oversold
+            if exit_short:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -127,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_RSI_Chop_Regime"
-timeframe = "1d"
+name = "6h_WilliamsR_1dEMA50_Volume_MeanReversion"
+timeframe = "6h"
 leverage = 1.0
