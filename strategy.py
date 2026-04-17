@@ -13,120 +13,101 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ADX (HTF)
+    # Get daily data for 1d EMA34 and volume
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate ADX (14-period)
+    # Calculate daily EMA34
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Calculate daily volume SMA20 for volume spike filter
+    volume_sma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align to 12h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    volume_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma20_1d)
+    
+    # Get weekly data for ADX (trend strength filter)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly ADX (14-period)
     period = 14
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    up_move[0] = 0
-    down_move[0] = 0
+    plus_dm = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), 
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    minus_dm = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), 
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     
-    # Smoothing with Wilder's smoothing (EMA with alpha=1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        alpha = 1.0 / period
-        # First value is simple average of first 'period' values
-        if len(data) >= period:
-            result[period-1] = np.nansum(data[:period]) / period
-            for i in range(period, len(data)):
-                result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-        return result
+    # Align weekly ADX to 12h
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
-    tr_smoothed = wilders_smoothing(tr, period)
-    plus_dm_smoothed = wilders_smoothing(plus_dm, period)
-    minus_dm_smoothed = wilders_smoothing(minus_dm, period)
+    # 12h Donchian channel (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Directional Indicators
-    plus_di = np.where(tr_smoothed != 0, (plus_dm_smoothed / tr_smoothed) * 100, 0)
-    minus_di = np.where(tr_smoothed != 0, (minus_dm_smoothed / tr_smoothed) * 100, 0)
-    
-    # DX and ADX
-    dx = np.where((plus_di + minus_di) != 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
-    adx = wilders_smoothing(dx, period)
-    
-    # Align daily ADX to 6h
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Get 12h data for RSI (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    
-    # Calculate RSI (14-period) on 12h
-    delta = np.diff(close_12h)
-    delta = np.insert(delta, 0, 0)  # First value 0
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing for RSI
-    avg_gain = wilders_smoothing(gain, 14)
-    avg_loss = wilders_smoothing(loss, 14)
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_12h = 100 - (100 / (1 + rs))
-    
-    # Align 12h RSI to 6h
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
-    
-    # Williams %R (14-period) on 6h
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where((highest_high_14 - lowest_low_14) != 0, 
-                          -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14), -50)
-    
-    # Volume filter: current volume > 1.5 * 20-period average
+    # Volume confirmation: current volume > 1.5 * 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * volume_ma20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # Need ADX, RSI, Williams %R, volume MA
+    start_idx = 50  # Need EMA34, ADX, Donchian, volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(adx_aligned[i]) or 
-            np.isnan(rsi_12h_aligned[i]) or 
-            np.isnan(williams_r[i]) or 
-            np.isnan(volume_ma20[i])):
+        if (np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or 
+            np.isnan(volume_ma20[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or
+            np.isnan(volume_sma20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Filters
+        price_above_ema = close[i] > ema_34_1d_aligned[i]
+        strong_trend = adx_aligned[i] > 25
+        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        daily_volume_spike = volume_1d[i // 288] > (1.5 * volume_sma20_1d_aligned[i]) if i >= 288 else False
+        
         if position == 0:
-            # Long: ADX > 20 (trending), RSI < 30 (oversold), Williams %R > -80 (not deeply oversold)
-            if (adx_aligned[i] > 20 and rsi_12h_aligned[i] < 30 and williams_r[i] > -80 and volume_filter[i]):
+            # Long: price above EMA34, strong uptrend, volume confirmation
+            if (price_above_ema and strong_trend and volume_filter and daily_volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: ADX > 20 (trending), RSI > 70 (overbought), Williams %R < -20 (not deeply overbought)
-            elif (adx_aligned[i] > 20 and rsi_12h_aligned[i] > 70 and williams_r[i] < -20 and volume_filter[i]):
+            # Short: price below EMA34, strong downtrend, volume confirmation
+            elif ((not price_above_ema) and strong_trend and volume_filter and daily_volume_spike):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI > 50 (momentum fading) or ADX < 20 (trend weakening)
-            if rsi_12h_aligned[i] > 50 or adx_aligned[i] < 20:
+            # Exit long: price crosses below EMA34 or trend weakens
+            if (not price_above_ema) or (adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI < 50 (momentum fading) or ADX < 20 (trend weakening)
-            if rsi_12h_aligned[i] < 50 or adx_aligned[i] < 20:
+            # Exit short: price crosses above EMA34 or trend weakens
+            if price_above_ema or (adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -134,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ADX_RSI_WilliamsR_Volume"
-timeframe = "6h"
+name = "12h_EMA34_ADX_Volume_Spike_Filter"
+timeframe = "12h"
 leverage = 1.0
