@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_1dVolumeSpike_TrendFilter
-Strategy: 4h Donchian breakout with 1d volume spike and trend filter.
-Long: Close > upper band + 1d volume > 1.5x 20-day avg + 1d close > 1d open
-Short: Close < lower band + 1d volume > 1.5x 20-day avg + 1d close < 1d open
-Exit: Opposite band touch
+1d_KAMA_Trend_With_Volume_Filter
+Strategy: 1d KAMA direction with volume confirmation.
+Long: KAMA rising + volume > 1.5x 20-period average
+Short: KAMA falling + volume > 1.5x 20-period average
+Exit: KAMA direction reversal
 Position size: 0.25
-Designed to capture strong momentum moves with volume confirmation and trend alignment.
-Timeframe: 4h
+Designed to capture trending moves while avoiding chop.
+Timeframe: 1d
 """
 
 import numpy as np
@@ -16,82 +16,98 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Donchian channel (20-period)
-    upper = np.full_like(close, np.nan)
-    lower = np.full_like(close, np.nan)
+    # Calculate KAMA (Kaufman Adaptive Moving Average)
+    kama_period = 10
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
     
-    # Calculate rolling max/min
-    for i in range(20, n):
-        upper[i] = np.max(high[i-20:i])
-        lower[i] = np.min(low[i-20:i])
+    # Calculate Efficiency Ratio
+    change = np.abs(np.diff(close, prepend=close[0]))
+    abs_change = np.abs(np.diff(close, prepend=close[0]))
     
-    # Get 1d data
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Net change over kama_period
+    net_change = np.abs(np.subtract(close[kama_period:], close[:-kama_period]))
+    net_change = np.concatenate([np.full(kama_period, np.nan), net_change])
+    
+    # Sum of absolute changes over kama_period
+    sum_abs_change = np.convolve(abs_change, np.ones(kama_period), mode='full')[:len(close)]
+    sum_abs_change = np.concatenate([np.full(kama_period-1, np.nan), sum_abs_change[kama_period-1:]])
+    
+    # Efficiency Ratio
+    er = np.where(sum_abs_change != 0, net_change / sum_abs_change, 0)
+    
+    # Smoothing Constant
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # KAMA calculation
+    kama = np.full_like(close, np.nan)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    # Get 1w trend (close > open = uptrend)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 1d volume spike (>1.5x 20-day average)
-    vol_1d = df_1d['volume'].values
-    vol_ma20 = np.full_like(vol_1d, np.nan)
-    for i in range(20, len(vol_1d)):
-        vol_ma20[i] = np.mean(vol_1d[i-20:i])
-    vol_spike = np.where(vol_ma20 > 0, vol_1d / vol_ma20, 0)
-    vol_spike_filter = align_htf_to_ltf(prices, df_1d, vol_spike > 1.5)
+    trend_1w = (df_1w['close'] > df_1w['open']).astype(float).values  # 1 for up, 0 for down
+    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
-    # 1d trend (close > open = uptrend)
-    trend_1d = (df_1d['close'] > df_1d['open']).astype(float).values
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    # Get volume average (20-period)
+    volume_ma20 = np.convolve(volume, np.ones(20)/20, mode='full')[:len(volume)]
+    volume_ma20 = np.concatenate([np.full(19, np.nan), volume_ma20[19:]])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Precompute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    
     # Start from sufficient warmup
-    start_idx = 40  # 20 for Donchian + buffer
+    start_idx = max(kama_period*2, 20)
     
     for i in range(start_idx, n):
-        # Session filter: 08-20 UTC
-        if not (8 <= hours[i] <= 20):
+        # Skip if any required data is not available
+        if (np.isnan(kama[i]) or np.isnan(trend_1w_aligned[i]) or np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Skip if any required data is not available
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_spike_filter[i])):
-            signals[i] = 0.0
-            continue
+        # Current volume
+        volume_current = volume[i]
+        volume_filter = volume_current > (1.5 * volume_ma20[i])
+        
+        # KAMA direction
+        kama_rising = kama[i] > kama[i-1]
+        kama_falling = kama[i] < kama[i-1]
         
         # Entry signals
         if position == 0:
-            # Long: break above upper + volume spike + 1d uptrend
-            if close[i] > upper[i] and vol_spike_filter[i] and trend_1d_aligned[i] > 0.5:
+            # Long: KAMA rising + volume filter + 1w uptrend
+            if kama_rising and volume_filter and trend_1w_aligned[i] > 0.5:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower + volume spike + 1d downtrend
-            elif close[i] < lower[i] and vol_spike_filter[i] and trend_1d_aligned[i] < 0.5:
+            # Short: KAMA falling + volume filter + 1w downtrend
+            elif kama_falling and volume_filter and trend_1w_aligned[i] < 0.5:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: touch or cross lower band
-            if close[i] < lower[i]:
+            # Exit long: KAMA falling
+            if not kama_rising:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: touch or cross upper band
-            if close[i] > upper[i]:
+            # Exit short: KAMA rising
+            if not kama_falling:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dVolumeSpike_TrendFilter"
-timeframe = "4h"
+name = "1d_KAMA_Trend_With_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
