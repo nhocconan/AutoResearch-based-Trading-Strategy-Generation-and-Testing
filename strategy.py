@@ -13,18 +13,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d RSI (14-period) ===
+    # === 1d RSI (14-period) with Wilder's smoothing ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate RSI using Wilder's smoothing
     delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
-    # Wilder's smoothing with proper seeding
-    avg_gain = np.full_like(gain, np.nan)
-    avg_loss = np.full_like(loss, np.nan)
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
     period = 14
     for i in range(len(gain)):
         if i < period:
