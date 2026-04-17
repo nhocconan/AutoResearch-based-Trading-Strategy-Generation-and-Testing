@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Ichimoku Cloud with 1d EMA50 trend filter and volume confirmation.
-Long when price above Ichimoku cloud, TK cross bullish, price > 1d EMA50, and volume > 1.5x average.
-Short when price below Ichimoku cloud, TK cross bearish, price < 1d EMA50, and volume > 1.5x average.
-Exit when price crosses back into cloud or volume drops below average.
-Ichimoku provides dynamic support/resistance, TK cross signals momentum, EMA50 filters trend direction.
-Volume confirmation reduces fakeouts. Designed to capture trends in both bull and bear markets.
-Target: 50-150 total trades over 4 years (12-37/year).
+Hypothesis: 12h Camarilla R1/S1 breakout with 1d volume confirmation and 1w ADX trend filter.
+Long when price breaks above Camarilla R1 AND volume > 1.3x 20-period average AND 1w ADX > 20.
+Short when price breaks below Camarilla S1 AND volume > 1.3x average AND 1w ADX > 20.
+Exit when price reverts to Camarilla midpoint (close) OR 1w ADX < 15 (range market).
+Uses 12h for price action/Camarilla calculation and 1d/1w for filters to reduce whipsaw.
+Target: 50-150 total trades over 4 years (12-37/year). Camarilla levels provide intraday support/resistance,
+volume confirmation filters breakout strength, higher-timeframe ADX ensures trending environment.
+Works in bull markets (captures R1 breakouts) and bear markets (captures S1 breakdowns).
 """
 
 import numpy as np
@@ -23,110 +24,123 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 6h data for Ichimoku calculation
-    df_6h = get_htf_data(prices, '6h')
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
+    # Get 12h data for Camarilla calculation
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Ichimoku parameters
-    tenkan_period = 9
-    kijun_period = 26
-    senkou_span_b_period = 52
-    displacement = 26
+    # Calculate Camarilla levels on 12h timeframe (based on previous day's range)
+    # Camarilla R1 = close + 1.1*(high-low)/12
+    # Camarilla S1 = close - 1.1*(high-low)/12
+    # Camarilla midpoint = close
+    prev_high_12h = np.roll(high_12h, 1)
+    prev_low_12h = np.roll(low_12h, 1)
+    prev_close_12h = np.roll(close_12h, 1)
+    prev_high_12h[0] = high_12h[0]  # first period
+    prev_low_12h[0] = low_12h[0]
+    prev_close_12h[0] = close_12h[0]
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    high_9 = pd.Series(high_6h).rolling(window=tenkan_period, min_periods=tenkan_period).max()
-    low_9 = pd.Series(low_6h).rolling(window=tenkan_period, min_periods=tenkan_period).min()
-    tenkan_sen = ((high_9 + low_9) / 2).values
+    camarilla_upper = prev_close_12h + 1.1 * (prev_high_12h - prev_low_12h) / 12
+    camarilla_lower = prev_close_12h - 1.1 * (prev_high_12h - prev_low_12h) / 12
+    camarilla_mid = prev_close_12h  # midpoint is previous close
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    high_26 = pd.Series(high_6h).rolling(window=kijun_period, min_periods=kijun_period).max()
-    low_26 = pd.Series(low_6h).rolling(window=kijun_period, min_periods=kijun_period).min()
-    kijun_sen = ((high_26 + low_26) / 2).values
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).values
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
-    high_52 = pd.Series(high_6h).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).max()
-    low_52 = pd.Series(low_6h).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).min()
-    senkou_span_b = ((high_52 + low_52) / 2).values
-    
-    # Get 1d data for EMA50 filter
+    # Get 1d data for volume filter
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    volume_1d = df_1d['volume'].values
+    volume_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
     
-    # Align indicators to 6h timeframe
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_6h, tenkan_sen)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_6h, kijun_sen)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_6h, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_6h, senkou_span_b)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Get 1w data for ADX filter
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Volume average (20-period) on 6h
-    volume_6h = df_6h['volume'].values
-    volume_ma = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_6h, volume_ma)
+    # Calculate ADX on 1w timeframe (14-period)
+    high_1w_series = pd.Series(high_1w)
+    low_1w_series = pd.Series(low_1w)
+    close_1w_series = pd.Series(close_1w)
+    
+    # True Range
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    
+    # Plus Directional Movement (+DM)
+    up_move = high_1w - np.roll(high_1w, 1)
+    down_move = np.roll(low_1w, 1) - low_1w
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smooth TR, +DM, -DM (14-period)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate +DI and -DI
+    plus_di = 100 * (plus_dm_smooth / np.where(atr != 0, atr, np.inf))
+    minus_di = 100 * (minus_dm_smooth / np.where(atr != 0, atr, np.inf))
+    
+    # Calculate DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) != 0, (plus_di + minus_di), np.inf)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align 12h Camarilla to 12h timeframe (no alignment needed)
+    camarilla_upper_aligned = camarilla_upper
+    camarilla_lower_aligned = camarilla_lower
+    camarilla_mid_aligned = camarilla_mid
+    
+    # Align 1d volume MA to 12h timeframe
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d_aligned)
+    
+    # Align 1w ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 100  # warmup for Ichimoku (52+26+buffer)
+    start_idx = 100  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
-            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(volume_ma_aligned[i])):
+        if (np.isnan(camarilla_upper_aligned[i]) or np.isnan(camarilla_lower_aligned[i]) or 
+            np.isnan(camarilla_mid_aligned[i]) or np.isnan(volume_ma_aligned[i]) or 
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
-        tk = tenkan_sen_aligned[i]
-        kj = kijun_sen_aligned[i]
-        sa = senkou_span_a_aligned[i]
-        sb = senkou_span_b_aligned[i]
-        ema50 = ema_50_aligned[i]
+        cu = camarilla_upper_aligned[i]
+        cl = camarilla_lower_aligned[i]
+        cm = camarilla_mid_aligned[i]
         vol_ma = volume_ma_aligned[i]
         vol = volume[i]
+        adx_val = adx_aligned[i]
         price = close[i]
         
-        # Ichimoku Cloud boundaries
-        upper_cloud = max(sa, sb)
-        lower_cloud = min(sa, sb)
-        
-        # TK Cross
-        tk_cross_bullish = tk > kj
-        tk_cross_bearish = tk < kj
-        
         if position == 0:
-            # Long: price above cloud, TK bullish, price > EMA50, volume > 1.5x avg
-            if (price > upper_cloud and 
-                tk_cross_bullish and 
-                price > ema50 and 
-                vol > 1.5 * vol_ma):
+            # Long: price > Camarilla R1 AND volume > 1.3x avg AND 1w ADX > 20 (trending)
+            if price > cu and vol > 1.3 * vol_ma and adx_val > 20:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below cloud, TK bearish, price < EMA50, volume > 1.5x avg
-            elif (price < lower_cloud and 
-                  tk_cross_bearish and 
-                  price < ema50 and 
-                  vol > 1.5 * vol_ma):
+            # Short: price < Camarilla S1 AND volume > 1.3x avg AND 1w ADX > 20 (trending)
+            elif price < cl and vol > 1.3 * vol_ma and adx_val > 20:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses into cloud OR volume drops below average
-            if price < upper_cloud or vol < vol_ma:
+            # Exit long: price < Camarilla midpoint OR 1w ADX < 15 (range market)
+            if price < cm or adx_val < 15:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses into cloud OR volume drops below average
-            if price > lower_cloud or vol < vol_ma:
+            # Exit short: price > Camarilla midpoint OR 1w ADX < 15 (range market)
+            if price > cm or adx_val < 15:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -134,6 +148,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_IchimokuCloud_Volume_EMA50_Filter"
-timeframe = "6h"
+name = "12h_CamarillaR1S1_Volume_1wADX_Filter"
+timeframe = "12h"
 leverage = 1.0
