@@ -1,29 +1,17 @@
 #!/usr/bin/env python3
 """
-1h_HMA21_Cross_4hTrend_1dVolumeFilter
-Strategy: 1h HMA(21) cross with 4h trend filter and 1d volume spike confirmation.
-Long: HMA(21) crosses above price + 4h close > 4h HMA(21) + 1d volume > 1.5x 20-day avg
-Short: HMA(21) crosses below price + 4h close < 4h HMA(21) + 1d volume > 1.5x 20-day avg
-Exit: Opposite HMA cross
-Position size: 0.20
-Uses HMA for smooth trend following, 4h for trend direction, 1d volume for conviction.
-Avoids whipsaws by requiring alignment across timeframes and volume confirmation.
+1d_WeeklyDonchian_Breakout_VolumeSpike_V1
+Strategy: Daily Donchian(20) breakout with weekly trend filter and daily volume spike confirmation.
+Long: Price breaks above 20-day high + weekly close > weekly SMA(10) + daily volume > 2x 20-day average volume
+Short: Price breaks below 20-day low + weekly close < weekly SMA(10) + daily volume > 2x 20-day average volume
+Exit: Opposite breakout or volume drop below average
+Position size: 0.25
+Designed to capture strong trends with volume confirmation, works in both bull and bear markets by following the weekly trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def hull_moving_average(series, period):
-    """Calculate Hull Moving Average"""
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
-    
-    wma1 = pd.Series(series).rolling(window=half_period, min_periods=half_period).mean()
-    wma2 = pd.Series(series).rolling(window=period, min_periods=period).mean()
-    raw_hma = 2 * wma1 - wma2
-    hma = pd.Series(raw_hma).rolling(window=sqrt_period, min_periods=sqrt_period).mean()
-    return hma.values
 
 def generate_signals(prices):
     n = len(prices)
@@ -35,85 +23,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    
-    # Get 1d data for volume filter
+    # Get daily data for Donchian channels and volume
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate HMA(21) on 1h
-    hma_21 = hull_moving_average(close, 21)
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate HMA(21) on 4h for trend filter
-    hma_21_4h = hull_moving_average(close_4h, 21)
+    # Calculate 20-day Donchian channels on daily data
+    high_max20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_min20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 20-day average volume on 1d
+    # Calculate weekly SMA(10) for trend filter
+    sma_10_1w = pd.Series(close_1w).rolling(window=10, min_periods=10).mean().values
+    
+    # Calculate 20-day average volume on daily data
     volume_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align indicators to 1h timeframe
-    hma_21_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_21_4h)
-    volume_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma20_1d)
+    # Align all indicators to daily timeframe (already aligned since we're using daily data)
+    # But we need to align weekly data to daily timeframe
+    sma_10_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_10_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Precompute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    
-    for i in range(50, n):  # warmup for HMA calculations
-        # Session filter: 08-20 UTC
-        if not (8 <= hours[i] <= 20):
-            signals[i] = 0.0
-            continue
-        
+    for i in range(20, n):  # warmup for Donchian calculations
         # Skip if any required data is not available
-        if (np.isnan(hma_21[i]) or np.isnan(hma_21_4h_aligned[i]) or 
-            np.isnan(volume_ma20_1d_aligned[i])):
+        if (np.isnan(high_max20[i]) or np.isnan(low_min20[i]) or 
+            np.isnan(sma_10_1w_aligned[i]) or np.isnan(volume_ma20_1d[i])):
             signals[i] = 0.0
             continue
         
-        # Current 1d volume aligned to 1h
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
-        volume_filter = vol_1d_current > (1.5 * volume_ma20_1d_aligned[i])
+        # Current daily values
+        close_today = close_1d[i] if i < len(close_1d) else close[-1]
+        volume_today = volume_1d[i] if i < len(volume_1d) else volume[-1]
         
-        # Trend filter: 4h close vs 4h HMA(21)
-        uptrend_4h = close_4h[-1] > hma_21_4h[-1] if len(close_4h) > 0 else False
-        downtrend_4h = close_4h[-1] < hma_21_4h[-1] if len(close_4h) > 0 else False
+        # Breakout conditions
+        breakout_up = close_today > high_max20[i]
+        breakout_down = close_today < low_min20[i]
         
-        # HMA cross signals
-        hma_cross_up = close[i] > hma_21[i] and close[i-1] <= hma_21[i-1]
-        hma_cross_down = close[i] < hma_21[i] and close[i-1] >= hma_21[i-1]
+        # Trend filter: weekly close vs weekly SMA(10)
+        weekly_close = close_1w[i // 7] if i // 7 < len(close_1w) else close_1w[-1]
+        weekly_sma = sma_10_1w_aligned[i]
+        uptrend_weekly = weekly_close > weekly_sma
+        downtrend_weekly = weekly_close < weekly_sma
+        
+        # Volume filter: daily volume > 2x 20-day average
+        volume_filter = volume_today > (2.0 * volume_ma20_1d[i])
         
         if position == 0:
-            # Long: HMA cross up + 4h uptrend + volume spike
-            if hma_cross_up and uptrend_4h and volume_filter:
-                signals[i] = 0.20
+            # Long: upward breakout + weekly uptrend + volume spike
+            if breakout_up and uptrend_weekly and volume_filter:
+                signals[i] = 0.25
                 position = 1
-            # Short: HMA cross down + 4h downtrend + volume spike
-            elif hma_cross_down and downtrend_4h and volume_filter:
-                signals[i] = -0.20
+            # Short: downward breakout + weekly downtrend + volume spike
+            elif breakout_down and downtrend_weekly and volume_filter:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: HMA cross down
-            if hma_cross_down:
+            # Exit long: downward breakout or volume drop below average
+            if breakout_down or volume_today < volume_ma20_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: HMA cross up
-            if hma_cross_up:
+            # Exit short: upward breakout or volume drop below average
+            if breakout_up or volume_today < volume_ma20_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_HMA21_Cross_4hTrend_1dVolumeFilter"
-timeframe = "1h"
+name = "1d_WeeklyDonchian_Breakout_VolumeSpike_V1"
+timeframe = "1d"
 leverage = 1.0
