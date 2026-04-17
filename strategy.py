@@ -3,17 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 4-hour Donchian breakout with 1-day volume confirmation and ATR volatility filter
+# Works in bull markets by capturing breakouts; works in bear markets by avoiding low-volatility false signals
+# Volume spike filters out low-conviction moves; ATR filter ensures trades occur in sufficient volatility regimes
+# Target: 20-40 trades/year to minimize fee drag while capturing significant moves
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 4h Donchian channel (25-period) ===
-    high_25 = pd.Series(close).rolling(window=25, min_periods=25).max().values
-    low_25 = pd.Series(close).rolling(window=25, min_periods=25).min().values
+    # === 4h Donchian channel (20-period) ===
+    high_20 = pd.Series(close).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(close).rolling(window=20, min_periods=20).min().values
     
     # === 1d ATR(14) for volatility filter ===
     df_1d = get_htf_data(prices, '1d')
@@ -42,14 +47,14 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 50
+    warmup = 60
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(high_25[i]) or np.isnan(low_25[i]) or 
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
             np.isnan(atr_1d_aligned[i]) or 
             np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(vol_ma_15_4h[i])):
             signals[i] = 0.0
@@ -64,8 +69,8 @@ def generate_signals(prices):
         vol_spike_4h = volume[i] > vol_ma_15_4h[i] * 1.5
         
         # Donchian breakout conditions
-        breakout_up = close[i] > high_25[i-1]  # Break above previous period's high
-        breakout_down = close[i] < low_25[i-1]  # Break below previous period's low
+        breakout_up = close[i] > high_20[i-1]  # Break above previous period's high
+        breakout_down = close[i] < low_20[i-1]  # Break below previous period's low
         
         # Volatility filter: avoid low volatility periods
         vol_filter = atr_1d_aligned[i] > np.nanmedian(atr_1d_aligned[max(0, i-100):i])
@@ -86,7 +91,7 @@ def generate_signals(prices):
         # Exit logic
         elif position == 1:
             # Exit long when price returns to middle of channel or volatility drops
-            mid_channel = (high_25[i] + low_25[i]) / 2
+            mid_channel = (high_20[i] + low_20[i]) / 2
             if close[i] < mid_channel or not vol_filter:
                 signals[i] = 0.0
                 position = 0
@@ -96,7 +101,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit short when price returns to middle of channel or volatility drops
-            mid_channel = (high_25[i] + low_25[i]) / 2
+            mid_channel = (high_20[i] + low_20[i]) / 2
             if close[i] > mid_channel or not vol_filter:
                 signals[i] = 0.0
                 position = 0
@@ -106,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian25_1dATR_Vol2.0x_1.5x"
+name = "4h_Donchian20_1dATR_Vol2.0x_1.5x"
 timeframe = "4h"
 leverage = 1.0
