@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_1d_Pivot_R1_S1_Breakout_Volume_ATRFilter_V1
-Long when price breaks above R1 with volume > 1.5x 20-period avg, short when breaks below S1.
-Trend filter: price above/below 1d EMA50. Exit when price crosses back to pivot point.
-Uses 12h timeframe for entries, 1d for pivot levels and trend filter.
+4h_Camarilla_Pivot_R1_S1_Breakout_Volume_Spike_v1
+Breakout above Camarilla R1 or below S1 with volume spike and volume ratio filter.
+Uses 1d timeframe for pivot calculation.
+Exit when price returns to H4/L4 levels or volume drops.
 Target: 50-150 total trades over 4 years (12-37/year).
 """
 
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,76 +21,79 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1d Pivot Points (Classic) ===
-    df_1d = get_htf_data(prices, '1d')
-    # Ensure we have enough data
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Calculate pivot points from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
-    
-    # Align to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # === 1d EMA50 for trend filter ===
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # === Volume filter: 20-period average ===
+    # === Volume spike filter (20-period) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / (vol_ma + 1e-10)
+    
+    # === 1d Camarilla pivot levels ===
+    df_1d = get_htf_data(prices, '1d')
+    # Calculate pivots from previous day's OHLC
+    phigh = df_1d['high'].values
+    plow = df_1d['low'].values
+    pclose = df_1d['close'].values
+    
+    # Camarilla formula
+    range_ = phigh - plow
+    R4 = pclose + range_ * 1.1 / 2
+    R3 = pclose + range_ * 1.1 / 4
+    R2 = pclose + range_ * 1.1 / 6
+    R1 = pclose + range_ * 1.1 / 12
+    S1 = pclose - range_ * 1.1 / 12
+    S2 = pclose - range_ * 1.1 / 6
+    S3 = pclose - range_ * 1.1 / 4
+    S4 = pclose - range_ * 1.1 / 2
+    
+    # Align to 4h timeframe (previous day's pivots)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    H4_aligned = align_htf_to_ltf(prices, df_1d, (pclose + range_ * 1.1 / 2) * 0)  # Placeholder, will use R4/S4 for exit
+    L4_aligned = align_htf_to_ltf(prices, df_1d, (pclose - range_ * 1.1 / 2) * 0)  # Placeholder
+    
+    # Actually compute R4 and S4 for exit
+    R4_val = pclose + range_ * 1.1 / 2
+    S4_val = pclose - range_ * 1.1 / 2
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4_val)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4_val)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 50
+    warmup = 30
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(vol_ratio[i]) or 
+            np.isnan(R1_aligned[i]) or 
+            np.isnan(S1_aligned[i]) or
+            np.isnan(R4_aligned[i]) or
+            np.isnan(S4_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Volume condition: current volume > 1.5x 20-period average
-        vol_condition = volume[i] > 1.5 * vol_ma[i]
-        
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price breaks above R1, volume confirmation, price above 1d EMA50
-            if (close[i] > r1_aligned[i] and 
-                vol_condition and 
-                close[i] > ema_50_1d_aligned[i]):
+            # Long: price breaks above R1 with volume spike (vol_ratio > 1.5)
+            if (close[i] > R1_aligned[i] and 
+                vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price breaks below S1, volume confirmation, price below 1d EMA50
-            elif (close[i] < s1_aligned[i] and 
-                  vol_condition and 
-                  close[i] < ema_50_1d_aligned[i]):
+            # Short: price breaks below S1 with volume spike (vol_ratio > 1.5)
+            elif (close[i] < S1_aligned[i] and 
+                  vol_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price crosses back below pivot point
-            if close[i] < pivot_aligned[i]:
+            # Exit long: price returns to H4 (R4) level OR volume drops (vol_ratio < 1.0)
+            if (close[i] >= R4_aligned[i] or 
+                vol_ratio[i] < 1.0):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -98,8 +101,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses back above pivot point
-            if close[i] > pivot_aligned[i]:
+            # Exit short: price returns to L4 (S4) level OR volume drops (vol_ratio < 1.0)
+            if (close[i] <= S4_aligned[i] or 
+                vol_ratio[i] < 1.0):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -108,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Pivot_R1_S1_Breakout_Volume_ATRFilter_V1"
-timeframe = "12h"
+name = "4h_Camarilla_Pivot_R1_S1_Breakout_Volume_Spike_v1"
+timeframe = "4h"
 leverage = 1.0
