@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,31 +13,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get 1d data for pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points (standard formula)
+    # Calculate daily pivot points (standard formula)
     # P = (H + L + C) / 3
     # R1 = 2*P - L, S1 = 2*P - H
-    pivot = (high_1w + low_1w + close_1w) / 3.0
-    r1 = 2 * pivot - low_1w
-    s1 = 2 * pivot - high_1w
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
     
-    # Shift to use previous week's pivots (avoid look-ahead)
+    # Shift to use previous day's pivots (avoid look-ahead)
     r1_prev = np.roll(r1, 1)
     s1_prev = np.roll(s1, 1)
     r1_prev[0] = np.nan
     s1_prev[0] = np.nan
     
-    # Align weekly pivot levels to 12h timeframe
-    r1_12h = align_htf_to_ltf(prices, df_1w, r1_prev)
-    s1_12h = align_htf_to_ltf(prices, df_1w, s1_prev)
+    # Align daily pivot levels to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1_prev)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1_prev)
     
-    # Volume confirmation: current volume > 1.5 * 12-period average (12h * 12 = 144h)
-    volume_ma12 = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    # Volume confirmation: current volume > 1.5 * 48-period average (4h * 12 = 48h)
+    volume_ma48 = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
     
     # ATR filter to avoid low volatility environments
     tr1 = high - low
@@ -48,42 +48,54 @@ def generate_signals(prices):
     tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma10 = pd.Series(atr).rolling(window=10, min_periods=10).mean().values
+    atr_ma20 = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
+    
+    # Momentum filter: 4-period RSI
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=4, min_periods=4).mean().values
+    avg_loss = pd.Series(loss).rolling(window=4, min_periods=4).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, 50.0), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 12  # Need volume MA12 and ATR MA10
+    start_idx = 48  # Need volume MA48 and ATR MA20
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(volume_ma12[i]) or 
+        if (np.isnan(volume_ma48[i]) or 
             np.isnan(atr[i]) or 
-            np.isnan(atr_ma10[i]) or 
-            np.isnan(r1_12h[i]) or 
-            np.isnan(s1_12h[i])):
+            np.isnan(atr_ma20[i]) or 
+            np.isnan(r1_4h[i]) or 
+            np.isnan(s1_4h[i]) or
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 12-period average
-        volume_filter = volume[i] > (1.5 * volume_ma12[i])
-        # Volatility filter: ATR > ATR MA10 (avoid low volatility)
-        volatility_filter = atr[i] > atr_ma10[i]
+        # Volume filter: current volume > 1.5x 48-period average
+        volume_filter = volume[i] > (1.5 * volume_ma48[i])
+        # Volatility filter: ATR > ATR MA20 (avoid low volatility)
+        volatility_filter = atr[i] > atr_ma20[i]
+        # Momentum filter: RSI between 30 and 70 (avoid extremes)
+        momentum_filter = (rsi[i] >= 30) & (rsi[i] <= 70)
         
         if position == 0:
-            # Long: price breaks above R1 with volume and volatility
-            if close[i] > r1_12h[i] and volume_filter and volatility_filter:
+            # Long: price breaks above R1 with volume, volatility, and momentum
+            if close[i] > r1_4h[i] and volume_filter and volatility_filter and momentum_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume and volatility
-            elif close[i] < s1_12h[i] and volume_filter and volatility_filter:
+            # Short: price breaks below S1 with volume, volatility, and momentum
+            elif close[i] < s1_4h[i] and volume_filter and volatility_filter and momentum_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit long: price returns below pivot or volatility drops
-            pivot_12h = align_htf_to_ltf(prices, df_1w, pivot)
-            if close[i] < pivot_12h[i] or not volatility_filter:
+            pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
+            if close[i] < pivot_4h[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,8 +103,8 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit short: price returns above pivot or volatility drops
-            pivot_12h = align_htf_to_ltf(prices, df_1w, pivot)
-            if close[i] > pivot_12h[i] or not volatility_filter:
+            pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
+            if close[i] > pivot_4h[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WeeklyPivot_R1_S1_VolVol"
-timeframe = "12h"
+name = "4h_Pivot_R1_S1_VolVol_Mom"
+timeframe = "4h"
 leverage = 1.0
