@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_RSI_Volume_v1
-KAMA trend + RSI mean reversion + volume confirmation on 1d timeframe.
-Uses daily close trend filter (KAMA direction) for trend alignment,
-RSI(14) for mean reversion entries, and volume spike for confirmation.
-Designed to work in both bull and bear markets by combining trend following
-with mean reversion at extreme RSI levels.
-Target: 30-100 total trades over 4 years (7-25/year).
+12h_Pivot_R1_S1_Breakout_VolumeRegime_v1
+Daily Camarilla pivot breakout with volume spike and choppiness regime filter.
+Pivot levels calculated from daily OHLC, long/short on break of R1/S1 with volume confirmation.
+Choppiness index filter: trade only when CHOP > 61.8 (ranging market) to avoid whipsaws in trends.
+Designed for 12h timeframe to target 50-150 trades over 4 years.
 """
 
 import numpy as np
@@ -23,107 +21,105 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d KAMA (Kaufman Adaptive Moving Average) ===
+    # === 1d Camarilla Pivot Levels ===
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.abs(np.diff(close_1d))
-    er = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
-        if i >= 10:
-            er[i] = np.sum(change[i-9:i+1]) / np.sum(volatility[i-9:i+1]) if np.sum(volatility[i-9:i+1]) > 0 else 0
-        else:
-            er[i] = 0
+    # Calculate pivot and levels
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_ = high_1d - low_1d
+    r1 = close_1d + (range_ * 1.1 / 12)
+    s1 = close_1d - (range_ * 1.1 / 12)
     
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    # Align to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Calculate KAMA
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # === 12h Choppiness Index (14-period) ===
+    def true_range(high, low, prev_close):
+        tr1 = high - low
+        tr2 = np.abs(high - prev_close)
+        tr3 = np.abs(low - prev_close)
+        return np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # === 1d RSI (14-period) ===
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    prev_close = np.roll(close, 1)
+    prev_close[0] = close[0]
+    tr = true_range(high, low, prev_close)
     
-    avg_gain = np.zeros_like(close_1d)
-    avg_loss = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
+    atr14 = np.full_like(close, np.nan)
+    for i in range(len(close)):
         if i >= 14:
             if i == 14:
-                avg_gain[i] = np.mean(gain[1:15])
-                avg_loss[i] = np.mean(loss[1:15])
+                atr14[i] = np.mean(tr[1:15])
             else:
-                avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-                avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-        else:
-            avg_gain[i] = np.nan
-            avg_loss[i] = np.nan
+                atr14[i] = (atr14[i-1] * 13 + tr[i]) / 14
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
+    # Sum of true ranges over 14 periods
+    sum_tr14 = np.full_like(close, np.nan)
+    for i in range(len(close)):
+        if i >= 14:
+            sum_tr14[i] = np.sum(tr[i-13:i+1])
     
-    # === 1d Volume confirmation (20-period average) ===
+    chop = np.full_like(close, np.nan)
+    for i in range(len(close)):
+        if i >= 14 and sum_tr14[i] > 0:
+            chop[i] = 100 * np.log10(sum_tr14[i] / (atr14[i] * 14)) / np.log10(2)
+    
+    # Chop > 61.8 indicates ranging market (good for mean reversion)
+    chop_filter = chop > 61.8
+    
+    # === 12h Volume confirmation (20-period average) ===
     vol_ma_20 = np.full_like(volume, np.nan)
     for i in range(len(volume)):
         if i >= 20:
             vol_ma_20[i] = np.mean(volume[i-19:i+1])
-        elif i > 0:
-            vol_ma_20[i] = np.mean(volume[max(0, i-9):i+1])
-        else:
-            vol_ma_20[i] = volume[0]
     
     vol_confirm = volume > vol_ma_20 * 1.5  # volume spike: 1.5x average
-    
-    # === Align 1d KAMA, RSI, volume to 1d timeframe (no change needed as already 1d) ===
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    vol_confirm_aligned = align_htf_to_ltf(prices, df_1d, vol_confirm)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 30
+    warmup = 50
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_aligned[i]) or 
-            np.isnan(rsi_aligned[i]) or 
-            np.isnan(vol_confirm_aligned[i])):
+        if (np.isnan(pivot_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(chop_filter[i]) or 
+            np.isnan(vol_confirm[i])):
             signals[i] = 0.0
             position = 0
             continue
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: price above KAMA (uptrend) AND RSI oversold (<30) AND volume confirmation
-            if (close[i] > kama_aligned[i] and 
-                rsi_aligned[i] < 30 and 
-                vol_confirm_aligned[i]):
+            # Long: price breaks above R1 with volume confirmation in ranging market
+            if (close[i] > r1_aligned[i] and 
+                vol_confirm[i] and 
+                chop_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price below KAMA (downtrend) AND RSI overbought (>70) AND volume confirmation
-            elif (close[i] < kama_aligned[i] and 
-                  rsi_aligned[i] > 70 and 
-                  vol_confirm_aligned[i]):
+            # Short: price breaks below S1 with volume confirmation in ranging market
+            elif (close[i] < s1_aligned[i] and 
+                  vol_confirm[i] and 
+                  chop_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: RSI overbought (>70) OR price crosses below KAMA
-            if (rsi_aligned[i] > 70 or 
-                close[i] < kama_aligned[i]):
+            # Exit long: price returns to pivot or opposite break with volume
+            if (close[i] < pivot_aligned[i] or 
+                (close[i] < s1_aligned[i] and vol_confirm[i])):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -131,9 +127,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI oversold (<30) OR price crosses above KAMA
-            if (rsi_aligned[i] < 30 or 
-                close[i] > kama_aligned[i]):
+            # Exit short: price returns to pivot or opposite break with volume
+            if (close[i] > pivot_aligned[i] or 
+                (close[i] > r1_aligned[i] and vol_confirm[i])):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -142,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_RSI_Volume_v1"
-timeframe = "1d"
+name = "12h_Pivot_R1_S1_Breakout_VolumeRegime_v1"
+timeframe = "12h"
 leverage = 1.0
