@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
 Hypothesis: 4h Donchian(20) breakout with volume spike and 1d ADX trend filter.
-Long when price breaks above Donchian upper band AND volume > 1.8x average AND daily ADX > 25.
-Short when price breaks below Donchian lower band AND volume > 1.8x average AND daily ADX > 25.
-Exit when price reverts to Donchian midpoint OR daily ADX < 20.
-Target: 75-200 total trades over 4 years (19-50/year) on BTC/ETH/SOL.
-Uses 4h for price/volume/Donchian, 1d for ADX filter to avoid whipsaw in ranging markets.
-Discrete position size 0.25 to minimize fee churn.
+Long when price breaks above Donchian upper band AND volume > 1.5x average AND daily ADX > 25 (trending).
+Short when price breaks below Donchian lower band AND volume > 1.5x average AND daily ADX > 25.
+Exit when price reverts to Donchian midpoint OR daily ADX < 20 (range market).
+Uses 4h for price/volume, 1d for ADX filter to avoid whipsaw in ranging markets.
+Target: 75-200 total trades over 4 years (19-50/year). Donchian channels provide clear breakout levels,
+volume confirmation reduces fakeouts, daily ADX ensures we only trade in strong trends.
+Works in bull markets (captures uptrends) and bear markets (captures downtrends).
 """
 
 import numpy as np
@@ -15,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -89,7 +90,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 60  # warmup for indicators
+    start_idx = 50  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
@@ -108,12 +109,12 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price > Donchian upper AND volume > 1.8x avg AND daily ADX > 25 (trending)
-            if price > upper and vol > 1.8 * vol_ma and adx_val > 25:
+            # Long: price > Donchian upper AND volume > 1.5x avg AND daily ADX > 25 (trending)
+            if price > upper and vol > 1.5 * vol_ma and adx_val > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < Donchian lower AND volume > 1.8x avg AND daily ADX > 25 (trending)
-            elif price < lower and vol > 1.8 * vol_ma and adx_val > 25:
+            # Short: price < Donchian lower AND volume > 1.5x avg AND daily ADX > 25 (trending)
+            elif price < lower and vol > 1.5 * vol_ma and adx_val > 25:
                 signals[i] = -0.25
                 position = -1
         
