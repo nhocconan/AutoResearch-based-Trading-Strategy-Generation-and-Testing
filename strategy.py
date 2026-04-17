@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,79 +13,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Williams Alligator
+    # Get daily data for reference
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Williams Alligator components on daily
-    jaw_1d = pd.Series(close_1d).rolling(window=13, center=False, min_periods=13).mean().shift(8).values
-    teeth_1d = pd.Series(close_1d).rolling(window=8, center=False, min_periods=8).mean().shift(5).values
-    lips_1d = pd.Series(close_1d).rolling(window=5, center=False, min_periods=5).mean().shift(3).values
+    # Calculate daily Donchian channels (20-day)
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    dc_upper_1d = high_20
+    dc_lower_1d = low_20
     
-    # Align Alligator to 6h
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
+    # Align Donchian levels to 12h timeframe
+    dc_upper_1d_aligned = align_htf_to_ltf(prices, df_1d, dc_upper_1d)
+    dc_lower_1d_aligned = align_htf_to_ltf(prices, df_1d, dc_lower_1d)
     
-    # ADX on 6h
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    close_series = pd.Series(close)
-    tr1 = high_series - low_series
-    tr2 = (high_series - close_series.shift()).abs()
-    tr3 = (low_series - close_series.shift()).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean()
-    plus_dm = high_series.diff()
-    minus_dm = low_series.diff().multiply(-1)
-    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
-    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
-    smoothed_plus_dm = plus_dm.rolling(window=14, min_periods=14).mean()
-    smoothed_minus_dm = minus_dm.rolling(window=14, min_periods=14).mean()
-    plus_di = 100 * smoothed_plus_dm / atr
-    minus_di = 100 * smoothed_minus_dm / atr
-    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
-    adx = dx.rolling(window=14, min_periods=14).mean()
+    # Calculate daily ADX for trend filter (14-period)
+    # Calculate True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Volume filter: current > 1.5x 20-period avg
+    # Calculate +DM and -DM
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
+    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values
+    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values
+    
+    # Calculate DI and DX
+    plus_di_14 = 100 * plus_dm_14 / tr_14
+    minus_di_14 = 100 * minus_dm_14 / tr_14
+    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
+    adx_14 = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    
+    # Align ADX to 12h timeframe
+    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
+    
+    # Volume filter: current volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    volume_filter = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(adx[i]) or np.isnan(vol_ma[i])):
+        # Skip if any required data is not available
+        if (np.isnan(dc_upper_1d_aligned[i]) or np.isnan(dc_lower_1d_aligned[i]) or 
+            np.isnan(adx_14_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Trend filter: ADX > 25 indicates trending market
+        trending = adx_14_aligned[i] > 25
+        
         if position == 0:
-            # Bullish alignment: Lips > Teeth > Jaw and ADX > 25
-            if (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i]) and adx[i] > 25 and volume_filter[i]:
+            # Long: price breaks above upper Donchian with volume and trend
+            if close[i] > dc_upper_1d_aligned[i] and volume_filter[i] and trending:
                 signals[i] = 0.25
                 position = 1
-            # Bearish alignment: Lips < Teeth < Jaw and ADX > 25
-            elif (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i]) and adx[i] > 25 and volume_filter[i]:
+            # Short: price breaks below lower Donchian with volume and trend
+            elif close[i] < dc_lower_1d_aligned[i] and volume_filter[i] and trending:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: alignment breaks or ADX drops
-            if not (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i]) or adx[i] < 20:
+            # Exit long: price breaks below lower Donchian or trend weakens
+            if close[i] < dc_lower_1d_aligned[i] or adx_14_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: alignment breaks or ADX drops
-            if not (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i]) or adx[i] < 20:
+            # Exit short: price breaks above upper Donchian or trend weakens
+            if close[i] > dc_upper_1d_aligned[i] or adx_14_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsAlligator_ADX_VolumeFilter"
-timeframe = "6h"
+name = "12h_Donchian20_ADX25_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
