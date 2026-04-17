@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_WeeklyPivot_R1_S1_Breakout_VolumeFilter
-Hypothesis: On 4h timeframe, enter long when price breaks above weekly R1 (H4) with volume confirmation, short when breaks below weekly S1 (L4). Uses 1d EMA34 trend filter to avoid counter-trend trades. Weekly pivots capture institutional levels, volume confirms participation, trend filter reduces whipsaw in sideways markets. Designed for ~20-40 trades/year to minimize fee drag and work in bull/bear regimes.
+4h_WeeklyPivot_R1_S1_Breakout_VolumeFilter_v2
+Hypothesis: Weekly pivot points (R1/S1) act as strong support/resistance levels. Breakouts with volume confirmation and trend filter (1d EMA34) capture institutional participation. Reduces whipsaw by requiring price to close beyond the pivot level. Designed for ~20-40 trades/year to minimize fee drag and work in bull/bear regimes.
 """
 
 import numpy as np
@@ -75,14 +75,14 @@ def generate_signals(prices):
         # Volume filter: current volume > 1.5x 20-period average
         vol_filter = vol_1d_current > 1.5 * vol_avg20_1d_aligned[i]
         
-        # Entry conditions
+        # Entry conditions: require close beyond pivot level
         if position == 0:
-            # Long: price breaks above weekly R1 + above 1d EMA34 + volume
+            # Long: price closes above weekly R1 + above 1d EMA34 + volume
             if close[i] > R1_aligned[i] and close[i] > ema34_1d_aligned[i] and vol_filter:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price breaks below weekly S1 + below 1d EMA34 + volume
+            # Short: price closes below weekly S1 + below 1d EMA34 + volume
             elif close[i] < S1_aligned[i] and close[i] < ema34_1d_aligned[i] and vol_filter:
                 signals[i] = -0.25
                 position = -1
@@ -90,7 +90,7 @@ def generate_signals(prices):
         
         # Exit conditions: reverse when price returns to opposite weekly pivot level
         elif position == 1:
-            if close[i] < S1_aligned[i]:  # exit long when price breaks below S1
+            if close[i] < S1_aligned[i]:  # exit long when price closes below S1
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -98,7 +98,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            if close[i] > R1_aligned[i]:  # exit short when price breaks above R1
+            if close[i] > R1_aligned[i]:  # exit short when price closes above R1
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -107,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WeeklyPivot_R1_S1_Breakout_VolumeFilter"
+name = "4h_WeeklyPivot_R1_S1_Breakout_VolumeFilter_v2"
 timeframe = "4h"
 leverage = 1.0
