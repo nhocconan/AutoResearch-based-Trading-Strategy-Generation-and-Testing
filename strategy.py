@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h timeframe with 1d Elder Ray (Bull/Bear Power) + volume confirmation + 6h EMA50 trend filter.
-Long when Bull Power > 0, volume > 1.5x 20-period average, and close > 6h EMA50 (uptrend).
-Short when Bear Power < 0, volume > 1.5x 20-period average, and close < 6h EMA50 (downtrend).
-Exit when Elder Power crosses zero (Bull Power <= 0 for long exit, Bear Power >= 0 for short exit).
-Elder Ray measures buying/selling pressure relative to EMA13, providing early trend strength signals.
-Designed to work in both bull and bear markets by capturing institutional volume-driven moves while avoiding false signals in low-volume chop.
-Uses 1d timeframe for Elder Ray calculation (reduces noise) and 6h for entry timing and trend confirmation.
-Target trades: 12-37 per year over 4 years (50-150 total).
+Hypothesis: 4h timeframe with 1d Camarilla R1/S1 breakout + volume confirmation + choppiness regime filter.
+Long when price breaks above 1d Camarilla R1 level with volume confirmation and choppy market (CHOP > 61.8).
+Short when price breaks below 1d Camarilla S1 level with volume confirmation and choppy market (CHOP > 61.8).
+Exit when price returns to the 1d Camarilla midpoint (mean reversion to pivot center).
+Designed to capture mean-reversion bounces off key daily pivot levels in ranging markets, which are common in BTC/ETH during 2025 bear/range conditions.
+Uses 1d timeframe for Camarilla pivot structure and 4h for entry timing and volume confirmation.
 """
 
 import numpy as np
@@ -16,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,73 +22,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Elder Ray calculation
+    # Get 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA13 for Elder Ray
-    close_1d_series = pd.Series(close_1d)
-    ema13_1d = close_1d_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate 1d Camarilla pivot levels
+    # Pivot = (high + low + close) / 3
+    # Range = high - low
+    # R1 = close + (range * 1.1 / 12)
+    # S1 = close - (range * 1.1 / 12)
+    # R4 = close + (range * 1.1 / 2)
+    # S4 = close - (range * 1.1 / 2)
+    # Midpoint for exit = (R1 + S1) / 2
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r1_1d = close_1d + (range_1d * 1.1 / 12)
+    s1_1d = close_1d - (range_1d * 1.1 / 12)
+    midpoint_1d = (r1_1d + s1_1d) / 2.0  # equals pivot_1d
     
-    # Calculate Elder Ray components
-    bull_power_1d = high_1d - ema13_1d  # Bull Power = High - EMA13
-    bear_power_1d = low_1d - ema13_1d   # Bear Power = Low - EMA13
+    # Calculate 4h choppiness index (CHOP) for regime filter
+    # CHOP = 100 * log10(sum(ATR(14)) / (max(high, lookback=14) - min(low, lookback=14))) / log10(14)
+    # CHOP > 61.8 = ranging market (good for mean reversion)
+    # CHOP < 38.2 = trending market
+    tr = np.maximum(high[1:] - low[1:], np.maximum(abs(high[1:] - close[:-1]), abs(low[1:] - close[:-1])))
+    tr = np.concatenate([[np.nan], tr])  # align with high/low
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    max_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop_raw = 100 * np.log10(pd.Series(atr14).rolling(window=14, min_periods=14).sum().values / (max_high_14 - min_low_14)) / np.log10(14)
+    chop = np.where((max_high_14 - min_low_14) == 0, 50, chop_raw)  # avoid division by zero
     
-    # Calculate 6h EMA50 for trend filter
-    close_s = pd.Series(close)
-    ema50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Calculate 6h volume 20-period average for confirmation
+    # Calculate 4h volume 20-period average for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align 1d Elder Ray components to 6h timeframe
-    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    # Align 1d Camarilla levels to 4h timeframe
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    midpoint_1d_aligned = align_htf_to_ltf(prices, df_1d, midpoint_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # need enough for EMA50 and volume MA
+    start_idx = 100  # need enough for CHOP calculation and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(bull_power_1d_aligned[i]) or 
-            np.isnan(bear_power_1d_aligned[i]) or 
-            np.isnan(ema50[i]) or 
+        if (np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(midpoint_1d_aligned[i]) or 
+            np.isnan(chop[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 6h volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume confirmation: current 4h volume > 1.3x 20-period average
+        volume_confirmed = volume[i] > 1.3 * vol_ma_20[i]
+        
+        # Chop filter: CHOP > 61.8 indicates ranging market (good for mean reversion)
+        chop_filter = chop[i] > 61.8
         
         if position == 0:
-            # Long: Bull Power > 0 (buying pressure), volume confirmed, and uptrend (close > EMA50)
-            if (bull_power_1d_aligned[i] > 0 and 
+            # Long: price breaks above 1d Camarilla R1 with volume and choppy market
+            if (close[i] > r1_1d_aligned[i] and 
                 volume_confirmed and 
-                close[i] > ema50[i]):
+                chop_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 (selling pressure), volume confirmed, and downtrend (close < EMA50)
-            elif (bear_power_1d_aligned[i] < 0 and 
+            # Short: price breaks below 1d Camarilla S1 with volume and choppy market
+            elif (close[i] < s1_1d_aligned[i] and 
                   volume_confirmed and 
-                  close[i] < ema50[i]):
+                  chop_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Bull Power <= 0 (buying pressure faded)
-            if bull_power_1d_aligned[i] <= 0:
+            # Exit long: price returns to or below 1d Camarilla midpoint
+            if close[i] <= midpoint_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Bear Power >= 0 (selling pressure faded)
-            if bear_power_1d_aligned[i] >= 0:
+            # Exit short: price returns to or above 1d Camarilla midpoint
+            if close[i] >= midpoint_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1dElderRay_Volume_EMA50_Trend"
-timeframe = "6h"
+name = "4h_1dCamarilla_R1S1_Breakout_Volume_ChopFilter"
+timeframe = "4h"
 leverage = 1.0
