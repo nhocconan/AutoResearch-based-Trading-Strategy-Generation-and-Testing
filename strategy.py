@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_S1_S2_Short_Long_Average
-Strategy: Trade S1/S2 bounce on 12h with 1d EMA filter and volume spike.
-Long: Price near S1/S2 average + 1d EMA34 > EMA144 + volume > 2x average
-Short: Price near S1/S2 average + 1d EMA34 < EMA144 + volume > 2x average
-Exit: Price moves away from S1/S2 or trend reverses
+12h_Range_Reversion_Triple_Filter
+Strategy: Mean reversion at extreme RSI with volume confirmation and trend filter.
+Long: RSI(14) < 20 + volume > 2x average + daily EMA34 > EMA144 (bullish)
+Short: RSI(14) > 80 + volume > 2x average + daily EMA34 < EMA144 (bearish)
+Exit: RSI crosses back to neutral (40-60) or trend reversal
 Position size: 0.25
-Designed to capture mean-reversion bounces at key weekly support/resistance with trend alignment.
 Timeframe: 12h
 """
 
@@ -23,6 +22,19 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # Calculate RSI(14)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    
+    # Handle division by zero
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.concatenate([[np.nan], rsi])  # Align with original index
     
     # Calculate 1d EMA34 and EMA144 for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -42,12 +54,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(144, 20)
+    start_idx = max(144, 20, 15)  # RSI needs 14+1, EMA needs 144
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(ema144_1d_aligned[i]) or 
-            np.isnan(volume_ma20[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(ema144_1d_aligned[i]) or np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
@@ -58,68 +70,39 @@ def generate_signals(prices):
         ema34_gt_ema144 = ema34_1d_aligned[i] > ema144_1d_aligned[i]
         ema34_lt_ema144 = ema34_1d_aligned[i] < ema144_1d_aligned[i]
         
-        # Calculate weekly S1 and S2 from previous week's OHLC
-        if i >= 14:  # Need at least 14 12h bars (1 week) to get previous week
-            # Get weekly data for S1/S2 calculation
-            df_1w = get_htf_data(prices, '1w')
-            
-            # Find previous week's index in 1w data
-            current_time = prices['open_time'].iloc[i]
-            prev_week = current_time - pd.Timedelta(days=7)
-            
-            # Get previous week's OHLC from 1w data
-            week_mask = df_1w['open_time'].dt.date == prev_week.date()
-            if week_mask.any():
-                prev_week_data = df_1w[week_mask].iloc[0]
-                prev_high = prev_week_data['high']
-                prev_low = prev_week_data['low']
-                prev_close = prev_week_data['close']
-                
-                # Calculate weekly pivot and S1/S2
-                pivot = (prev_high + prev_low + prev_close) / 3
-                range_val = prev_high - prev_low
-                if range_val > 0:
-                    s1 = pivot - (range_val * 1.1 / 12)
-                    s2 = pivot - (2 * range_val * 1.1 / 12)
-                    s1_s2_avg = (s1 + s2) / 2
-                    
-                    # Entry conditions: price near S1/S2 average (within 0.5%)
-                    price_near_s1s2 = abs(close[i] - s1_s2_avg) / s1_s2_avg < 0.005
-                    
-                    if position == 0:
-                        # Long: near S1/S2 + uptrend + volume spike
-                        if price_near_s1s2 and ema34_gt_ema144 and volume_filter:
-                            signals[i] = 0.25
-                            position = 1
-                        # Short: near S1/S2 + downtrend + volume spike
-                        elif price_near_s1s2 and ema34_lt_ema144 and volume_filter:
-                            signals[i] = -0.25
-                            position = -1
-                    
-                    elif position == 1:
-                        # Exit long: price moves away from S1/S2 or trend reverses
-                        if abs(close[i] - s1_s2_avg) / s1_s2_avg > 0.02 or not ema34_gt_ema144:
-                            signals[i] = 0.0
-                            position = 0
-                        else:
-                            signals[i] = 0.25
-                    
-                    elif position == -1:
-                        # Exit short: price moves away from S1/S2 or trend reverses
-                        if abs(close[i] - s1_s2_avg) / s1_s2_avg > 0.02 or not ema34_lt_ema144:
-                            signals[i] = 0.0
-                            position = 0
-                        else:
-                            signals[i] = -0.25
-                else:
-                    signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        # RSI extremes
+        rsi_oversold = rsi[i] < 20
+        rsi_overbought = rsi[i] > 80
+        rsi_neutral = (rsi[i] >= 40) & (rsi[i] <= 60)
+        
+        if position == 0:
+            # Long: oversold + uptrend + volume spike
+            if rsi_oversold and ema34_gt_ema144 and volume_filter:
+                signals[i] = 0.25
+                position = 1
+            # Short: overbought + downtrend + volume spike
+            elif rsi_overbought and ema34_lt_ema144 and volume_filter:
+                signals[i] = -0.25
+                position = -1
+        
+        elif position == 1:
+            # Exit long: RSI returns to neutral or trend reverses
+            if rsi_neutral or not ema34_gt_ema144:
+                signals[i] = 0.0
+                position = 0
             else:
-                signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-        else:
-            signals[i] = 0.0
+                signals[i] = 0.25
+        
+        elif position == -1:
+            # Exit short: RSI returns to neutral or trend reverses
+            if rsi_neutral or not ema34_lt_ema144:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "12h_S1_S2_Short_Long_Average"
+name = "12h_Range_Reversion_Triple_Filter"
 timeframe = "12h"
 leverage = 1.0
