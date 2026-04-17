@@ -3,13 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Williams Alligator with 1-day trend filter and volume confirmation
-# Williams Alligator (13,8,5 SMAs with 8,5,3 offsets) identifies trend presence and direction
-# In trending markets (JAW > TEETH > LIPS or JAW < TEETH < LIPS), trade Alligator direction
-# In ranging markets (JAW, TEETH, LIPS intertwined), stay flat
-# 1-day EMA50 confirms higher-timeframe trend bias
-# Volume spike (>1.5x 20-period average) filters low-conviction moves
-# Target: 20-40 trades/year to minimize fee decay while capturing strong trends
+# Hypothesis: 4-hour Williams Alligator with 12-hour volume confirmation and 1-day ADX trend filter
+# Williams Alligator (13,8,5 SMAs) identifies trend direction and strength
+# In strong trends (ADX > 25), trade Alligator crossovers with volume confirmation
+# Volume spike filters low-conviction moves; ADX filter avoids whipsaws in ranging markets
+# Target: 20-35 trades/year to minimize fee decay while capturing strong trends
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,19 +19,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1-day EMA50 for trend bias ===
+    # === 12h Williams Alligator (13,8,5 SMAs) ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    
+    # Jaw (13-period SMA)
+    jaw_12h = pd.Series(close_12h).rolling(window=13, min_periods=13).mean().values
+    # Teeth (8-period SMA)
+    teeth_12h = pd.Series(close_12h).rolling(window=8, min_periods=8).mean().values
+    # Lips (5-period SMA)
+    lips_12h = pd.Series(close_12h).rolling(window=5, min_periods=5).mean().values
+    
+    jaw_12h_aligned = align_htf_to_ltf(prices, df_12h, jaw_12h)
+    teeth_12h_aligned = align_htf_to_ltf(prices, df_12h, teeth_12h)
+    lips_12h_aligned = align_htf_to_ltf(prices, df_12h, lips_12h)
+    
+    # === 12h Volume Spike (vs 20-period average) ===
+    volume_12h = df_12h['volume'].values
+    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
+    
+    # === 1-day ADX (14-period) for trend strength ===
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # === Williams Alligator on 6h timeframe ===
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8)
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5)
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # === Volume Spike on 6h (vs 20-period average) ===
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Directional Movement
+    up_move = high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])
+    down_move = np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed DM
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di_1d = 100 * plus_dm_smooth / atr_1d
+    minus_di_1d = 100 * minus_dm_smooth / atr_1d
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d + 1e-10)
+    adx_1d = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     
@@ -45,50 +81,44 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(jaw_12h_aligned[i]) or np.isnan(teeth_12h_aligned[i]) or 
+            np.isnan(lips_12h_aligned[i]) or np.isnan(vol_ma_20_12h_aligned[i]) or
+            np.isnan(adx_1d_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Alligator alignment
-        jaw_val = jaw[i]
-        teeth_val = teeth[i]
-        lips_val = lips[i]
+        # Get current 12h volume (avoid calling get_htf_data in loop)
+        volume_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_12h)
         
-        # Alligator sleeping (intertwined) = ranging market
-        jaw_teeth_close = abs(jaw_val - teeth_val) < (jaw_val * 0.001)
-        teeth_lips_close = abs(teeth_val - lips_val) < (teeth_val * 0.001)
-        jaws_lips_close = abs(jaw_val - lips_val) < (jaw_val * 0.001)
-        is_ranging = jaw_teeth_close and teeth_lips_close and jaws_lips_close
+        # Volume spike: current 12h volume > 1.5x 20-period average
+        vol_spike = volume_12h_aligned[i] > vol_ma_20_12h_aligned[i] * 1.5
         
-        # Alligator awake - trending market
-        is_bullish = jaw_val > teeth_val > lips_val
-        is_bearish = jaw_val < teeth_val < lips_val
+        # Trend filter: ADX > 25 indicates strong trend
+        strong_trend = adx_1d_aligned[i] > 25
         
-        # Volume spike filter
-        vol_spike = volume[i] > vol_ma_20[i] * 1.5
-        
-        # 1-day EMA50 trend bias
-        price_vs_ema50 = close[i] > ema50_1d_aligned[i]
+        # Alligator signals
+        # Bullish: Lips > Teeth > Jaw (green alignment)
+        bullish_aligned = (lips_12h_aligned[i] > teeth_12h_aligned[i]) and (teeth_12h_aligned[i] > jaw_12h_aligned[i])
+        # Bearish: Lips < Teeth < Jaw (red alignment)
+        bearish_aligned = (lips_12h_aligned[i] < teeth_12h_aligned[i]) and (teeth_12h_aligned[i] < jaw_12h_aligned[i])
         
         # Entry logic: only enter when flat
         if position == 0:
-            # Long conditions: bullish Alligator + price above 1d EMA50 + volume spike
-            if is_bullish and price_vs_ema50 and vol_spike:
-                signals[i] = 0.25
-                position = 1
-                continue
-            # Short conditions: bearish Alligator + price below 1d EMA50 + volume spike
-            elif is_bearish and not price_vs_ema50 and vol_spike:
-                signals[i] = -0.25
-                position = -1
-                continue
+            if strong_trend and vol_spike:
+                if bullish_aligned:
+                    signals[i] = 0.25
+                    position = 1
+                    continue
+                elif bearish_aligned:
+                    signals[i] = -0.25
+                    position = -1
+                    continue
         
-        # Exit logic
+        # Exit logic: exit when Alligator alignment breaks or trend weakens
         elif position == 1:
-            # Exit long when Alligator turns bearish or loses bullish alignment
-            if not is_bullish:  # Either bearish or ranging
+            # Exit long if bearish alignment forms or trend weakens
+            if bearish_aligned or not strong_trend:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -96,8 +126,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short when Alligator turns bullish or loses bearish alignment
-            if not is_bearish:  # Either bullish or ranging
+            # Exit short if bullish alignment forms or trend weakens
+            if bullish_aligned or not strong_trend:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -106,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsAlligator_1dEMA50_VolumeSpike"
-timeframe = "6h"
+name = "4h_WilliamsAlligator_ADXTrend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
