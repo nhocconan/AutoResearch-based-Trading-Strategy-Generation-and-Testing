@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_AbnormalVolume_Momentum_Reversal_v1
-Detect momentum reversals after abnormal volume spikes on 6h timeframe.
-Uses volume spike (>2.5x 20-period average) combined with RSI divergence
-and price rejection at key levels. Works in both bull/bear markets by
-fading exhaustion moves after high-volume spikes.
+4h_Ichimoku_Cloud_Breakout_TF
+Ichimoku Cloud breakout with trend confirmation from daily Ichimoku and volume spike.
+Trades on breakouts above/below cloud with TK cross confirmation and volume filter.
+Designed for 4h timeframe with daily trend filter to reduce false signals.
 Target: 50-150 total trades over 4 years (12-37/year).
 """
 
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,112 +21,116 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Volume spike detection (20-period average) ===
-    vol_ma_20 = np.full_like(volume, np.nan)
-    for i in range(len(volume)):
-        if i >= 20:
-            vol_ma_20[i] = np.mean(volume[i-19:i+1])
-        else:
-            vol_ma_20[i] = np.mean(volume[max(0, i-9):i+1]) if i > 0 else volume[0]
+    # === 4h Ichimoku Cloud ===
+    # Tenkan-sen (Conversion Line): (9-period high + low)/2
+    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (high_9 + low_9) / 2
     
-    vol_spike = volume > vol_ma_20 * 2.5  # abnormal volume: 2.5x average
+    # Kijun-sen (Base Line): (26-period high + low)/2
+    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (high_26 + low_26) / 2
     
-    # === RSI (14-period) for momentum/divergence ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods
+    senkou_a = ((tenkan + kijun) / 2)
     
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    for i in range(len(close)):
-        if i >= 14:
-            if i == 14:
-                avg_gain[i] = np.mean(gain[1:15])
-                avg_loss[i] = np.mean(loss[1:15])
-            else:
-                avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-                avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-        else:
-            avg_gain[i] = np.nan
-            avg_loss[i] = np.nan
+    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 52 periods
+    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((high_52 + low_52) / 2)
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
+    # Chikou Span (Lagging Span): close shifted -22 periods (not used in signals)
     
-    # === Price rejection detection ===
-    # Bullish rejection: long wick down, close near high
-    bullish_rejection = (close - low) > (high - close) * 1.5 and (close - low) > (high - low) * 0.6
-    # Bearish rejection: long wick up, close near low
-    bearish_rejection = (high - close) > (close - low) * 1.5 and (high - close) > (high - low) * 0.6
+    # === Daily Ichimoku for trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Vectorize the rejection conditions
-    bullish_rejection = np.where(
-        (close - low) > (high - close) * 1.5,
-        np.where((close - low) > (high - low) * 0.6, True, False),
-        False
-    )
-    bearish_rejection = np.where(
-        (high - close) > (close - low) * 1.5,
-        np.where((high - close) > (high - low) * 0.6, True, False),
-        False
-    )
+    # Daily Tenkan-sen (9-period)
+    high_9_1d = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    low_9_1d = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan_1d = (high_9_1d + low_9_1d) / 2
     
-    # === 12h trend filter (EMA34) for context ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_34_12h = np.full_like(close_12h, np.nan)
-    for i in range(len(close_12h)):
-        if i >= 34:
-            if i == 34:
-                ema_34_12h[i] = np.mean(close_12h[1:35])
-            else:
-                ema_34_12h[i] = (close_12h[i] * 2 + ema_34_12h[i-1] * 33) / 34
-        else:
-            ema_34_12h[i] = np.nan
+    # Daily Kijun-sen (26-period)
+    high_26_1d = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    low_26_1d = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun_1d = (high_26_1d + low_26_1d) / 2
     
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Daily Senkou Span A
+    senkou_a_1d = ((tenkan_1d + kijun_1d) / 2)
+    
+    # Daily Senkou Span B (52-period)
+    high_52_1d = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    low_52_1d = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_b_1d = ((high_52_1d + low_52_1d) / 2)
+    
+    # === Volume confirmation ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > vol_ma_20 * 1.8  # volume spike: 1.8x average
+    
+    # === Align daily Ichimoku components to 4h ===
+    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d)
+    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d)
+    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
+    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
     
     signals = np.zeros(n)
     
     # Warmup period
-    warmup = 50
+    warmup = 100
     
     # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi[i]) or 
-            np.isnan(ema_34_12h_aligned[i]) or 
-            np.isnan(vol_spike[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
+            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or
+            np.isnan(tenkan_1d_aligned[i]) or np.isnan(kijun_1d_aligned[i]) or
+            np.isnan(senkou_a_1d_aligned[i]) or np.isnan(senkou_b_1d_aligned[i]) or
+            np.isnan(vol_confirm[i])):
             signals[i] = 0.0
             position = 0
             continue
         
+        # Cloud top and bottom
+        cloud_top = max(senkou_a[i], senkou_b[i])
+        cloud_bottom = min(senkou_a[i], senkou_b[i])
+        
+        # Daily cloud top and bottom for trend filter
+        daily_cloud_top = max(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
+        daily_cloud_bottom = min(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
+        
+        # TK cross signals
+        tk_cross_up = tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1]
+        tk_cross_down = tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1]
+        
         # Entry logic: only enter when flat
         if position == 0:
-            # Long: volume spike + bullish rejection + RSI not overbought + price above 12h EMA (uptrend filter)
-            if (vol_spike[i] and 
-                bullish_rejection[i] and 
-                rsi[i] < 70 and 
-                close[i] > ema_34_12h_aligned[i]):
+            # Long: price breaks above cloud, TK cross up, above daily cloud, volume confirmation
+            if (close[i] > cloud_top and 
+                tk_cross_up and 
+                close[i] > daily_cloud_top and 
+                vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: volume spike + bearish rejection + RSI not oversold + price below 12h EMA (downtrend filter)
-            elif (vol_spike[i] and 
-                  bearish_rejection[i] and 
-                  rsi[i] > 30 and 
-                  close[i] < ema_34_12h_aligned[i]):
+            # Short: price breaks below cloud, TK cross down, below daily cloud, volume confirmation
+            elif (close[i] < cloud_bottom and 
+                  tk_cross_down and 
+                  close[i] < daily_cloud_bottom and 
+                  vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: RSI overbought OR price closes below 12h EMA
-            if (rsi[i] > 70 or 
-                close[i] < ema_34_12h_aligned[i]):
+            # Exit long: price falls below cloud OR TK cross down
+            if (close[i] < cloud_bottom or 
+                tk_cross_down):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -135,9 +138,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI oversold OR price closes above 12h EMA
-            if (rsi[i] < 30 or 
-                close[i] > ema_34_12h_aligned[i]):
+            # Exit short: price rises above cloud OR TK cross up
+            if (close[i] > cloud_top or 
+                tk_cross_up):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -146,6 +149,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_AbnormalVolume_Momentum_Reversal_v1"
-timeframe = "6h"
+name = "4h_Ichimoku_Cloud_Breakout_TF"
+timeframe = "4h"
 leverage = 1.0
