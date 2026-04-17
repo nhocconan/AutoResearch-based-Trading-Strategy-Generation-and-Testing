@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_12h_Camarilla_Breakout_Volume_Filter
-Strategy: Camarilla R1/S1 breakout on 4h with 12h trend filter and volume confirmation.
-Long: Close breaks above R1 + 12h EMA34 > EMA144 + volume > 1.5x average
-Short: Close breaks below S1 + 12h EMA34 < EMA144 + volume > 1.5x average
+4h_12h_1d_Camarilla_Pivot_Breakout_Volume_Trend
+Strategy: Camarilla R1/S1 breakout on 4h with 12h EMA trend filter and 1d volume confirmation.
+Long: Close breaks above R1 + 12h EMA34 > EMA144 + volume > 1.5x 1d average volume
+Short: Close breaks below S1 + 12h EMA34 < EMA144 + volume > 1.5x 1d average volume
 Exit: Close returns to CAM (pivot) or trend reverses
 Position size: 0.25
 Designed to capture institutional breakouts with trend alignment and volume confirmation.
@@ -36,8 +36,11 @@ def generate_signals(prices):
     ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     ema144_12h_aligned = align_htf_to_ltf(prices, df_12h, ema144_12h)
     
-    # Volume confirmation (20-period MA on 4h)
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d average volume for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    volume_1d = df_1d['volume'].values
+    volume_1d_ma20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_1d_ma20_aligned = align_htf_to_ltf(prices, df_1d, volume_1d_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -47,12 +50,12 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(ema34_12h_aligned[i]) or np.isnan(ema144_12h_aligned[i]) or 
-            np.isnan(volume_ma20[i])):
+            np.isnan(volume_1d_ma20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        # Volume filter: current volume > 1.5x 20-period average from 1d data
+        volume_filter = volume[i] > (1.5 * volume_1d_ma20_aligned[i])
         
         # Trend filter: 12h EMA34 > EMA144 for long, < for short
         ema34_gt_ema144 = ema34_12h_aligned[i] > ema144_12h_aligned[i]
@@ -62,9 +65,6 @@ def generate_signals(prices):
         # Need previous day's data - use daily OHLC from 1d timeframe
         if i >= 96:  # Need at least 96 4h bars (4 days) to get previous day
             # Get daily data for Camarilla calculation
-            df_1d = get_htf_data(prices, '1d')
-            
-            # Find previous day's index in 1d data
             # Current 4h bar timestamp
             current_time = prices['open_time'].iloc[i]
             # Previous day's date
@@ -120,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_Camarilla_Breakout_Volume_Filter"
+name = "4h_12h_1d_Camarilla_Pivot_Breakout_Volume_Trend"
 timeframe = "4h"
 leverage = 1.0
