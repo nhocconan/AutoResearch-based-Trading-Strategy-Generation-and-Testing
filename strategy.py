@@ -13,44 +13,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for higher timeframe trend filter
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Get weekly data for trend direction
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 4h EMA34 for trend direction
-    close_4h_series = pd.Series(close_4h)
-    ema34_4h = close_4h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate weekly pivot points (Standard)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
+    r1_1w = pivot_1w + (range_1w * 1.0)
+    s1_1w = pivot_1w - (range_1w * 1.0)
+    r2_1w = pivot_1w + (range_1w * 2.0)
+    s2_1w = pivot_1w - (range_1w * 2.0)
+    r3_1w = pivot_1w + (range_1w * 3.0)
+    s3_1w = pivot_1w - (range_1w * 3.0)
+    r4_1w = pivot_1w + (range_1w * 4.0)
+    s4_1w = pivot_1w - (range_1w * 4.0)
     
-    # Get 1d data for pivot levels (support/resistance)
+    # Align weekly pivot levels to 6h timeframe
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    r4_1w_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
+    s4_1w_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
+    
+    # Get daily data for volume and volatility context
     df_1d = get_htf_data(prices, '1d')
+    volume_1d = df_1d['volume'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate daily pivot points (Standard)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r1_1d = pivot_1d + (range_1d * 1.0)
-    s1_1d = pivot_1d - (range_1d * 1.0)
-    r2_1d = pivot_1d + (range_1d * 2.0)
-    s2_1d = pivot_1d - (range_1d * 2.0)
+    # Calculate daily ATR for volatility filter
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Align indicators to 1h timeframe
-    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    # Daily volume average for context
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Volume filter: current volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
-    
-    # Session filter: 08-20 UTC (only trade during active hours)
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # 6h ATR for stop loss and position sizing
+    tr_6h_1 = high - low
+    tr_6h_2 = np.abs(high - np.roll(close, 1))
+    tr_6h_3 = np.abs(low - np.roll(close, 1))
+    tr_6h = np.maximum(tr_6h_1, np.maximum(tr_6h_2, tr_6h_3))
+    tr_6h[0] = tr_6h_1[0]
+    atr_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -59,45 +71,50 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema34_4h_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(r2_1d_aligned[i]) or 
-            np.isnan(s2_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or 
+            np.isnan(r4_1w_aligned[i]) or np.isnan(s4_1w_aligned[i]) or 
+            np.isnan(atr_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or
+            np.isnan(atr_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Apply session filter
-        if not session_filter[i]:
-            signals[i] = 0.0
-            continue
+        # Volatility filter: only trade when volatility is above average
+        vol_filter = atr_1d_aligned[i] > np.nanmean(atr_1d_aligned[max(0, i-50):i+1])
+        
+        # Volume filter: current 6h volume > 1.5x daily average volume (scaled)
+        vol_scaled = vol_ma_1d_aligned[i] * (6/24)  # scale daily volume to 6h equivalent
+        volume_filter = volume[i] > vol_scaled * 1.5
         
         if position == 0:
-            # Long: price breaks above R1 with volume and above 4h EMA34
-            if close[i] > r1_1d_aligned[i] and volume_filter[i] and close[i] > ema34_4h_aligned[i]:
-                signals[i] = 0.20
+            # Long: price breaks above weekly R4 with volume and volatility
+            if close[i] > r4_1w_aligned[i] and volume_filter and vol_filter:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume and below 4h EMA34
-            elif close[i] < s1_1d_aligned[i] and volume_filter[i] and close[i] < ema34_4h_aligned[i]:
-                signals[i] = -0.20
+            # Short: price breaks below weekly S4 with volume and volatility
+            elif close[i] < s4_1w_aligned[i] and volume_filter and vol_filter:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below S2
-            if close[i] < s2_1d_aligned[i]:
+            # Trail stop: exit if price drops below 3*ATR from highest high since entry
+            # Simplified: exit if price closes below weekly S3
+            if close[i] < s3_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above R2
-            if close[i] > r2_1d_aligned[i]:
+            # Trail stop: exit if price rises above 3*ATR from lowest low since entry
+            # Simplified: exit if price closes above weekly R3
+            if close[i] > r3_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Pivot_R1S1_R2S2_Breakout_Volume_Trend"
-timeframe = "1h"
+name = "6h_Weekly_R3S3_R4S4_Breakout_Volume_Volatility"
+timeframe = "6h"
 leverage = 1.0
