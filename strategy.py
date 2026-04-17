@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-6h Ichimoku Cloud + 1d Tenkan-Kijun Cross + Volume Spike
-Long: Tenkan > Kijun + Price > Kumo + Volume > 2x 6h MA
-Short: Tenkan < Kijun + Price < Kumo + Volume > 2x 6h MA
-Exit: Opposite TK cross or price crosses Kumo
-Target: 15-30 trades/year per symbol, uses Ichimoku for trend + momentum, volume for confirmation
+12h Prior 1D High/Low Breakout with Volume and Trend Confirmation
+Long: Price breaks above prior 1D high + volume > 1.5x 12h volume MA + price > 12h EMA50
+Short: Price breaks below prior 1D low + volume > 1.5x 12h volume MA + price < 12h EMA50
+Exit: Opposite break of prior 1D level
+Target: 15-25 trades/year per symbol, avoids overtrading via strict breakout and volume filters
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,83 +21,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d Ichimoku components
+    # Get prior 1D high and low (using 1d data)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = low = df_1d['low'].values
+    prior_1d_high = df_1d['high'].shift(1)  # Prior day's high
+    prior_1d_low = df_1d['low'].shift(1)    # Prior day's low
+    prior_1d_high_aligned = align_htf_to_ltf(prices, df_1d, prior_1d_high.values)
+    prior_1d_low_aligned = align_htf_to_ltf(prices, df_1d, prior_1d_low.values)
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    tenkan_sen = (pd.Series(high_1d).rolling(window=9, min_periods=9).max() + 
-                  pd.Series(low_1d).rolling(window=9, min_periods=9).min()) / 2
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    kijun_sen = (pd.Series(high_1d).rolling(window=26, min_periods=26).max() + 
-                 pd.Series(low_1d).rolling(window=26, min_periods=26).min()) / 2
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan_sen + kijun_sen) / 2)
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    senkou_b = ((pd.Series(high_1d).rolling(window=52, min_periods=52).max() + 
-                 pd.Series(low_1d).rolling(window=52, min_periods=52).min()) / 2)
-    # Chikou Span (Lagging Span): Close shifted 26 periods back (not used for signals)
+    # 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    ema_50 = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h = align_htf_to_ltf(prices, df_12h, ema_50)
     
-    # Align Ichimoku components to 6h timeframe
-    tenkan_sen_1d = align_htf_to_ltf(prices, df_1d, tenkan_sen.values)
-    kijun_sen_1d = align_htf_to_ltf(prices, df_1d, kijun_sen.values)
-    senkou_a_1d = align_htf_to_ltf(prices, df_1d, senkou_a.values, additional_delay_bars=26)
-    senkou_b_1d = align_htf_to_ltf(prices, df_1d, senkou_b.values, additional_delay_bars=26)
-    
-    # 6h volume spike filter (2x 20-period MA)
-    df_6h = get_htf_data(prices, '6h')
-    volume_ma_20 = pd.Series(df_6h['volume']).rolling(window=20, min_periods=20).mean()
-    volume_ma_20_6h = align_htf_to_ltf(prices, df_6h, volume_ma_20.values)
+    # 12h volume moving average (24-period for confirmation)
+    volume_ma_24 = pd.Series(df_12h['volume']).rolling(window=24, min_periods=24).mean()
+    volume_ma_24_12h = align_htf_to_ltf(prices, df_12h, volume_ma_24.values)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     entry_price = 0.0
     
-    start_idx = 100  # warmup
+    start_idx = 50  # warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(tenkan_sen_1d[i]) or np.isnan(kijun_sen_1d[i]) or 
-            np.isnan(senkou_a_1d[i]) or np.isnan(senkou_b_1d[i]) or 
-            np.isnan(volume_ma_20_6h[i])):
+        if (np.isnan(prior_1d_high_aligned[i]) or np.isnan(prior_1d_low_aligned[i]) or 
+            np.isnan(ema_50_12h[i]) or np.isnan(volume_ma_24_12h[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_ma = volume_ma_20_6h[i]
-        tenkan = tenkan_sen_1d[i]
-        kijun = kijun_sen_1d[i]
-        span_a = senkou_a_1d[i]
-        span_b = senkou_b_1d[i]
-        
-        # Kumo (Cloud) top and bottom
-        kumo_top = max(span_a, span_b)
-        kumo_bottom = min(span_a, span_b)
+        vol_ma = volume_ma_24_12h[i]
         
         if position == 0:
-            # Long: TK bullish + Price above Kumo + Volume spike
-            if tenkan > kijun and price > kumo_top and vol > 2.0 * vol_ma:
+            # Long: break above prior 1D high + volume + trend
+            if price > prior_1d_high_aligned[i] and vol > 1.5 * vol_ma and price > ema_50_12h[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: TK bearish + Price below Kumo + Volume spike
-            elif tenkan < kijun and price < kumo_bottom and vol > 2.0 * vol_ma:
+            # Short: break below prior 1D low + volume + trend
+            elif price < prior_1d_low_aligned[i] and vol > 1.5 * vol_ma and price < ema_50_12h[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Long exit: TK bearish or price drops below Kumo
-            if tenkan < kijun or price < kumo_bottom:
+            # Long exit: break below prior 1D low
+            if price < prior_1d_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: TK bullish or price rises above Kumo
-            if tenkan > kijun or price > kumo_top:
+            # Short exit: break above prior 1D high
+            if price > prior_1d_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_TK_Cross_Volume"
-timeframe = "6h"
+name = "12h_Prior1D_HL_Breakout_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
