@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,95 +13,102 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d EMA(34) for trend direction ===
+    # === 1d Ichimoku components (9, 26, 52) ===
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    
-    # Wilder's smoothing EMA (alpha = 1/period)
-    alpha = 1.0 / 34
-    ema_34 = np.full_like(close_1d, np.nan)
-    ema_34[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        ema_34[i] = alpha * close_1d[i] + (1 - alpha) * ema_34[i-1]
-    
-    # === 1d ATR(14) for volatility filter ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period_tenkan = 9
+    tenkan_sen = np.full_like(high_1d, np.nan)
+    for i in range(len(high_1d)):
+        if i >= period_tenkan - 1:
+            tenkan_sen[i] = (np.max(high_1d[i - period_tenkan + 1:i + 1]) + 
+                             np.min(low_1d[i - period_tenkan + 1:i + 1])) / 2
     
-    # Wilder's smoothing for ATR
-    atr_14 = np.full_like(tr, np.nan)
-    if len(tr) >= 14:
-        atr_14[13] = np.mean(tr[:14])
-        for i in range(14, len(tr)):
-            atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period_kijun = 26
+    kijun_sen = np.full_like(high_1d, np.nan)
+    for i in range(len(high_1d)):
+        if i >= period_kijun - 1:
+            kijun_sen[i] = (np.max(high_1d[i - period_kijun + 1:i + 1]) + 
+                            np.min(low_1d[i - period_kijun + 1:i + 1])) / 2
     
-    # === 1d volume spike filter ===
-    vol_1d = df_1d['volume'].values
-    vol_ma_10 = np.full_like(vol_1d, np.nan)
-    for i in range(len(vol_1d)):
-        if i >= 9:
-            vol_ma_10[i] = np.mean(vol_1d[i-9:i+1])
-        elif i > 0:
-            vol_ma_10[i] = np.mean(vol_1d[max(0, i-4):i+1])
-        else:
-            vol_ma_10[i] = vol_1d[0]
-    vol_spike = vol_1d > vol_ma_10 * 2.0  # Volume > 2x 10-period average
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
     
-    # Align indicators to 4h
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period_senkou_b = 52
+    senkou_span_b = np.full_like(high_1d, np.nan)
+    for i in range(len(high_1d)):
+        if i >= period_senkou_b - 1:
+            senkou_span_b[i] = (np.max(high_1d[i - period_senkou_b + 1:i + 1]) + 
+                                np.min(low_1d[i - period_senkou_b + 1:i + 1])) / 2
+    
+    # Align Ichimoku components to 6h
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    
+    # === 6h Volume spike filter ===
+    vol_ma_20 = np.full_like(volume, np.nan)
+    for i in range(len(volume)):
+        if i >= 19:
+            vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    
+    volume_spike = volume > vol_ma_20 * 2.0  # Volume at least 2x 20-period average
     
     signals = np.zeros(n)
-    warmup = 100
+    
+    # Warmup period
+    warmup = 200
+    
+    # Track position state
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
-            np.isnan(vol_spike_aligned[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x 20-period average
-        if i >= 19:
-            vol_ma_20 = np.mean(volume[i-19:i+1])
-        else:
-            vol_ma_20 = np.mean(volume[max(0, i-9):i+1]) if i > 0 else volume[0]
-        vol_confirm = volume[i] > vol_ma_20 * 1.5
+        # Ichimoku cloud: green when Senkou Span A > Senkou Span B, red otherwise
+        # Cloud top = max(Senkou A, Senkou B), Cloud bottom = min(Senkou A, Senkou B)
+        cloud_top = np.maximum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        cloud_bottom = np.minimum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
         
-        # Entry logic: only enter when flat AND volume spike present (1d)
+        # TK Cross: Tenkan-sen crosses Kijun-sen
+        tk_cross_up = tenkan_sen_aligned[i] > kijun_sen_aligned[i]
+        tk_cross_down = tenkan_sen_aligned[i] < kijun_sen_aligned[i]
+        
+        # Price relative to cloud
+        price_above_cloud = close[i] > cloud_top
+        price_below_cloud = close[i] < cloud_bottom
+        
+        # Volume confirmation
+        vol_confirm = volume_spike[i] if not np.isnan(volume_spike[i]) else False
+        
+        # Entry logic
         if position == 0:
-            # Long: price above EMA34 + volatility filter + volume confirmation + 1d volume spike
-            if (close[i] > ema_34_aligned[i] and 
-                atr_14_aligned[i] > 0.005 * close[i] and  # volatility filter
-                vol_confirm and
-                vol_spike_aligned[i] > 0.5):  # 1d volume spike
+            # Long: TK cross up + price above cloud + volume spike
+            if tk_cross_up and price_above_cloud and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 continue
-            # Short: price below EMA34 + volatility filter + volume confirmation + 1d volume spike
-            elif (close[i] < ema_34_aligned[i] and 
-                  atr_14_aligned[i] > 0.005 * close[i] and  # volatility filter
-                  vol_confirm and
-                  vol_spike_aligned[i] > 0.5):  # 1d volume spike
+            # Short: TK cross down + price below cloud + volume spike
+            elif tk_cross_down and price_below_cloud and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 continue
         
         # Exit logic
         elif position == 1:
-            # Exit long: price crosses below EMA34
-            if close[i] < ema_34_aligned[i]:
+            # Exit long: TK cross down OR price falls below cloud
+            if tk_cross_down or price_below_cloud:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -109,8 +116,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above EMA34
-            if close[i] > ema_34_aligned[i]:
+            # Exit short: TK cross up OR price rises above cloud
+            if tk_cross_up or price_above_cloud:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -119,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "EMA34_ATR_VolumeSpike_Filter_v1"
-timeframe = "4h"
+name = "Ichimoku_TK_Cross_Cloud_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
