@@ -19,12 +19,13 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot points (standard formula)
+    # Calculate Camarilla pivot levels (more precise than standard pivots)
+    range_1d = high_1d - low_1d
     pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
+    r1 = close_1d + range_1d * 1.1 / 12
+    s1 = close_1d - range_1d * 1.1 / 12
+    r2 = close_1d + range_1d * 1.1 / 6
+    s2 = close_1d - range_1d * 1.1 / 6
     
     # Shift to use previous day's pivots (avoid look-ahead)
     r1_prev = np.roll(r1, 1)
@@ -36,14 +37,14 @@ def generate_signals(prices):
     r2_prev[0] = np.nan
     s2_prev[0] = np.nan
     
-    # Align daily pivot levels to 12h timeframe
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1_prev)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1_prev)
-    r2_12h = align_htf_to_ltf(prices, df_1d, r2_prev)
-    s2_12h = align_htf_to_ltf(prices, df_1d, s2_prev)
+    # Align daily pivot levels to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1_prev)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1_prev)
+    r2_4h = align_htf_to_ltf(prices, df_1d, r2_prev)
+    s2_4h = align_htf_to_ltf(prices, df_1d, s2_prev)
     
-    # Volume confirmation: current volume > 1.8 * 12-period average (12h * 12 = 6 days)
-    volume_ma12 = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    # Volume confirmation: current volume > 2.0 * 6-period average (4h * 6 = 24h)
+    volume_ma6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     
     # ATR filter to avoid low volatility environments
     tr1 = high - low
@@ -63,34 +64,34 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(volume_ma12[i]) or 
+        if (np.isnan(volume_ma6[i]) or 
             np.isnan(atr[i]) or 
             np.isnan(atr_ma10[i]) or 
-            np.isnan(r2_12h[i]) or 
-            np.isnan(s2_12h[i]) or
-            np.isnan(r1_12h[i]) or 
-            np.isnan(s1_12h[i])):
+            np.isnan(r2_4h[i]) or 
+            np.isnan(s2_4h[i]) or
+            np.isnan(r1_4h[i]) or 
+            np.isnan(s1_4h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.8x 12-period average (6 days)
-        volume_filter = volume[i] > (1.8 * volume_ma12[i])
+        # Volume filter: current volume > 2.0x 6-period average
+        volume_filter = volume[i] > (2.0 * volume_ma6[i])
         # Volatility filter: ATR > ATR MA10 (avoid low volatility)
         volatility_filter = atr[i] > atr_ma10[i]
         
         if position == 0:
             # Long: price breaks above R2 with volume and volatility (strong breakout)
-            if close[i] > r2_12h[i] and volume_filter and volatility_filter:
+            if close[i] > r2_4h[i] and volume_filter and volatility_filter:
                 signals[i] = 0.25
                 position = 1
             # Short: price breaks below S2 with volume and volatility (strong breakdown)
-            elif close[i] < s2_12h[i] and volume_filter and volatility_filter:
+            elif close[i] < s2_4h[i] and volume_filter and volatility_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit long: price returns below R1 or volatility drops
-            if close[i] < r1_12h[i] or not volatility_filter:
+            if close[i] < r1_4h[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,7 +99,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit short: price returns above S1 or volatility drops
-            if close[i] > s1_12h[i] or not volatility_filter:
+            if close[i] > s1_4h[i] or not volatility_filter:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_R2_S2_Breakout_Vol_v5"
-timeframe = "12h"
+name = "4h_Camarilla_R2_S2_Breakout_Vol_v1"
+timeframe = "4h"
 leverage = 1.0
