@@ -13,33 +13,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for 20-period EMA (trend filter)
+    # Get daily data for indicators
     df_1d = get_htf_data(prices, '1d')
+    
+    # Daily close for EMA calculation
     close_1d = df_1d['close'].values
-    
-    # Daily EMA20 for trend filter
     close_1d_series = pd.Series(close_1d)
-    ema20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Get weekly data for Donchian channel (price channel)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Daily high/low for Donchian channel
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    high_1d_series = pd.Series(high_1d)
+    low_1d_series = pd.Series(low_1d)
+    donch_high_20 = high_1d_series.rolling(window=20, min_periods=20).max().values
+    donch_low_20 = low_1d_series.rolling(window=20, min_periods=20).min().values
     
-    # Weekly Donchian(20) channel
-    high_1w_series = pd.Series(high_1w)
-    low_1w_series = pd.Series(low_1w)
-    donch_high_20 = high_1w_series.rolling(window=20, min_periods=20).max().values
-    donch_low_20 = low_1w_series.rolling(window=20, min_periods=20).min().values
+    # Align Donchian levels to daily timeframe
+    donch_high_20_aligned = align_htf_to_ltf(prices, df_1d, donch_high_20)
+    donch_low_20_aligned = align_htf_to_ltf(prices, df_1d, donch_low_20)
     
-    # Align Donchian levels to weekly timeframe (proper delay for weekly bar close)
-    donch_high_20_aligned = align_htf_to_ltf(prices, df_1w, donch_high_20)
-    donch_low_20_aligned = align_htf_to_ltf(prices, df_1w, donch_low_20)
-    
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    volume_filter = volume > (vol_ma * 2.0)
     
     # ATR(14) for volatility filter and stop
     high_low = high - low
@@ -56,39 +53,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema20_1d_aligned[i]) or np.isnan(donch_high_20_aligned[i]) or 
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(donch_high_20_aligned[i]) or 
             np.isnan(donch_low_20_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above weekly Donchian high with volume and above daily EMA20
-            if close[i] > donch_high_20_aligned[i] and volume_filter[i] and close[i] > ema20_1d_aligned[i]:
-                signals[i] = 0.25
+            # Long: price breaks above daily Donchian high with volume and above daily EMA34
+            if close[i] > donch_high_20_aligned[i] and volume_filter[i] and close[i] > ema34_1d_aligned[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short: price breaks below weekly Donchian low with volume and below daily EMA20
-            elif close[i] < donch_low_20_aligned[i] and volume_filter[i] and close[i] < ema20_1d_aligned[i]:
-                signals[i] = -0.25
+            # Short: price breaks below daily Donchian low with volume and below daily EMA34
+            elif close[i] < donch_low_20_aligned[i] and volume_filter[i] and close[i] < ema34_1d_aligned[i]:
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below weekly Donchian low OR ATR-based stop
+            # Exit long: price breaks below daily Donchian low OR ATR-based stop
             if close[i] < donch_low_20_aligned[i] or close[i] < (high[max(0, i-1)] - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Exit short: price breaks above weekly Donchian high OR ATR-based stop
+            # Exit short: price breaks above daily Donchian high OR ATR-based stop
             if close[i] > donch_high_20_aligned[i] or close[i] > (low[max(0, i-1)] + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "1d_WeeklyDonchian20_DailyEMA20_Volume_ATRStop"
-timeframe = "1d"
+name = "12h_Donchian20_DailyEMA34_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
