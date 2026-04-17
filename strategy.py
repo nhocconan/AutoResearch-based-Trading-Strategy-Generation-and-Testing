@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,14 +13,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for weekly pivot calculation (using daily data)
+    # Get daily data for weekly pivot calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
     # Calculate weekly pivot points from daily data (weekly = 5 daily bars approx)
-    # We'll use 5-period rolling window on daily data to approximate weekly
+    # Using 5-period rolling window on daily data
     high_5d = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
     low_5d = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
     close_5d = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values
@@ -53,7 +53,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 60  # Need weekly pivot, EMA50, volume MA
+    start_idx = 50  # Need weekly pivot, EMA50, volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
