@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h RSI(2) mean reversion with 4h trend filter and session filter.
-Long when 1h RSI(2) < 10 AND price > 4h EMA(50) AND session 08-20 UTC.
-Short when 1h RSI(2) > 90 AND price < 4h EMA(50) AND session 08-20 UTC.
-Exit when RSI(2) reverts to 50 OR session ends.
-Uses 4h EMA for trend filter to avoid counter-trend trades, RSI(2) for extreme mean reversion,
-and session filter to reduce noise. Target: 60-150 total trades over 4 years (15-37/year).
-Works in bull markets (buys dips in uptrend) and bear markets (sells rallies in downtrend).
+Hypothesis: 6h Williams %R extreme reversal with volume spike and 1w EMA200 trend filter.
+Long when Williams %R < -80 (oversold) AND volume > 1.5x average AND price > 1w EMA200 (uptrend).
+Short when Williams %R > -20 (overbought) AND volume > 1.5x average AND price < 1w EMA200 (downtrend).
+Exit when Williams %R returns to -50 (mean reversion) OR volume drops below average.
+Uses 6h for price/volume/Williams %R, 1w for EMA200 trend filter to avoid counter-trend trades.
+Targets 60-120 trades over 4 years (15-30/year). Williams %R captures momentum exhaustion,
+volume confirmation reduces false signals, weekly EMA200 ensures alignment with major trend.
+Works in bull markets (buying oversold dips in uptrend) and bear markets (selling overbought rallies in downtrend).
 """
 
 import numpy as np
@@ -15,36 +16,36 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 4h data for EMA trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Calculate Williams %R on 6h timeframe (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate EMA(50) on 4h timeframe
-    close_4h_series = pd.Series(close_4h)
-    ema_4h = close_4h_series.ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate volume average (20-period) on 6h
+    volume_series = pd.Series(volume)
+    volume_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
-    # Calculate RSI(2) on 1h timeframe
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
+    # Get 1w data for EMA200 filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    avg_gain = gain.ewm(alpha=1/2, min_periods=2, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/2, min_periods=2, adjust=False).mean()
+    # Calculate EMA200 on 1w timeframe
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # neutral when undefined
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # Align 6h Williams %R, volume MA, and 1w EMA200 to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, prices, williams_r)  # same timeframe, no alignment needed
+    volume_ma_aligned = align_htf_to_ltf(prices, prices, volume_ma)   # same timeframe, no alignment needed
+    ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -53,43 +54,45 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(rsi[i]):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(volume_ma_aligned[i]) or 
+            np.isnan(ema_200_aligned[i])):
             signals[i] = 0.0
             continue
         
-        in_session = (8 <= hours[i] <= 20)
+        wr = williams_r_aligned[i]
+        vol_ma = volume_ma_aligned[i]
+        ema_200 = ema_200_aligned[i]
+        vol = volume[i]
         price = close[i]
-        ema_trend = ema_4h_aligned[i]
-        rsi_val = rsi[i]
         
-        if position == 0 and in_session:
-            # Long: RSI(2) < 10 (extreme oversold) AND price > 4h EMA(50) (uptrend)
-            if rsi_val < 10 and price > ema_trend:
-                signals[i] = 0.20
+        if position == 0:
+            # Long: Williams %R < -80 (oversold) AND volume > 1.5x avg AND price > 1w EMA200 (uptrend)
+            if wr < -80 and vol > 1.5 * vol_ma and price > ema_200:
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI(2) > 90 (extreme overbought) AND price < 4h EMA(50) (downtrend)
-            elif rsi_val > 90 and price < ema_trend:
-                signals[i] = -0.20
+            # Short: Williams %R > -20 (overbought) AND volume > 1.5x avg AND price < 1w EMA200 (downtrend)
+            elif wr > -20 and vol > 1.5 * vol_ma and price < ema_200:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI(2) > 50 (mean reversion) OR session end
-            if rsi_val > 50 or not in_session:
+            # Exit long: Williams %R > -50 (mean reversion) OR volume < avg (losing momentum)
+            if wr > -50 or vol < vol_ma:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI(2) < 50 (mean reversion) OR session end
-            if rsi_val < 50 or not in_session:
+            # Exit short: Williams %R < -50 (mean reversion) OR volume < avg (losing momentum)
+            if wr < -50 or vol < vol_ma:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_RSI2_MeanReversion_4hEMA50_SessionFilter"
-timeframe = "1h"
+name = "6h_WilliamsR_Extreme_Volume_1wEMA200_Filter"
+timeframe = "6h"
 leverage = 1.0
