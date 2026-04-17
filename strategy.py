@@ -1,13 +1,14 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-1d_KAMA_Direction_RSI_Trend
-Strategy: Daily KAMA direction with RSI filter and weekly trend alignment.
-Long: KAMA trending up + RSI < 40 + price > weekly EMA34
-Short: KAMA trending down + RSI > 60 + price < weekly EMA34
-Exit: KAMA changes direction or RSI crosses 50
+12h_1d_RangeBreakout_Volume_Trend
+Strategy: 12-hour breakout of 1d high/low with volume confirmation and 1d trend filter.
+Long: Price breaks above 1-day high + volume > 1.8x 20-period avg + price above 1d EMA50
+Short: Price breaks below 1-day low + volume > 1.8x 20-period avg + price below 1d EMA50
+Exit: Price returns to 12h VWAP
 Position size: 0.25
-Designed to capture trend-following moves in both bull and bear markets with mean-reversion entries.
-Timeframe: 1d
+Designed to capture breakouts aligned with daily trend in both bull and bear markets.
+Timeframe: 12h
 """
 
 import numpy as np
@@ -16,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,80 +25,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average)
-    def calculate_kama(close_prices, fast=2, slow=30):
-        change = np.abs(np.diff(close_prices, prepend=close_prices[0]))
-        volatility = np.sum(np.abs(np.diff(close_prices)), axis=0)
-        # Avoid division by zero
-        er = np.where(volatility != 0, change / volatility, 0)
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        kama = np.zeros_like(close_prices)
-        kama[0] = close_prices[0]
-        for i in range(1, len(close_prices)):
-            kama[i] = kama[i-1] + sc[i] * (close_prices[i] - kama[i-1])
-        return kama
+    # Calculate 12h VWAP for exit
+    typical_price = (high + low + close) / 3.0
+    vwap_num = (typical_price * volume).cumsum()
+    vwap_den = volume.cumsum()
+    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
     
-    kama = calculate_kama(close, fast=2, slow=30)
+    # Calculate 1d high/low for breakout levels
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate RSI (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate 1d EMA50 for trend filter
+    close_series_1d = pd.Series(close_1d)
+    ema50_1d = close_series_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    close_series_1w = pd.Series(close_1w)
-    ema34_1w = close_series_1w.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Align 1d levels to 12h timeframe
+    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
+    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Volume confirmation (20-period MA on 12h)
+    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 14)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(kama[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(ema34_1w_aligned[i])):
+        if (np.isnan(high_1d_aligned[i]) or 
+            np.isnan(low_1d_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # KAMA direction: current vs previous
-        kama_up = kama[i] > kama[i-1]
-        kama_down = kama[i] < kama[i-1]
+        # Volume filter: current volume > 1.8x 20-period average
+        volume_filter = volume[i] > (1.8 * volume_ma20[i])
         
-        # RSI conditions
-        rsi_oversold = rsi[i] < 40
-        rsi_overbought = rsi[i] > 60
-        rsi_exit = abs(rsi[i] - 50) < 5  # Exit when RSI near neutral
+        # Trend filter: price above/below 1d EMA50
+        price_above_ema = close[i] > ema50_1d_aligned[i]
+        price_below_ema = close[i] < ema50_1d_aligned[i]
+        
+        # Breakout conditions
+        breakout_up = close[i] > high_1d_aligned[i-1]  # break above previous day high
+        breakout_down = close[i] < low_1d_aligned[i-1]  # break below previous day low
+        
+        # Return to 12h VWAP for exit
+        return_to_vwap = abs(close[i] - vwap[i]) < 0.005 * close[i]  # within 0.5% of VWAP
         
         if position == 0:
-            # Long: KAMA up + RSI oversold + price above weekly EMA
-            if kama_up and rsi_oversold and close[i] > ema34_1w_aligned[i]:
+            # Long: breakout up + volume filter + price above EMA
+            if breakout_up and volume_filter and price_above_ema:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA down + RSI overbought + price below weekly EMA
-            elif kama_down and rsi_overbought and close[i] < ema34_1w_aligned[i]:
+            # Short: breakout down + volume filter + price below EMA
+            elif breakout_down and volume_filter and price_below_ema:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: KAMA down or RSI near neutral
-            if kama_down or rsi_exit:
+            # Exit long: return to VWAP or break down
+            if return_to_vwap or breakout_down:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: KAMA up or RSI near neutral
-            if kama_up or rsi_exit:
+            # Exit short: return to VWAP or break up
+            if return_to_vwap or breakout_up:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Direction_RSI_Trend"
-timeframe = "1d"
+name = "12h_1d_RangeBreakout_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
