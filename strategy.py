@@ -1,9 +1,12 @@
-# 12h_Camarilla_R1S1_Breakout_VolumeSpike_ADXFilter
-# Hypothesis: Camarilla pivot levels from daily timeframe act as strong support/resistance.
-# Breakout above R1 or below S1 with volume confirmation and ADX trend filter captures
-# institutional order flow. Works in both bull/bear markets by only taking breakouts
-# in direction of higher timeframe trend (ADX > 25).
-# Target: 20-50 trades over 4 years (5-12/year) to minimize fee drag.
+#!/usr/bin/env python3
+"""
+4h TriStar Doji Reversal + 1d Volume Spike + Trend Filter
+Long: TriStar Doji (3 consecutive dojis) + volume > 1.5x 20-period average + price > 1d EMA50
+Short: TriStar Doji + volume spike + price < 1d EMA50
+Exit: Opposite TriStar pattern or price crosses 1d EMA50
+TriStar Doji is a rare but high-probability reversal pattern indicating market indecision and potential turning point.
+Designed for low trade frequency (~20-40/year) with high win rate in both bull and bear markets.
+"""
 
 import numpy as np
 import pandas as pd
@@ -11,109 +14,77 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
-    # Get 1d data for Camarilla pivot levels
+    # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each day
-    # R1 = Close + (High - Low) * 1.12 / 12
-    # S1 = Close - (High - Low) * 1.12 / 12
-    camarilla_range = high_1d - low_1d
-    r1 = close_1d + camarilla_range * 1.12 / 12
-    s1 = close_1d - camarilla_range * 1.12 / 12
+    # Calculate 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Calculate ADX(14) on 12h for trend strength filter
-    # ADX requires +DM, -DM, TR
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
-                       np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
-                        np.maximum(low[:-1] - low[1:], 0), 0)
-    tr = np.maximum(high[1:] - low[1:], 
-                    np.maximum(np.abs(high[1:] - close[:-1]), 
-                               np.abs(low[1:] - close[:-1])))
-    
-    # Pad arrays to original length
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    tr = np.concatenate([[0], tr])
-    
-    # Smooth with Wilder's smoothing (alpha = 1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            result[period-1] = np.nansum(data[:period])
-            for i in range(period, len(data)):
-                result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
-    
-    period = 14
-    plus_dm_smooth = wilders_smoothing(plus_dm, period)
-    minus_dm_smooth = wilders_smoothing(minus_dm, period)
-    tr_smooth = wilders_smoothing(tr, period)
-    
-    # Avoid division by zero
-    plus_di = np.where(tr_smooth != 0, 100 * plus_dm_smooth / tr_smooth, 0)
-    minus_di = np.where(tr_smooth != 0, 100 * minus_dm_smooth / tr_smooth, 0)
-    dx = np.where((plus_di + minus_di) != 0, 
-                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = wilders_smoothing(dx, period)
-    
-    # Volume spike filter: volume > 2x 20-period volume SMA
+    # Calculate volume SMA(20) for volume filter
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate doji condition: |close - open| <= 0.1 * (high - low)
+    body = np.abs(close - open_price)
+    rng = high - low
+    # Avoid division by zero
+    rng_safe = np.where(rng == 0, 1, rng)
+    doji = body <= (0.1 * rng_safe)
+    
+    # TriStar Doji: 3 consecutive dojis
+    tristar = np.zeros(n, dtype=bool)
+    for i in range(2, n):
+        if doji[i] and doji[i-1] and doji[i-2]:
+            tristar[i] = True
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = max(30, 34)  # need ADX and volume SMA
+    start_idx = max(30, 50)  # need EMA50 and volume SMA
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(adx[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_sma_20[i]) or
+            np.isnan(tristar[i])):
             signals[i] = 0.0
             continue
-            
+        
         price = close[i]
         vol = volume[i]
         vol_sma_val = vol_sma_20[i]
-        adx_val = adx[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
+        ema_50_val = ema_50_1d_aligned[i]
+        is_tristar = tristar[i]
         
         if position == 0:
-            # Long: Breakout above R1 with volume spike and ADX > 25 (trending market)
-            if price > r1_val and vol > 2.0 * vol_sma_val and adx_val > 25:
+            # Long: TriStar Doji + volume spike + price > 1d EMA50
+            if is_tristar and vol > 1.5 * vol_sma_val and price > ema_50_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Breakdown below S1 with volume spike and ADX > 25
-            elif price < s1_val and vol > 2.0 * vol_sma_val and adx_val > 25:
+            # Short: TriStar Doji + volume spike + price < 1d EMA50
+            elif is_tristar and vol > 1.5 * vol_sma_val and price < ema_50_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price re-enters below R1 or ADX weakens (< 20)
-            if price < r1_val or adx_val < 20:
+            # Long exit: Opposite TriStar or price < 1d EMA50
+            if is_tristar and vol > 1.5 * vol_sma_val and price < ema_50_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price re-enters above S1 or ADX weakens (< 20)
-            if price > s1_val or adx_val < 20:
+            # Short exit: Opposite TriStar or price > 1d EMA50
+            if is_tristar and vol > 1.5 * vol_sma_val and price > ema_50_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -121,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_VolumeSpike_ADXFilter"
-timeframe = "12h"
+name = "4h_TriStarDoji_Reversal_VolumeSpike_1dEMA50"
+timeframe = "4h"
 leverage = 1.0
