@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_RSI_MeanReversion_TrendFilter
-Hypothesis: On 4h, enter long when RSI(14) < 30 with 12h EMA(50) support and volume confirmation; short when RSI > 70 with resistance and volume. Uses mean reversion in overextended conditions filtered by higher timeframe trend to avoid counter-trend trades in strong moves. Designed for 20-40 trades/year to minimize fee drag and work in both bull/bear regimes via trend alignment.
+1h_VolumeBreakout_4hTrend
+Hypothesis: On 1h, buy breakouts above the 4h high of the last 20 periods with volume confirmation, sell breakdowns below the 4h low with volume. Uses 4h structure for direction, 1h for precise entry. Volume filter ensures conviction. Designed for 15-30 trades/year to avoid fee drag in choppy markets.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,83 +18,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h data for trend and volume ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    # === 4h data for structure (high/low) and trend ===
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # RSI(14) on 4h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # 4h highest high of last 20 periods (for breakout level)
+    hh20_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    # 4h lowest low of last 20 periods (for breakdown level)
+    ll20_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # 12h EMA50 for trend filter
-    ema50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Align 4h levels to 1h timeframe (already delayed for completed bar)
+    hh20_4h_aligned = align_htf_to_ltf(prices, df_4h, hh20_4h)
+    ll20_4h_aligned = align_htf_to_ltf(prices, df_4h, ll20_4h)
     
-    # 12h volume average (20-period) for confirmation
-    vol_avg20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_avg20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_avg20_12h)
+    # 4h trend: EMA34 of close
+    ema34_4h = pd.Series(close_4h).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
+    
+    # Volume filter: 1h volume > 1.5x 20-period average
+    vol_avg20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
-    # Warmup: covers RSI and 12h indicators
-    warmup = 50
+    # Warmup: covers 4h indicators
+    warmup = 100
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(warmup, n):
         # Skip if any data is NaN
-        if (np.isnan(rsi[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or 
-            np.isnan(vol_avg20_12h_aligned[i])):
+        if (np.isnan(hh20_4h_aligned[i]) or 
+            np.isnan(ll20_4h_aligned[i]) or 
+            np.isnan(ema34_4h_aligned[i]) or 
+            np.isnan(vol_avg20[i])):
             signals[i] = 0.0
             position = 0
             continue
         
-        # Get current 12h volume
-        vol_12h_current = align_htf_to_ltf(prices, df_12h, volume_12h)[i]
-        
         # Volume filter: current volume > 1.5x 20-period average
-        vol_filter = vol_12h_current > 1.5 * vol_avg20_12h_aligned[i]
+        vol_filter = volume[i] > 1.5 * vol_avg20[i]
         
         # Entry conditions
         if position == 0:
-            # Long: RSI oversold + above 12h EMA50 + volume
-            if rsi[i] < 30 and close[i] > ema50_12h_aligned[i] and vol_filter:
-                signals[i] = 0.25
+            # Long: break above 4h HH20 + above 4h EMA34 (uptrend) + volume
+            if close[i] > hh20_4h_aligned[i] and close[i] > ema34_4h_aligned[i] and vol_filter:
+                signals[i] = 0.20
                 position = 1
                 continue
-            # Short: RSI overbought + below 12h EMA50 + volume
-            elif rsi[i] > 70 and close[i] < ema50_12h_aligned[i] and vol_filter:
-                signals[i] = -0.25
+            # Short: break below 4h LL20 + below 4h EMA34 (downtrend) + volume
+            elif close[i] < ll20_4h_aligned[i] and close[i] < ema34_4h_aligned[i] and vol_filter:
+                signals[i] = -0.20
                 position = -1
                 continue
         
-        # Exit conditions: reverse when RSI returns to neutral zone (40-60)
+        # Exit conditions: reverse on opposite break
         elif position == 1:
-            if rsi[i] > 40:  # exit long when RSI recovers
-                signals[i] = 0.0
-                position = 0
+            if close[i] < ll20_4h_aligned[i]:  # reverse to short on breakdown
+                signals[i] = -0.20
+                position = -1
                 continue
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            if rsi[i] < 60:  # exit short when RSI declines
-                signals[i] = 0.0
-                position = 0
+            if close[i] > hh20_4h_aligned[i]:  # reverse to long on breakout
+                signals[i] = 0.20
+                position = 1
                 continue
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_RSI_MeanReversion_TrendFilter"
-timeframe = "4h"
+name = "1h_VolumeBreakout_4hTrend"
+timeframe = "1h"
 leverage = 1.0
