@@ -22,20 +22,16 @@ def generate_signals(prices):
     for i in range(len(close_1d)):
         if i >= 19:
             sma_20[i] = np.mean(close_1d[i-19:i+1])
-        elif i > 0:
-            sma_20[i] = np.mean(close_1d[max(0, i-9):i+1])
         else:
-            sma_20[i] = close_1d[0]
+            sma_20[i] = np.nan
     
     # Calculate standard deviation
     std_20 = np.full_like(close_1d, np.nan)
     for i in range(len(close_1d)):
         if i >= 19:
             std_20[i] = np.std(close_1d[i-19:i+1])
-        elif i > 0:
-            std_20[i] = np.std(close_1d[max(0, i-9):i+1])
         else:
-            std_20[i] = 0.0
+            std_20[i] = np.nan
     
     upper_bb = sma_20 + 2 * std_20
     lower_bb = sma_20 - 2 * std_20
@@ -50,36 +46,29 @@ def generate_signals(prices):
             window = bb_width[i-19:i+1]
             rank = np.sum(window <= bb_width[i]) / len(window)
             bb_width_percentile[i] = rank * 100
-        elif i > 0:
-            window = bb_width[max(0, i-9):i+1]
-            rank = np.sum(window <= bb_width[i]) / len(window)
-            bb_width_percentile[i] = rank * 100
         else:
-            bb_width_percentile[i] = 50.0
+            bb_width_percentile[i] = np.nan
     
-    # === Align indicators to 4h timeframe ===
+    # === Align indicators to 12h timeframe ===
     bb_width_percentile_aligned = align_htf_to_ltf(prices, df_1d, bb_width_percentile)
     upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
     lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
     
-    # === 4h Volume confirmation ===
-    df_4h = get_htf_data(prices, '4h')
-    volume_4h = df_4h['volume'].values
+    # === 1d Volume confirmation ===
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 20-period average volume on 4h timeframe
-    vol_ma_20 = np.full_like(volume_4h, np.nan)
-    for i in range(len(volume_4h)):
+    # Calculate 20-period average volume on 1d timeframe
+    vol_ma_20 = np.full_like(volume_1d, np.nan)
+    for i in range(len(volume_1d)):
         if i >= 19:
-            vol_ma_20[i] = np.mean(volume_4h[i-19:i+1])
-        elif i > 0:
-            vol_ma_20[i] = np.mean(volume_4h[max(0, i-9):i+1])
+            vol_ma_20[i] = np.mean(volume_1d[i-19:i+1])
         else:
-            vol_ma_20[i] = volume_4h[0]
+            vol_ma_20[i] = np.nan
     
-    # Volume confirmation: current 4h volume > 1.3x 20-period average
-    vol_confirm = volume_4h > vol_ma_20 * 1.3
+    # Volume confirmation: current 1d volume > 1.5x 20-period average
+    vol_confirm = volume_1d > vol_ma_20 * 1.5
     
-    # === 4h Session filter (08-20 UTC) ===
+    # === 12h Session filter (08-20 UTC) ===
     hours = prices.index.hour
     session_filter = (hours >= 8) & (hours <= 20)
     
@@ -129,8 +118,9 @@ def generate_signals(prices):
         
         # Exit logic
         elif position == 1:
-            # Exit long: price reaches middle BB or upper BB
-            if close[i] >= sma_20[-1] if len(sma_20) > 0 else False or close[i] >= upper_bb_aligned[i]:
+            # Exit long: price reaches upper BB or squeeze breaks
+            if (close[i] >= upper_bb_aligned[i] or 
+                not is_squeeze):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -138,8 +128,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price reaches middle BB or lower BB
-            if close[i] <= sma_20[-1] if len(sma_20) > 0 else False or close[i] <= lower_bb_aligned[i]:
+            # Exit short: price reaches lower BB or squeeze breaks
+            if (close[i] <= lower_bb_aligned[i] or 
+                not is_squeeze):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -148,6 +139,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_BB_Squeeze_Breakout_VolumeFilter"
-timeframe = "4h"
+name = "12h_BB_Squeeze_Breakout_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
