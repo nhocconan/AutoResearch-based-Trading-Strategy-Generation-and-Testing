@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout + volume confirmation + 1d chop regime filter.
-Long when price breaks above Donchian high with volume > 1.5x MA20 and CHOP(14) > 61.8 (range regime).
-Short when price breaks below Donchian low with volume > 1.5x MA20 and CHOP(14) > 61.8.
-Exit when price returns to Donchian midpoint or chop regime shifts to trending (CHOP < 38.2).
-Uses 1d for CHOP regime, 4h for Donchian and volume.
-Target: 75-200 total trades over 4 years (19-50/year).
+Hypothesis: 6h Volume-Weighted RSI + 12h Trend Filter.
+Long when VW_RSI(14) < 30 and 12h EMA50 > EMA200 (uptrend).
+Short when VW_RSI(14) > 70 and 12h EMA50 < EMA200 (downtrend).
+Exit when VW_RSI crosses 50 opposite direction or trend reverses.
+Uses 6h for VW_RSI calculation (volume confirmation), 12h for trend filter.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -22,100 +22,101 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for CHOP regime
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d CHOP (Choppiness Index, 14-period)
-    def calculate_chop(high, low, close, period=14):
-        atr = np.zeros_like(high)
-        for i in range(len(high)):
-            atr[i] = max(high[i] - low[i], abs(high[i] - close[i-1] if i>0 else high[i]), abs(low[i] - close[i-1] if i>0 else low[i]))
+    # Calculate 12h EMA50 and EMA200
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200_12h = pd.Series(close_12h).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Align 12h indicators
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    ema200_12h_aligned = align_htf_to_ltf(prices, df_12h, ema200_12h)
+    
+    # Calculate 6h Volume-Weighted RSI
+    def calculate_vw_rsi(close, volume, period=14):
+        # Typical price
+        tp = (high + low + close) / 3.0
+        # Volume-weighted typical price change
+        vwtp = tp * volume
         
-        # Sum of ATR over period
-        sum_atr = np.zeros_like(atr)
-        for i in range(period, len(atr)):
-            sum_atr[i] = np.sum(atr[i-period+1:i+1])
+        # Calculate changes
+        change = np.diff(vwtp, prepend=vwtp[0])
         
-        # Highest high and lowest low over period
-        highest_high = np.zeros_like(high)
-        lowest_low = np.zeros_like(low)
-        for i in range(period-1, len(high)):
-            highest_high[i] = np.max(high[i-period+1:i+1])
-            lowest_low[i] = np.min(low[i-period+1:i+1])
+        # Separate gains and losses
+        gains = np.where(change > 0, change, 0.0)
+        losses = np.where(change < 0, -change, 0.0)
         
-        # CHOP = 100 * log10(sum_atr / (highest_high - lowest_low)) / log10(period)
-        range_hl = highest_high - lowest_low
+        # Wilder's smoothing (EMA with alpha=1/period)
+        avg_gain = np.zeros_like(gains)
+        avg_loss = np.zeros_like(losses)
+        
+        # First average: simple mean
+        if len(gains) > period:
+            avg_gain[period] = np.mean(gains[1:period+1])
+            avg_loss[period] = np.mean(losses[1:period+1])
+            
+            # Subsequent: Wilder's smoothing
+            for i in range(period+1, len(gains)):
+                avg_gain[i] = (avg_gain[i-1] * (period-1) + gains[i]) / period
+                avg_loss[i] = (avg_loss[i-1] * (period-1) + losses[i]) / period
+        
         # Avoid division by zero
-        range_hl = np.where(range_hl == 0, 1e-10, range_hl)
-        chop = 100 * np.log10(sum_atr / range_hl) / np.log10(period)
-        # Set values before period to NaN
-        chop[:period-1] = np.nan
-        return chop
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100.0)
+        rsi = 100.0 - (100.0 / (1.0 + rs))
+        return rsi
     
-    chop_14 = calculate_chop(high_1d, low_1d, close_1d, 14)
-    chop_14_aligned = align_htf_to_ltf(prices, df_1d, chop_14)
-    
-    # Calculate 4h Donchian channels (20-period)
-    def donchian_channels(high, low, period=20):
-        upper = np.zeros_like(high)
-        lower = np.zeros_like(low)
-        for i in range(len(high)):
-            if i >= period - 1:
-                upper[i] = np.max(high[i-period+1:i+1])
-                lower[i] = np.min(low[i-period+1:i+1])
-            else:
-                upper[i] = np.nan
-                lower[i] = np.nan
-        return upper, lower
-    
-    donch_hi, donch_lo = donchian_channels(high, low, 20)
-    donch_mid = (donch_hi + donch_lo) / 2.0
-    
-    # Calculate 4h volume MA(20)
-    vol_ma20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate VW_RSI
+    vw_rsi = calculate_vw_rsi(close, volume, 14)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 50  # warmup for all indicators
+    start_idx = 200  # warmup for EMA200
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donch_hi[i]) or np.isnan(donch_lo[i]) or 
-            np.isnan(vol_ma20[i]) or np.isnan(chop_14_aligned[i])):
+        if (np.isnan(vw_rsi[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or 
+            np.isnan(ema200_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade in range regime (CHOP > 61.8)
-        is_range = chop_14_aligned[i] > 61.8
+        # Trend determination from 12h
+        ema50 = ema50_12h_aligned[i]
+        ema200 = ema200_12h_aligned[i]
+        is_uptrend = ema50 > ema200
+        is_downtrend = ema50 < ema200
         
-        # Volume confirmation: volume > 1.5x MA20
-        vol_confirm = volume[i] > 1.5 * vol_ma20[i]
+        # VW_RSI signals
+        rsi = vw_rsi[i]
+        oversold = rsi < 30
+        overbought = rsi > 70
+        exit_long = rsi > 50
+        exit_short = rsi < 50
         
         if position == 0:
-            # Long: price breaks above Donchian high + volume + range regime
-            if close[i] > donch_hi[i] and vol_confirm and is_range:
+            # Long: Oversold + Uptrend
+            if oversold and is_uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low + volume + range regime
-            elif close[i] < donch_lo[i] and vol_confirm and is_range:
+            # Short: Overbought + Downtrend
+            elif overbought and is_downtrend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to Donchian midpoint OR regime shifts to trending (CHOP < 38.2)
-            if close[i] < donch_mid[i] or chop_14_aligned[i] < 38.2:
+            # Exit long: RSI crosses above 50 OR trend turns down
+            if exit_long or is_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to Donchian midpoint OR regime shifts to trending (CHOP < 38.2)
-            if close[i] > donch_mid[i] or chop_14_aligned[i] < 38.2:
+            # Exit short: RSI crosses below 50 OR trend turns up
+            if exit_short or is_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -123,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Volume_ChopRange"
-timeframe = "4h"
+name = "6h_VWRSI_12hEMATrend"
+timeframe = "6h"
 leverage = 1.0
