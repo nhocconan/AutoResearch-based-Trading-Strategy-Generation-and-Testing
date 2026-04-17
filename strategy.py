@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Pivot_R1_S1_Breakout_Volume
-Hypothesis: Camarilla pivot levels (R1/S1) from 1d act as strong support/resistance.
-Breakouts above R1 or below S1 with volume confirmation indicate institutional interest.
-Works in bull markets (breakouts continue) and bear markets (breakdowns continue).
-Uses volume filter to avoid false breakouts. Position size: ±0.25.
+4h_RSI_Trend_With_4h_Trend_Filter
+Hypothesis: RSI combined with trend filter and volume confirmation provides high-probability entries in both bull and bear markets. 
+Long when RSI > 50 + price > EMA20 + volume > 1.5x average + 4h close > 4h EMA50.
+Short when RSI < 50 + price < EMA20 + volume > 1.5x average + 4h close < 4h EMA50.
+Exit on opposite RSI condition. Position size: ±0.25. Uses 4h timeframe with trend filter.
+Designed to capture trends while avoiding false signals via EMA50 filter.
 """
 
 import numpy as np
@@ -21,66 +22,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate EMA20 for price trend
+    close_series = pd.Series(close)
+    ema20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate Camarilla pivot levels for 1d
-    # Pivot = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    # Calculate EMA50 for trend filter
+    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d levels to 4h timeframe (wait for 1d candle to close)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Calculate RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Volume confirmation: 20-period average on 4h
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume confirmation (10-period MA)
+    volume_ma10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = 20  # volume MA20
+    start_idx = max(20, 50, 14, 10)  # EMA20, EMA50, RSI, volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_1d_aligned[i]) or 
-            np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(volume_ma20[i])):
+        if (np.isnan(ema20[i]) or 
+            np.isnan(ema50[i]) or 
+            np.isnan(rsi[i]) or 
+            np.isnan(volume_ma10[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > (1.5 * volume_ma20[i])
+        # Volume filter: current volume > 1.5x 10-period average
+        volume_filter = volume[i] > (1.5 * volume_ma10[i])
+        
+        # RSI-based conditions
+        rsi_bullish = rsi[i] > 50
+        rsi_bearish = rsi[i] < 50
+        
+        # Price relative to EMA20
+        price_above_ema20 = close[i] > ema20[i]
+        price_below_ema20 = close[i] < ema20[i]
+        
+        # Trend filter: 4h close relative to EMA50
+        uptrend = close[i] > ema50[i]
+        downtrend = close[i] < ema50[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume
-            if close[i] > r1_1d_aligned[i] and volume_filter:
+            # Long: RSI bullish + price above EMA20 + volume filter + uptrend
+            if rsi_bullish and price_above_ema20 and volume_filter and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume
-            elif close[i] < s1_1d_aligned[i] and volume_filter:
+            # Short: RSI bearish + price below EMA20 + volume filter + downtrend
+            elif rsi_bearish and price_below_ema20 and volume_filter and downtrend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns below pivot (mean reversion) or opposite breakout
-            if close[i] < pivot_1d_aligned[i]:
+            # Exit long: RSI turns bearish (< 50)
+            if rsi_bearish:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns above pivot (mean reversion) or opposite breakout
-            if close[i] > pivot_1d_aligned[i]:
+            # Exit short: RSI turns bullish (> 50)
+            if rsi_bullish:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_Pivot_R1_S1_Breakout_Volume"
+name = "4h_RSI_Trend_With_4h_Trend_Filter"
 timeframe = "4h"
 leverage = 1.0
