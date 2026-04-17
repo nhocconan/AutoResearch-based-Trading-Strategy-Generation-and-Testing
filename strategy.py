@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_Pivot_R3_S3_Bounce_With_Volume
-Hypothesis: Camarilla R3/S3 levels act as strong support/resistance where price often bounces. 
-Long when price touches S3 with rejection (close > open) and volume > 1.5x average.
-Short when price touches R3 with rejection (close < open) and volume > 1.5x average.
-Uses 12h EMA50 as trend filter to avoid counter-trend trades in strong trends.
-Designed to work in both bull (buying dips at S3) and bear (selling rallies at R3) markets.
+1d_Camarilla_Pivot_Breakout_Volume_Confirmation
+Hypothesis: Camarilla pivot levels (R1/S1) act as strong support/resistance on daily timeframe.
+Breakouts above R1 or below S1 with volume confirmation yield sustained moves.
+Long when price breaks above R1 + volume > 2x average, short when breaks below S1 + volume > 2x average.
+Exit on opposite signal or when price returns to pivot point (PP).
+Uses weekly trend filter: only take longs when weekly close > weekly EMA20, shorts when weekly close < weekly EMA20.
+Designed to work in both bull (breakouts in uptrend) and bear (breakouts in downtrend) with low trade frequency.
+Position size: ±0.25.
 """
 
 import numpy as np
 import pandas as pd
+from math import ceil
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
@@ -17,84 +20,82 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    open_ = prices['open'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels from previous day
-    # R3 = close + (high - low) * 1.1/2
-    # S3 = close - (high - low) * 1.1/2
-    # We need previous day's OHLC
-    prev_day_high = np.roll(high, 1)  # previous bar's high
-    prev_day_low = np.roll(low, 1)    # previous bar's low
-    prev_day_close = np.roll(close, 1) # previous bar's close
+    # Calculate daily Camarilla pivot levels
+    # PP = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1/12
+    # S1 = C - (H - L) * 1.1/12
+    # R2 = C + (H - L) * 1.1/6
+    # S2 = C - (H - L) * 1.1/6
+    # We'll use R1 and S1 for breakouts
+    pp = (high + low + close) / 3.0
+    r1 = close + (high - low) * 1.1 / 12.0
+    s1 = close - (high - low) * 1.1 / 12.0
     
-    # For first bar, use current values (will be filtered out by warmup anyway)
-    prev_day_high[0] = high[0]
-    prev_day_low[0] = low[0]
-    prev_day_close[0] = close[0]
+    # Volume confirmation: 20-period average
+    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    camarilla_width = (prev_day_high - prev_day_low) * 1.1 / 2
-    r3 = prev_day_close + camarilla_width
-    s3 = prev_day_close - camarilla_width
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Price rejection at S3/R3: close > open for bullish bounce, close < open for bearish rejection
-    bullish_bounce = (close <= s3 * 1.001) & (close > open_)  # Allow small slippage
-    bearish_rejection = (close >= r3 * 0.999) & (close < open_)  # Allow small slippage
+    # Calculate weekly EMA20 for trend filter
+    close_series_1w = pd.Series(close_1w)
+    ema20_1w = close_series_1w.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    volume_series = pd.Series(volume)
-    volume_ma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * volume_ma20)
-    
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    
-    # Calculate 12h EMA50 for trend filter
-    close_series_12h = pd.Series(close_12h)
-    ema50_12h = close_series_12h.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 12h EMA to 4h timeframe
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Align weekly EMA to daily timeframe
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     
-    start_idx = max(20, 50)  # volume MA20, EMA50
+    start_idx = max(20, 20)  # volume MA20, weekly EMA20
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(volume_ma20[i]) or 
-            np.isnan(ema50_12h_aligned[i])):
+        if (np.isnan(r1[i]) or 
+            np.isnan(s1[i]) or 
+            np.isnan(pp[i]) or 
+            np.isnan(volume_ma20[i]) or 
+            np.isnan(ema20_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        vol_filter = volume_filter[i]
+        # Volume filter: current volume > 2x 20-period average
+        volume_filter = volume[i] > (2.0 * volume_ma20[i])
+        
+        # Breakout conditions
+        breakout_long = close[i] > r1[i] and volume_filter
+        breakout_short = close[i] < s1[i] and volume_filter
+        
+        # Mean reversion exit: price returns to pivot point
+        reversion_to_pp = abs(close[i] - pp[i]) < (pp[i] * 0.005)  # within 0.5% of PP
         
         if position == 0:
-            # Long: price bounces off S3 + volume + 12h uptrend (price > EMA50)
-            if bullish_bounce[i] and vol_filter and close[i] > ema50_12h_aligned[i]:
+            # Long: breakout above R1 + volume filter + weekly uptrend
+            if breakout_long and close[i] > ema20_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price rejected at R3 + volume + 12h downtrend (price < EMA50)
-            elif bearish_rejection[i] and vol_filter and close[i] < ema50_12h_aligned[i]:
+            # Short: breakout below S1 + volume filter + weekly downtrend
+            elif breakout_short and close[i] < ema20_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price reaches R3 or reversal signal
-            if close[i] >= r3[i] * 0.999:  # Reached R3 level
+            # Exit long: breakout fails (return to PP) or opposite breakout
+            if reversion_to_pp or breakout_short:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price reaches S3 or reversal signal
-            if close[i] <= s3[i] * 1.001:  # Reached S3 level
+            # Exit short: breakout fails (return to PP) or opposite breakout
+            if reversion_to_pp or breakout_long:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_Pivot_R3_S3_Bounce_With_Volume"
-timeframe = "4h"
+name = "1d_Camarilla_Pivot_Breakout_Volume_Confirmation"
+timeframe = "1d"
 leverage = 1.0
