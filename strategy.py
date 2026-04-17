@@ -1,9 +1,8 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian breakout with 1d ADX trend filter and volume confirmation.
-Works in bull (breakouts catch momentum) and bear (ADX filters weak breakouts).
-Targets 20-40 trades/year to avoid fee drag.
+Hypothesis: 4h Donchian(20) breakout with 1d ADX(25) filter and volume confirmation.
+Uses 1d volume surge (>1.5x 20-period avg) to confirm breakout strength.
+Targets 25-40 trades/year to avoid fee drag. Works in bull (catch momentum) and bear (ADX filters weak breakouts).
 """
 import numpy as np
 import pandas as pd
@@ -11,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -83,7 +82,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup
-    warmup = 50
+    warmup = 60
     
     # Track position
     position = 0  # 0: flat, 1: long, -1: short
