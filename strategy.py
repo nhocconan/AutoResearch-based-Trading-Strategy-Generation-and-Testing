@@ -1,13 +1,11 @@
-#!/usr/bin/env python3
-"""
-6h_Ichimoku_SilverCross_1dTrend
-6h strategy using Ichimoku Cloud Silver Cross (TK Cross) with 1d trend filter.
-- Long: TK Cross bullish (Tenkan > Kijun) + price above cloud + 1d EMA50 > EMA200
-- Short: TK Cross bearish (Tenkan < Kijun) + price below cloud + 1d EMA50 < EMA200
-- Exit: Opposite TK Cross or price crosses opposite cloud boundary
-Designed for ~12-25 trades/year per symbol (48-100 total over 4 years)
-Works in bull markets (trend continuation) and bear markets (trend reversal)
-"""
+# NEW STRATEGY: 4h_KAMA_Trend_Filter_V1
+# Hypothesis: KAMA adapts to market noise - in trending markets it follows price closely,
+# in ranging markets it stays flat. Combined with volume confirmation and RSI filter,
+# this should capture trends while avoiding whipsaws in ranging markets.
+# Timeframe: 4h (optimal balance of signal quality and trade frequency)
+# Works in bull markets: KAMA follows uptrend, enters on pullbacks with volume
+# Works in bear markets: KAMA follows downtrend, enters on bounces with volume
+# Expected trades: 20-40/year (80-160 total over 4 years) - avoids fee drag
 
 import numpy as np
 import pandas as pd
@@ -15,102 +13,85 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get Ichimoku components on 6h
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period_tenkan = 9
-    max_high_tenkan = pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    min_low_tenkan = pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan = (max_high_tenkan + min_low_tenkan) / 2
+    # KAMA calculation (adaptive moving average)
+    # Efficiency Ratio = |Price Change| / Sum of Absolute Daily Changes
+    change = np.abs(np.diff(close, prepend=close[0]))
+    direction = np.abs(np.subtract(close, np.roll(close, 1)))
+    direction[0] = np.abs(close[0] - close[0])  # first element
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period_kijun = 26
-    max_high_kijun = pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    min_low_kijun = pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun = (max_high_kijun + min_low_kijun) / 2
+    # Avoid division by zero
+    er = np.where(change != 0, direction / change, 0)
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period_senkou_b = 52
-    max_high_senkou_b = pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    min_low_senkou_b = pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_b = (max_high_senkou_b + min_low_senkou_b) / 2
+    # Calculate KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Get daily trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # RSI for overbought/oversold conditions
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Daily EMA50 and EMA200 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
     
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.where(avg_loss == 0, 100, rsi)  # when no losses, RSI=100
+    rsi = np.where(avg_gain == 0, 0, rsi)    # when no gains, RSI=0
     
-    # Align Ichimoku components to 6b (though they're already calculated on 6h data)
-    # We still need to align for proper NaN handling at the start
-    tenkan_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low, 'close': close}), tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low, 'close': close}), kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low, 'close': close}), senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low, 'close': close}), senkou_b)
+    # Volume confirmation (20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 52  # need enough for Senkou B calculation
+    start_idx = max(30, 20)  # KAMA needs warmup, RSI needs 14, volume MA needs 20
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
-            np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i])):
+        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
-        # Ichimoku conditions
-        tk_bullish = tenkan_aligned[i] > kijun_aligned[i]
-        tk_bearish = tenkan_aligned[i] < kijun_aligned[i]
-        
-        # Cloud top and bottom
-        cloud_top = max(senkou_a_aligned[i], senkou_b_aligned[i])
-        cloud_bottom = min(senkou_a_aligned[i], senkou_b_aligned[i])
-        
-        price_above_cloud = close[i] > cloud_top
-        price_below_cloud = close[i] < cloud_bottom
-        
-        # Trend conditions
-        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
-        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.2 * vol_ma[i]
         
         if position == 0:
-            # Long: bullish TK cross + price above cloud + uptrend
-            if tk_bullish and price_above_cloud and uptrend:
+            # Long: price above KAMA (uptrend) + RSI not overbought + volume confirmation
+            if close[i] > kama[i] and rsi[i] < 70 and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish TK cross + price below cloud + downtrend
-            elif tk_bearish and price_below_cloud and downtrend:
+            # Short: price below KAMA (downtrend) + RSI not oversold + volume confirmation
+            elif close[i] < kama[i] and rsi[i] > 30 and vol_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: bearish TK cross OR price drops below cloud bottom
-            if tk_bearish or close[i] < cloud_bottom:
+            # Long exit: price below KAMA (trend change) or RSI overbought
+            if close[i] < kama[i] or rsi[i] > 75:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: bullish TK cross OR price rises above cloud top
-            if tk_bullish or close[i] > cloud_top:
+            # Short exit: price above KAMA (trend change) or RSI oversold
+            if close[i] > kama[i] or rsi[i] < 25:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -118,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_SilverCross_1dTrend"
-timeframe = "6h"
+name = "4h_KAMA_Trend_Filter_V1"
+timeframe = "4h"
 leverage = 1.0
