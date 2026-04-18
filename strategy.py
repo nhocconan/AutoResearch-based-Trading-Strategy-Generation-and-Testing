@@ -5,7 +5,7 @@ Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d ADX trend f
 - Short: price breaks below Donchian lower band, ADX > 25, volume > 1.5x average
 - Exit: opposite Donchian band touch or ADX < 20 (trend weakening)
 - Uses 1d Donchian bands for structure, avoiding whipsaws in ranging markets.
-Designed for 19-50 trades/year (75-200 total) to minimize fee drift.
+Designed for 19-50 trades/year (75-200 total) to minimize fee drag.
 """
 
 import numpy as np
