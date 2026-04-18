@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Pivot_R1S1_Breakout_Volume
-Hypothesis: Price breaking above Camarilla R1 or below S1 with volume confirmation and trend filter (1d EMA34) provides high-probability entries. Works in bull markets by buying R1 breaks above EMA34, and in bear markets by selling S1 breaks below EMA34. Volume > 1.5x 20-period average confirms institutional interest. Targets 20-30 trades/year via strict confluence of price level, volume, and trend alignment.
+6h_ADX_Plus_Momentum_With_Volume_Filter
+Hypothesis: Use ADX to filter trending markets (ADX>20) and combine with momentum (ROC>0) and volume spike (>1.5x 20-period avg) for entries. Exit when ADX drops below 15 or momentum turns negative. Designed for 6h timeframe to capture multi-day trends while avoiding whipsaws in low-volatility periods. Targets 15-25 trades/year by requiring strong trend confirmation, momentum alignment, and volume expansion. Works in bull markets by following uptrends with rising momentum, and in bear markets by taking shorts when ADX confirms downtrend and momentum is negative.
 """
 
 import numpy as np
@@ -18,29 +18,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate ADX (14-period)
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # first period
+        
+        # Directional Movement
+        up_move = high - np.roll(high, 1)
+        down_move = np.roll(low, 1) - low
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+        
+        # Smoothed values
+        def smooth_wilder(arr, period):
+            result = np.full_like(arr, np.nan)
+            if len(arr) < period:
+                return result
+            # First value is simple average
+            result[period-1] = np.nansum(arr[:period]) / period
+            # Subsequent values Wilder smoothing
+            for i in range(period, len(arr)):
+                result[i] = (result[i-1] * (period-1) + arr[i]) / period
+            return result
+        
+        atr = smooth_wilder(tr, period)
+        plus_di = 100 * smooth_wilder(plus_dm, period) / atr
+        minus_di = 100 * smooth_wilder(minus_dm, period) / atr
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = smooth_wilder(dx, period)
+        return adx, plus_di, minus_di
     
-    # Calculate Camarilla pivot levels for each day
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # R1 = C + (Range * 1.1 / 12)
-    # S1 = C - (Range * 1.1 / 12)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r1_1d = close_1d + (range_1d * 1.1 / 12)
-    s1_1d = close_1d - (range_1d * 1.1 / 12)
+    adx, plus_di, minus_di = calculate_adx(high, low, close, 14)
     
-    # Align Camarilla levels to 4h timeframe (wait for bar close)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # Get 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Rate of Change (ROC) - 10 period
+    roc = np.full_like(close, np.nan)
+    for i in range(10, n):
+        if close[i-10] != 0:
+            roc[i] = ((close[i] - close[i-10]) / close[i-10]) * 100
     
     # Volume confirmation: current volume > 1.5 x 20-period average
     vol_ma = np.full(n, np.nan)
@@ -51,42 +69,37 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # need EMA34 and volume MA
+    start_idx = max(30, 20)  # need ADX and ROC
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema34_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(adx[i]) or np.isnan(roc[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long entry: price breaks above R1, with volume, and above EMA34 (uptrend)
-            if (close[i] > r1_aligned[i] and vol_confirm[i] and 
-                close[i] > ema34_aligned[i]):
+            # Long entry: ADX > 20 (trending), plus DI > minus DI, ROC > 0, volume confirmation
+            if (adx[i] > 20 and plus_di[i] > minus_di[i] and roc[i] > 0 and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S1, with volume, and below EMA34 (downtrend)
-            elif (close[i] < s1_aligned[i] and vol_confirm[i] and 
-                  close[i] < ema34_aligned[i]):
+            # Short entry: ADX > 20 (trending), minus DI > plus DI, ROC < 0, volume confirmation
+            elif (adx[i] > 20 and minus_di[i] > plus_di[i] and roc[i] < 0 and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price returns below R1 or below EMA34 (trend change)
-            if (close[i] < r1_aligned[i] or 
-                close[i] < ema34_aligned[i]):
+            # Long exit: ADX drops below 15 (trend weakening) or ROC turns negative
+            if adx[i] < 15 or roc[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns above S1 or above EMA34 (trend change)
-            if (close[i] > s1_aligned[i] or 
-                close[i] > ema34_aligned[i]):
+            # Short exit: ADX drops below 15 (trend weakening) or ROC turns positive
+            if adx[i] < 15 or roc[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Pivot_R1S1_Breakout_Volume"
-timeframe = "4h"
+name = "6h_ADX_Plus_Momentum_With_Volume_Filter"
+timeframe = "6h"
 leverage = 1.0
