@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Pullback_Volume_Trend
-Hypothesis: Camarilla pivot S1/R1 levels on 1d act as strong support/resistance. 
-Buy when price pulls back to S1 in uptrend with volume confirmation. 
-Sell when price pulls back to R1 in downtrend with volume confirmation.
-Uses 1w EMA40 for trend filter to avoid counter-trend trades. 
-Target: 20-30 trades/year to minimize fee drag while capturing high-probability reversals.
+6h_RVOL_Pullback_To_VWAP
+Hypothesis: On 6h timeframe, enter long when price pulls back to VWAP during high relative volume in uptrend,
+and short when price rallies to VWAP during high relative volume in downtrend.
+Uses 1d ADX for trend filter and 6h VWAP as dynamic support/resistance.
+Target: 20-30 trades/year to minimize fee fade while capturing mean-reversion within trend.
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,80 +21,97 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly EMA40 for trend filter (loaded once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_40_1w = pd.Series(close_1w).ewm(span=40, adjust=False, min_periods=40).mean().values
-    ema_40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_40_1w)
-    
-    # Daily Camarilla pivot levels (R1, S1)
+    # Daily ADX for trend filter (loaded once before loop)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    # Calculate ADX(14)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = 0  # first bar has no previous close
     
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
     
-    # Volume spike: >1.5x 20-period average
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    plus_dm14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
+    minus_dm14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
+    
+    plus_di = 100 * plus_dm14 / tr14
+    minus_di = 100 * minus_dm14 / tr14
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # 6h VWAP (typical price * volume) cumulative
+    typical_price = (high + low + close) / 3.0
+    vwap_numerator = np.cumsum(typical_price * volume)
+    vwap_denominator = np.cumsum(volume)
+    vwap = vwap_numerator / vwap_denominator
+    
+    # Relative volume: current volume / 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    rvol = volume / vol_ma
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(20, 1)  # Warmup for indicators
+    start_idx = max(20, 34)  # Warmup for ADX and VWAP
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_40_1w_aligned[i]) or
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
-            np.isnan(volume_spike[i])):
+        if (np.isnan(adx_1d_aligned[i]) or
+            np.isnan(vwap[i]) or
+            np.isnan(rvol[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
-        ema40 = ema_40_1w_aligned[i]
-        vol_spike = volume_spike[i]
+        adx_val = adx_1d_aligned[i]
+        vwap_val = vwap[i]
+        rvol_val = rvol[i]
         
         if position == 0:
-            # Long: price pulls back to S1 with volume spike in uptrend
-            if (low[i] <= s1 <= high[i] and   # price touches S1
-                close[i] > s1 and             # closes above S1 (confirms bounce)
-                vol_spike and
-                price > ema40):               # uptrend filter
+            # Long: pullback to VWAP with high RVOL in uptrend (ADX > 25)
+            if (abs(price - vwap_val) < 0.005 * price and  # within 0.5% of VWAP
+                low[i] <= vwap_val <= high[i] and           # price touched VWAP
+                rvol_val > 1.5 and                          # volume spike
+                adx_val > 25):                              # strong trend
                 signals[i] = 0.25
                 position = 1
-            # Short: price pulls back to R1 with volume spike in downtrend
-            elif (low[i] <= r1 <= high[i] and   # price touches R1
-                  close[i] < r1 and             # closes below R1 (confirms rejection)
-                  vol_spike and
-                  price < ema40):               # downtrend filter
+            # Short: rally to VWAP with high RVOL in downtrend (ADX > 25)
+            elif (abs(price - vwap_val) < 0.005 * price and  # within 0.5% of VWAP
+                  low[i] <= vwap_val <= high[i] and          # price touched VWAP
+                  rvol_val > 1.5 and                         # volume spike
+                  adx_val > 25):                             # strong trend
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price crosses below S1 or trend reverses
-            if close[i] < s1 or price < ema40:
+            # Exit: price moves 1.5% away from VWAP or trend weakens
+            if (abs(price - vwap_val) > 0.015 * price or
+                adx_val < 20):
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price crosses above R1 or trend reverses
-            if close[i] > r1 or price > ema40:
+            # Exit: price moves 1.5% away from VWAP or trend weakens
+            if (abs(price - vwap_val) > 0.015 * price or
+                adx_val < 20):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1S1_Pullback_Volume_Trend"
-timeframe = "4h"
+name = "6h_RVOL_Pullback_To_VWAP"
+timeframe = "6h"
 leverage = 1.0
