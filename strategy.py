@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-12h 1D/1W Donchian Breakout with Volume Confirmation and ADX Filter
-Hypothesis: Price breaking above/below 20-period Donchian Channel with volume confirmation 
-(volume > 1.5x 20-period average) and trend strength (ADX > 20) indicates strong momentum. 
-Works in both bull and bear markets by capturing strong directional moves with filters to reduce false signals.
-Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag.
+4h Donchian Breakout with Volume Confirmation and Daily Trend Filter
+Hypothesis: Donchian(20) breakouts with volume > 1.5x average and daily EMA34 trend filter 
+capture strong momentum moves while reducing false breakouts. Works in both bull and bear 
+markets by following the daily trend direction. Target: 20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -21,85 +20,61 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 20-period Donchian Channels
-    upper_dc = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lower_dc = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Donchian Channel (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # True Range and ATR(20)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # ADX for trend strength (14-period)
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
-    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
-    
-    di_plus = np.where(tr14 > 0, 100 * dm_plus14 / tr14, 0)
-    di_minus = np.where(tr14 > 0, 100 * dm_minus14 / tr14, 0)
-    
-    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # EMA20 for exit
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     # Volume confirmation: volume > 1.5x 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     vol_ratio = volume / vol_ema
     
-    # Multi-timeframe: 1D trend filter (EMA34)
+    # Load daily EMA34 for trend filter (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Warmup for indicators (max of 20,20,14,34)
+    start_idx = 34  # Warmup for indicators (max of 20,20,34)
     
     for i in range(start_idx, n):
-        if (np.isnan(upper_dc[i]) or np.isnan(lower_dc[i]) or np.isnan(atr[i]) or 
-            np.isnan(adx[i]) or np.isnan(vol_ratio[i]) or np.isnan(ema_34_1d_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema20[i]) or np.isnan(vol_ratio[i]) or 
+            np.isnan(ema34_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper = upper_dc[i]
-        lower = lower_dc[i]
-        adx_val = adx[i]
+        upper = highest_high[i]
+        lower = lowest_low[i]
+        ema34 = ema34_1d_aligned[i]
         vol_conf = vol_ratio[i] > 1.5
-        ema_1d = ema_34_1d_aligned[i]
         
         if position == 0:
-            # Strong trend (ADX > 20) and volume confirmation
-            # Price breaks above upper DC = long (only if above 1D EMA34)
-            if adx_val > 20 and price > upper and vol_conf and price > ema_1d:
+            # Long: price breaks above Donchian high + volume + above daily EMA34
+            if price > upper and vol_conf and price > ema34:
                 signals[i] = 0.25
                 position = 1
-            # Price breaks below lower DC = short (only if below 1D EMA34)
-            elif adx_val > 20 and price < lower and vol_conf and price < ema_1d:
+            # Short: price breaks below Donchian low + volume + below daily EMA34
+            elif price < lower and vol_conf and price < ema34:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit if trend weakens, price returns to lower DC, or breaks below 1D EMA
-            if adx_val < 15 or price < lower_dc[i] or price < ema_1d:
+            # Exit if price returns to EMA20 or breaks below Donchian low
+            if price < ema20[i] or price < lowest_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit if trend weakens, price returns to upper DC, or breaks above 1D EMA
-            if adx_val < 15 or price > upper_dc[i] or price > ema_1d:
+            # Exit if price returns to EMA20 or breaks above Donchian high
+            if price > ema20[i] or price > highest_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,6 +82,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_Volume_ADX_1DTrend"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_Volume_DailyEMA34"
+timeframe = "4h"
 leverage = 1.0
