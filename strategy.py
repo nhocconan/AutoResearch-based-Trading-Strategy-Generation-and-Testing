@@ -1,22 +1,15 @@
-# 12h_Camarilla_R1_S1_Breakout_Volume_1dEMA50
-# Strategy: 12h timeframe using Camarilla pivot levels (R1, S1) from daily data
-# Breakout above R1 with volume confirmation and price above daily EMA50 triggers long
-# Breakdown below S1 with volume confirmation and price below daily EMA50 triggers short
-# Exit on trend reversal (price crosses EMA50) or at R4/S4 levels
-# Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag
-# Works in both bull and bear markets by following higher timeframe trend
-# Uses proper MTF data loading and alignment to avoid look-ahead bias
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1_S1_Breakout_Volume_1dEMA50"
-timeframe = "12h"
+name = "1d_CCI_Reversal_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,79 +17,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and EMA50
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate Camarilla pivot levels from previous day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly SMA20 for trend (smooth trend filter)
+    sma_20_1w = pd.Series(df_1w['close'].values).rolling(window=20, min_periods=20).mean().values
+    sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_20_1w)
     
-    # Calculate pivot and support/resistance levels (using previous day)
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_ = high_1d - low_1d
+    # Calculate CCI(14) on daily data
+    tp = (high + low + close) / 3.0  # Typical Price
+    tp_ma = pd.Series(tp).rolling(window=14, min_periods=14).mean().values
+    tp_mad = pd.Series(tp).rolling(window=14, min_periods=14).apply(
+        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
+    ).values
+    cci = (tp - tp_ma) / (0.015 * tp_mad)
+    # Handle division by zero or very small values
+    cci = np.where(tp_mad == 0, 0, cci)
     
-    # Camarilla levels
-    r1 = close_1d + (range_ * 1.1 / 12)
-    s1 = close_1d - (range_ * 1.1 / 12)
-    r4 = close_1d + (range_ * 1.1 / 2)
-    s4 = close_1d - (range_ * 1.1 / 2)
-    
-    # Align Camarilla levels to 12h timeframe (using previous day's values)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Calculate EMA50 on 1d data for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate volume spike: current volume > 2.0 * 24-period average volume (2 days on 12h chart)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (2.0 * vol_ma_24)
+    # Volume spike: current volume > 1.5 * 20-day average volume
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicator calculations
+    start_idx = 60  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_24[i])):
+        if (np.isnan(sma_20_1w_aligned[i]) or np.isnan(cci[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        r4_val = r4_aligned[i]
-        s4_val = s4_aligned[i]
-        ema_val = ema_50_1d_aligned[i]
+        sma_20_val = sma_20_1w_aligned[i]
+        cci_val = cci[i]
         
         if position == 0:
-            # Long: Close above R1 AND price above EMA50 AND volume spike
-            if close_val > r1_val and close_val > ema_val and volume_spike[i]:
+            # Long: CCI < -100 (oversold) AND price above weekly SMA20 AND volume spike
+            if cci_val < -100 and close_val > sma_20_val and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close below S1 AND price below EMA50 AND volume spike
-            elif close_val < s1_val and close_val < ema_val and volume_spike[i]:
+            # Short: CCI > 100 (overbought) AND price below weekly SMA20 AND volume spike
+            elif cci_val > 100 and close_val < sma_20_val and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Close below EMA50 (trend change) or at R4 (take profit)
-            if close_val < ema_val or close_val >= r4_val:
+            # Long exit: CCI > -100 (exit oversold) or CCI > 50 (momentum shift)
+            if cci_val > -100 or cci_val > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Close above EMA50 (trend change) or at S4 (take profit)
-            if close_val > ema_val or close_val <= s4_val:
+            # Short exit: CCI < 100 (exit overbought) or CCI < -50 (momentum shift)
+            if cci_val < 100 or cci_val < -50:
                 signals[i] = 0.0
                 position = 0
             else:
