@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_RSI_40_60_TrendPullback_VolumeFilter
-Long: RSI < 40 + price > EMA50 + volume spike + 1d trend up
-Short: RSI > 60 + price < EMA50 + volume spike + 1d trend down
-Exit: RSI crosses 50 or trend flips
-Designed for 4h timeframe with moderate trade frequency and trend-following + mean reversion blend.
-Works in bull via pullbacks to EMA50, works in bear via bounces off EMA50 in downtrend.
+4h Williams Alligator + Volume Spike + 12h EMA Trend Filter
+Based on Bill Williams Alligator (Jaw/Teeth/Lips SMAs) to detect trend presence.
+Long when Lips > Teeth > Jaw (bullish alignment) with volume spike.
+Short when Lips < Teeth < Jaw (bearish alignment) with volume spike.
+Uses 12h EMA34 as higher timeframe trend filter to avoid counter-trend trades.
+Designed for low trade frequency with clear trend-following edge.
 """
 
 import numpy as np
@@ -22,75 +22,74 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter (once before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Get daily data for 12h EMA trend filter (once before loop)
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate daily EMA50 for trend direction
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 12h EMA34 for trend direction
+    close_12h = df_12h['close'].values
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Williams Alligator components (13, 8, 5 period SMAs with future shift)
+    # Jaw: 13-period SMA, shifted 8 bars forward
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
+    # Teeth: 8-period SMA, shifted 5 bars forward
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
+    # Lips: 5-period SMA, shifted 3 bars forward
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # EMA50 on 4h
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Volume spike (1.5x 20-period average)
+    # Volume spike detection (2x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 50  # need enough history
+    start_idx = 50  # need enough history for calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(rsi[i]) or np.isnan(ema_50[i]) or
+        if (np.isnan(ema_34_12h_aligned[i]) or 
+            np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Alligator alignment signals
+        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
+        
         price = close[i]
-        above_ema50 = price > ema_50[i]
-        below_ema50 = price < ema_50[i]
-        rsi_val = rsi[i]
+        above_12h_ema = price > ema_34_12h_aligned[i]
+        below_12h_ema = price < ema_34_12h_aligned[i]
         
         if position == 0:
-            # Long: RSI < 40 (oversold), price above EMA50, uptrend, volume spike
-            if (rsi_val < 40 and above_ema50 and ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and volume_spike[i]):
+            # Long: bullish alignment, price above 12h EMA, volume spike
+            if (bullish_alignment and above_12h_ema and volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI > 60 (overbought), price below EMA50, downtrend, volume spike
-            elif (rsi_val > 60 and below_ema50 and ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and volume_spike[i]):
+            # Short: bearish alignment, price below 12h EMA, volume spike
+            elif (bearish_alignment and below_12h_ema and volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long position management
             signals[i] = 0.25
-            # Exit: RSI crosses above 50 or trend flips down
-            if rsi_val > 50 or ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1]:
+            # Exit: bearish alignment forms or price breaks below 12h EMA
+            if bearish_alignment or below_12h_ema:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position management
             signals[i] = -0.25
-            # Exit: RSI crosses below 50 or trend flips up
-            if rsi_val < 50 or ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]:
+            # Exit: bullish alignment forms or price breaks above 12h EMA
+            if bullish_alignment or above_12h_ema:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_RSI_40_60_TrendPullback_VolumeFilter"
+name = "4h_WilliamsAlligator_12hEMA34_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
