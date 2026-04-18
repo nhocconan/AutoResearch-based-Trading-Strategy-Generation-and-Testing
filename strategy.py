@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_1w_LowBollingerBand_Bounce_With_Volume_Confirmation
-Hypothesis: Buy near the lower Bollinger Band (20, 2) on weekly timeframe when price shows intraday strength on 12h, confirmed by volume spike. Exit when price touches the upper band or momentum fades. Designed for low frequency (15-30 trades/year) to capture mean-reversion bounces in both bull and bear markets, avoiding whipsaws via weekly trend filter and volume confirmation.
+4h_ThreeBarReversal_WithVolume_TrendFilter
+Hypothesis: Three-bar reversal patterns on 4h with volume confirmation and 1d EMA trend filter.
+Buy when three consecutive higher closes form with volume spike and uptrend (price > EMA34).
+Sell when three consecutive lower closes form with volume spike and downtrend (price < EMA34).
+Designed for low trade frequency (20-50/year) to avoid fee drag while capturing
+reversal moves in both bull and bear markets via trend alignment.
 """
 
 import numpy as np
@@ -18,69 +22,69 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Bollinger Bands
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
-    sma_20 = pd.Series(close_1w).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std_20 = pd.Series(close_1w).rolling(window=bb_period, min_periods=bb_period).std().values
-    lower_bb = sma_20 - (bb_std * std_20)
-    upper_bb = sma_20 + (bb_std * std_20)
+    # 1d EMA(34) for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align BB to 12h timeframe
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1w, lower_bb)
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1w, upper_bb)
-    sma_20_aligned = align_htf_to_ltf(prices, df_1w, sma_20)
+    # Volume spike: >2.0x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
-    # Weekly trend filter: price above/below 50-week EMA
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # 12h volume spike: >1.8x 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
+    # Three-bar reversal detection
+    # Bullish: three consecutive higher closes
+    bullish_reversal = (close > np.roll(close, 1)) & (np.roll(close, 1) > np.roll(close, 2))
+    # Bearish: three consecutive lower closes
+    bearish_reversal = (close < np.roll(close, 1)) & (np.roll(close, 1) < np.roll(close, 2))
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 30)  # Warmup for weekly indicators
+    start_idx = max(35, 20)  # Warmup for EMA and volume
     
     for i in range(start_idx, n):
-        if (np.isnan(lower_bb_aligned[i]) or 
-            np.isnan(upper_bb_aligned[i]) or
-            np.isnan(sma_20_aligned[i]) or
-            np.isnan(ema_50_aligned[i]) or
-            np.isnan(volume_spike[i])):
+        if (np.isnan(ema_34_aligned[i]) or 
+            np.isnan(volume_spike[i]) or
+            np.isnan(bullish_reversal[i]) or
+            np.isnan(bearish_reversal[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        lower_bb_val = lower_bb_aligned[i]
-        upper_bb_val = upper_bb_aligned[i]
-        sma_20_val = sma_20_aligned[i]
-        ema_50_val = ema_50_aligned[i]
+        ema34 = ema_34_aligned[i]
         vol_spike = volume_spike[i]
+        bull_rev = bullish_reversal[i]
+        bear_rev = bearish_reversal[i]
         
         if position == 0:
-            # Long: price near lower BB, above weekly EMA (uptrend bias), with volume spike
-            if price <= lower_bb_val * 1.02 and price > ema_50_val and vol_spike:
+            # Long: bullish reversal with volume spike and uptrend
+            if bull_rev and vol_spike and price > ema34:
                 signals[i] = 0.25
                 position = 1
+            # Short: bearish reversal with volume spike and downtrend
+            elif bear_rev and vol_spike and price < ema34:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price touches upper BB OR loses weekly uptrend
-            if price >= upper_bb_val * 0.98 or price < ema_50_val:
+            # Exit: bearish reversal OR trend turns down
+            if bear_rev or price < ema34:
+                signals[i] = 0.0
+                position = 0
+        
+        elif position == -1:
+            signals[i] = -0.25
+            # Exit: bullish reversal OR trend turns up
+            if bull_rev or price > ema34:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_1w_LowBollingerBand_Bounce_With_Volume_Confirmation"
-timeframe = "12h"
+name = "4h_ThreeBarReversal_WithVolume_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
