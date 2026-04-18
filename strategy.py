@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Pivot_R2_S2_Breakout_WeeklyTrend_Volume
-Hypothesis: Price breaks above/below weekly R2/S2 levels with volume confirmation and 1w EMA34 trend filter.
-Uses weekly pivot levels (R2,S2 from prior week), volume > 1.5x 20-period average, and 1w EMA34 trend filter.
-Designed for 12h timeframe to target 15-35 trades/year (60-140 total over 4 years) to minimize fee drag.
-Works in both bull and bear markets by requiring trend alignment and volume confirmation.
+4h_TrueRange_Breakout_Volume_Trend_Filter
+Hypothesis: Price breaks above/below the True Range (ATR-based) channel with volume confirmation and EMA trend filter.
+Uses ATR(14) to define dynamic breakout levels: Upper = SMA(20) + 1.5*ATR(14), Lower = SMA(20) - 1.5*ATR(14).
+Requires volume > 1.5x 20-period average and EMA20 trend alignment.
+Designed to capture volatility expansion moves in both bull and bear markets with tight entry conditions.
+Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -13,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,77 +22,72 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly OHLC for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # ATR(14) for volatility-based channels
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate weekly pivot levels: R2 = close + 1.1*(high-low)/2, S2 = close - 1.1*(high-low)/2
-    # Using weekly range for stronger levels
-    weekly_range = high_1w - low_1w
-    r2 = close_1w + 1.1 * weekly_range / 2
-    s2 = close_1w - 1.1 * weekly_range / 2
+    # SMA(20) for mean line
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
     
-    # Align to 12h timeframe (use previous week's levels)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    # Dynamic breakout channels: SMA ± 1.5*ATR
+    upper_channel = sma_20 + 1.5 * atr
+    lower_channel = sma_20 - 1.5 * atr
     
-    # Weekly EMA34 for trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Volume spike: >1.5x 20-period average (adjusted for 12h)
+    # Volume filter: >1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_filter = volume > (1.5 * vol_ma)
+    
+    # EMA20 trend filter
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(34, 20)  # Warmup for indicators
+    start_idx = 20  # Warmup for SMA20 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or
+            np.isnan(volume_filter[i]) or np.isnan(ema_20[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r2_level = r2_aligned[i]
-        s2_level = s2_aligned[i]
-        ema34 = ema_34_aligned[i]
-        vol_spike = volume_spike[i]
+        upper = upper_channel[i]
+        lower = lower_channel[i]
+        vol_ok = volume_filter[i]
+        ema20 = ema_20[i]
         
         if position == 0:
-            # Long: price breaks above S2 with volume spike in uptrend
-            if (price > s2_level and          # breaks above S2
-                vol_spike and                 # volume confirmation
-                price > ema34):               # uptrend filter
+            # Long: price breaks above upper channel with volume in uptrend
+            if price > upper and vol_ok and price > ema20:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below R2 with volume spike in downtrend
-            elif (price < r2_level and        # breaks below R2
-                  vol_spike and               # volume confirmation
-                  price < ema34):             # downtrend filter
+            # Short: price breaks below lower channel with volume in downtrend
+            elif price < lower and vol_ok and price < ema20:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price crosses back below S2 or trend reverses
-            if price < s2_level or price < ema34:
+            # Exit: price returns to middle (SMA) or trend reverses
+            if price < sma_20[i] or price < ema20:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price crosses back above R2 or trend reverses
-            if price > r2_level or price > ema34:
+            # Exit: price returns to middle (SMA) or trend reverses
+            if price > sma_20[i] or price > ema20:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Pivot_R2_S2_Breakout_WeeklyTrend_Volume"
-timeframe = "12h"
+name = "4h_TrueRange_Breakout_Volume_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
