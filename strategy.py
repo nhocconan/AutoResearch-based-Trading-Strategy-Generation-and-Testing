@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_R3S3_MeanReversion_Bounce
-Hypothesis: Weekly pivot levels (R3/S3) act as strong support/resistance on daily timeframe.
-Price tends to bounce from these levels with mean-reversion tendency. Works in both bull and bear
-markets as price respects weekly structure. Uses 6h for entry timing with volume confirmation.
-Target: 15-30 trades/year (60-120 total over 4 years) to balance opportunity and fee drag.
+12h_StrongTrend_With_Volume_Confirmation
+Hypothesis: Strong 12-hour trends (price > 50-period SMA) combined with above-average volume 
+capture sustained institutional moves. Works in bull/bear by following confirmed trends.
+Target: 20-40 trades/year (80-160 total over 4 years) for optimal balance.
 """
 
 import numpy as np
@@ -13,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,86 +20,61 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Daily trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Previous week's OHLC for weekly pivot
-    prev_weekly_close = df_1w['close'].shift(1).values
-    prev_weekly_high = df_1w['high'].shift(1).values
-    prev_weekly_low = df_1w['low'].shift(1).values
-    prev_weekly_range = prev_weekly_high - prev_weekly_low
-    
-    # Weekly pivot point and support/resistance levels
-    weekly_pivot = (prev_weekly_high + prev_weekly_low + prev_weekly_close) / 3
-    r1 = 2 * weekly_pivot - prev_weekly_low
-    s1 = 2 * weekly_pivot - prev_weekly_high
-    r2 = weekly_pivot + prev_weekly_range
-    s2 = weekly_pivot - prev_weekly_range
-    r3 = weekly_pivot + 2 * prev_weekly_range
-    s3 = weekly_pivot - 2 * prev_weekly_range
-    
-    # Align weekly levels to 6h timeframe
-    r3_6h = align_htf_to_ltf(prices, df_1w, r3)
-    s3_6h = align_htf_to_ltf(prices, df_1w, s3)
-    weekly_pivot_6h = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    # Daily EMA50 trend
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume filter: >1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.3 * vol_ma)
     
-    # 6-day RSI for overbought/oversold confirmation (using close prices)
-    close_series = pd.Series(close)
-    delta = close_series.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/6, min_periods=6).mean()
-    avg_loss = loss.ewm(alpha=1/6, min_periods=6).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Price momentum: close > open for bullish, close < open for bearish
+    bullish_momentum = close > prices['open'].values
+    bearish_momentum = close < prices['open'].values
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(20, 6)  # Warmup for volume MA and RSI
+    start_idx = 50  # Warmup for EMA50
     
     for i in range(start_idx, n):
-        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or
-            np.isnan(weekly_pivot_6h[i]) or np.isnan(volume_filter[i]) or
-            np.isnan(rsi_values[i])):
+        if (np.isnan(ema_50_12h[i]) or np.isnan(volume_filter[i]) or 
+            np.isnan(bullish_momentum[i]) or np.isnan(bearish_momentum[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r3_val = r3_6h[i]
-        s3_val = s3_6h[i]
-        pivot_val = weekly_pivot_6h[i]
+        ema_trend = ema_50_12h[i]
         vol_ok = volume_filter[i]
-        rsi_val = rsi_values[i]
+        bull_mom = bullish_momentum[i]
+        bear_mom = bearish_momentum[i]
         
         if position == 0:
-            # Long: bounce from S3 with oversold RSI and volume
-            if price <= s3_val * 1.005 and rsi_val < 30 and vol_ok:
+            # Long: price above daily EMA50 with volume and bullish momentum
+            if price > ema_trend and vol_ok and bull_mom:
                 signals[i] = 0.25
                 position = 1
-            # Short: bounce from R3 with overbought RSI and volume
-            elif price >= r3_val * 0.995 and rsi_val > 70 and vol_ok:
+            # Short: price below daily EMA50 with volume and bearish momentum
+            elif price < ema_trend and vol_ok and bear_mom:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price reaches weekly pivot or RSI overbought
-            if price >= pivot_val * 0.995 or rsi_val > 70:
+            # Exit: trend breaks or volume dries up
+            if price < ema_trend or not vol_ok:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price reaches weekly pivot or RSI oversold
-            if price <= pivot_val * 1.005 or rsi_val < 30:
+            # Exit: trend breaks or volume dries up
+            if price > ema_trend or not vol_ok:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -108,6 +82,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R3S3_MeanReversion_Bounce"
-timeframe = "6h"
+name = "12h_StrongTrend_With_Volume_Confirmation"
+timeframe = "12h"
 leverage = 1.0
