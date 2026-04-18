@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 """
-12h_Adaptive_RSI_Confluence - 12H strategy using adaptive RSI with volume and trend filters.
-Long: RSI < 30 (oversold) + volume > 1.5x average + price above 20-period SMA
-Short: RSI > 70 (overbought) + volume > 1.5x average + price below 20-period SMA
-Exit: Opposite RSI extreme or trend reversal
-Designed for ~20-30 trades/year per symbol (80-120 total over 4 years)
-Works in both bull and bear markets by capturing mean reversion within trends.
+Strategy: 4h_Donchian20_VolumeSpike_TrendFilter
+Timeframe: 4h
+Hypothesis: Breakouts above the 4-hour Donchian channel (20-period) combined with volume spikes (2x 4h average volume) and a 4-hour EMA trend filter (EMA50 > EMA200 for longs, EMA50 < EMA200 for shorts) capture strong momentum moves. This strategy is designed to work in both bull and bear markets by following the trend on the 4h timeframe, reducing false breakouts in ranging markets. Volume confirmation increases the reliability of breakouts. Target: 20-50 trades per year per symbol (~80-200 total over 4 years).
 """
 
 import numpy as np
@@ -17,74 +14,67 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for multi-timeframe context
-    df_1d = get_htf_data(prices, '1d')
+    # 4h Donchian channel (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 20-period SMA for trend filter
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    # 4h EMA trend filter
+    ema_fast = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_slow = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate RSI (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Daily volume average (20-period)
-    vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # 4h volume average (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # need enough for SMA20 and RSI
+    start_idx = 50  # need enough for EMA200 and Donchian
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(sma_20[i]) or np.isnan(rsi[i]) or 
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to SMA20
-        above_sma = close[i] > sma_20[i]
-        below_sma = close[i] < sma_20[i]
+        # Trend conditions
+        uptrend = ema_fast[i] > ema_slow[i]
+        downtrend = ema_fast[i] < ema_slow[i]
         
         # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
+        vol_confirm = volume[i] > 2.0 * vol_ma[i]
         
-        # RSI conditions
-        oversold = rsi[i] < 30
-        overbought = rsi[i] > 70
+        # Donchian breakout conditions
+        breakout_up = close[i] > high_max[i]
+        breakdown_down = close[i] < low_min[i]
         
         if position == 0:
-            # Long: oversold + volume + price above SMA20
-            if oversold and vol_confirm and above_sma:
+            # Long: uptrend + volume + breakout above Donchian high
+            if uptrend and vol_confirm and breakout_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: overbought + volume + price below SMA20
-            elif overbought and vol_confirm and below_sma:
+            # Short: downtrend + volume + breakdown below Donchian low
+            elif downtrend and vol_confirm and breakdown_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: overbought condition or price below SMA20
-            if overbought or not above_sma:
+            # Long exit: trend change or breakdown below Donchian low
+            if not uptrend or breakdown_down:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: oversold condition or price above SMA20
-            if oversold or not below_sma:
+            # Short exit: trend change or breakout above Donchian high
+            if not downtrend or breakout_up:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -92,6 +82,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Adaptive_RSI_Confluence"
-timeframe = "12h"
+name = "4h_Donchian20_VolumeSpike_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
