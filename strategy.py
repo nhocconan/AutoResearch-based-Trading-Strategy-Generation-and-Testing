@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_Williams_Fractal_Breakout_With_Volume_Confirmation
-Hypothesis: Williams fractal breakouts on 12h with volume confirmation and 1d EMA trend filter.
-Buy when price breaks above bearish fractal (resistance) with volume spike and uptrend.
-Sell when price breaks below bullish fractal (support) with volume spike and downtrend.
-Designed for low trade frequency (12-37/year) to avoid fee drag while capturing
-breakout moves in both bull and bear markets via trend alignment.
+1d_KeltnerChannel_Breakout_With_TrendFilter
+Hypothesis: Keltner Channel breakouts on daily timeframe with weekly trend filter.
+Buy when price closes above upper KC with weekly EMA uptrend, short when closes below lower KC with weekly EMA downtrend.
+Designed for low trade frequency (<25/year) to minimize fee decay while capturing sustained trends in both bull and bear markets.
+Uses volatility-based channel (ATR) which adapts to market conditions, reducing false breakouts in ranging periods.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,81 +21,72 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams fractals and trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Williams fractals on 1d (requires 2 extra bars for confirmation)
-    bearish_fractal, bullish_fractal = compute_williams_fractals(
-        df_1d['high'].values,
-        df_1d['low'].values,
-    )
-    bearish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bearish_fractal, additional_delay_bars=2
-    )
-    bullish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bullish_fractal, additional_delay_bars=2
-    )
+    # Weekly EMA(34) for trend filter
+    close_weekly = df_weekly['close'].values
+    ema_34_weekly = pd.Series(close_weekly).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_34_weekly)
     
-    # 1d EMA(34) for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Daily ATR(14) for Keltner Channel
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume spike: >2.0x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Daily EMA(20) for KC middle line
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Keltner Channel: EMA(20) ± 2 * ATR(14)
+    kc_upper = ema_20 + 2.0 * atr_14
+    kc_lower = ema_20 - 2.0 * atr_14
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(35, 20)  # Warmup for EMA and volume
+    start_idx = max(34, 20, 14)  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_aligned[i]) or 
-            np.isnan(bearish_fractal_aligned[i]) or
-            np.isnan(bullish_fractal_aligned[i]) or
-            np.isnan(volume_spike[i])):
+        if (np.isnan(ema_34_weekly_aligned[i]) or 
+            np.isnan(atr_14[i]) or
+            np.isnan(kc_upper[i]) or
+            np.isnan(kc_lower[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema34 = ema_34_aligned[i]
-        vol_spike = volume_spike[i]
-        bear_fractal = bearish_fractal_aligned[i]
-        bull_fractal = bullish_fractal_aligned[i]
+        weekly_ema = ema_34_weekly_aligned[i]
+        upper = kc_upper[i]
+        lower = kc_lower[i]
         
         if position == 0:
-            # Long: price breaks above bearish fractal with volume spike and uptrend
-            if not np.isnan(bear_fractal) and price > bear_fractal and vol_spike and price > ema34:
+            # Long: close above upper KC with weekly uptrend
+            if price > upper and price > weekly_ema:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below bullish fractal with volume spike and downtrend
-            elif not np.isnan(bull_fractal) and price < bull_fractal and vol_spike and price < ema34:
+            # Short: close below lower KC with weekly downtrend
+            elif price < lower and price < weekly_ema:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price breaks below bullish fractal OR trend turns down
-            if not np.isnan(bull_fractal) and price < bull_fractal:
-                signals[i] = 0.0
-                position = 0
-            elif price < ema34:
+            # Exit: close below middle line OR weekly trend turns down
+            if price < ema_20[i] or price < weekly_ema:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price breaks above bearish fractal OR trend turns up
-            if not np.isnan(bear_fractal) and price > bear_fractal:
-                signals[i] = 0.0
-                position = 0
-            elif price > ema34:
+            # Exit: close above middle line OR weekly trend turns up
+            if price > ema_20[i] or price > weekly_ema:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Williams_Fractal_Breakout_With_Volume_Confirmation"
-timeframe = "12h"
+name = "1d_KeltnerChannel_Breakout_With_TrendFilter"
+timeframe = "1d"
 leverage = 1.0
