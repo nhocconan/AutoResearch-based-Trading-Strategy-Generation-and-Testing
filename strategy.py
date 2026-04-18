@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R reversal with 1-day ATR filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions, which work well in ranging markets.
-# Daily ATR filter ensures sufficient volatility to avoid false signals in low-volatility periods.
-# Volume confirmation adds conviction to reversals.
+# Hypothesis: 4h Donchian breakout with daily ATR filter and volume confirmation.
+# Donchian channels provide clear breakout levels based on price extremes.
+# Daily ATR filter ensures we only trade when volatility is sufficient to avoid chop.
+# Volume confirmation adds conviction to breakouts.
 # Designed for low trade frequency (20-50/year) to minimize fee drag in 4h timeframe.
-# Works in bull markets (reversals from oversold) and bear markets (reversals from overbought).
-name = "4h_WilliamsR_DailyATR_Volume_Filter"
+# Works in bull markets (breakouts above upper band) and bear markets (breakouts below lower band).
+name = "4h_Donchian20_DailyATR_Volume_Filter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,12 +26,11 @@ def generate_signals(prices):
     # Get daily data for ATR filter (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Williams %R (14-period) using previous period's data to avoid look-ahead
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().shift(1).values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().shift(1).values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate Donchian channels (20-period) using previous period's data to avoid look-ahead
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    upper_band = high_20
+    lower_band = low_20
     
     # Calculate daily ATR (14-period)
     high_d = df_1d['high'].values
@@ -75,8 +74,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(williams_r[i]) or np.isnan(atr_threshold_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
+            np.isnan(atr_threshold_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -94,19 +93,19 @@ def generate_signals(prices):
         vol_filter = not np.isnan(atr_threshold_aligned[i]) and atr_threshold_aligned[i] > 0
         
         if position == 0:
-            # Long: Williams %R below -80 (oversold) AND volume confirmation AND volatility filter
-            long_signal = williams_r[i] < -80
-            if vol_confirm and vol_filter and long_signal:
+            # Long: price breaks above upper band AND volume confirmation AND volatility filter
+            long_breakout = close[i] > upper_band[i]
+            if vol_confirm and vol_filter and long_breakout:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R above -20 (overbought) AND volume confirmation AND volatility filter
-            elif vol_confirm and vol_filter and williams_r[i] > -20:
+            # Short: price breaks below lower band AND volume confirmation AND volatility filter
+            elif vol_confirm and vol_filter and close[i] < lower_band[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Williams %R rises above -20 (overbought) OR ATR drops below threshold (volatility collapse)
-            exit_condition = williams_r[i] > -20 or (np.isnan(atr_threshold_aligned[i]) or atr_threshold_aligned[i] <= 0)
+            # Long exit: price falls below lower band OR ATR drops below threshold (volatility collapse)
+            exit_condition = close[i] < lower_band[i] or (np.isnan(atr_threshold_aligned[i]) or atr_threshold_aligned[i] <= 0)
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
@@ -114,8 +113,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Williams %R falls below -80 (oversold) OR ATR drops below threshold (volatility collapse)
-            exit_condition = williams_r[i] < -80 or (np.isnan(atr_threshold_aligned[i]) or atr_threshold_aligned[i] <= 0)
+            # Short exit: price rises above upper band OR ATR drops below threshold (volatility collapse)
+            exit_condition = close[i] > upper_band[i] or (np.isnan(atr_threshold_aligned[i]) or atr_threshold_aligned[i] <= 0)
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
