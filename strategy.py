@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_Pivot_R1S1_Breakout_Volume
-Hypothesis: Daily price respects weekly-derived Camarilla pivot levels R1/S1. Breakouts with volume (>1.5x 20-period mean) trigger entries. Uses weekly EMA(34) filter to avoid counter-trend trades. Designed for low trade frequency (<25/year) to minimize fee drag on 1d timeframe. Works in both bull and bear markets by adapting to regime (range vs trend).
+12h_Pivot_R1S1_Breakout_Volume_Filtered_V2
+Hypothesis: In ranging markets (ADX<25), price respects daily Camarilla pivot levels R1/S1.
+Breakouts with volume (>1.8x 12-period mean) trigger entries. Uses weekly EMA(34) filter
+to avoid counter-trend trades in strong weekly trends. Optimized for low trade frequency
+(12-25/year) on 12h timeframe to minimize fee drag. Works in both bull and bear by adapting
+to regime (range vs trend). Uses tighter volume threshold and wider stop to reduce whipsaw.
 """
 
 import numpy as np
@@ -18,20 +22,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivots and ADX
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get daily data for Camarilla pivots and ADX
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels (based on previous week)
-    R1 = np.full_like(high_1w, np.nan)
-    S1 = np.full_like(low_1w, np.nan)
+    # Calculate Camarilla levels (based on previous day)
+    R1 = np.full_like(high_1d, np.nan)
+    S1 = np.full_like(low_1d, np.nan)
     
-    for i in range(1, len(close_1w)):
-        prev_high = high_1w[i-1]
-        prev_low = low_1w[i-1]
-        prev_close = close_1w[i-1]
+    for i in range(1, len(close_1d)):
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
         range_ = prev_high - prev_low
         
         if range_ > 0:
@@ -94,26 +98,27 @@ def generate_signals(prices):
         
         return adx
     
-    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
     # Get weekly data for trend filter
-    close_1w_for_ema = close_1w
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
     # Weekly EMA(34) for trend filter
-    if len(close_1w_for_ema) >= 34:
-        ema_1w = pd.Series(close_1w_for_ema).ewm(span=34, adjust=False).mean().values
+    if len(close_1w) >= 34:
+        ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False).mean().values
     else:
-        ema_1w = np.full_like(close_1w_for_ema, np.nan)
+        ema_1w = np.full_like(close_1w, np.nan)
     
-    # Align all weekly data to daily timeframe
-    R1_1d = align_htf_to_ltf(prices, df_1w, R1)
-    S1_1d = align_htf_to_ltf(prices, df_1w, S1)
-    adx_1d = align_htf_to_ltf(prices, df_1w, adx_1w)
-    ema_1w_1d = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Align all 1d data to 12h timeframe
+    R1_12h = align_htf_to_ltf(prices, df_1d, R1)
+    S1_12h = align_htf_to_ltf(prices, df_1d, S1)
+    adx_12h = align_htf_to_ltf(prices, df_1d, adx_1d)
+    ema_1w_12h = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 1.8x 12-period average (tighter)
     vol_ma = np.full_like(volume, np.nan)
-    vol_period = 20
+    vol_period = 12
     
     if len(volume) >= vol_period:
         for i in range(vol_period, len(volume)):
@@ -126,32 +131,32 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(R1_1d[i]) or np.isnan(S1_1d[i]) or 
-            np.isnan(adx_1d[i]) or np.isnan(ema_1w_1d[i]) or 
+        if (np.isnan(R1_12h[i]) or np.isnan(S1_12h[i]) or 
+            np.isnan(adx_12h[i]) or np.isnan(ema_1w_12h[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        vol_confirm = volume[i] > 1.8 * vol_ma[i]
         
-        # Regime filters: weekly ADX < 25 (range) AND price above weekly EMA (bullish bias)
-        range_regime = adx_1d[i] < 25
-        bullish_bias = close[i] > ema_1w_1d[i]
+        # Regime filters: daily ADX < 25 (range) AND price above weekly EMA (bullish bias)
+        range_regime = adx_12h[i] < 25
+        bullish_bias = close[i] > ema_1w_12h[i]
         
         if position == 0:
             # Long: price breaks above R1 with volume in range regime
-            if close[i] > R1_1d[i] and vol_confirm and range_regime:
+            if close[i] > R1_12h[i] and vol_confirm and range_regime:
                 signals[i] = 0.25
                 position = 1
             # Short: price breaks below S1 with volume in range regime
-            elif close[i] < S1_1d[i] and vol_confirm and range_regime:
+            elif close[i] < S1_12h[i] and vol_confirm and range_regime:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long exit: price breaks below S1 OR ADX rises above 30 (trend emerging)
-            if close[i] < S1_1d[i] or adx_1d[i] > 30:
+            if close[i] < S1_12h[i] or adx_12h[i] > 30:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
@@ -159,7 +164,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Short exit: price breaks above R1 OR ADX rises above 30 (trend emerging)
-            if close[i] > R1_1d[i] or adx_1d[i] > 30:
+            if close[i] > R1_12h[i] or adx_12h[i] > 30:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -167,6 +172,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Pivot_R1S1_Breakout_Volume"
-timeframe = "1d"
+name = "12h_Pivot_R1S1_Breakout_Volume_Filtered_V2"
+timeframe = "12h"
 leverage = 1.0
