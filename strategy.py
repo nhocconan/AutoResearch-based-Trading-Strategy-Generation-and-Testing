@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_SwingReversal_1dTrend_VolumeFilter
-Hypothesis: On 6h timeframe, swing reversals identified by price crossing 6-period RSI(14) extremes (RSI<30 for long, RSI>70 for short) combined with 1d EMA(50) trend filter and volume spike (2.0x 20-period average) capture mean-reversion in trending markets. Works in both bull and bear: in bull markets, buys dips in uptrend; in bear markets, sells rallies in downtrend. Target: 20-40 trades/year.
+12h_Supertrend_TrendFollowing_VolumeFilter
+Hypothesis: Supertrend on 12h timeframe provides strong trend signals. Combined with volume confirmation and daily trend filter (EMA34), this strategy captures major moves while avoiding chop. Volume filter ensures momentum confirmation. Designed for 12h timeframe to target 12-37 trades/year.
 """
 
 import numpy as np
@@ -20,71 +20,97 @@ def generate_signals(prices):
     
     # Get daily data for EMA trend filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close']
     
-    # Calculate daily EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate daily EMA(34) for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 6-period RSI(14) on 6h data
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate ATR(10) for Supertrend
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Supertrend parameters
+    atr_multiplier = 3.0
+    upper_band = (high + low) / 2 + (atr_multiplier * atr)
+    lower_band = (high + low) / 2 - (atr_multiplier * atr)
     
-    # Volume spike: 2.0x 20-period average
+    # Initialize Supertrend
+    supertrend = np.full(n, np.nan)
+    direction = np.full(n, 1)  # 1 for uptrend, -1 for downtrend
+    
+    # Calculate Supertrend
+    for i in range(1, n):
+        # Upper and lower bands
+        upper_band[i] = max(upper_band[i], upper_band[i-1]) if close[i-1] > supertrend[i-1] else upper_band[i]
+        lower_band[i] = min(lower_band[i], lower_band[i-1]) if close[i-1] < supertrend[i-1] else lower_band[i]
+        
+        # Determine trend direction
+        if close[i] > upper_band[i-1]:
+            direction[i] = 1
+        elif close[i] < lower_band[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+        
+        # Set Supertrend value
+        supertrend[i] = lower_band[i] if direction[i] == 1 else upper_band[i]
+    
+    # Align daily EMA to 12h timeframe
+    ema_34_aligned = ema_34_1d_aligned  # already aligned
+    
+    # Volume filter: 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_filter = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 50
+    start_idx = 30  # enough for Supertrend calculation
     
     for i in range(start_idx, n):
-        if (np.isnan(rsi[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or
+        if (np.isnan(supertrend[i]) or 
+            np.isnan(ema_34_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        rsi_val = rsi[i]
-        ema_trend = ema_50_1d_aligned[i]
-        vol_spike = volume_spike[i]
+        st_value = supertrend[i]
+        ema_trend = ema_34_aligned[i]
+        vol_filt = volume_filter[i]
         
         if position == 0:
-            # Long: RSI < 30 (oversold) with volume spike and price above daily EMA (uptrend)
-            if rsi_val < 30 and vol_spike and price > ema_trend:
+            # Long: price above Supertrend (uptrend), price above daily EMA, volume confirmation
+            if price > st_value and price > ema_trend and vol_filt:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI > 70 (overbought) with volume spike and price below daily EMA (downtrend)
-            elif rsi_val > 70 and vol_spike and price < ema_trend:
+            # Short: price below Supertrend (downtrend), price below daily EMA, volume confirmation
+            elif price < st_value and price < ema_trend and vol_filt:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: RSI returns to neutral (50) or breaks below daily EMA
-            if rsi_val >= 50 or price < ema_trend:
+            # Long: maintain position while uptrend continues and above daily EMA
+            if price > st_value and price > ema_trend:
+                signals[i] = 0.25
+            else:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = 0.25
         
         elif position == -1:
-            # Exit: RSI returns to neutral (50) or breaks above daily EMA
-            if rsi_val <= 50 or price > ema_trend:
+            # Short: maintain position while downtrend continues and below daily EMA
+            if price < st_value and price < ema_trend:
+                signals[i] = -0.25
+            else:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = -0.25
     
     return signals
 
-name = "6h_SwingReversal_1dTrend_VolumeFilter"
-timeframe = "6h"
+name = "12h_Supertrend_TrendFollowing_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
