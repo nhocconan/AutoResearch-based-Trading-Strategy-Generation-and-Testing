@@ -1,98 +1,115 @@
+# 2025-01-13
+# 2025-01-13
 #!/usr/bin/env python3
 """
-Hypothesis: 4h-based strategy using Donchian channel breakout with volume confirmation and ATR-based volatility filter. 
-The strategy enters long when price breaks above the 20-period Donchian upper band with above-average volume,
-and enters short when price breaks below the 20-period Donchian lower band with above-average volume.
-Positions are exited when price crosses the midline (average of upper and lower bands) or reverses direction.
-Designed for 20-30 trades/year to minimize fee drift while capturing trending moves in both bull and bear markets.
+Hypothesis: 4h strategy using 1d ATR-based volatility filter + 1w EMA trend filter.
+Buy when volatility is low (ATR < 20-period SMA) and price crosses above 1w EMA(50).
+Sell when volatility is high (ATR > 20-period SMA) or price crosses below 1w EMA(50).
+Volatility filter prevents whipsaws in choppy markets, EMA trend filter ensures directional bias.
+Designed for ~20 trades/year to minimize fee drag. Works in bull (trend following) and bear (mean reversion in low vol).
 """
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period)
-    upper_band = np.full(n, np.nan)
-    lower_band = np.full(n, np.nan)
-    mid_band = np.full(n, np.nan)
+    # Get 1d data for ATR calculation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    for i in range(20, n):
-        upper_band[i] = np.max(high[i-20:i])
-        lower_band[i] = np.min(low[i-20:i])
-        mid_band[i] = (upper_band[i] + lower_band[i]) / 2
+    # Calculate True Range and ATR(14) on 1d
+    tr = np.zeros(len(close_1d))
+    atr = np.zeros(len(close_1d))
     
-    # Calculate volume moving average (20-period)
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+    for i in range(1, len(close_1d)):
+        hl = high_1d[i] - low_1d[i]
+        hc = abs(high_1d[i] - close_1d[i-1])
+        lc = abs(low_1d[i] - close_1d[i-1])
+        tr[i] = max(hl, hc, lc)
     
-    # Calculate ATR (14-period) for volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = np.full(n, np.nan)
-    for i in range(14, n):
-        atr[i] = np.mean(tr[i-14:i])
+    # ATR(14) calculation
+    if len(tr) >= 14:
+        atr[13] = np.mean(tr[1:15])  # First ATR value
+        for i in range(15, len(tr)):
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    
+    # ATR 20-period SMA for volatility regime
+    atr_sma = np.full(len(close_1d), np.nan)
+    if len(atr) >= 20:
+        for i in range(19, len(atr)):
+            atr_sma[i] = np.mean(atr[i-19:i+1])
+    
+    # Get 1w data for EMA(50) trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Calculate EMA(50) on 1w close
+    ema_50_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 50:
+        ema_50_1w[49] = np.mean(close_1w[:50])
+        alpha = 2 / (50 + 1)
+        for i in range(50, len(close_1w)):
+            ema_50_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_50_1w[i-1]
+    
+    # Align indicators to 4h timeframe
+    atr_sma_4h = align_htf_to_ltf(prices, df_1d, atr_sma)
+    atr_4h = align_htf_to_ltf(prices, df_1d, atr)
+    ema_50_1w_4h = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 14)  # need Donchian, volume MA, ATR
+    start_idx = max(50, 20)  # need EMA and ATR data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(mid_band[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_50_1w_4h[i]) or np.isnan(atr_sma_4h[i]) or 
+            np.isnan(atr_4h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.2 * 20-period average
-        vol_confirmed = volume[i] > 1.2 * vol_ma[i]
+        # Volatility regime: low vol when ATR < SMA(ATR)
+        low_volatility = atr_4h[i] < atr_sma_4h[i]
+        high_volatility = atr_4h[i] > atr_sma_4h[i]
         
-        # Volatility filter: ATR > 50-period average ATR (avoid low volatility chop)
-        if i >= 50:
-            atr_ma = np.mean(atr[i-50:i])
-            vol_filter = atr[i] > 0.5 * atr_ma  # Only trade in sufficient volatility
-        else:
-            vol_filter = True  # Not enough data for ATR MA, use default
+        # Trend filter: price relative to 1w EMA50
+        price_above_ema = close[i] > ema_50_1w_4h[i]
+        price_below_ema = close[i] < ema_50_1w_4h[i]
         
         if position == 0:
-            # Long entry: price breaks above upper band with volume and volatility confirmation
-            if (close[i] > upper_band[i] and 
-                vol_confirmed and 
-                vol_filter):
+            # Long entry: low volatility + price above 1w EMA50
+            if low_volatility and price_above_ema:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below lower band with volume and volatility confirmation
-            elif (close[i] < lower_band[i] and 
-                  vol_confirmed and 
-                  vol_filter):
+            # Short entry: high volatility + price below 1w EMA50
+            elif high_volatility and price_below_ema:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price crosses below midline or reverses below lower band
-            if close[i] < mid_band[i]:
+            # Long exit: high volatility or price below EMA
+            if high_volatility or price_below_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above midline or reverses above upper band
-            if close[i] > mid_band[i]:
+            # Short exit: low volatility or price above EMA
+            if low_volatility or price_above_ema:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Volume_VolatilityFilter"
+name = "4h_ATR_Volatility_Regime_1wEMA50"
 timeframe = "4h"
 leverage = 1.0
