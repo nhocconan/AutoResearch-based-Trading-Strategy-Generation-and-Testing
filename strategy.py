@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_Volume_Strict
-Hypothesis: Strict version requiring volume spike AND price closing beyond R1/S1 (not just intraday touch) reduces false breakouts. Uses prior day's close for pivot calculation to avoid look-ahead. Targets 20-40 trades/year by requiring both conditions simultaneously, minimizing fee drag while capturing institutional breakouts in bull/bear markets.
+1d_1w_RangeBreakout_Volume
+Hypothesis: Weekly price ranges (high/low) act as strong support/resistance. Daily breakouts above weekly high or below weekly low with volume confirmation indicate institutional interest. Works in bull (breakouts up) and bear (breakdowns down) by following price action. Weekly timeframe reduces noise, volume confirmation avoids false breakouts, and daily frequency keeps trade count manageable (target: 15-30/year).
 """
 
 import numpy as np
@@ -18,71 +18,66 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for range calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's close, high, low
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly high and low from previous week
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
     
-    camarilla_r1 = np.zeros_like(close_1d)
-    camarilla_s1 = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
-        if i == 0:
-            camarilla_r1[i] = close_1d[i]
-            camarilla_s1[i] = close_1d[i]
-        else:
-            rang = high_1d[i-1] - low_1d[i-1]
-            camarilla_r1[i] = close_1d[i-1] + rang * 1.1 / 12
-            camarilla_s1[i] = close_1d[i-1] - rang * 1.1 / 12
+    # Shift by 1 to use previous week's completed bar (no look-ahead)
+    weekly_high_prev = np.roll(weekly_high, 1)
+    weekly_low_prev = np.roll(weekly_low, 1)
+    weekly_high_prev[0] = weekly_high[0]  # first value
+    weekly_low_prev[0] = weekly_low[0]
     
-    # Align to 4h timeframe (use previous day's levels)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Align weekly levels to daily timeframe
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high_prev)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low_prev)
     
-    # Volume spike: current volume > 2.0x 20-period average (stricter)
+    # Volume confirmation: current volume > 1.5x 20-day average
     vol_ma = np.zeros_like(volume)
     for i in range(len(volume)):
         if i < 20:
             vol_ma[i] = np.mean(volume[0:i+1]) if i >= 0 else volume[i]
         else:
             vol_ma[i] = np.mean(volume[i-20+1:i+1])
-    vol_spike = volume > (vol_ma * 2.0)
+    vol_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 25  # Warmup
+    start_idx = 30  # Warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Strict entry: price must CLOSE beyond level AND volume spike
-            if close[i] > camarilla_r1_aligned[i] and vol_spike[i]:
+            # Long: price breaks above weekly high with volume spike
+            if close[i] > weekly_high_aligned[i] and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            elif close[i] < camarilla_s1_aligned[i] and vol_spike[i]:
+            # Short: price breaks below weekly low with volume spike
+            elif close[i] < weekly_low_aligned[i] and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price returns below S1 OR volume dies
-            if close[i] < camarilla_s1_aligned[i] or not vol_spike[i]:
+            # Exit long: price returns below weekly low (mean reversion) or volume dies
+            if close[i] < weekly_low_aligned[i] or not vol_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price returns above R1 OR volume dies
-            if close[i] > camarilla_r1_aligned[i] or not vol_spike[i]:
+            # Exit short: price returns above weekly high or volume dies
+            if close[i] > weekly_high_aligned[i] or not vol_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_Volume_Strict"
-timeframe = "4h"
+name = "1d_1w_RangeBreakout_Volume"
+timeframe = "1d"
 leverage = 1.0
