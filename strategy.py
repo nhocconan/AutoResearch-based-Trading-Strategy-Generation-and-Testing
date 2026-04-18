@@ -1,60 +1,73 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot (R1/S1) breakout with 1d EMA trend filter and volume confirmation.
-# Uses daily EMA34 for trend direction and Camarilla levels from previous day for entry.
-# Designed for 20-40 trades/year to avoid fee drag. Works in bull/bear via trend filter.
-# Target: ETH/BTC with potential for SOL.
+# Hypothesis: Daily Bollinger Band breakout with weekly trend filter and volume confirmation.
+# Uses daily Bollinger Bands (20,2) for volatility bands and weekly EMA(34) for trend direction.
+# Enters on daily close outside Bollinger Bands with volume confirmation and weekly trend alignment.
+# Designed for low trade frequency (target 10-25/year) to minimize fee drag in both bull and bear markets.
+# Works in bull markets by catching breakouts and in bear markets by fading overextended moves.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    open_price = prices['open'].values
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation and EMA
+    # Get daily data for Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate previous day's Camarilla levels (R1, S1)
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # Use previous day's data to avoid look-ahead
-    hl_range_1d = high_1d - low_1d
-    camarilla_r1_1d = close_1d + hl_range_1d * 1.1 / 12
-    camarilla_s1_1d = close_1d - hl_range_1d * 1.1 / 12
+    # Calculate Bollinger Bands (20,2) on daily data
+    sma_20 = np.full(len(close_1d), np.nan)
+    std_20 = np.full(len(close_1d), np.nan)
+    for i in range(20, len(close_1d)):
+        sma_20[i] = np.mean(close_1d[i-20:i])
+        std_20[i] = np.std(close_1d[i-20:i])
     
-    # Shift to get previous day's levels (available at close of previous day)
-    camarilla_r1_1d_prev = np.roll(camarilla_r1_1d, 1)
-    camarilla_s1_1d_prev = np.roll(camarilla_s1_1d, 1)
-    camarilla_r1_1d_prev[0] = np.nan  # first day has no previous
-    camarilla_s1_1d_prev[0] = np.nan
+    upper_band = sma_20 + 2 * std_20
+    lower_band = sma_20 - 2 * std_20
     
-    # Calculate daily EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align Bollinger Bands to daily timeframe (no alignment needed as we're using daily data)
+    upper_band_aligned = upper_band
+    lower_band_aligned = lower_band
     
-    # Align daily indicators to 4h timeframe
-    camarilla_r1_4h = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d_prev)
-    camarilla_s1_4h = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d_prev)
-    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Get weekly data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 4h ATR for stop loss and entry threshold
-    tr_4h_1 = high - low
-    tr_4h_2 = np.abs(high - np.roll(close, 1))
-    tr_4h_3 = np.abs(low - np.roll(close, 1))
-    tr_4h_1[0] = high[0] - low[0]
-    tr_4h_2[0] = np.abs(high[0] - close[0])
-    tr_4h_3[0] = np.abs(low[0] - close[0])
-    tr_4h = np.maximum(tr_4h_1, np.maximum(tr_4h_2, tr_4h_3))
-    atr_4h = pd.Series(tr_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Calculate EMA(34) on weekly close
+    ema_34_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 34:
+        ema_34_1w[33] = np.mean(close_1w[:34])  # SMA for first value
+        alpha = 2 / (34 + 1)
+        for i in range(34, len(close_1w)):
+            ema_34_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_34_1w[i-1]
+    
+    # Align weekly EMA to daily timeframe
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Calculate daily ATR for position sizing and stop loss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]
+    tr2[0] = np.abs(high[0] - close[0])
+    tr3[0] = np.abs(low[0] - close[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = np.full(n, np.nan)
+    if len(tr) >= 14:
+        atr[13] = np.mean(tr[:14])  # SMA for first value
+        alpha = 2 / (14 + 1)
+        for i in range(14, n):
+            atr[i] = alpha * tr[i] + (1 - alpha) * atr[i-1]
     
     # Calculate volume moving average (20-period)
     vol_ma = np.full(n, np.nan)
@@ -64,31 +77,31 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # need daily EMA34, volume MA
+    start_idx = max(34, 20, 20)  # need weekly EMA, Bollinger Bands, volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(camarilla_r1_4h[i]) or np.isnan(camarilla_s1_4h[i]) or 
-            np.isnan(ema_34_4h[i]) or np.isnan(vol_ma[i]) or np.isnan(atr_4h[i])):
+        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or 
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5 * 20-period average
         vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
-        # Trend filter: price above daily EMA34 (uptrend) or below (downtrend)
-        trend_up = close[i] > ema_34_4h[i]
-        trend_down = close[i] < ema_34_4h[i]
+        # Trend filter: price above weekly EMA34 (uptrend) or below (downtrend)
+        trend_up = close[i] > ema_34_1w_aligned[i]
+        trend_down = close[i] < ema_34_1w_aligned[i]
         
         if position == 0:
-            # Long entry: price breaks above Camarilla R1 with volume and uptrend
-            if (close[i] > camarilla_r1_4h[i] and 
+            # Long entry: close above upper Bollinger Band with volume and uptrend
+            if (close[i] > upper_band_aligned[i] and 
                 vol_confirmed and 
                 trend_up):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below Camarilla S1 with volume and downtrend
-            elif (close[i] < camarilla_s1_4h[i] and 
+            # Short entry: close below lower Bollinger Band with volume and downtrend
+            elif (close[i] < lower_band_aligned[i] and 
                   vol_confirmed and 
                   trend_down):
                 signals[i] = -0.25
@@ -97,16 +110,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price crosses below Camarilla S1 or ATR-based stop
-            if close[i] < camarilla_s1_4h[i] - 0.5 * atr_4h[i]:
+            # Long exit: price crosses below middle Bollinger Band (SMA20)
+            if close[i] < sma_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above Camarilla R1 or ATR-based stop
-            if close[i] > camarilla_r1_4h[i] + 0.5 * atr_4h[i]:
+            # Short exit: price crosses above middle Bollinger Band (SMA20)
+            if close[i] > sma_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -114,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_EMA34_VolumeFilter"
-timeframe = "4h"
+name = "1d_BollingerBreakout_WeeklyEMA34_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
