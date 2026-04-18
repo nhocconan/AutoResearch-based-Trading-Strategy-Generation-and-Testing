@@ -1,11 +1,8 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-12h_Camarilla_Pivot_R1S1_Breakout_With_Volume_and_1dTrend_v2
-Hypothesis: Camarilla pivot levels (R1, S1) from daily timeframe act as significant support/resistance. 
-Price breaking above R1 with volume spike and above daily EMA34 indicates bullish momentum; 
-breaking below S1 with volume spike and below daily EMA34 indicates bearish momentum. 
-Daily EMA34 filter ensures alignment with medium-term trend, reducing false breakouts. 
-Designed for low trade frequency (<30/year) to minimize fee drag while capturing meaningful moves.
+4h_Donchian_Breakout_With_Volume_Trend_v1
+Hypothesis: Price breaking Donchian(20) high/low with volume spike and 12h EMA34 trend captures breakouts in both bull and bear markets. Donchian channels capture volatility expansion, volume confirms institutional interest, and EMA34 filter ensures trend alignment. Designed for low trade frequency (<25/year) to minimize fee drag while catching explosive moves.
 """
 
 import numpy as np
@@ -22,73 +19,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily Camarilla pivot levels (R1, S1)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Donchian Channels (20)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper_donchian = high_series.rolling(window=20, min_periods=20).max()
+    lower_donchian = low_series.rolling(window=20, min_periods=20).min()
+    upper = upper_donchian.values
+    lower = lower_donchian.values
     
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r1 = close_1d + (range_1d * 1.1 / 12)
-    s1 = close_1d - (range_1d * 1.1 / 12)
+    # Volume spike: >1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Daily EMA34 trend filter
-    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # Volume spike: >2.0x 24-period average (2 periods = 1 day)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # 12h EMA34 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 48  # Need EMA and volume MA
+    start_idx = 40  # Need Donchian and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or
-            np.isnan(ema_1d_aligned[i]) or
-            np.isnan(volume_spike[i])):
+        if (np.isnan(ema_12h_aligned[i]) or 
+            np.isnan(volume_spike[i]) or
+            np.isnan(upper[i]) or
+            np.isnan(lower[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema_1d_val = ema_1d_aligned[i]
+        ema_12h_val = ema_12h_aligned[i]
         vol_spike = volume_spike[i]
+        upper_val = upper[i]
+        lower_val = lower[i]
         
         if position == 0:
-            # Long: price > R1 with volume spike and above daily EMA34
-            if price > r1_val and vol_spike and price > ema_1d_val:
+            # Long: price > upper Donchian with volume spike and above 12h EMA34
+            if price > upper_val and vol_spike and price > ema_12h_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < S1 with volume spike and below daily EMA34
-            elif price < s1_val and vol_spike and price < ema_1d_val:
+            # Short: price < lower Donchian with volume spike and below 12h EMA34
+            elif price < lower_val and vol_spike and price < ema_12h_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price < S1 or below daily EMA34
-            if price < s1_val or price < ema_1d_val:
+            # Exit: price < lower Donchian or below 12h EMA34
+            if price < lower_val or price < ema_12h_val:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price > R1 or above daily EMA34
-            if price > r1_val or price > ema_1d_val:
+            # Exit: price > upper Donchian or above 12h EMA34
+            if price > upper_val or price > ema_12h_val:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_Pivot_R1S1_Breakout_With_Volume_and_1dTrend_v2"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_With_Volume_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
