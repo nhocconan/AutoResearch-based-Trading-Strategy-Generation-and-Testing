@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Pivot_R1S1_Breakout_Volume
-Hypothesis: 12h Camarilla R1/S1 breakouts with volume confirmation and daily EMA34 trend filter.
-Works in bull markets via upward breakouts, in bear markets via downward breakouts.
-Target: 15-25 trades/year on 12h timeframe with disciplined entry conditions.
+1h_EMA_Retracement_With_4hTrend_and_1dVol
+Hypothesis: In trending markets (4h EMA20), price retraces to the 20 EMA on 1h and resumes trend.
+Enter long when price touches 1h EMA20 from below in 4h uptrend, short when from above in 4h downtrend.
+Use 1d volume filter to avoid low-activity periods. Works in bull/bear by following 4h trend.
+Target: 15-35 trades/year on 1h with strict entry conditions.
 """
 
 import numpy as np
@@ -20,72 +21,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily Camarilla pivot levels (R1, S1)
+    # 1h EMA20 for entry
+    ema20 = np.full(n, np.nan)
+    k = 2 / (20 + 1)
+    for i in range(20, n):
+        if i == 20:
+            ema20[i] = np.mean(close[0:21])
+        else:
+            ema20[i] = close[i] * k + ema20[i-1] * (1 - k)
+    
+    # 4h EMA20 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema20_4h = np.full(len(close_4h), np.nan)
+    for i in range(20, len(close_4h)):
+        if i == 20:
+            ema20_4h[i] = np.mean(close_4h[0:21])
+        else:
+            ema20_4h[i] = close_4h[i] * k + ema20_4h[i-1] * (1 - k)
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    
+    # 1d volume MA filter (avoid low volume)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
+    vol_ma_1d = np.full(len(volume_1d), np.nan)
+    for i in range(20, len(volume_1d)):
+        vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r1 = close_1d + (range_1d * 1.1 / 12)
-    s1 = close_1d - (range_1d * 1.1 / 12)
-    
-    # Align pivot levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Daily EMA34 trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume spike: current volume > 2.0 x 12-period average
-    vol_ma = np.full(n, np.nan)
-    for i in range(12, n):
-        vol_ma[i] = np.mean(volume[i-12:i])
-    vol_spike = volume > (vol_ma * 2.0)
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Ensure EMA34 is ready
+    start_idx = max(20, 20)  # EMA20 needs 20 bars
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema20[i]) or np.isnan(ema20_4h_aligned[i]) or 
+            np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        if position == 0:
-            # Long: break above R1 with volume spike and daily uptrend
-            if (close[i] > r1_aligned[i] and vol_spike[i] and 
-                close[i] > ema34_1d_aligned[i]):
-                signals[i] = 0.25
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
+        vol_filter = volume[i] > vol_ma_1d_aligned[i]  # above average 1d volume
+        
+        if position == 0 and in_session and vol_filter:
+            # Long: price touches EMA20 from below in 4h uptrend
+            if (low[i] <= ema20[i] and close[i] > ema20[i] and 
+                close[i] > ema20_4h_aligned[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: break below S1 with volume spike and daily downtrend
-            elif (close[i] < s1_aligned[i] and vol_spike[i] and 
-                  close[i] < ema34_1d_aligned[i]):
-                signals[i] = -0.25
+            # Short: price touches EMA20 from above in 4h downtrend
+            elif (high[i] >= ema20[i] and close[i] < ema20[i] and 
+                  close[i] < ema20_4h_aligned[i]):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: close below S1 or daily trend turns down
-            if (close[i] < s1_aligned[i] or close[i] < ema34_1d_aligned[i]):
+            # Long exit: price closes below EMA20 or 4h trend turns down
+            if (close[i] < ema20[i] or close[i] < ema20_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: close above R1 or daily trend turns up
-            if (close[i] > r1_aligned[i] or close[i] > ema34_1d_aligned[i]):
+            # Short exit: price closes above EMA20 or 4h trend turns up
+            if (close[i] > ema20[i] or close[i] > ema20_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "12h_Pivot_R1S1_Breakout_Volume"
-timeframe = "12h"
+name = "1h_EMA_Retracement_With_4hTrend_and_1dVol"
+timeframe = "1h"
 leverage = 1.0
