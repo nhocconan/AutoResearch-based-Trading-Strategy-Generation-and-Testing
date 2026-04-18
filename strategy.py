@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian channel breakout with 1d volume confirmation and 1d ADX trend filter.
-- Long: Price breaks above Donchian(20) high, volume > 1.5x 20-day average, ADX > 25
-- Short: Price breaks below Donchian(20) low, volume > 1.5x 20-day average, ADX > 25
+Hypothesis: 1d Donchian channel breakout with 1w volume confirmation and 1w ADX trend filter.
+- Long: Price breaks above Donchian(20) high, weekly volume > 1.5x 20-week average, ADX > 25
+- Short: Price breaks below Donchian(20) low, weekly volume > 1.5x 20-week average, ADX > 25
 - Exit: Price crosses back through Donchian midpoint or volume drops below 1.2x average
-Designed for 12-30 trades/year (50-80 total) to minimize fee drag.
+Designed for 7-25 trades/year (30-100 total) to minimize fee drag.
 """
 
 import numpy as np
@@ -94,26 +94,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume and ADX
-    df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 1w data for volume and ADX
+    df_1w = get_htf_data(prices, '1w')
+    volume_1w = df_1w['volume'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Donchian channel (20-period) on 12h
+    # Calculate Donchian channel (20-period) on 1d
     donch_h, donch_l = calculate_donchian(high, low, 20)
     donch_mid = (donch_h + donch_l) / 2
     
-    # Calculate volume moving average (20-period) on 1d
-    vol_ma_1d = calculate_sma(volume_1d, 20)
+    # Calculate volume moving average (20-period) on 1w
+    vol_ma_1w = calculate_sma(volume_1w, 20)
     
-    # Calculate ADX (14-period) on 1d
-    adx_14_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    # Calculate ADX (14-period) on 1w
+    adx_14_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
     
-    # Align 1d indicators to 12h timeframe
-    vol_ma_1d_12h = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    adx_14_1d_12h = align_htf_to_ltf(prices, df_1d, adx_14_1d)
+    # Align 1w indicators to 1d timeframe
+    vol_ma_1w_1d = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
+    adx_14_1w_1d = align_htf_to_ltf(prices, df_1w, adx_14_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -123,29 +123,29 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(donch_h[i]) or np.isnan(donch_l[i]) or 
-            np.isnan(vol_ma_1d_12h[i]) or np.isnan(adx_14_1d_12h[i])):
+            np.isnan(vol_ma_1w_1d[i]) or np.isnan(adx_14_1w_1d[i])):
             signals[i] = 0.0
             continue
         
-        # Get aligned 1d volume for current 12h bar
-        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+        # Get aligned 1w volume for current 1d bar
+        vol_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_1w)
         
-        # Volume confirmation: current 1d volume > 1.5x 20-day average
-        vol_spike = vol_1d_aligned[i] > 1.5 * vol_ma_1d_12h[i]
+        # Volume confirmation: current 1w volume > 1.5x 20-week average
+        vol_spike = vol_1w_aligned[i] > 1.5 * vol_ma_1w_1d[i]
         
         if position == 0:
             # Long: break above upper band, volume spike, ADX > 25
-            if close[i] > donch_h[i] and vol_spike and adx_14_1d_12h[i] > 25:
+            if close[i] > donch_h[i] and vol_spike and adx_14_1w_1d[i] > 25:
                 signals[i] = 0.25
                 position = 1
             # Short: break below lower band, volume spike, ADX > 25
-            elif close[i] < donch_l[i] and vol_spike and adx_14_1d_12h[i] > 25:
+            elif close[i] < donch_l[i] and vol_spike and adx_14_1w_1d[i] > 25:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long exit: price crosses below midpoint or volume drops below 1.2x average
-            vol_exit = vol_1d_aligned[i] < 1.2 * vol_ma_1d_12h[i]
+            vol_exit = vol_1w_aligned[i] < 1.2 * vol_ma_1w_1d[i]
             if close[i] < donch_mid[i] or vol_exit:
                 signals[i] = 0.0
                 position = 0
@@ -154,7 +154,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Short exit: price crosses above midpoint or volume drops below 1.2x average
-            vol_exit = vol_1d_aligned[i] < 1.2 * vol_ma_1d_12h[i]
+            vol_exit = vol_1w_aligned[i] < 1.2 * vol_ma_1w_1d[i]
             if close[i] > donch_mid[i] or vol_exit:
                 signals[i] = 0.0
                 position = 0
@@ -163,6 +163,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_VolumeSpike_ADX14"
-timeframe = "12h"
+name = "1d_Donchian20_VolumeSpike_ADX14_1w"
+timeframe = "1d"
 leverage = 1.0
