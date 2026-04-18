@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_RSI2_Regime_Breakout
-4h strategy using 2-period RSI for mean reversion in ranging markets and breakout in trending markets.
-- Long: RSI2 < 10 + price > 200 EMA + volume > 1.5x 20-period volume MA (mean reversion long in uptrend)
-- Short: RSI2 > 90 + price < 200 EMA + volume > 1.5x 20-period volume MA (mean reversion short in downtrend)
-- Exit: Opposite RSI2 extreme or trend reversal
-Designed for ~20-40 trades/year per symbol (80-160 total over 4 years)
-Works in bull markets (mean reversion longs) and bear markets (mean reversion shorts)
+6h_WeeklyPivot_RangeBreakout
+6h strategy using weekly pivot points (S2/R2) with volatility filter.
+- Long: Close breaks above weekly R2 + volatility expansion (ATR > 1.2x ATR(20))
+- Short: Close breaks below weekly S2 + volatility expansion
+- Exit: Opposite breakout or volatility contraction
+Designed for ~15-25 trades/year per symbol (60-100 total over 4 years)
+Works in trending markets (breakout continuation) and range markets (mean reversion at extremes)
 """
 
 import numpy as np
@@ -23,84 +23,79 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and volume average
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for pivot points and filters
+    df_1w = get_htf_data(prices, '1w')
     
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Calculate weekly pivot points (using weekly high/low/close)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Daily EMA200 for trend filter
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Weekly pivot = (H + L + C) / 3
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    # Weekly R2 = pivot + (H - L)
+    r2_1w = pivot_1w + (high_1w - low_1w)
+    # Weekly S2 = pivot - (H - L)
+    s2_1w = pivot_1w - (high_1w - low_1w)
     
-    # Daily volume average (20-period)
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Weekly ATR for volatility filter
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align daily data to 4h timeframe
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Align all weekly data to 6h timeframe
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
+    atr_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
     
-    # Calculate 2-period RSI on 4h close
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing: first average is simple average, then smoothed
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[1] = gain[1]  # first value after seed
-    avg_loss[1] = loss[1]
-    
-    for i in range(2, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi2 = 100 - (100 / (1 + rs))
+    # 6h ATR for volatility expansion filter
+    tr_6h = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr_6h[0] = high[0] - low[0]
+    atr_6h = pd.Series(tr_6h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # need enough for daily EMA200
+    start_idx = 20  # need enough for ATR20
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_200_aligned[i]) or np.isnan(vol_ma_aligned[i]) or
-            np.isnan(rsi2[i])):
+        if (np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
+            np.isnan(atr_aligned[i]) or np.isnan(atr_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Trend conditions from daily timeframe
-        uptrend = ema_200_aligned[i] > close[i]  # price above daily EMA200 = uptrend
-        downtrend = ema_200_aligned[i] < close[i]  # price below daily EMA200 = downtrend
+        # Volatility expansion filter: current ATR > 1.2x weekly ATR
+        vol_expansion = atr_6h[i] > 1.2 * atr_aligned[i]
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
-        
-        # RSI2 extremes for mean reversion
-        rsi_oversold = rsi2[i] < 10
-        rsi_overbought = rsi2[i] > 90
+        # Breakout conditions
+        breakout_up = close[i] > r2_aligned[i]
+        breakdown_down = close[i] < s2_aligned[i]
         
         if position == 0:
-            # Long: uptrend + volume + RSI2 oversold (mean reversion long)
-            if uptrend and vol_confirm and rsi_oversold:
+            # Long: volatility expansion + breakout above weekly R2
+            if vol_expansion and breakout_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + volume + RSI2 overbought (mean reversion short)
-            elif downtrend and vol_confirm and rsi_overbought:
+            # Short: volatility expansion + breakdown below weekly S2
+            elif vol_expansion and breakdown_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI2 overbought or trend reversal to downtrend
-            if rsi_overbought or downtrend:
+            # Long exit: volatility contraction or breakdown below weekly S2
+            if not vol_expansion or breakdown_down:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI2 oversold or trend reversal to uptrend
-            if rsi_oversold or uptrend:
+            # Short exit: volatility contraction or breakout above weekly R2
+            if not vol_expansion or breakout_up:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -108,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI2_Regime_Breakout"
-timeframe = "4h"
+name = "6h_WeeklyPivot_RangeBreakout"
+timeframe = "6h"
 leverage = 1.0
