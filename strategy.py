@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_1d_Volume_Weighted_Mean_Reversion_With_Regime_Filter
-Hypothesis: Mean reversion from 1-day volume-weighted average price (VWAP) with 1-day ATR filter and 1-week trend filter.
-Designed for 12h timeframe to capture multi-day mean reversion moves while avoiding false signals in strong trends.
-Works in both bull and bear markets by fading extreme deviations from VWAP only when 1-week trend is weak (ADX < 25).
-Target: 15-25 trades/year (~60-100 total over 4 years) to minimize fee drag.
+1h_4h1d_Camarilla_Pivot_R1S1_Breakout
+Hypothesis: Uses 4-hour and daily Camarilla pivot levels (R1/S1) for directional bias and 1-hour for precise entry timing.
+Trades breakouts of key support/resistance with volume confirmation to reduce false signals.
+Designed to work in both bull and bear markets by capturing directional moves after consolidation.
+Target: 15-35 trades/year to minimize fee drag while maintaining edge.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,112 +21,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for VWAP and ATR calculation
+    # Get 4h and daily data for multi-timeframe analysis
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
     
-    # Calculate daily VWAP (typical price * volume / cumulative volume)
-    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    vwap_1d = (typical_price_1d * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
-    vwap_1d_values = vwap_1d.values
+    # Calculate 4h Camarilla levels (for trend bias)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate daily ATR(14)
-    tr1 = np.maximum(df_1d['high'], df_1d['close'].shift(1)) - np.minimum(df_1d['low'], df_1d['close'].shift(1))
-    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rng_4h = high_4h - low_4h
+    r1_4h = close_4h + rng_4h * 1.1 / 12
+    s1_4h = close_4h - rng_4h * 1.1 / 12
     
-    # Get weekly data for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
+    # Calculate daily Camarilla levels (for stronger support/resistance)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly ADX(14)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    rng_1d = high_1d - low_1d
+    r1_1d = close_1d + rng_1d * 1.1 / 12
+    s1_1d = close_1d - rng_1d * 1.1 / 12
     
-    # True Range
-    tr_w1 = np.maximum(high_1w[1:] - low_1w[1:], np.maximum(np.abs(high_1w[1:] - close_1w[:-1]), np.abs(low_1w[1:] - close_1w[:-1])))
-    tr_w1 = np.concatenate([[np.nan], tr_w1])
+    # Align all levels to 1h timeframe (wait for bar close)
+    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
+    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Directional Movement
-    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
-    
-    # Smoothed values
-    atr_w = pd.Series(tr_w1).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # DI+ and DI-
-    di_plus = np.where(atr_w != 0, 100 * dm_plus_smooth / atr_w, 0)
-    di_minus = np.where(atr_w != 0, 100 * dm_minus_smooth / atr_w, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx_1w = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align all 1d indicators to 12h timeframe
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d_values)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Align weekly ADX to 12h timeframe (with 1-week delay for confirmation)
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx_1w, additional_delay_bars=1)
-    
-    # Calculate deviation from VWAP in ATR units
-    deviation = (close - vwap_aligned) / atr_aligned
-    
-    # Entry conditions: extreme deviation from VWAP only in weak trend (ADX < 25)
-    oversold = deviation < -2.0  # Price more than 2 ATR below VWAP
-    overbought = deviation > 2.0  # Price more than 2 ATR above VWAP
-    weak_trend = adx_aligned < 25  # Weak trend regime
+    # Volume confirmation: current volume > 1.5 x 20-period average
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after sufficient data for indicators
-    start_idx = 50
+    start_idx = 20
     
     for i in range(start_idx, n):
-        if (np.isnan(vwap_aligned[i]) or np.isnan(atr_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or atr_aligned[i] == 0):
+        # Skip if any required data is not available
+        if (np.isnan(r1_4h_aligned[i]) or np.isnan(s1_4h_aligned[i]) or 
+            np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Look for mean reversion signals in weak trend
-            if oversold[i] and weak_trend[i]:
-                signals[i] = 0.25
+            # Long entry: price breaks above both 4h R1 and daily R1 with volume
+            if (close[i] > r1_4h_aligned[i] and close[i] > r1_1d_aligned[i] and 
+                vol_confirm[i]):
+                signals[i] = 0.20
                 position = 1
-            elif overbought[i] and weak_trend[i]:
-                signals[i] = -0.25
+            # Short entry: price breaks below both 4h S1 and daily S1 with volume
+            elif (close[i] < s1_4h_aligned[i] and close[i] < s1_1d_aligned[i] and 
+                  vol_confirm[i]):
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price returns to VWAP or trend strengthens
-            if close[i] >= vwap_aligned[i] or adx_aligned[i] >= 30:
+            # Long exit: price returns to 4h pivot or breaks below 4h S1
+            pivot_4h = (high_4h + low_4h + close_4h) / 3
+            pivot_4h_aligned = align_htf_to_ltf(prices, df_4h, pivot_4h)
+            if (not np.isnan(pivot_4h_aligned[i]) and close[i] < pivot_4h_aligned[i]) or \
+               (not np.isnan(s1_4h_aligned[i]) and close[i] < s1_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price returns to VWAP or trend strengthens
-            if close[i] <= vwap_aligned[i] or adx_aligned[i] >= 30:
+            # Short exit: price returns to 4h pivot or breaks above 4h R1
+            pivot_4h = (high_4h + low_4h + close_4h) / 3
+            pivot_4h_aligned = align_htf_to_ltf(prices, df_4h, pivot_4h)
+            if (not np.isnan(pivot_4h_aligned[i]) and close[i] > pivot_4h_aligned[i]) or \
+               (not np.isnan(r1_4h_aligned[i]) and close[i] > r1_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "12h_1d_Volume_Weighted_Mean_Reversion_With_Regime_Filter"
-timeframe = "12h"
+name = "1h_4h1d_Camarilla_Pivot_R1S1_Breakout"
+timeframe = "1h"
 leverage = 1.0
