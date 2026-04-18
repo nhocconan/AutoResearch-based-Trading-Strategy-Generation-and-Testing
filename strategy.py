@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_Volume
-Hypothesis: Use Camarilla pivot levels (R1/S1) from 1d as entry triggers with volume confirmation.
-In bull markets, buy when price breaks above R1; in bear markets, sell when price breaks below S1.
-Camarilla levels provide high-probability reversal/breakout points. Volume > 1.5x 20-period average
-confirms institutional participation. This combination reduces false breakouts and captures strong moves.
-Target: 15-25 trades/year by requiring both price level breach and volume confirmation.
-Works in bull markets via R1 breakouts, bear markets via S1 breakdowns, and ranges via mean reversion at H4/L4.
+4h_12h_1d_ParabolicSAR_Trend
+Hypothesis: Use Parabolic SAR from 12h as primary trend filter (proven to reduce whipsaws in 2022 crash), combined with 1d breakout above/below daily high/low and volume confirmation. Parabolic SAR provides clear trend direction with built-in acceleration, making it effective in both trending and ranging markets. Targets 20-30 trades/year by requiring PSAR trend alignment, price breakout beyond daily range, and volume > 1.8x 20-period average. Works in bull markets by following uptrend breaks above daily high, and in bear markets by taking short breaks below daily low only when PSAR confirms downtrend.
 """
 
 import numpy as np
@@ -15,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,34 +18,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels (HTF)
+    # Get 12h data for Parabolic SAR (HTF)
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # Calculate Parabolic SAR
+    # Parameters: start=0.02, increment=0.02, max=0.2
+    psar = np.full_like(close_12h, np.nan)
+    bull = True  # start assuming bullish
+    af = 0.02    # acceleration factor
+    ep = low_12h[0] if bull else high_12h[0]  # extreme point
+    psar[0] = ep
+    
+    for i in range(1, len(close_12h)):
+        if bull:
+            psar[i] = psar[i-1] + af * (ep - psar[i-1])
+            # Reverse if price < SAR
+            if low_12h[i] < psar[i]:
+                bull = False
+                psar[i] = ep  # SAR = prior EP
+                af = 0.02
+                ep = high_12h[i]
+            else:
+                # Continue bullish
+                if high_12h[i] > ep:
+                    ep = high_12h[i]
+                    af = min(af + 0.02, 0.2)
+        else:
+            psar[i] = psar[i-1] + af * (ep - psar[i-1])
+            # Reverse if price > SAR
+            if high_12h[i] > psar[i]:
+                bull = True
+                psar[i] = ep  # SAR = prior EP
+                af = 0.02
+                ep = low_12h[i]
+            else:
+                # Continue bearish
+                if low_12h[i] < ep:
+                    ep = low_12h[i]
+                    af = min(af + 0.02, 0.2)
+    
+    # Align PSAR to 4h timeframe (wait for bar close)
+    psar_aligned = align_htf_to_ltf(prices, df_12h, psar)
+    
+    # Get 1d data for daily high/low (HTF)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each day
-    # R4 = close + ((high - low) * 1.500)
-    # R3 = close + ((high - low) * 1.250)
-    # R2 = close + ((high - low) * 1.166)
-    # R1 = close + ((high - low) * 1.083)
-    # S1 = close - ((high - low) * 1.083)
-    # S2 = close - ((high - low) * 1.166)
-    # S3 = close - ((high - low) * 1.250)
-    # S4 = close - ((high - low) * 1.500)
-    range_1d = high_1d - low_1d
-    r1 = close_1d + (range_1d * 1.083)
-    s1 = close_1d - (range_1d * 1.083)
+    # Align daily high/low to 4h timeframe (wait for bar close)
+    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
+    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
     
-    # Align Camarilla levels to 12h timeframe (wait for bar close)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Volume confirmation: current volume > 1.5 x 20-period average
+    # Volume confirmation: current volume > 1.8 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_confirm = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,34 +85,38 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(psar_aligned[i]) or np.isnan(high_1d_aligned[i]) or 
+            np.isnan(low_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long entry: price breaks above R1 with volume confirmation
-            if close[i] > r1_aligned[i] and vol_confirm[i]:
+            # Long entry: price breaks above 1d high, with volume, and PSAR bullish (close > PSAR)
+            if (close[i] > high_1d_aligned[i] and vol_confirm[i] and 
+                close[i] > psar_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S1 with volume confirmation
-            elif close[i] < s1_aligned[i] and vol_confirm[i]:
+            # Short entry: price breaks below 1d low, with volume, and PSAR bearish (close < PSAR)
+            elif (close[i] < low_1d_aligned[i] and vol_confirm[i] and 
+                  close[i] < psar_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price returns below S1 (mean reversion) or loses momentum
-            if close[i] < s1_aligned[i]:
+            # Long exit: price returns below PSAR (trend change) or fails to hold above daily high
+            if (close[i] < psar_aligned[i] or 
+                close[i] < high_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns above R1 (mean reversion) or loses momentum
-            if close[i] > r1_aligned[i]:
+            # Short exit: price returns above PSAR (trend change) or fails to hold below daily low
+            if (close[i] > psar_aligned[i] or 
+                close[i] > low_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_Volume"
-timeframe = "12h"
+name = "4h_12h_1d_ParabolicSAR_Trend"
+timeframe = "4h"
 leverage = 1.0
