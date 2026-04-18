@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Pivot_S1R1_Breakout_Volume_Trend_v2
-Strategy: Daily Camarilla S1/R1 breakout with volume confirmation and 1D EMA50/EMA200 trend filter.
-Breakouts in direction of daily trend only. Reverse on trend change or opposite breakout with volume.
-Designed for 12h timeframe: ~20-30 trades/year per symbol (80-120 total over 4 years).
-Works in bull/bear via trend filter and breakout logic.
+6h_WeeklyPivot_Momentum_Breakout
+Hypothesis: Weekly pivot levels act as strong support/resistance. Breakouts above weekly R1 or below weekly S1 with momentum (ROC > 0) and volume confirmation capture institutional flow. Works in bull/bear by only taking breakouts in direction of weekly trend (price > weekly EMA50 for longs, < for shorts). Targets 15-35 trades/year per symbol.
 """
 
 import numpy as np
@@ -21,78 +18,78 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and filters
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for pivot and trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla pivot points for daily timeframe
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    # Weekly pivot points (standard calculation)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
     
-    # Daily EMA50 and EMA200 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Weekly EMA50 for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Daily volume average (20-period)
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Align weekly data to 6h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Align all daily data to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Rate of change (momentum) - 3 period
+    roc = np.zeros_like(close)
+    roc[3:] = (close[3:] - close[:-3]) / close[:-3] * 100
+    
+    # Volume average (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for EMA200
+    start_idx = 50  # need enough for weekly EMA50
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
-            np.isnan(vol_ma_aligned[i])):
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend conditions
-        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
-        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
+        # Trend conditions from weekly EMA50
+        uptrend = close[i] > ema_50_aligned[i]
+        downtrend = close[i] < ema_50_aligned[i]
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
+        # Momentum and volume confirmation
+        mom_confirm = roc[i] > 0  # positive momentum
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         # Breakout conditions
         breakout_up = close[i] > r1_aligned[i]
         breakdown_down = close[i] < s1_aligned[i]
         
         if position == 0:
-            # Long: uptrend + volume + breakout above daily R1
-            if uptrend and vol_confirm and breakout_up:
+            # Long: uptrend + momentum + volume + breakout above weekly R1
+            if uptrend and mom_confirm and vol_confirm and breakout_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + volume + breakdown below daily S1
-            elif downtrend and vol_confirm and breakdown_down:
+            # Short: downtrend + momentum + volume + breakdown below weekly S1
+            elif downtrend and mom_confirm and vol_confirm and breakdown_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend change, volume confirmation, or breakdown below daily S1
-            if not uptrend or (vol_confirm and breakdown_down):
+            # Long exit: trend change, or breakdown below weekly S1 with volume
+            if not uptrend or (volume[i] > vol_ma[i] and breakdown_down):
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend change, volume confirmation, or breakout above daily R1
-            if not downtrend or (vol_confirm and breakout_up):
+            # Short exit: trend change, or breakout above weekly R1 with volume
+            if not downtrend or (volume[i] > vol_ma[i] and breakout_up):
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -100,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_S1R1_Breakout_Volume_Trend_v2"
-timeframe = "12h"
+name = "6h_WeeklyPivot_Momentum_Breakout"
+timeframe = "6h"
 leverage = 1.0
