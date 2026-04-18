@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 80:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,70 +20,83 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate daily RSI(14) for overbought/oversold
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
+    # Calculate daily ATR (14-period) for volatility filter
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = np.nan
+    tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate daily EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Calculate daily volume spike (volume > 2.0x 20-period average)
     vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     volume_spike_1d = volume_1d > (2.0 * vol_ma_1d)
     
-    # Align indicators to 6h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Align indicators to 12h timeframe
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
     
-    # Calculate 6h Donchian channels (20-period)
+    # Calculate 12h Donchian channels (20-period)
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Wait for enough data
+    start_idx = 80  # Wait for enough data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(rsi_1d_aligned[i]) or
+        if (np.isnan(ema34_1d_aligned[i]) or
+            np.isnan(atr_1d_aligned[i]) or
             np.isnan(donchian_high[i]) or
             np.isnan(donchian_low[i])):
             signals[i] = 0.0
             continue
         
-        trade_allowed = volume_spike_1d_aligned[i]
+        # Volatility filter: only trade when ATR is above its 30-period average
+        if i >= 30:
+            atr_ma_1d = pd.Series(atr_1d).rolling(window=30, min_periods=30).mean().values
+            atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
+            vol_filter = atr_1d_aligned[i] > atr_ma_1d_aligned[i] if not np.isnan(atr_ma_1d_aligned[i]) else False
+        else:
+            vol_filter = False
+        
+        trade_allowed = volume_spike_1d_aligned[i] and vol_filter
         
         if position == 0:
-            # Long: Donchian breakout above upper band with RSI < 30 (oversold)
-            if trade_allowed and close[i] > donchian_high[i] and rsi_1d_aligned[i] < 30:
-                signals[i] = 0.30
+            # Long: Donchian breakout above upper band with EMA34 uptrend
+            if trade_allowed and close[i] > donchian_high[i] and close[i] > ema34_1d_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: Donchian breakdown below lower band with RSI > 70 (overbought)
-            elif trade_allowed and close[i] < donchian_low[i] and rsi_1d_aligned[i] > 70:
-                signals[i] = -0.30
+            # Short: Donchian breakdown below lower band with EMA34 downtrend
+            elif trade_allowed and close[i] < donchian_low[i] and close[i] < ema34_1d_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price closes below Donchian lower band or RSI > 70
-            if close[i] < donchian_low[i] or rsi_1d_aligned[i] > 70:
+            # Long exit: price closes below EMA34 or Donchian lower band
+            if close[i] < ema34_1d_aligned[i] or close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price closes above Donchian upper band or RSI < 30
-            if close[i] > donchian_high[i] or rsi_1d_aligned[i] < 30:
+            # Short exit: price closes above EMA34 or Donchian upper band
+            if close[i] > ema34_1d_aligned[i] or close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "6h_Donchian20_1dRSI_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA34_VolumeSpike_ATRFilter_v1"
+timeframe = "12h"
 leverage = 1.0
