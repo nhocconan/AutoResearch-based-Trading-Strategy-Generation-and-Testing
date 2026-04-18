@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_MultiTimeframe_Momentum_v1
-Hypothesis: Use 12h Donchian breakout for trend direction and 1d RSI for momentum confirmation, with 4h price action for entry timing.
-Go long when price breaks above 12h Donchian upper band AND 1d RSI > 55, short when price breaks below 12h Donchian lower band AND 1d RSI < 45.
-Requires volume > 1.5x 20-period average for confirmation. Uses session filter (08-20 UTC) to avoid low-liquidity hours.
-Target: 15-30 trades/year by combining multiple filters to reduce noise. Works in bull markets via trend following and in bear via short signals.
+1d_KAMA_RSI_ChopFilter_v1
+Hypothesis: On daily timeframe, use KAMA (adaptive trend) for direction, RSI for momentum, and Choppiness Index to filter ranging markets.
+Long when KAMA > price, RSI > 50, and CHOP > 61.8 (ranging) for mean reversion to upside.
+Short when KAMA < price, RSI < 50, and CHOP > 61.8 (ranging) for mean reversion to downside.
+In trending markets (CHOP < 38.2), follow KAMA direction only.
+Uses weekly trend filter: only take longs when weekly close > weekly EMA20, shorts when weekly close < weekly EMA20.
+Designed for low turnover (~10-25 trades/year) with edge in both bull (trend follow) and bear (mean revert in ranges).
 """
 
 import numpy as np
@@ -13,122 +15,156 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 12h data for Donchian channels
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # 12h Donchian channels (20-period)
-    donch_len = 20
-    upper_12h = np.full_like(high_12h, np.nan)
-    lower_12h = np.full_like(low_12h, np.nan)
+    # Weekly EMA20 for trend filter
+    if len(close_1w) >= 20:
+        ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+        weekly_trend_up = close_1w > ema_20_1w
+        weekly_trend_down = close_1w < ema_20_1w
+    else:
+        ema_20_1w = np.full_like(close_1w, np.nan)
+        weekly_trend_up = np.zeros_like(close_1w, dtype=bool)
+        weekly_trend_down = np.zeros_like(close_1w, dtype=bool)
     
-    if len(high_12h) >= donch_len:
-        for i in range(donch_len, len(high_12h)):
-            upper_12h[i] = np.max(high_12h[i-donch_len:i])
-            lower_12h[i] = np.min(low_12h[i-donch_len:i])
+    weekly_trend_up_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_up.astype(float))
+    weekly_trend_down_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_down.astype(float))
     
-    # Align Donchian channels to 4h timeframe
-    upper_12h_aligned = align_htf_to_ltf(prices, df_12h, upper_12h)
-    lower_12h_aligned = align_htf_to_ltf(prices, df_12h, lower_12h)
+    # KAMA (adaptive trend) - using ER = 10, fast=2, slow=30
+    def kama(close, er_period=10, fast=2, slow=30):
+        change = np.abs(np.diff(close, n=er_period))
+        volatility = np.sum(np.abs(np.diff(close)), axis=1) if len(close) > 1 else np.array([])
+        # Pad volatility to match change length
+        if len(volatility) < len(change):
+            volatility = np.concatenate([volatility, np.full(len(change) - len(volatility), np.nan)])
+        elif len(volatility) > len(change):
+            volatility = volatility[:len(change)]
+        
+        er = np.where(volatility != 0, change / volatility, 0)
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        
+        kama_out = np.full_like(close, np.nan)
+        kama_out[er_period] = close[er_period]  # seed
+        
+        for i in range(er_period + 1, len(close)):
+            if not np.isnan(sc[i-er_period]):
+                kama_out[i] = kama_out[i-1] + sc[i-er_period] * (close[i-1] - kama_out[i-1])
+            else:
+                kama_out[i] = kama_out[i-1]
+        return kama_out
     
-    # Get 1d data for RSI
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    kama_val = kama(close, 10, 2, 30)
     
-    # 1d RSI(14)
-    rsi_period = 14
-    rsi_1d = np.full_like(close_1d, np.nan)
-    
-    if len(close_1d) >= rsi_period + 1:
-        delta = np.diff(close_1d)
+    # RSI(14)
+    def rsi(close, period=14):
+        if len(close) < period + 1:
+            return np.full_like(close, np.nan)
+        delta = np.diff(close)
         gain = np.where(delta > 0, delta, 0)
         loss = np.where(delta < 0, -delta, 0)
         
-        avg_gain = np.full_like(close_1d, np.nan)
-        avg_loss = np.full_like(close_1d, np.nan)
+        avg_gain = np.full_like(close, np.nan)
+        avg_loss = np.full_like(close, np.nan)
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
         
-        # First average
-        avg_gain[rsi_period] = np.mean(gain[:rsi_period])
-        avg_loss[rsi_period] = np.mean(loss[:rsi_period])
-        
-        # Wilder smoothing
-        for i in range(rsi_period + 1, len(close_1d)):
-            avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i-1]) / rsi_period
-            avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i-1]) / rsi_period
+        for i in range(period + 1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
         
         rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi_1d = 100 - (100 / (1 + rs))
+        rsi_out = 100 - (100 / (1 + rs))
+        return rsi_out
     
-    # Align 1d RSI to 4h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    rsi_val = rsi(close, 14)
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = np.full_like(volume, np.nan)
-    vol_period = 20
+    # Choppiness Index
+    def chop(high, low, close, period=14):
+        if len(close) < period:
+            return np.full_like(close, np.nan)
+        atr = np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1)))
+        atr[0] = high[0] - low[0]  # first ATR
+        
+        # True range sum over period
+        tr_sum = np.zeros_like(close)
+        for i in range(period, len(close)):
+            tr_sum[i] = np.sum(atr[i-period+1:i+1])
+        
+        # Highest high and lowest low over period
+        max_h = np.zeros_like(close)
+        min_l = np.zeros_like(close)
+        for i in range(period-1, len(close)):
+            max_h[i] = np.max(high[i-period+1:i+1])
+            min_l[i] = np.min(low[i-period+1:i+1])
+        
+        chop_val = np.where(
+            (max_h - min_l) != 0,
+            100 * np.log10(tr_sum / (max_h - min_l)) / np.log10(period),
+            50
+        )
+        return chop_val
     
-    if len(volume) >= vol_period:
-        for i in range(vol_period, len(volume)):
-            vol_ma[i] = np.mean(volume[i - vol_period:i])
+    chop_val = chop(high, low, close, 14)
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Align all indicators to daily (they're already daily, but for consistency)
+    kama_aligned = kama_val  # already aligned to prices
+    rsi_aligned = rsi_val
+    chop_aligned = chop_val
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(donch_len, rsi_period, vol_period) + 1
+    # Start after warmup period
+    start_idx = max(50, 20)  # KAMA needs ~50, weekly EMA20
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available
-        if (np.isnan(upper_12h_aligned[i]) or np.isnan(lower_12h_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i]) or np.isnan(vol_ma[i])):
-            signals[i] = 0.0
+        # Skip if any data not ready
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(chop_aligned[i]) or np.isnan(weekly_trend_up_aligned[i]) or 
+            np.isnan(weekly_trend_down_aligned[i])):
             continue
         
-        # Session filter
-        hour = hours[i]
-        in_session = 8 <= hour <= 20
+        # Conditions
+        price_above_kama = close[i] > kama_aligned[i]
+        price_below_kama = close[i] < kama_aligned[i]
+        rsi_above_50 = rsi_aligned[i] > 50
+        rsi_below_50 = rsi_aligned[i] < 50
+        chop_high = chop_aligned[i] > 61.8  # ranging market
+        chop_low = chop_aligned[i] < 38.2   # trending market
+        weekly_up = weekly_trend_up_aligned[i] > 0.5
+        weekly_down = weekly_trend_down_aligned[i] > 0.5
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
-        
-        if position == 0 and in_session:
-            # Long: price breaks above 12h Donchian upper + RSI > 55 + volume
-            if close[i] > upper_12h_aligned[i] and rsi_1d_aligned[i] > 55 and vol_confirm:
-                signals[i] = 0.20
-                position = 1
-            # Short: price breaks below 12h Donchian lower + RSI < 45 + volume
-            elif close[i] < lower_12h_aligned[i] and rsi_1d_aligned[i] < 45 and vol_confirm:
-                signals[i] = -0.20
-                position = -1
-        
-        elif position == 1:
-            # Long exit: price breaks below 12h Donchian lower OR RSI < 40
-            if close[i] < lower_12h_aligned[i] or rsi_1d_aligned[i] < 40:
-                signals[i] = -0.20  # reverse to short
-                position = -1
-            else:
-                signals[i] = 0.20
-        
-        elif position == -1:
-            # Short exit: price breaks above 12h Donchian upper OR RSI > 60
-            if close[i] > upper_12h_aligned[i] or rsi_1d_aligned[i] > 60:
-                signals[i] = 0.20  # reverse to long
-                position = 1
-            else:
-                signals[i] = -0.20
+        # Exit conditions (reverse position)
+        if close[i] > kama_aligned[i] * 1.05:  # 5% above KAMA - take profit
+            signals[i] = 0.0
+            continue
+        if close[i] < kama_aligned[i] * 0.95:  # 5% below KAMA - take profit
+            signals[i] = 0.0
+            continue
+            
+        # Entry logic
+        if chop_high:  # ranging market - mean reversion
+            if price_below_kama and rsi_below_50 and weekly_up:
+                signals[i] = 0.25  # long
+            elif price_above_kama and rsi_above_50 and weekly_down:
+                signals[i] = -0.25  # short
+        elif chop_low:  # trending market - follow trend
+            if price_above_kama and rsi_above_50 and weekly_up:
+                signals[i] = 0.25  # long
+            elif price_below_kama and rsi_below_50 and weekly_down:
+                signals[i] = -0.25  # short
+        # In neutral chop (38.2-61.8), no new entries but may hold
     
     return signals
 
-name = "4h_MultiTimeframe_Momentum_v1"
-timeframe = "4h"
+name = "1d_KAMA_RSI_ChopFilter_v1"
+timeframe = "1d"
 leverage = 1.0
