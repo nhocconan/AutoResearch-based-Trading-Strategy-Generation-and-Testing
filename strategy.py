@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_Pivot_R1S1_Volume_Trend
-4h strategy using daily Camarilla pivot levels (R1/S1) with volume confirmation and trend filter.
-- Long: Close > R1 + volume > 1.3x daily avg + daily EMA34 > EMA89
-- Short: Close < S1 + volume > 1.3x daily avg + daily EMA34 < EMA89
-- Exit: Opposite signal or trend reversal
-Designed for ~20-35 trades/year per symbol (80-140 total over 4 years)
+4h_WeeklyBreakout_VolumeTrend
+4h strategy using weekly support/resistance breakouts with volume confirmation and weekly trend filter.
+- Long: Close breaks above weekly high + volume > 1.5x weekly avg + weekly EMA20 > EMA50
+- Short: Close breaks below weekly low + volume > 1.5x weekly avg + weekly EMA20 < EMA50
+- Exit: Opposite breakout or trend reversal
+Designed for ~20-50 trades/year per symbol (80-200 total over 4 years)
 Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
 """
 
@@ -23,81 +23,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots, EMA, and volume average
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for Support/Resistance levels
+    df_1w = get_htf_data(prices, '1w')
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate daily Camarilla pivot levels
-    # Pivot = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    # Weekly High and Low (resistance/support)
+    weekly_high = high_1w
+    weekly_low = low_1w
     
-    # Daily EMA34 and EMA89 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_89_1d = pd.Series(close_1d).ewm(span=89, adjust=False, min_periods=89).mean().values
+    # Align weekly S/R levels to 4h
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
     
-    # Daily volume average (20-period)
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Get weekly data for trend filter and volume average
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # Align all daily data to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    ema_89_aligned = align_htf_to_ltf(prices, df_1d, ema_89_1d)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Weekly EMA20 and EMA50 for trend filter
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Weekly volume average (10-period)
+    vol_ma_10 = pd.Series(volume_1w).rolling(window=10, min_periods=10).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_10)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 89  # need enough for EMA89
+    start_idx = 50  # need enough for EMA50
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(ema_89_aligned[i]) or
+        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
+            np.isnan(ema_20_aligned[i]) or np.isnan(ema_50_aligned[i]) or
             np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Trend conditions
-        uptrend = ema_34_aligned[i] > ema_89_aligned[i]
-        downtrend = ema_34_aligned[i] < ema_89_aligned[i]
+        uptrend = ema_20_aligned[i] > ema_50_aligned[i]
+        downtrend = ema_20_aligned[i] < ema_50_aligned[i]
         
         # Volume confirmation
-        vol_confirm = volume[i] > 1.3 * vol_ma_aligned[i]
+        vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
         
-        # Pivot level conditions
-        above_r1 = close[i] > r1_aligned[i]
-        below_s1 = close[i] < s1_aligned[i]
+        # Breakout conditions
+        breakout_up = close[i] > weekly_high_aligned[i]
+        breakdown_down = close[i] < weekly_low_aligned[i]
         
         if position == 0:
-            # Long: uptrend + volume + close above R1
-            if uptrend and vol_confirm and above_r1:
+            # Long: uptrend + volume + breakout above weekly high
+            if uptrend and vol_confirm and breakout_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + volume + close below S1
-            elif downtrend and vol_confirm and below_s1:
+            # Short: downtrend + volume + breakdown below weekly low
+            elif downtrend and vol_confirm and breakdown_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend reversal or close below S1
-            if not uptrend or close[i] < s1_aligned[i]:
+            # Long exit: trend change, volume confirmation, or breakdown below weekly low
+            if not uptrend or (vol_confirm and breakdown_down):
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend reversal or close above R1
-            if not downtrend or close[i] > r1_aligned[i]:
+            # Short exit: trend change, volume confirmation, or breakout above weekly high
+            if not downtrend or (vol_confirm and breakout_up):
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -105,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_Pivot_R1S1_Volume_Trend"
+name = "4h_WeeklyBreakout_VolumeTrend"
 timeframe = "4h"
 leverage = 1.0
