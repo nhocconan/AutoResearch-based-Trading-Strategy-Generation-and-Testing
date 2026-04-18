@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_Pivot_Range_Reversion_with_Volume_Filter
-Hypothesis: In range-bound markets (common in 2025-2026), price reverts to the mean from Camarilla H3/L3 levels. 
-Buy near L3 with volume confirmation, sell near H3. Uses 1d pivot levels and 6h trend filter to avoid counter-trend trades.
-Designed for ~25 trades/year to minimize fee drag and work in both bull and bear markets via mean reversion in ranges.
+6h_WeeklyPivot_R3S3_Fade_R4S4_Breakout_Volume_v1
+Hypothesis: On 6h timeframe, fade price at weekly pivot R3/S3 levels (mean reversion in ranging markets) and breakout continuation at R4/S4 levels (trend continuation in strong moves), both confirmed by volume spikes. Weekly pivots provide strong institutional levels that work in both bull and bear markets by capturing mean reversion at extremes and trend acceleration at breakouts. Target: 20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -12,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,78 +18,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels from previous day (1d timeframe)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate weekly pivot points from previous week (1w timeframe)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
+        return np.zeros(n)
     
-    # Camarilla calculation: H3/L3 from previous day
-    # H3 = close + 1.1 * (high - low) / 4
-    # L3 = close - 1.1 * (high - low) / 4
-    camarilla_range = high_1d - low_1d
-    h3_1d = close_1d + (1.1 * camarilla_range) / 4
-    l3_1d = close_1d - (1.1 * camarilla_range) / 4
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Align to 4h timeframe (use previous day's levels)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    # Weekly pivot calculation (standard formula)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
     
-    # 6h EMA trend filter (avoid strong counter-trend trades)
-    df_6h = get_htf_data(prices, '6h')
-    close_6h = df_6h['close'].values
-    ema_6h = pd.Series(close_6h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_6h_aligned = align_htf_to_ltf(prices, df_6h, ema_6h)
+    # Weekly support/resistance levels
+    r3_1w = pivot_1w + range_1w * 1.1
+    s3_1w = pivot_1w - range_1w * 1.1
+    r4_1w = pivot_1w + range_1w * 1.5
+    s4_1w = pivot_1w - range_1w * 1.5
     
-    # Volume confirmation: >1.3x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.3 * vol_ma)
+    # Align weekly levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
+    
+    # Volume confirmation: >1.8x 30-period average (higher threshold for fewer trades)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_spike = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 100
+    start_idx = 30
     
     for i in range(start_idx, n):
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(ema_6h_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        h3 = h3_aligned[i]
-        l3 = l3_aligned[i]
-        ema_6h_val = ema_6h_aligned[i]
+        pivot = pivot_aligned[i]
+        r3 = r3_aligned[i]
+        s3 = s3_aligned[i]
+        r4 = r4_aligned[i]
+        s4 = s4_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: price near L3 (within 0.2%) with volume and above 6h EMA (avoid strong downtrend)
-            if price <= l3 * 1.002 and vol_spike and price > ema_6h_val:
-                signals[i] = 0.25
+            # Fade at R3/S3: mean reversion when price reaches extreme weekly levels
+            if price >= r3 and vol_spike:
+                signals[i] = -0.25  # Short at R3
+                position = -1
+            elif price <= s3 and vol_spike:
+                signals[i] = 0.25   # Long at S3
                 position = 1
-            # Short: price near H3 (within 0.2%) with volume and below 6h EMA (avoid strong uptrend)
-            elif price >= h3 * 0.998 and vol_spike and price < ema_6h_val:
-                signals[i] = -0.25
+            # Breakout continuation at R4/S4: trend acceleration when price breaks weekly extremes
+            elif price > r4 and vol_spike:
+                signals[i] = 0.25   # Long breakout above R4
+                position = 1
+            elif price < s4 and vol_spike:
+                signals[i] = -0.25  # Short breakdown below S4
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price reaches midpoint or breaks above H3
-            midpoint = (h3 + l3) / 2
-            if price >= midpoint or price > h3 * 1.002:
+            # Exit long: price returns to pivot (mean reversion) or breaks S4 (stop)
+            if price <= pivot or price < s4:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price reaches midpoint or breaks below L3
-            midpoint = (h3 + l3) / 2
-            if price <= midpoint or price < l3 * 0.998:
+            # Exit short: price returns to pivot (mean reversion) or breaks R4 (stop)
+            if price >= pivot or price > r4:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_Pivot_Range_Reversion_with_Volume_Filter"
-timeframe = "4h"
+name = "6h_WeeklyPivot_R3S3_Fade_R4S4_Breakout_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
