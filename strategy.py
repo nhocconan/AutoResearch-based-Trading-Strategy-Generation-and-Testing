@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Range_Breakout
-Hypothesis: Uses weekly price range (high-low) to identify expansion/contraction cycles.
-Enters long when price breaks above weekly high with volume confirmation in low volatility environments,
-and short when price breaks below weekly high in high volatility environments.
-Designed to capture breakouts after consolidation in both bull and bear markets.
-Target: 10-20 trades/year to minimize fee decay.
+6h_12h1d_Camarilla_Pivot_R1S1_Breakout
+Hypothesis: Uses 12-hour and daily Camarilla pivot levels (R1/S1) for directional bias and 6-hour for precise entry timing.
+Trades breakouts of key support/resistance with volume confirmation to reduce false signals.
+Designed to work in both bull and bear markets by capturing directional moves after consolidation.
+Target: 10-25 trades/year to minimize fee drag while maintaining edge.
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,81 +21,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for range and volatility
-    df_1w = get_htf_data(prices, '1w')
+    # Get 12h and daily data for multi-timeframe analysis
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly high, low, and range
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    range_1w = high_1w - low_1w
+    # Calculate 12h Camarilla levels (for trend bias)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate weekly ATR for volatility filter
-    tr_1w = np.maximum(
-        high_1w[1:] - low_1w[1:],
-        np.maximum(
-            np.abs(high_1w[1:] - df_1w['close'].values[:-1]),
-            np.abs(low_1w[1:] - df_1w['close'].values[:-1])
-        )
-    )
-    tr_1w = np.concatenate([[np.nan], tr_1w])
-    atr_1w = np.full(len(tr_1w), np.nan)
-    for i in range(14, len(tr_1w)):
-        atr_1w[i] = np.nanmean(tr_1w[i-14:i])
+    rng_12h = high_12h - low_12h
+    r1_12h = close_12h + rng_12h * 1.1 / 12
+    s1_12h = close_12h - rng_12h * 1.1 / 12
     
-    # Align weekly data to daily
-    high_1w_aligned = align_htf_to_ltf(prices, df_1w, high_1w)
-    low_1w_aligned = align_htf_to_ltf(prices, df_1w, low_1w)
-    range_1w_aligned = align_htf_to_ltf(prices, df_1w, range_1w)
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    # Calculate daily Camarilla levels (for stronger support/resistance)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume confirmation: current volume > 1.5 x 20-day average
+    rng_1d = high_1d - low_1d
+    r1_1d = close_1d + rng_1d * 1.1 / 12
+    s1_1d = close_1d - rng_1d * 1.1 / 12
+    
+    # Align all levels to 6h timeframe (wait for bar close)
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # Volume confirmation: current volume > 1.5 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     vol_confirm = volume > (vol_ma * 1.5)
     
-    # Volatility regime: low volatility when weekly ATR < 50-day average
-    atr_ma = np.full(n, np.nan)
-    for i in range(50, n):
-        atr_ma[i] = np.mean(atr_1w_aligned[i-50:i])
-    low_vol = atr_1w_aligned < atr_ma
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(high_1w_aligned[i]) or np.isnan(low_1w_aligned[i]) or 
-            np.isnan(range_1w_aligned[i]) or np.isnan(atr_1w_aligned[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(atr_ma[i])):
+        if (np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or 
+            np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long entry: price breaks above weekly high in low volatility
-            if (close[i] > high_1w_aligned[i] and vol_confirm[i] and low_vol[i]):
+            # Long entry: price breaks above both 12h R1 and daily R1 with volume
+            if (close[i] > r1_12h_aligned[i] and close[i] > r1_1d_aligned[i] and 
+                vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below weekly low in high volatility
-            elif (close[i] < low_1w_aligned[i] and vol_confirm[i] and not low_vol[i]):
+            # Short entry: price breaks below both 12h S1 and daily S1 with volume
+            elif (close[i] < s1_12h_aligned[i] and close[i] < s1_1d_aligned[i] and 
+                  vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price returns to weekly low or volatility increases
-            if (close[i] < low_1w_aligned[i]) or (not low_vol[i]):
+            # Long exit: price returns to 12h pivot or breaks below 12h S1
+            pivot_12h = (high_12h + low_12h + close_12h) / 3
+            pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
+            if (not np.isnan(pivot_12h_aligned[i]) and close[i] < pivot_12h_aligned[i]) or \
+               (not np.isnan(s1_12h_aligned[i]) and close[i] < s1_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to weekly high or volatility decreases
-            if (close[i] > high_1w_aligned[i]) or (low_vol[i]):
+            # Short exit: price returns to 12h pivot or breaks above 12h R1
+            pivot_12h = (high_12h + low_12h + close_12h) / 3
+            pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
+            if (not np.isnan(pivot_12h_aligned[i]) and close[i] > pivot_12h_aligned[i]) or \
+               (not np.isnan(r1_12h_aligned[i]) and close[i] > r1_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Weekly_Range_Breakout"
-timeframe = "1d"
+name = "6h_12h1d_Camarilla_Pivot_R1S1_Breakout"
+timeframe = "6h"
 leverage = 1.0
