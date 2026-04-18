@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d 3-bar reversal pattern with 1w RSI filter and volume confirmation.
-# 3-bar reversal: bullish (close > prev close for 3 consecutive bars) or bearish (close < prev close for 3 consecutive bars).
-# 1w RSI < 30 for long, > 70 for short to catch overextended moves in strong trends.
-# Volume > 1.5x 20-period average confirms conviction.
-# Works in bull markets (catching pullbacks in uptrends) and bear markets (counter-trend bounces).
-# Target: 10-25 trades/year (40-100 total over 4 years) to minimize fee drag.
-name = "1d_3BarReversal_1wRSI_Volume"
-timeframe = "1d"
+# Hypothesis: 12h ADX breakout with 1d EMA filter and volume confirmation.
+# ADX > 25 indicates strong trend on 12h.
+# Price > 1d EMA50 for long, < 1d EMA50 for short ensures alignment with daily trend.
+# Volume spike (>1.5x 20-period average) confirms conviction.
+# Works in bull markets (trend up) and bear markets (trend down).
+# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag.
+name = "12h_ADXBreakout_1dEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,72 +23,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for price action
+    # Get 12h data for ADX calculation
+    df_12h = get_htf_data(prices, '12h')
+    
+    # Calculate ADX on 12h data
+    high_12h = pd.Series(df_12h['high'].values)
+    low_12h = pd.Series(df_12h['low'].values)
+    close_12h = pd.Series(df_12h['close'].values)
+    
+    # True Range
+    tr1 = high_12h - low_12h
+    tr2 = abs(high_12h - close_12h.shift(1))
+    tr3 = abs(low_12h - close_12h.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_12h = tr.rolling(window=14, min_periods=14).mean()
+    
+    # Directional Movement
+    up_move = high_12h.diff()
+    down_move = low_12h.diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed DM
+    plus_di = 100 * (pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean() / atr_12h)
+    minus_di = 100 * (pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean() / atr_12h)
+    
+    # DX and ADX
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx_12h = dx.ewm(alpha=1/14, adjust=False).mean().values
+    
+    # Align ADX to lower timeframe (12h)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    
+    # Get 1d data for EMA50 filter
     df_1d = get_htf_data(prices, '1d')
+    close_1d = pd.Series(df_1d['close'].values)
+    ema_50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Get 1w data for RSI filter
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate RSI on 1w data
-    close_1w = pd.Series(df_1w['close'].values)
-    delta = close_1w.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_1w = 100 - (100 / (1 + rs))
-    rsi_1w_values = rsi_1w.values
-    
-    # Align RSI to lower timeframe (1d)
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w_values)
-    
-    # Calculate volume confirmation: current volume > 1.5 * 20-period average volume
+    # Calculate volume spike: current volume > 1.5 * 20-period average volume
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (1.5 * vol_ma_20)
+    volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # Wait for indicator calculations
+    start_idx = 60  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(rsi_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(adx_12h_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Check for 3-bar reversal pattern
-        # Bullish: 3 consecutive higher closes
-        bullish_reversal = (close[i] > close[i-1] and 
-                           close[i-1] > close[i-2] and 
-                           close[i-2] > close[i-3])
-        # Bearish: 3 consecutive lower closes
-        bearish_reversal = (close[i] < close[i-1] and 
-                           close[i-1] < close[i-2] and 
-                           close[i-2] < close[i-3])
+        adx_val = adx_12h_aligned[i]
+        price = close[i]
+        ema_50 = ema_50_1d_aligned[i]
+        
+        # Strong trend filter: ADX > 25
+        strong_trend = adx_val > 25
         
         if position == 0:
-            # Long: Bullish reversal AND RSI oversold (<30) AND volume confirmed
-            if bullish_reversal and rsi_1w_aligned[i] < 30 and volume_confirmed[i]:
+            # Long: Strong trend AND price > 1d EMA50 AND volume spike
+            if strong_trend and price > ema_50 and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish reversal AND RSI overbought (>70) AND volume confirmed
-            elif bearish_reversal and rsi_1w_aligned[i] > 70 and volume_confirmed[i]:
+            # Short: Strong trend AND price < 1d EMA50 AND volume spike
+            elif strong_trend and price < ema_50 and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Bearish reversal OR RSI overbought (>70)
-            if bearish_reversal or rsi_1w_aligned[i] > 70:
+            # Long exit: Trend weakens OR price crosses below EMA50
+            if adx_12h_aligned[i] < 20 or price < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Bullish reversal OR RSI oversold (<30)
-            if bullish_reversal or rsi_1w_aligned[i] < 30:
+            # Short exit: Trend weakens OR price crosses above EMA50
+            if adx_12h_aligned[i] < 20 or price > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
