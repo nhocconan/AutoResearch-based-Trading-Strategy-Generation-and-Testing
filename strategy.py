@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_1d_TRIX_ZeroCross_Volume_Confirm
-Hypothesis: Use 1-hour TRIX zero-cross as momentum signal filtered by 1-day trend (price vs 50 EMA) and volume confirmation. TRIX filters noise and captures momentum shifts. Long when TRIX crosses above zero in uptrend (price > 50 EMA), short when crosses below zero in downtrend (price < 50 EMA). Volume > 1.3x 20-period average confirms breakout strength. Targets 20-35 trades/year by requiring TRIX cross + trend alignment + volume spike. Works in bull markets via momentum continuation and in bear via counter-trend momentum exhaustion signals.
+6h_1d_Volume_Weighted_RSI_Momentum
+Hypothesis: Use RSI(14) from 1h data as momentum filter, combined with 1d VWAP deviation and volume spike on 6h. 
+In bull markets: RSI > 55 + price > 1d VWAP + volume > 2x average → long.
+In bear markets: RSI < 45 + price < 1d VWAP + volume > 2x average → short.
+Volume spike filters low-conviction moves; VWAP acts as dynamic support/resistance.
+Targets 15-25 trades/year by requiring triple confirmation.
 """
 
 import numpy as np
@@ -18,96 +22,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1h data for TRIX calculation
+    # Get 1h data for RSI (lower TF for timing)
     df_1h = get_htf_data(prices, '1h')
     close_1h = df_1h['close'].values
     
-    # Calculate TRIX: triple EMA of log returns, then ROC
-    # EMA1
-    ema1 = np.full_like(close_1h, np.nan)
-    ema1[0] = close_1h[0]
-    for i in range(1, len(close_1h)):
-        ema1[i] = 0.15 * close_1h[i] + 0.85 * ema1[i-1]  # alpha = 2/(12+1) for 12-period EMA
+    # Calculate RSI(14) on 1h
+    def rsi(close, period=14):
+        delta = np.diff(close, prepend=close[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        avg_gain[period] = np.mean(gain[1:period+1])
+        avg_loss[period] = np.mean(loss[1:period+1])
+        for i in range(period+1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        return 100 - (100 / (1 + rs))
     
-    # EMA2 of EMA1
-    ema2 = np.full_like(close_1h, np.nan)
-    ema2[0] = ema1[0]
-    for i in range(1, len(close_1h)):
-        ema2[i] = 0.15 * ema1[i] + 0.85 * ema2[i-1]
+    rsi_1h = rsi(close_1h, 14)
+    rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h)
     
-    # EMA3 of EMA2
-    ema3 = np.full_like(close_1h, np.nan)
-    ema3[0] = ema2[0]
-    for i in range(1, len(close_1h)):
-        ema3[i] = 0.15 * ema2[i] + 0.85 * ema3[i-1]
-    
-    # TRIX = 100 * (EMA3[t] - EMA3[t-1]) / EMA3[t-1]
-    trix = np.full_like(close_1h, np.nan)
-    for i in range(1, len(close_1h)):
-        if ema3[i-1] != 0:
-            trix[i] = 100 * (ema3[i] - ema3[i-1]) / ema3[i-1]
-    
-    # Align TRIX to 4h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_1h, trix)
-    
-    # Get 1d data for 50 EMA trend filter
+    # Get 1d data for VWAP
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 50-period EMA on daily close
-    ema50_1d = np.full_like(close_1d, np.nan)
-    for i in range(len(close_1d)):
-        if i < 50:
-            ema50_1d[i] = np.mean(close_1d[:i+1]) if i > 0 else close_1d[0]
-        else:
-            ema50_1d[i] = 0.0392 * close_1d[i] + 0.9608 * ema50_1d[i-1]  # alpha = 2/(50+1)
+    # Calculate typical price and VWAP
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
+    cum_vol_tp = np.cumsum(typical_price_1d * volume_1d)
+    cum_vol = np.cumsum(volume_1d)
+    vwap_1d = np.divide(cum_vol_tp, cum_vol, out=np.full_like(cum_vol_tp, np.nan), where=cum_vol!=0)
     
-    # Align 50 EMA to 4h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align VWAP to 6h timeframe
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
-    # Volume confirmation: current volume > 1.3 x 20-period average
+    # Volume confirmation: current volume > 2 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    vol_confirm = volume > (vol_ma * 1.3)
+    vol_confirm = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need TRIX and EMA50 warmed up
+    start_idx = max(20, 34)  # need volume MA and RSI warmed up
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(trix_aligned[i]) or np.isnan(trix_aligned[i-1]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(rsi_1h_aligned[i]) or np.isnan(vwap_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long entry: TRIX crosses above zero, price above 50 EMA (uptrend), volume confirmation
-            if (trix_aligned[i-1] <= 0 and trix_aligned[i] > 0 and 
-                close[i] > ema50_1d_aligned[i] and vol_confirm[i]):
+            # Long entry: RSI > 55, price above VWAP, volume spike
+            if (rsi_1h_aligned[i] > 55 and 
+                close[i] > vwap_1d_aligned[i] and 
+                vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: TRIX crosses below zero, price below 50 EMA (downtrend), volume confirmation
-            elif (trix_aligned[i-1] >= 0 and trix_aligned[i] < 0 and 
-                  close[i] < ema50_1d_aligned[i] and vol_confirm[i]):
+            # Short entry: RSI < 45, price below VWAP, volume spike
+            elif (rsi_1h_aligned[i] < 45 and 
+                  close[i] < vwap_1d_aligned[i] and 
+                  vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: TRIX crosses below zero (momentum loss) or price breaks below 50 EMA (trend change)
-            if (trix_aligned[i] < 0 or close[i] < ema50_1d_aligned[i]):
+            # Long exit: RSI < 50 (momentum fade) or price below VWAP (support break)
+            if (rsi_1h_aligned[i] < 50 or 
+                close[i] < vwap_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: TRIX crosses above zero (momentum loss) or price breaks above 50 EMA (trend change)
-            if (trix_aligned[i] > 0 or close[i] > ema50_1d_aligned[i]):
+            # Short exit: RSI > 50 (momentum fade) or price above VWAP (resistance break)
+            if (rsi_1h_aligned[i] > 50 or 
+                close[i] > vwap_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -115,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_TRIX_ZeroCross_Volume_Confirm"
-timeframe = "4h"
+name = "6h_1d_Volume_Weighted_RSI_Momentum"
+timeframe = "6h"
 leverage = 1.0
