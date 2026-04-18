@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla pivot level touch with 1d volume surge and ADX trend filter.
-Pivots act as support/resistance in ranging markets and breakout points in trends.
-Volume surge confirms institutional interest, while ADX avoids false signals in weak trends.
-Designed for 15-25 trades/year to minimize fee drag. Works in bull (buy R3/S3 breakouts) 
-and bear (sell R3/S3 breakdowns) by trading both directions with trend filter.
+Hypothesis: 4h Camarilla pivot (R1/S1) breakout with volume confirmation and 1d ADX trend filter.
+Breakouts of the Camarilla R1 (for longs) and S1 (for shorts) capture momentum, while volume confirms institutional participation.
+The ADX filter avoids false breakouts in ranging markets. Designed for 20-30 trades/year to minimize fee drag.
+Works in bull markets (buy R1 breakouts) and bear markets (sell S1 breakdowns).
 """
 
 import numpy as np
@@ -12,22 +11,15 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for the day."""
+    """
+    Calculate Camarilla pivot levels for a single day.
+    Returns: R1, S1 levels
+    """
+    typical_price = (high + low + close) / 3
     range_val = high - low
-    if range_val == 0:
-        return close, close, close, close, close, close, close, close
-    c = close
-    h = high
-    l = low
-    r4 = c + range_val * 1.1 / 2
-    r3 = c + range_val * 1.1 / 4
-    r2 = c + range_val * 1.1 / 6
-    r1 = c + range_val * 1.1 / 12
-    s1 = c - range_val * 1.1 / 12
-    s2 = c - range_val * 1.1 / 6
-    s3 = c - range_val * 1.1 / 4
-    s4 = c - range_val * 1.1 / 2
-    return r4, r3, r2, r1, s1, s2, s3, s4
+    R1 = close + (range_val * 1.1 / 12)
+    S1 = close - (range_val * 1.1 / 12)
+    return R1, S1
 
 def calculate_adx(high, low, close, period=14):
     """Calculate ADX (Average Directional Index)."""
@@ -97,46 +89,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and ADX
+    # Get 1d data for Camarilla pivot and ADX trend filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ADX(14) on 1d data
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_1d_4h = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Calculate Camarilla levels for each day
-    r4_1d = np.full(len(df_1d), np.nan)
-    r3_1d = np.full(len(df_1d), np.nan)
-    r2_1d = np.full(len(df_1d), np.nan)
+    # Calculate Camarilla R1, S1 for each 1d bar
     r1_1d = np.full(len(df_1d), np.nan)
     s1_1d = np.full(len(df_1d), np.nan)
-    s2_1d = np.full(len(df_1d), np.nan)
-    s3_1d = np.full(len(df_1d), np.nan)
-    s4_1d = np.full(len(df_1d), np.nan)
     
     for i in range(len(df_1d)):
-        r4, r3, r2, r1, s1, s2, s3, s4 = calculate_camarilla(high_1d[i], low_1d[i], close_1d[i])
-        r4_1d[i] = r4
-        r3_1d[i] = r3
-        r2_1d[i] = r2
+        r1, s1 = calculate_camarilla(high_1d[i], low_1d[i], close_1d[i])
         r1_1d[i] = r1
         s1_1d[i] = s1
-        s2_1d[i] = s2
-        s3_1d[i] = s3
-        s4_1d[i] = s4
     
-    # Align Camarilla levels to 4h timeframe
-    r4_4h = align_htf_to_ltf(prices, df_1d, r4_1d)
-    r3_4h = align_htf_to_ltf(prices, df_1d, r3_1d)
-    r2_4h = align_htf_to_ltf(prices, df_1d, r2_1d)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
-    s2_4h = align_htf_to_ltf(prices, df_1d, s2_1d)
-    s3_4h = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_4h = align_htf_to_ltf(prices, df_1d, s4_1d)
+    # Calculate ADX(14) on 1d data
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    
+    # Align 1d data to 4h timeframe
+    r1_1d_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    adx_1d_4h = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     # Calculate volume moving average (20-period)
     vol_ma = np.full(n, np.nan)
@@ -146,44 +120,60 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # need volume MA
+    start_idx = 20  # need volume MA calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(adx_1d_4h[i]) or np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(r1_1d_4h[i]) or np.isnan(s1_1d_4h[i]) or 
+            np.isnan(adx_1d_4h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0 * 20-period average
-        vol_confirmed = volume[i] > 2.0 * vol_ma[i]
+        # Volume confirmation: current volume > 1.5 * 20-period average
+        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         # Trend filter: ADX threshold
         trending = adx_1d_4h[i] >= 25
         
         if position == 0:
-            # Only trade in trending markets with volume confirmation
+            # Only trade in trending markets
             if trending and vol_confirmed:
-                # Long breakout above R3
-                if close[i] > r3_4h[i]:
+                # Long breakout above R1
+                if close[i] > r1_1d_4h[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short breakdown below S3
-                elif close[i] < s3_4h[i]:
+                # Short breakdown below S1
+                elif close[i] < s1_1d_4h[i]:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Long exit: price returns to R2 or breaks below S3 (reversal)
-            if close[i] <= r2_4h[i] or close[i] < s3_4h[i]:
+            # Long exit: price returns to previous day's close or opposite breakdown
+            prev_close = close_1d[-1] if len(close_1d) > 0 else close[i]
+            # Align previous day's close to current 4h bar
+            if len(df_1d) >= 2:
+                prev_close_1d = close_1d[-2]
+                # Find the 4h index corresponding to this previous day's close
+                # Since we're using aligned arrays, we can use the value from the previous 1d bar
+                prev_close_aligned = align_htf_to_ltf(prices, df_1d, np.full_like(close_1d, prev_close_1d))[i]
+            else:
+                prev_close_aligned = prev_close
+            
+            if close[i] <= prev_close_aligned:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to S2 or breaks above R3 (reversal)
-            if close[i] >= s2_4h[i] or close[i] > r3_4h[i]:
+            # Short exit: price returns to previous day's close or opposite breakout
+            if len(df_1d) >= 2:
+                prev_close_1d = close_1d[-2]
+                prev_close_aligned = align_htf_to_ltf(prices, df_1d, np.full_like(close_1d, prev_close_1d))[i]
+            else:
+                prev_close_aligned = close_1d[-1] if len(close_1d) > 0 else close[i]
+            
+            if close[i] >= prev_close_aligned:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -191,6 +181,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_ADX_Volume"
+name = "4h_Camarilla_R1S1_ADX_Volume"
 timeframe = "4h"
 leverage = 1.0
