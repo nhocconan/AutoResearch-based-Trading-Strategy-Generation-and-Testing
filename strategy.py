@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_MultiTimeframe_RSI_Divergence_Trend
-Hypothesis: Combines 6h RSI divergence with 12h EMA trend and volume confirmation to capture momentum reversals.
-Works in both bull and bear by using RSI for reversal signals and higher timeframe trend for direction.
-Target: 20-40 trades/year (80-160 total over 4 years) to balance opportunity and fee drag.
+4h_KAMA_Direction_Volume_Trend_Filter
+Hypothesis: KAMA adapts to market noise, providing a reliable trend filter. 
+When price is above KAMA with volume confirmation, we go long; below KAMA with volume, short.
+Uses 1d trend filter to avoid counter-trend trades. Designed for 4h timeframe to target 20-50 trades/year.
+Works in bull by catching trends, in bear by avoiding false breaks via volume + trend filter.
 """
 
 import numpy as np
@@ -20,102 +21,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12-hour data for trend and RSI
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # KAMA calculation (ER=10, fast=2, slow=30)
+    change = np.abs(np.diff(close, k=10))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # will fix below
+    
+    # Proper ER calculation
+    er = np.zeros_like(close)
+    for i in range(10, len(close)):
+        if i >= 10:
+            price_change = np.abs(close[i] - close[i-10])
+            sum_abs_diff = np.sum(np.abs(np.diff(close[i-9:i+1])))
+            if sum_abs_diff > 0:
+                er[i] = price_change / sum_abs_diff
+            else:
+                er[i] = 0
+    er[:10] = 0
+    
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)
+    slow_sc = 2 / (30 + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # 1-day data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 12h EMA for trend filter
-    ema_12h = pd.Series(df_12h['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # 1-day EMA trend
+    ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_4h = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 12h RSI for momentum
-    delta = pd.Series(df_12h['close']).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_12h = 100 - (100 / (1 + rs))
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h.values)
-    
-    # 6h volume filter: >1.3x 20-period average
+    # Volume filter: >1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.3 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
-    bars_since_entry = 0
     
-    start_idx = 30  # Warmup for indicators
+    start_idx = max(30, 20)  # warmup for KAMA and volume
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_12h_aligned[i]) or np.isnan(rsi_12h_aligned[i]) or
+        if (np.isnan(kama[i]) or np.isnan(ema_1d_4h[i]) or 
             np.isnan(volume_filter[i])):
             signals[i] = 0.0
-            bars_since_entry = 0
             continue
         
         price = close[i]
-        ema_trend = ema_12h_aligned[i]
-        rsi = rsi_12h_aligned[i]
+        kama_val = kama[i]
         vol_ok = volume_filter[i]
-        
-        # Detect RSI divergence (simplified: look for RSI extremum with price continuation)
-        if i >= 5:
-            # Bearish divergence: price makes higher high, RSI makes lower high
-            if (high[i] > high[i-3] and high[i-3] > high[i-6] and
-                rsi < rsi_12h_aligned[i-3] and rsi_12h_aligned[i-3] < rsi_12h_aligned[i-6]):
-                div_signal = -1  # Bearish divergence
-            # Bullish divergence: price makes lower low, RSI makes higher low
-            elif (low[i] < low[i-3] and low[i-3] < low[i-6] and
-                  rsi > rsi_12h_aligned[i-3] and rsi_12h_aligned[i-3] > rsi_12h_aligned[i-6]):
-                div_signal = 1   # Bullish divergence
-            else:
-                div_signal = 0
-        else:
-            div_signal = 0
+        ema_trend = ema_1d_4h[i]
         
         if position == 0:
-            # Long: bullish divergence with uptrend and volume
-            if div_signal == 1 and price > ema_trend and vol_ok:
+            # Long: price > KAMA with volume in uptrend
+            if price > kama_val and vol_ok and price > ema_trend:
                 signals[i] = 0.25
                 position = 1
-                bars_since_entry = 0
-            # Short: bearish divergence with downtrend and volume
-            elif div_signal == -1 and price < ema_trend and vol_ok:
+            # Short: price < KAMA with volume in downtrend
+            elif price < kama_val and vol_ok and price < ema_trend:
                 signals[i] = -0.25
                 position = -1
-                bars_since_entry = 0
         
         elif position == 1:
-            bars_since_entry += 1
-            # Minimum holding: 3 bars (1.5 days)
-            if bars_since_entry < 3:
-                signals[i] = 0.25
+            # Exit: price crosses below KAMA or trend reverses
+            if price < kama_val or price < ema_trend:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = 0.25
-                # Exit: RSI overbought or trend breaks
-                if rsi > 70 or price < ema_trend:
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_entry = 0
         
         elif position == -1:
-            bars_since_entry += 1
-            # Minimum holding: 3 bars (1.5 days)
-            if bars_since_entry < 3:
-                signals[i] = -0.25
+            # Exit: price crosses above KAMA or trend reverses
+            if price > kama_val or price > ema_trend:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = -0.25
-                # Exit: RSI oversold or trend breaks
-                if rsi < 30 or price > ema_trend:
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_entry = 0
     
     return signals
 
-name = "6h_MultiTimeframe_RSI_Divergence_Trend"
-timeframe = "6h"
+name = "4h_KAMA_Direction_Volume_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
