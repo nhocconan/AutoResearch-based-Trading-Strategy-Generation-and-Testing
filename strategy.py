@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 150:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -16,7 +16,7 @@ def generate_signals(prices):
     # Get 1d data for calculations (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d ATR (14-period) for volatility
+    # Calculate 1d ATR (14-period) for volatility filter
     tr1 = df_1d['high'] - df_1d['low']
     tr2 = np.abs(df_1d['high'] - np.roll(df_1d['close'], 1))
     tr3 = np.abs(df_1d['low'] - np.roll(df_1d['close'], 1))
@@ -36,9 +36,9 @@ def generate_signals(prices):
     tr_adx = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_adx = pd.Series(tr_adx).rolling(window=14, min_periods=14).mean().values
     
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_adx
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_adx
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / (atr_adx + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / (atr_adx + 1e-10)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
     # Align indicators to 4h timeframe
@@ -63,7 +63,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 150  # Wait for enough data
+    start_idx = 200  # Wait for enough data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
