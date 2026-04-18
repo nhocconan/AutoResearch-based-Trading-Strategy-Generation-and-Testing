@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_1d_1w_Camarilla_R1S1_Breakout_Trend_Volume_Filter
-Hypothesis: Use weekly and daily Camiarilla R1/S1 levels for directional bias on 12h timeframe, requiring volume > 1.5x 20-period average and weekly ADX > 25 to ensure trending conditions. This reduces whipsaw and focuses on strong trends in both bull and bear markets. Target 15-30 trades/year to avoid fee drag.
+6h_1d_Pivot_R3S3_Fade_With_Volume_Confirmation
+Hypothesis: On 6h timeframe, fade at daily Pivot R3/S3 levels during ranging markets, but allow breakout continuation at R4/S4 when accompanied by volume spikes. This strategy aims to profit from mean reversion in sideways markets while capturing strong directional moves when momentum builds. Uses volume confirmation to reduce false signals and targets 15-35 trades per year to minimize fee drag in both bull and bear markets.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,147 +18,151 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for primary trend bias
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Get daily data for entry levels
+    # Get daily data for pivot levels
     df_1d = get_htf_data(prices, '1d')
     
-    # Weekly calculations for trend bias
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate daily pivot points and support/resistance levels
+    # Pivot = (High + Low + Close) / 3
+    # R1 = 2*Pivot - Low
+    # S1 = 2*Pivot - High
+    # R2 = Pivot + (High - Low)
+    # S2 = Pivot - (High - Low)
+    # R3 = High + 2*(Pivot - Low)
+    # S3 = Low - 2*(High - Pivot)
+    # R4 = R3 + (High - Low)
+    # S4 = S3 - (High - Low)
     
-    # Previous week's OHLC for Camarilla calculation
-    prev_close_1w = np.roll(close_1w, 1)
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_close_1w[0] = close_1w[0]
-    prev_high_1w[0] = high_1w[0]
-    prev_low_1w[0] = low_1w[0]
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
+    prev_close = df_1d['close'].values
     
-    # Weekly Camarilla levels: R1 = close + (high-low)*1.1/12, S1 = close - (high-low)*1.1/12
-    range_1w = prev_high_1w - prev_low_1w
-    r1_1w = prev_close_1w + range_1w * 1.1 / 12
-    s1_1w = prev_close_1w - range_1w * 1.1 / 12
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_daily = prev_high - prev_low
     
-    # Daily calculations for entry
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    r1 = 2 * pivot - prev_low
+    s1 = 2 * pivot - prev_high
+    r2 = pivot + range_daily
+    s2 = pivot - range_daily
+    r3 = prev_high + 2 * (pivot - prev_low)
+    s3 = prev_low - 2 * (prev_high - pivot)
+    r4 = r3 + range_daily
+    s4 = s3 - range_daily
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d[0] = close_1d[0]
-    prev_high_1d[0] = high_1d[0]
-    prev_low_1d[0] = low_1d[0]
+    # Align daily pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Daily Camarilla levels: R1 = close + (high-low)*1.1/12, S1 = close - (high-low)*1.1/12
-    range_1d = prev_high_1d - prev_low_1d
-    r1_1d = prev_close_1d + range_1d * 1.1 / 12
-    s1_1d = prev_close_1d - range_1d * 1.1 / 12
+    # Volume confirmation: current volume > 1.8x 24-period average (48h for 6h timeframe)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_confirm = volume > 1.8 * vol_ma
+    vol_confirm = np.where(np.isnan(vol_confirm), False, vol_confirm)
     
-    # Weekly ADX for trend strength filter (avoid chop)
-    high_1w_arr = df_1w['high'].values
-    low_1w_arr = df_1w['low'].values
-    close_1w_arr = df_1w['close'].values
+    # Choppiness filter: avoid trading in extremely choppy conditions
+    # Calculate Choppy Index using ATR and price range over 14 periods
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(np.roll(close, 1) - low)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = high[0] - low[0]
     
-    # True Range
-    tr1 = np.maximum(high_1w_arr - low_1w_arr, np.abs(high_1w_arr - np.roll(close_1w_arr, 1)))
-    tr2 = np.abs(np.roll(close_1w_arr, 1) - low_1w_arr)
-    tr = np.maximum(tr1, tr2)
-    tr[0] = high_1w_arr[0] - low_1w_arr[0]
+    atr_period = 14
+    atr = np.zeros_like(tr)
+    atr[atr_period] = np.nansum(tr[1:atr_period+1]) if not np.isnan(tr).all() else 0
+    for i in range(atr_period + 1, len(tr)):
+        atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
     
-    # Directional Movement
-    up_move = np.maximum(high_1w_arr - np.roll(high_1w_arr, 1), 0)
-    down_move = np.maximum(np.roll(low_1w_arr, 1) - low_1w_arr, 0)
-    up_move[0] = 0
-    down_move[0] = 0
+    # Calculate highest high and lowest low over atr_period
+    highest_high = np.zeros_like(high)
+    lowest_low = np.zeros_like(low)
+    for i in range(len(high)):
+        if i < atr_period:
+            highest_high[i] = np.max(high[:i+1]) if i >= 0 else high[i]
+            lowest_low[i] = np.min(low[:i+1]) if i >= 0 else low[i]
+        else:
+            highest_high[i] = np.max(high[i-atr_period+1:i+1])
+            lowest_low[i] = np.min(low[i-atr_period+1:i+1])
     
-    # Smoothed values
-    tr_period = 14
-    tr_smooth = np.zeros_like(tr)
-    tr_smooth[tr_period] = np.nansum(tr[1:tr_period+1]) if not np.isnan(tr).all() else 0
-    for i in range(tr_period + 1, len(tr)):
-        tr_smooth[i] = tr_smooth[i-1] - (tr_smooth[i-1] / tr_period) + tr[i]
+    # Choppy Index: 100 * log10(sum(TR, atr_period) / (atr_period * (highest_high - lowest_low))) / log10(atr_period)
+    tr_sum = np.zeros_like(tr)
+    for i in range(len(tr)):
+        if i < atr_period:
+            tr_sum[i] = np.sum(tr[:i+1]) if i >= 0 else tr[i]
+        else:
+            tr_sum[i] = np.sum(tr[i-atr_period+1:i+1])
     
-    up_smooth = np.zeros_like(up_move)
-    down_smooth = np.zeros_like(down_move)
-    up_smooth[tr_period] = np.nansum(up_move[1:tr_period+1]) if not np.isnan(up_move).all() else 0
-    down_smooth[tr_period] = np.nansum(down_move[1:tr_period+1]) if not np.isnan(down_move).all() else 0
-    for i in range(tr_period + 1, len(up_move)):
-        up_smooth[i] = up_smooth[i-1] - (up_smooth[i-1] / tr_period) + up_move[i]
-        down_smooth[i] = down_smooth[i-1] - (down_smooth[i-1] / tr_period) + down_move[i]
+    # Avoid division by zero
+    hl_range = highest_high - lowest_low
+    hl_range = np.where(hl_range == 0, 1e-10, hl_range)
     
-    # Directional Indicators
-    plus_di = 100 * up_smooth / tr_smooth
-    minus_di = 100 * down_smooth / tr_smooth
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    chop = np.zeros_like(tr)
+    for i in range(len(tr)):
+        if hl_range[i] > 0 and tr_sum[i] > 0:
+            chop[i] = 100 * np.log10(tr_sum[i] / (atr_period * hl_range[i])) / np.log10(atr_period)
+        else:
+            chop[i] = 50  # neutral value
     
-    # ADX
-    adx_period = 14
-    adx = np.zeros_like(dx)
-    adx[2*adx_period] = np.nanmean(dx[adx_period:2*adx_period+1]) if not np.isnan(dx).all() else 0
-    for i in range(2*adx_period + 1, len(dx)):
-        adx[i] = (adx[i-1] * (adx_period - 1) + dx[i]) / adx_period
-    
-    # Align all higher timeframe data to 12h
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Precompute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_mask = (hours >= 8) & (hours <= 20)
+    # Market regime: chop > 61.8 = ranging (mean revert), chop < 38.2 = trending (breakout)
+    chop_above = chop > 61.8
+    chop_below = chop < 38.2
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for ADX and averages
+    start_idx = 30  # need enough for ATR and Chop calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or 
-            np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(adx_1w_aligned[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_confirm = volume[i] > 1.5 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
-        
-        # Trend filter: weekly ADX > 25 to avoid chop
-        trend_filter = adx_1w_aligned[i] > 25 if not np.isnan(adx_1w_aligned[i]) else False
-        
-        # Only trade during active session
-        in_session = session_mask[i]
-        
         if position == 0:
-            # Long: price breaks above weekly R1 and daily R1 with volume and trend filter during session
-            if close[i] > r1_1w_aligned[i] and close[i] > r1_1d_aligned[i] and vol_confirm and trend_filter and in_session:
+            # Long conditions:
+            # 1. In ranging market (chop > 61.8) and price at S3 with volume confirmation -> mean reversion long
+            # 2. In trending market (chop < 38.2) and price breaks above R4 with volume -> breakout long
+            if ((chop_above[i] and close[i] <= s3_aligned[i] and vol_confirm[i]) or
+                (chop_below[i] and close[i] >= r4_aligned[i] and vol_confirm[i])):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly S1 and daily S1 with volume and trend filter during session
-            elif close[i] < s1_1w_aligned[i] and close[i] < s1_1d_aligned[i] and vol_confirm and trend_filter and in_session:
+            # Short conditions:
+            # 1. In ranging market (chop > 61.8) and price at R3 with volume confirmation -> mean reversion short
+            # 2. In trending market (chop < 38.2) and price breaks below S4 with volume -> breakout short
+            elif ((chop_above[i] and close[i] >= r3_aligned[i] and vol_confirm[i]) or
+                  (chop_below[i] and close[i] <= s4_aligned[i] and vol_confirm[i])):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns below weekly R1 or daily R1 or trend filter fails or outside session
-            if close[i] < r1_1w_aligned[i] or close[i] < r1_1d_aligned[i] or not trend_filter or not in_session:
+            # Long exit conditions:
+            # 1. Price reaches R3 in ranging market (take profit at opposite level)
+            # 2. Price falls below S4 in trending market (stop loss)
+            # 3. Volume drops significantly (loss of momentum)
+            if ((chop_above[i] and close[i] >= r3_aligned[i]) or
+                (chop_below[i] and close[i] < s4_aligned[i]) or
+                (volume[i] < 0.5 * vol_ma[i])):
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns above weekly S1 or daily S1 or trend filter fails or outside session
-            if close[i] > s1_1w_aligned[i] or close[i] > s1_1d_aligned[i] or not trend_filter or not in_session:
+            # Short exit conditions:
+            # 1. Price reaches S3 in ranging market (take profit at opposite level)
+            # 2. Price rises above R4 in trending market (stop loss)
+            # 3. Volume drops significantly (loss of momentum)
+            if ((chop_above[i] and close[i] <= s3_aligned[i]) or
+                (chop_below[i] and close[i] > r4_aligned[i]) or
+                (volume[i] < 0.5 * vol_ma[i])):
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -166,6 +170,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_1w_Camarilla_R1S1_Breakout_Trend_Volume_Filter"
-timeframe = "12h"
+name = "6h_1d_Pivot_R3S3_Fade_With_Volume_Confirmation"
+timeframe = "6h"
 leverage = 1.0
