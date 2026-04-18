@@ -1,10 +1,7 @@
-# #!/usr/bin/env python3
+#!/usr/bin/env python3
 """
-6h Bollinger Band Squeeze Breakout with Volume Spike and Daily Trend Filter
-Hypothesis: Bollinger Band squeeze (low volatility) followed by breakout with volume
-captures explosive moves. Daily EMA50 filters direction to avoid counter-trend trades.
-Works in bull markets (breakouts continue) and bear markets (breakdowns continue).
-Designed for 12-37 trades/year on 6h timeframe with strict entry conditions.
+4h Donchian Breakout with Volume Spike and 12h EMA Trend Filter
+Hypothesis: Donchian(20) breakouts on 4h with volume confirmation and 12h EMA trend filter capture momentum moves while avoiding false breakouts. Designed for 20-50 trades/year on 4h timeframe, works in bull/bear markets by filtering with higher timeframe trend.
 """
 
 import numpy as np
@@ -21,29 +18,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA filter (once before loop)
-    df_d = get_htf_data(prices, '1d')
+    # Get 12h data for EMA trend filter (once before loop)
+    df_12h = get_htf_data(prices, '12h')
     
-    # Bollinger Bands (20, 2) on 6h
-    bb_period = 20
-    bb_std = 2
-    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    bb_stddev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper = sma + (bb_std * bb_stddev)
-    lower = sma - (bb_std * bb_stddev)
-    bb_width = (upper - lower) / sma  # normalized width
+    # Calculate EMA34 on 12h close
+    ema_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Bollinger Squeeze: width below 20-period average of width
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    squeeze = bb_width < bb_width_ma
-    
-    # Daily EMA50 for trend filter
-    ema_50 = pd.Series(df_d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_aligned = align_htf_to_ltf(prices, df_d, ema_50)
+    # Donchian channels on 4h (20-period high/low)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume spike: 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
+    
+    # ATR for stop loss (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
@@ -51,45 +49,48 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(sma[i]) or 
-            np.isnan(upper[i]) or
-            np.isnan(lower[i]) or
-            np.isnan(ema_aligned[i]) or
+        if (np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or
+            np.isnan(ema_12h_aligned[i]) or
+            np.isnan(atr[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema = ema_aligned[i]
+        upper = high_20[i]
+        lower = low_20[i]
+        ema = ema_12h_aligned[i]
+        atr_val = atr[i]
         
         if position == 0:
-            # Long: break above upper BB with volume spike and squeeze + price above EMA50
-            if price > upper[i] and volume_spike[i] and squeeze[i] and price > ema:
+            # Long: break above upper Donchian with volume spike and price above 12h EMA (uptrend)
+            if price > upper and volume_spike[i] and price > ema:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower BB with volume spike and squeeze + price below EMA50
-            elif price < lower[i] and volume_spike[i] and squeeze[i] and price < ema:
+            # Short: break below lower Donchian with volume spike and price below 12h EMA (downtrend)
+            elif price < lower and volume_spike[i] and price < ema:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long position
             signals[i] = 0.25
-            # Exit: price returns to middle Bollinger Band (mean reversion)
-            if price < sma[i]:
+            # Exit: price returns to lower Donchian or ATR trailing stop
+            if price <= lower or price < (high[i] - 2.0 * atr_val):
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position
             signals[i] = -0.25
-            # Exit: price returns to middle Bollinger Band
-            if price > sma[i]:
+            # Exit: price returns to upper Donchian or ATR trailing stop
+            if price >= upper or price > (low[i] + 2.0 * atr_val):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_BollingerSqueeze_Breakout_Volume_EMA50"
-timeframe = "6h"
+name = "4h_Donchian_Breakout_VolumeSpike_12hEMA34"
+timeframe = "4h"
 leverage = 1.0
