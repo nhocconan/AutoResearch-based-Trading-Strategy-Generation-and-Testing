@@ -1,42 +1,55 @@
 #!/usr/bin/env python3
 """
-6h Ichimoku Cloud + 1d VWAP Pullback with Volume Confirmation
-Long: Price above Kumo (cloud) + Tenkan > Kijun + price pulls back to Tenkan/Kijun + volume spike
-Short: Price below Kumo + Tenkan < Kijun + price pulls back to Tenkan/Kijun + volume spike
-Exit: Price crosses opposite edge of Kumo or Tenkan/Kijun cross reverses
-Ichimoku provides dynamic support/resistance and trend direction. Pullback to Tenkan/Kijun in trending markets offers high-probability entries.
-1d VWAP acts as institutional reference point for pullback depth. Volume spike confirms institutional participation.
-Target: 60-120 total trades over 4 years (15-30/year)
+12h Donchian Breakout + Volume Spike + Choppiness Filter
+Breakout: Price breaks Donchian(20) high/low
+Volume: 2x 20-period volume average
+Choppiness: Filter out when CHOP(14) < 38.2 (strong trend) or > 61.8 (choppy) - only trade in between
+Long: Breakout above upper band + volume spike + chop filter
+Short: Breakout below lower band + volume spike + chop filter
+Exit: Opposite breakout or midline crossover
+Designed for 12h timeframe to capture medium-term trends with reduced frequency.
+Target: 50-150 total trades over 4 years (12-37/year)
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_ichimoku(high, low, close):
-    """Calculate Ichimoku components: Tenkan, Kijun, Senkou A/B, Chikou"""
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    tenkan = (pd.Series(high).rolling(window=9, min_periods=9).max() + 
-              pd.Series(low).rolling(window=9, min_periods=9).min()) / 2
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    kijun = (pd.Series(high).rolling(window=26, min_periods=26).max() + 
-             pd.Series(low).rolling(window=26, min_periods=26).min()) / 2
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods
-    senkou_a = ((tenkan + kijun) / 2).shift(26)
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 52 periods
-    senkou_b = ((pd.Series(high).rolling(window=52, min_periods=52).max() + 
-                 pd.Series(low).rolling(window=52, min_periods=52).min()) / 2).shift(52)
-    return tenkan, kijun, senkou_a, senkou_b
-
-def calculate_vwap(high, low, close, volume):
-    """Calculate Volume Weighted Average Price"""
-    typical_price = (high + low + close) / 3
-    vwap = (typical_price * volume).cumsum() / volume.cumsum()
-    return vwap
+def calculate_chop(high, low, close, window=14):
+    """Calculate Choppiness Index"""
+    atr = []
+    for i in range(len(high)):
+        if i == 0:
+            tr = high[i] - low[i]
+        else:
+            tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        atr.append(tr)
+    
+    atr_sum = []
+    for i in range(len(atr)):
+        if i < window - 1:
+            atr_sum.append(np.nan)
+        else:
+            atr_sum.append(sum(atr[i-window+1:i+1]))
+    
+    highest_high = pd.Series(high).rolling(window=window, min_periods=window).max().values
+    lowest_low = pd.Series(low).rolling(window=window, min_periods=window).min().values
+    
+    chop = []
+    for i in range(len(close)):
+        if (np.isnan(atr_sum[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            highest_high[i] == lowest_low[i]):
+            chop.append(np.nan)
+        else:
+            log_val = np.log10(atr_sum[i] / (highest_high[i] - lowest_low[i]))
+            chop_val = 100 * log_val / np.log10(window)
+            chop.append(chop_val)
+    
+    return np.array(chop)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 52:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -44,66 +57,60 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Ichimoku on 6h
-    tenkan, kijun, senkou_a, senkou_b = calculate_ichimoku(high, low, close)
+    # Donchian channels (20-period)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2
     
-    # Get 1d data for VWAP
+    # Volume spike (2x 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
+    
+    # Choppiness Index (14-period)
+    chop = calculate_chop(high, low, close, 14)
+    
+    # Get 1d data for additional filter (optional - can be removed if not needed)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
-    
-    # Calculate 1d VWAP
-    vwap_1d = calculate_vwap(high_1d, low_1d, close_1d, volume_1d)
-    
-    # Align 1d VWAP to 6h
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    # Example: could add 1d trend filter here if desired
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 52  # need Ichimoku calculations
+    start_idx = 30  # need Donchian and chop calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or
-            np.isnan(vwap_1d_aligned[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        # Determine if price is above or below cloud
-        above_cloud = price > max(senkou_a[i], senkou_b[i])
-        below_cloud = price < min(senkou_a[i], senkou_b[i])
         
         if position == 0:
-            # Long: Above cloud + Tenkan > Kijun + pullback to Tenkan/Kijun + volume spike
-            if (above_cloud and tenkan[i] > kijun[i] and
-                price >= min(tenkan[i], kijun[i]) * 0.998 and  # within 0.2% of Tenkan/Kijun
-                price <= max(tenkan[i], kijun[i]) * 1.002 and
-                volume[i] > 1.5 * pd.Series(volume).rolling(window=20, min_periods=20).mean().iloc[i]):
+            # Long: Breakout above upper band + volume spike + chop filter (38.2 < CHOP < 61.8)
+            if (price > donch_high[i] and 
+                volume_spike[i] and 
+                chop[i] > 38.2 and chop[i] < 61.8):
                 signals[i] = 0.25
                 position = 1
-            # Short: Below cloud + Tenkan < Kijun + pullback to Tenkan/Kijun + volume spike
-            elif (below_cloud and tenkan[i] < kijun[i] and
-                  price >= min(tenkan[i], kijun[i]) * 0.998 and
-                  price <= max(tenkan[i], kijun[i]) * 1.002 and
-                  volume[i] > 1.5 * pd.Series(volume).rolling(window=20, min_periods=20).mean().iloc[i]):
+            # Short: Breakout below lower band + volume spike + chop filter
+            elif (price < donch_low[i] and 
+                  volume_spike[i] and 
+                  chop[i] > 38.2 and chop[i] < 61.8):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price crosses below cloud OR Tenkan/Kijun cross turns bearish
-            if (below_cloud or tenkan[i] < kijun[i]):
+            # Long exit: Breakdown below lower band OR price crosses below midline
+            if (price < donch_low[i]) or (price < donch_mid[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price crosses above cloud OR Tenkan/Kijun cross turns bullish
-            if (above_cloud or tenkan[i] > kijun[i]):
+            # Short exit: Breakout above upper band OR price crosses above midline
+            if (price > donch_high[i]) or (price > donch_mid[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -111,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Cloud_1dVWAP_Pullback_Volume"
-timeframe = "6h"
+name = "12h_Donchian_Breakout_VolumeSpike_ChopFilter"
+timeframe = "12h"
 leverage = 1.0
