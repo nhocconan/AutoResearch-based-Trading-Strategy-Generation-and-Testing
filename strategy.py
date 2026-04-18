@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_1D_Camarilla_Pivot_R1S1_Breakout_Volume
-Hypothesis: Uses 1-day Camarilla pivot levels (R1, S1) for entry with volume confirmation.
-Trades on 12h timeframe with 1-day trend filter to avoid counter-trend entries.
-Designed for low trade frequency (15-25/year) to minimize fee drag and work in both bull/bear markets.
+1d_Weekly_Trend_Follower
+Hypothesis: Uses 1-week SMA trend filter on daily data with daily RSI pullback entries.
+Long when weekly SMA rising and daily RSI < 30; short when weekly SMA falling and daily RSI > 70.
+Targets 10-20 trades/year by combining weekly trend filter with daily oversold/overbought entries.
+Works in bull markets via trend following and in bear markets via mean-reversion within trend.
 """
 
 import numpy as np
@@ -12,89 +13,86 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1-day data for Camarilla pivot levels and trend
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    weekly_close = df_weekly['close'].values
     
-    # Calculate 1-day Camarilla levels (using previous day's OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly SMA(10) for trend filter
+    weekly_sma10 = np.full(len(weekly_close), np.nan)
+    if len(weekly_close) >= 10:
+        weekly_sma10[9] = np.mean(weekly_close[0:10])
+        for i in range(10, len(weekly_close)):
+            weekly_sma10[i] = (weekly_sma10[i-1] * 9 + weekly_close[i]) / 10
     
-    # Pivot and support/resistance levels
-    pivot = np.full(len(high_1d), np.nan)
-    r1 = np.full(len(high_1d), np.nan)
-    s1 = np.full(len(high_1d), np.nan)
+    # Align weekly SMA to daily timeframe
+    weekly_sma10_aligned = align_htf_to_ltf(prices, df_weekly, weekly_sma10)
     
-    for i in range(1, len(high_1d)):
-        # Use previous day's OHLC to avoid look-ahead
-        prev_high = high_1d[i-1]
-        prev_low = low_1d[i-1]
-        prev_close = close_1d[i-1]
-        pivot[i] = (prev_high + prev_low + prev_close) / 3.0
-        r1[i] = pivot[i] + (prev_high - prev_low) * 1.1 / 12.0
-        s1[i] = pivot[i] - (prev_high - prev_low) * 1.1 / 12.0
-    
-    # 1-day EMA34 for trend filter
-    ema34 = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 34:
-        ema34[33] = np.mean(close_1d[0:34])
-        alpha = 2 / (34 + 1)
-        for i in range(34, len(close_1d)):
-            ema34[i] = close_1d[i] * alpha + ema34[i-1] * (1 - alpha)
-    
-    # Volume spike: current volume > 1.5 x 20-period average
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    vol_spike = volume > (vol_ma * 1.5)
-    
-    # Align 1-day data to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34)
+    # Calculate daily RSI(14)
+    rsi = np.full(n, np.nan)
+    if n >= 14:
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.full(n, np.nan)
+        avg_loss = np.full(n, np.nan)
+        
+        avg_gain[13] = np.mean(gain[0:14])
+        avg_loss[13] = np.mean(loss[0:14])
+        
+        for i in range(14, n):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+        rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Need volume MA and EMA warmup
+    start_idx = max(14, 10)
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema34_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(weekly_sma10_aligned[i]) or np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
+        # Weekly trend: rising if current > previous, falling if current < previous
+        if i > 0 and not np.isnan(weekly_sma10_aligned[i-1]):
+            weekly_rising = weekly_sma10_aligned[i] > weekly_sma10_aligned[i-1]
+            weekly_falling = weekly_sma10_aligned[i] < weekly_sma10_aligned[i-1]
+        else:
+            weekly_rising = False
+            weekly_falling = False
+        
         if position == 0:
-            # Long: break above R1 with volume spike and 1-day uptrend
-            if (close[i] > r1_aligned[i] and vol_spike[i] and 
-                close[i] > ema34_aligned[i]):
+            # Long: weekly uptrend + daily RSI oversold (<30)
+            if weekly_rising and rsi[i] < 30:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with volume spike and 1-day downtrend
-            elif (close[i] < s1_aligned[i] and vol_spike[i] and 
-                  close[i] < ema34_aligned[i]):
+            # Short: weekly downtrend + daily RSI overbought (>70)
+            elif weekly_falling and rsi[i] > 70:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: close below S1 or 1-day trend turns down
-            if (close[i] < s1_aligned[i] or close[i] < ema34_aligned[i]):
+            # Long exit: weekly trend turns down OR RSI overbought (>70)
+            if not weekly_rising or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: close above R1 or 1-day trend turns up
-            if (close[i] > r1_aligned[i] or close[i] > ema34_aligned[i]):
+            # Short exit: weekly trend turns up OR RSI oversold (<30)
+            if not weekly_falling or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1D_Camarilla_Pivot_R1S1_Breakout_Volume"
-timeframe = "12h"
+name = "1d_Weekly_Trend_Follower"
+timeframe = "1d"
 leverage = 1.0
