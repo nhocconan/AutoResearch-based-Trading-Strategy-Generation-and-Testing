@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_RSI20_Bounce_1wTrend_Filter_v1
-Hypothesis: On daily timeframe, buy when RSI(14) < 20 (deep oversold) and weekly trend is up (price > weekly EMA50); sell when RSI > 80 (overbought) and weekly trend is down (price < weekly EMA50). Uses weekly trend filter to avoid counter-trend trades in strong trends, reducing false signals. Designed for low trade frequency (10-20/year) with high win rate in both bull and bear markets by catching mean-reversion bounces in alignment with higher timeframe trend.
+6h_Donchian_Breakout_WeeklyPivot_Direction_VolumeConfirm_v1
+Hypothesis: 6h Donchian(20) breakouts aligned with weekly pivot direction and volume confirmation capture institutional momentum in both bull and bear markets. Weekly pivot provides long-term bias, Donchian breakout signals trend continuation, volume confirms conviction. Designed for low trade frequency (15-25/year) to minimize fee drag on 6h timeframe.
 """
 
 import numpy as np
@@ -14,63 +14,97 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for EMA50 trend filter (once before loop)
+    # Get weekly data for pivot direction (once before loop)
     df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high']
+    low_1w = df_1w['low']
     close_1w = df_1w['close']
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate daily RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Calculate weekly pivot points (standard floor trader pivots)
+    # PP = (H + L + C) / 3
+    # R1 = (2 * PP) - L
+    # S1 = (2 * PP) - H
+    weekly_pp = (high_1w + low_1w + close_1w) / 3
+    weekly_r1 = (2 * weekly_pp) - low_1w
+    weekly_s1 = (2 * weekly_pp) - high_1w
+    
+    # Determine weekly bias: price above PP = bullish, below PP = bearish
+    weekly_bullish = close_1w > weekly_pp
+    weekly_bearish = close_1w < weekly_pp
+    
+    # Align weekly bias to 6h timeframe
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
+    
+    # Get 12h data for volume context (optional filter)
+    df_12h = get_htf_data(prices, '12h')
+    vol_12h = df_12h['volume']
+    vol_ma_12h = pd.Series(vol_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
+    
+    # Calculate Donchian channels (20-period) on 6h data
+    # Using pandas rolling for efficiency
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # Volume spike detection on 6h: volume > 1.8 * 20-period EMA
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = volume > (1.8 * vol_ema)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 50  # ensure enough data for RSI and EMA
+    start_idx = 40  # Ensure sufficient data for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(rsi_values[i]):
+        if (np.isnan(weekly_bullish_aligned[i]) or 
+            np.isnan(weekly_bearish_aligned[i]) or
+            np.isnan(donchian_high[i]) or
+            np.isnan(donchian_low[i]) or
+            np.isnan(volume_spike[i]) or
+            np.isnan(vol_ma_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_trend = ema_50_1w_aligned[i]
-        rsi_val = rsi_values[i]
+        bullish_bias = weekly_bullish_aligned[i] > 0.5
+        bearish_bias = weekly_bearish_aligned[i] > 0.5
+        upper_channel = donchian_high[i]
+        lower_channel = donchian_low[i]
+        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: RSI < 20 (oversold) and weekly uptrend (price > weekly EMA50)
-            if rsi_val < 20 and price > ema_trend:
+            # Long: break above Donchian high with weekly bullish bias and volume spike
+            if price > upper_channel and bullish_bias and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI > 80 (overbought) and weekly downtrend (price < weekly EMA50)
-            elif rsi_val > 80 and price < ema_trend:
+            # Short: break below Donchian low with weekly bearish bias and volume spike
+            elif price < lower_channel and bearish_bias and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: RSI > 60 (exit overbought) or trend breaks down
-            if rsi_val > 60 or price < ema_trend:
+            # Exit: price returns to Donchian low or weekly bias turns bearish
+            if price < lower_channel or not bullish_bias:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: RSI < 40 (exit oversold) or trend breaks up
-            if rsi_val < 40 or price > ema_trend:
+            # Exit: price returns to Donchian high or weekly bias turns bullish
+            if price > upper_channel or not bearish_bias:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_RSI20_Bounce_1wTrend_Filter_v1"
-timeframe = "1d"
+name = "6h_Donchian_Breakout_WeeklyPivot_Direction_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
