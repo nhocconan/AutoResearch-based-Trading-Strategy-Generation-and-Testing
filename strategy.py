@@ -1,89 +1,100 @@
 #!/usr/bin/env python3
 """
-6h_Trix_15_Signal_MeanReversion
-Hypothesis: TRIX (triple-smoothed EMA) identifies overbought/oversold conditions.
-In ranging markets (6h), TRIX > 0.15 signals overextended long, TRIX < -0.15 signals overextended short.
-Mean reversion to TRIX=0 works in both bull and bear regimes as price oscillates around mean.
-Uses 1d trend filter: only take long signals when price > 1d EMA50, short when price < 1d EMA50.
-Targets 15-30 trades/year to minimize fee decay while capturing mean reversion swings.
+12h_Pivot_R1S1_Breakout_With_Volume_and_TrendFilter
+Hypothesis: Breakout at daily Camarilla R1/S1 levels on 12h timeframe with volume confirmation and 1d EMA trend filter.
+Designed for 12-37 trades/year to avoid fee drag while capturing breakout moves in trending markets.
+Works in both bull and bear markets by aligning with higher timeframe trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_trix(close, period=15):
-    """Calculate TRIX: triple EMA of log returns."""
-    # Calculate log returns
-    log_close = np.log(close)
-    # First EMA
-    ema1 = pd.Series(log_close).ewm(span=period, adjust=False, min_periods=period).mean().values
-    # Second EMA
-    ema2 = pd.Series(ema1).ewm(span=period, adjust=False, min_periods=period).mean().values
-    # Third EMA
-    ema3 = pd.Series(ema2).ewm(span=period, adjust=False, min_periods=period).mean().values
-    # TRIX = percentage change of third EMA
-    trix = np.diff(ema3, prepend=ema3[0]) / ema3[:-1] * 100
-    # Handle first element
-    trix = np.insert(trix, 0, 0.0)
-    return trix
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels."""
+    typical = (high + low + close) / 3
+    range_val = high - low
+    R1 = close + range_val * 1.1 / 12
+    S1 = close - range_val * 1.1 / 12
+    return R1, S1
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for Camarilla levels and EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate TRIX on 6h close
-    trix = calculate_trix(close, 15)
+    # Camarilla R1/S1 on 1d
+    R1, S1 = calculate_camarilla(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values)
+    R1_1d = align_htf_to_ltf(prices, df_1d, R1)
+    S1_1d = align_htf_to_ltf(prices, df_1d, S1)
+    
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume spike: >1.5x 20-period average (12h bars)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 50  # Warmup for TRIX and EMA
+    start_idx = max(35, 20)  # Warmup for EMA and volume
     
     for i in range(start_idx, n):
-        if np.isnan(trix[i]) or np.isnan(ema_50_1d_aligned[i]):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(R1_1d[i]) or
+            np.isnan(S1_1d[i]) or
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        trix_val = trix[i]
-        ema50 = ema_50_1d_aligned[i]
+        ema34 = ema_34_1d_aligned[i]
+        vol_spike = volume_spike[i]
+        R1_val = R1_1d[i]
+        S1_val = S1_1d[i]
         
         if position == 0:
-            # Long: TRIX oversold (< -0.15) and price above 1d EMA50 (uptrend filter)
-            if trix_val < -0.15 and price > ema50:
+            # Long: price breaks above R1 with volume spike and uptrend
+            if not np.isnan(R1_val) and price > R1_val and vol_spike and price > ema34:
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX overbought (> 0.15) and price below 1d EMA50 (downtrend filter)
-            elif trix_val > 0.15 and price < ema50:
+            # Short: price breaks below S1 with volume spike and downtrend
+            elif not np.isnan(S1_val) and price < S1_val and vol_spike and price < ema34:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: TRIX returns to zero (mean reversion) or trend fails
-            if trix_val >= 0.0 or price < ema50:
+            # Exit: price breaks below S1 OR trend turns down
+            if not np.isnan(S1_val) and price < S1_val:
+                signals[i] = 0.0
+                position = 0
+            elif price < ema34:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: TRIX returns to zero (mean reversion) or trend fails
-            if trix_val <= 0.0 or price > ema50:
+            # Exit: price breaks above R1 OR trend turns up
+            if not np.isnan(R1_val) and price > R1_val:
+                signals[i] = 0.0
+                position = 0
+            elif price > ema34:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Trix_15_Signal_MeanReversion"
-timeframe = "6h"
+name = "12h_Pivot_R1S1_Breakout_With_Volume_and_TrendFilter"
+timeframe = "12h"
 leverage = 1.0
