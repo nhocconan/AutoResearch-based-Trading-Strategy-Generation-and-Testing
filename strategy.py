@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_with_RSI_Filter_and_ATR_Stop
-Hypothesis: KAMA trend on daily timeframe combined with RSI filter and ATR-based stop.
-Trades in direction of adaptive trend only when RSI confirms momentum.
-ATR stop limits downside in volatile markets.
-Designed for low trade frequency (<25/year) to minimize fee drag while capturing sustained trends.
+6h_Pivot_R2_S2_Breakout_Volume_Trend_Filter
+Hypothesis: Price breaks above/below R2/S2 levels with volume confirmation and trend filter.
+Uses 1d Camarilla pivot levels (R2/S2), volume > 2x 20-period average, and EMA20 trend filter.
+Designed to work in both bull and bear markets by requiring trend alignment.
+Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag while capturing institutional breakout moves.
 """
 
 import numpy as np
@@ -16,99 +16,82 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Daily KAMA (adaptive trend)
+    # Daily Camarilla pivot levels (calculated from previous day's OHLC)
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close_1d, n=10))
-    volatility = np.sum(np.abs(np.diff(close_1d, n=1)), axis=1)
-    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
+    # Calculate Camarilla levels: R2, S2 based on previous day
+    # R2 = close + 1.1*(high-low)/6
+    # S2 = close - 1.1*(high-low)/6
+    camarilla_range = (high_1d - low_1d) * 1.1 / 6
+    r2 = close_1d + camarilla_range
+    s2 = close_1d - camarilla_range
     
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # Align to 6h timeframe (use previous day's levels for current day)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
-    # KAMA calculation
-    kama = np.full_like(close_1d, np.nan)
-    kama[9] = close_1d[9]  # Start after 10 periods
-    for i in range(10, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # EMA20 for trend filter on 6h
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align KAMA to daily timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    
-    # Daily RSI(14)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Align RSI to daily
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    
-    # Daily ATR(14) for stop loss
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Align ATR to daily
-    atr_aligned = align_htf_to_ltf(prices, df_1d, tr)
+    # Volume spike: >2x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
-    entry_price = 0.0
     
-    start_idx = max(30, 14)  # Warmup for indicators
+    start_idx = max(20, 1)  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(atr_aligned[i])):
+        if (np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
+            np.isnan(ema_20[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
-            
+        
         price = close[i]
-        kama_val = kama_aligned[i]
-        rsi_val = rsi_aligned[i]
-        atr_val = atr_aligned[i]
+        r2_level = r2_aligned[i]
+        s2_level = s2_aligned[i]
+        ema20 = ema_20[i]
+        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: price above KAMA AND RSI > 50 (bullish momentum)
-            if price > kama_val and rsi_val > 50:
+            # Long: price breaks above S2 with volume spike in uptrend
+            if (price > s2_level and          # breaks above S2
+                vol_spike and                 # volume confirmation
+                price > ema20):               # uptrend filter
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-            # Short: price below KAMA AND RSI < 50 (bearish momentum)
-            elif price < kama_val and rsi_val < 50:
+            # Short: price breaks below R2 with volume spike in downtrend
+            elif (price < r2_level and        # breaks below R2
+                  vol_spike and               # volume confirmation
+                  price < ema20):             # downtrend filter
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
-                
+        
         elif position == 1:
             signals[i] = 0.25
-            # Exit: ATR-based stop or trend reversal
-            if price <= entry_price - 1.5 * atr_val or price < kama_val:
+            # Exit: price crosses back below S2 or trend reverses
+            if price < s2_level or price < ema20:
                 signals[i] = 0.0
                 position = 0
-                
+        
         elif position == -1:
             signals[i] = -0.25
-            # Exit: ATR-based stop or trend reversal
-            if price >= entry_price + 1.5 * atr_val or price > kama_val:
+            # Exit: price crosses back above R2 or trend reverses
+            if price > r2_level or price > ema20:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_KAMA_Trend_with_RSI_Filter_and_ATR_Stop"
-timeframe = "1d"
+name = "6h_Pivot_R2_S2_Breakout_Volume_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
