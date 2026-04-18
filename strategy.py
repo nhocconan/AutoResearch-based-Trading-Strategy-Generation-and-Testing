@@ -1,9 +1,12 @@
+# Solution
 #!/usr/bin/env python3
 """
-4h RSI Divergence + Volume Confirmation with 1d Trend Filter
-Hypothesis: RSI divergences signal exhaustion in overbought/oversold conditions. 
-Combined with volume confirmation and 1d EMA trend filter, this captures reversals 
-with controlled frequency. Works in both bull (buy oversold dips) and bear (sell overbought rallies).
+12h 1d High/Low Breakout with Volume Confirmation and ADX Trend Filter
+Hypothesis: Breakouts above the prior day's high or below the prior day's low,
+confirmed by volume expansion and ADX trend strength, capture momentum moves
+in both bull and bear markets. The 12h timeframe reduces trade frequency to
+avoid excessive fee drag, while the 1d reference provides meaningful support/
+resistance levels.
 """
 
 import numpy as np
@@ -20,34 +23,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (once before loop)
+    # Get 1d data for reference levels and ADX (once before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Prior day's high and low
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
     
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # ADX calculation on 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Price and RSI rolling extremes for divergence detection
-    lookback = 14
-    price_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    price_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    rsi_high = pd.Series(rsi).rolling(window=lookback, min_periods=lookback).max().values
-    rsi_low = pd.Series(rsi).rolling(window=lookback, min_periods=lookback).min().values
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
     
-    # Volume spike: current volume > 1.8x 20-period average
+    # Directional Movement
+    up_move = np.where(high_1d - np.roll(high_1d, 1) > 0, high_1d - np.roll(high_1d, 1), 0)
+    down_move = np.where(np.roll(low_1d, 1) - low_1d > 0, np.roll(low_1d, 1) - low_1d, 0)
+    up_move[0] = 0
+    down_move[0] = 0
+    
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smooth(arr, period):
+        result = np.full_like(arr, np.nan, dtype=float)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(arr[:period])
+        # Subsequent values
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
+    
+    atr_period = 14
+    atr_1d = wilders_smooth(tr, atr_period)
+    plus_dm_1d = wilders_smooth(up_move, atr_period)
+    minus_dm_1d = wilders_smooth(down_move, atr_period)
+    
+    # Directional Indicators
+    plus_di_1d = np.where(atr_1d != 0, 100 * plus_dm_1d / atr_1d, 0)
+    minus_di_1d = np.where(atr_1d != 0, 100 * minus_dm_1d / atr_1d, 0)
+    
+    # DX and ADX
+    dx_denom = plus_di_1d + minus_di_1d
+    dx = np.where(dx_denom != 0, 100 * np.abs(plus_di_1d - minus_di_1d) / dx_denom, 0)
+    adx_1d = wilders_smooth(dx, atr_period)
+    
+    # Align 1d indicators to 12h timeframe
+    prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high)
+    prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Volume spike: current volume > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.8)
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,40 +91,35 @@ def generate_signals(prices):
     start_idx = 50  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i]):
+        if (np.isnan(prev_high_aligned[i]) or np.isnan(prev_low_aligned[i]) or
+            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        trend = ema50_1d_aligned[i]
-        rsi_val = rsi[i]
+        adx_val = adx_1d_aligned[i]
         vol_ok = vol_spike[i]
         
-        # Bullish divergence: price makes lower low, RSI makes higher low
-        bull_div = (low[i] <= price_low[i] * 1.001) and (rsi_val >= rsi_low[i] * 1.02)
-        # Bearish divergence: price makes higher high, RSI makes lower high
-        bear_div = (high[i] >= price_high[i] * 0.999) and (rsi_val <= rsi_high[i] * 0.98)
-        
         if position == 0:
-            # Enter long on bullish divergence + volume + uptrend filter
-            if bull_div and vol_ok and close[i] > trend:
+            # Enter long on breakout above prior day's high + volume + trend
+            if (high[i] > prev_high_aligned[i] and vol_ok and adx_val > 25):
                 signals[i] = 0.25
                 position = 1
-            # Enter short on bearish divergence + volume + downtrend filter
-            elif bear_div and vol_ok and close[i] < trend:
+            # Enter short on breakout below prior day's low + volume + trend
+            elif (low[i] < prev_low_aligned[i] and vol_ok and adx_val > 25):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long on RSI overbought or trend failure
-            if rsi_val > 70 or close[i] < trend:
+            # Exit long on breakdown below prior day's low
+            if low[i] < prev_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short on RSI oversold or trend failure
-            if rsi_val < 30 or close[i] > trend:
+            # Exit short on breakout above prior day's high
+            if high[i] > prev_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI_Divergence_Volume_1dTrend"
-timeframe = "4h"
+name = "12h_1D_High_Low_Breakout_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
