@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-1D Weekly Pivot Reversal with Volume Spike
-Uses weekly pivot levels (R1/S1) as reversal zones confirmed by volume spikes.
-Designed for low trade frequency (target: 7-25 trades/year) with strong reversal edge in range-bound markets.
-Works in both bull and bear markets by fading extremes at weekly pivot levels.
+1h RSI Mean Reversion with 4h Trend Filter and Volume Spike
+Designed for low trade frequency (target: 15-37 trades/year) by combining:
+- RSI(14) extremes for mean reversion entries
+- 4h EMA trend filter to align with higher timeframe direction
+- Volume spike confirmation to filter noise
+- Session filter (08-20 UTC) to reduce noise
+Works in both bull and bear markets by only taking mean reversion in direction of 4h trend.
 """
 
 import numpy as np
@@ -12,81 +15,88 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_weekly = get_htf_data(prices, '1w')
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # Calculate weekly pivot points (using previous week's data)
-    pivot = (high_weekly[:-1] + low_weekly[:-1] + close_weekly[:-1]) / 3.0
-    r1 = 2 * pivot - low_weekly[:-1]
-    s1 = 2 * pivot - high_weekly[:-1]
+    # Calculate 4h EMA34 for trend filter
+    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
-    # Align weekly pivot levels to daily timeframe (with 1-week delay for completed bar)
-    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot, additional_delay_bars=0)
-    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1, additional_delay_bars=0)
-    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1, additional_delay_bars=0)
+    # RSI calculation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Volume spike detection (2x 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume spike detection (2x 4-period average)
+    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     volume_spike = volume > (2.0 * vol_ma)
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
-    entry_price = 0.0
     
-    start_idx = 200  # need enough history for calculations
+    start_idx = 34  # need enough history for EMA and RSI
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(rsi[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        if not session_filter[i]:
+            signals[i] = 0.0
+            continue
+        
+        rsi_val = rsi[i]
+        ema_trend = ema_34_4h_aligned[i]
         price = close[i]
-        pivot_val = pivot_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
         
         if position == 0:
-            # Long reversal: price touches S1 with volume spike
-            if abs(price - s1_val) < 0.001 * s1_val and volume_spike[i]:
-                signals[i] = 0.25
+            # Long: RSI oversold (<30) with volume spike and price above 4h EMA (uptrend)
+            if (rsi_val < 30 and 
+                volume_spike[i] and 
+                price > ema_trend):
+                signals[i] = 0.20
                 position = 1
-                entry_price = price
-            # Short reversal: price touches R1 with volume spike
-            elif abs(price - r1_val) < 0.001 * r1_val and volume_spike[i]:
-                signals[i] = -0.25
+            # Short: RSI overbought (>70) with volume spike and price below 4h EMA (downtrend)
+            elif (rsi_val > 70 and 
+                  volume_spike[i] and 
+                  price < ema_trend):
+                signals[i] = -0.20
                 position = -1
-                entry_price = price
         
         elif position == 1:
-            # Long position management
-            signals[i] = 0.25
-            # Exit at pivot or opposite level
-            if price >= pivot_val:
+            # Long position: hold until RSI returns to neutral or trend changes
+            signals[i] = 0.20
+            if rsi_val >= 50 or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
-            # Short position management
-            signals[i] = -0.25
-            # Exit at pivot or opposite level
-            if price <= pivot_val:
+            # Short position: hold until RSI returns to neutral or trend changes
+            signals[i] = -0.20
+            if rsi_val <= 50 or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1D_Weekly_Pivot_Reversal_Volume_Spike"
-timeframe = "1d"
+name = "1h_RSI_MeanReversion_4hEMA34_VolumeSpike_Session"
+timeframe = "1h"
 leverage = 1.0
