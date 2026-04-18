@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_DailyPivot_R1S1_Breakout_VolumeATRFilter_v1"
-timeframe = "6h"
+name = "1h_Pivot_R1S1_Breakout_VolumeATRFilter_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -31,33 +31,37 @@ def generate_signals(prices):
     R1_d = pivot_d + range_d
     S1_d = pivot_d - range_d
     
-    # ATR(14) for volatility filter
+    # ATR(14) for filter
     tr1 = prev_high_d - prev_low_d
     tr2 = np.abs(prev_high_d - prev_close_d)
     tr3 = np.abs(prev_low_d - prev_close_d)
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align to 6h
+    # Align to 1h
     R1_d_aligned = align_htf_to_ltf(prices, df_1d, R1_d)
     S1_d_aligned = align_htf_to_ltf(prices, df_1d, S1_d)
     pivot_d_aligned = align_htf_to_ltf(prices, df_1d, pivot_d)
     atr_d_aligned = align_htf_to_ltf(prices, df_1d, atr_d)
     
-    # Volume filter: current volume > 2.0 * 4-period average (4 * 6h = 1 day)
-    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
-    volume_filter = volume > (2.0 * vol_ma_4)
+    # Volume filter: current volume > 1.5 * 48-period average (48 * 1h = 2 days)
+    vol_ma_48 = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
+    volume_filter = volume > (1.5 * vol_ma_48)
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicator calculations
+    start_idx = 100  # Wait for indicator calculations
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available
+        # Skip if any required data is not available or outside session
         if (np.isnan(R1_d_aligned[i]) or np.isnan(S1_d_aligned[i]) or
             np.isnan(pivot_d_aligned[i]) or np.isnan(atr_d_aligned[i]) or
-            np.isnan(vol_ma_4[i])):
+            np.isnan(vol_ma_48[i]) or not session_filter[i]):
             signals[i] = 0.0
             continue
         
@@ -69,13 +73,13 @@ def generate_signals(prices):
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: break above R1 with volume and ATR filter (avoid low-vol breakouts)
+            # Long: break above R1 with volume and ATR filter
             if close_val > R1_val and vol_filter and atr_val > 0:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             # Short: break below S1 with volume and ATR filter
             elif close_val < S1_val and vol_filter and atr_val > 0:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
@@ -84,7 +88,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
             # Short exit: price rises back above pivot
@@ -92,6 +96,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
