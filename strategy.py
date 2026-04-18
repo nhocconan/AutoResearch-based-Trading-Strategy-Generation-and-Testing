@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_RSI_Trend_Filter
-Hypothesis: Uses RSI(14) with EMA(50) trend filter on 12h timeframe.
-Enters long when RSI crosses above 50 with EMA50 rising, short when RSI crosses below 50 with EMA50 falling.
-Designed for moderate trade frequency (~20-30/year) with trend-following capability in both bull and bear markets.
+1d_Keltner_Channel_Breakout_1wEMA34_Volume_Filter
+Hypothesis: Keltner Channel breakouts on 1d timeframe with 1-week EMA34 trend filter and volume confirmation. 
+Enters long when price breaks above upper KC with bullish weekly trend and volume spike, short when breaks below lower KC with bearish weekly trend and volume spike.
+Designed for low trade frequency (~10-20/year) with trend-following capability in both bull and bear markets.
+Weekly trend filter reduces whipsaws and improves performance during bear markets like 2022.
 """
 
 import numpy as np
@@ -12,88 +13,87 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # RSI(14) calculation
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Keltner Channel (20, 2.0) on daily
+    atr_period = 20
+    atr = np.full(n, np.nan)
+    tr = np.maximum(np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1])), np.abs(low[1:] - close[:-1]))
+    tr = np.concatenate([[np.nan], tr])
     
-    avg_gain = np.full(n, np.nan)
-    avg_loss = np.full(n, np.nan)
-    
-    for i in range(14, n):
-        if i == 14:
-            avg_gain[i] = np.mean(gain[0:14])
-            avg_loss[i] = np.mean(loss[0:14])
+    for i in range(atr_period, n):
+        if i == atr_period:
+            atr[i] = np.nanmean(tr[1:i+1])
         else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
+            atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
     
-    rs = np.full(n, np.nan)
-    rsi = np.full(n, np.nan)
-    for i in range(14, n):
-        if avg_loss[i] != 0:
-            rs[i] = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs[i]))
+    ma = np.full(n, np.nan)
+    for i in range(20, n):
+        if i == 20:
+            ma[i] = np.mean(close[0:20])
         else:
-            rsi[i] = 100
+            ma[i] = (ma[i-1] * 19 + close[i]) / 20
     
-    # EMA(50) for trend filter
-    ema50 = np.full(n, np.nan)
-    k = 2 / (50 + 1)
-    for i in range(50, n):
-        if i == 50:
-            ema50[i] = np.mean(close[0:51])
+    kc_upper = ma + (2 * atr)
+    kc_lower = ma - (2 * atr)
+    
+    # Weekly EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
+    close_1w = df_1w['close'].values
+    ema34_1w = np.full(len(close_1w), np.nan)
+    k = 2 / (34 + 1)
+    for i in range(34, len(close_1w)):
+        if i == 34:
+            ema34_1w[i] = np.mean(close_1w[0:35])
         else:
-            ema50[i] = close[i] * k + ema50[i-1] * (1 - k)
+            ema34_1w[i] = close_1w[i] * k + ema34_1w[i-1] * (1 - k)
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # EMA50 slope (trend direction)
-    ema50_slope = np.full(n, np.nan)
-    for i in range(51, n):
-        ema50_slope[i] = ema50[i] - ema50[i-1]
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    vol_spike = volume > (vol_ma * 1.5)
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Warmup
+    start_idx = 40  # Warmup
     
     for i in range(start_idx, n):
-        if np.isnan(rsi[i]) or np.isnan(ema50[i]) or np.isnan(ema50_slope[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: RSI crosses above 50 with rising EMA50 and volume spike
-            if rsi[i] > 50 and rsi[i-1] <= 50 and ema50_slope[i] > 0 and vol_spike[i]:
+            # Long: price breaks above upper KC with bullish weekly trend and volume spike
+            if close[i] > kc_upper[i] and ema34_1w_aligned[i] > close_1w[-1] if len(close_1w) > 0 else False and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI crosses below 50 with falling EMA50 and volume spike
-            elif rsi[i] < 50 and rsi[i-1] >= 50 and ema50_slope[i] < 0 and vol_spike[i]:
+            # Short: price breaks below lower KC with bearish weekly trend and volume spike
+            elif close[i] < kc_lower[i] and ema34_1w_aligned[i] < close_1w[-1] if len(close_1w) > 0 else False and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: RSI crosses below 50 or EMA50 turns down
-            if rsi[i] < 50 or ema50_slope[i] <= 0:
+            # Exit: price breaks below lower KC or weekly trend turns bearish
+            if close[i] < kc_lower[i] or ema34_1w_aligned[i] < close_1w[-1] if len(close_1w) > 0 else False:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: RSI crosses above 50 or EMA50 turns up
-            if rsi[i] > 50 or ema50_slope[i] >= 0:
+            # Exit: price breaks above upper KC or weekly trend turns bullish
+            if close[i] > kc_upper[i] or ema34_1w_aligned[i] > close_1w[-1] if len(close_1w) > 0 else False:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_RSI_Trend_Filter"
-timeframe = "12h"
+name = "1d_Keltner_Channel_Breakout_1wEMA34_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
