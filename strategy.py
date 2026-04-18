@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1w trend filter.
-# Long when price breaks above 4h Donchian upper channel + 1d volume > 2x 20-period average + price > 1w EMA(50).
-# Short when price breaks below 4h Donchian lower channel + 1d volume > 2x 20-period average + price < 1w EMA(50).
-# Exit when price returns to 4h Donchian middle (mean of upper and lower).
-# Designed for ~20-40 trades/year per symbol.
-name = "4h_Donchian20_1dVolumeSpike_1wEMA50"
-timeframe = "4h"
+# Hypothesis: 12h Pivot Point (PP) reversal with volume confirmation and 1d ADX trend filter.
+# Long when price crosses above PP with volume > 1.5x 24-period average and ADX < 25 (range).
+# Short when price crosses below PP with volume > 1.5x 24-period average and ADX < 25 (range).
+# Exit when price reaches opposite support/resistance (S1 for long, R1 for short).
+# Uses daily pivot levels for structure, volume surge for conviction, ADX for range filter.
+# Designed for ~15-30 trades/year per symbol.
+name = "12h_PP_Range_Reversal_Volume_ADX"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
-    n = len(prrices)
-    if n < 100:
+    n = len(prices)
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,68 +23,105 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for volume filter
+    # 1d data for pivot levels and ADX trend filter
     df_1d = get_htf_data(prices, '1d')
-    vol_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate daily pivot points and support/resistance levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 4h Donchian channels (20-period)
-    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper = high_max_20
-    donchian_lower = low_min_20
-    donchian_middle = (donchian_upper + donchian_lower) / 2.0
+    # Pivot Point (PP)
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    # Support and resistance levels
+    r1 = 2 * pp - low_1d
+    s1 = 2 * pp - high_1d
+    r2 = pp + (high_1d - low_1d)
+    s2 = pp - (high_1d - low_1d)
+    
+    # Align pivot levels to 12h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    
+    # ADX(14) on 1d for trend/range filter
+    # Calculate True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
+    up_move = high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])
+    down_move = np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_dm14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm14 / tr14
+    minus_di = 100 * minus_dm14 / tr14
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume filter: current volume > 1.5 * 24-period average
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_filter = volume > (1.5 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for indicator calculations
+    start_idx = 50  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(donchian_middle[i]) or
-            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(adx_aligned[i]) or
+            np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        vol_ma_val = vol_ma_20_1d_aligned[i]
-        ema_val = ema_50_1w_aligned[i]
-        upper = donchian_upper[i]
-        lower = donchian_lower[i]
-        middle = donchian_middle[i]
-        
-        # Volume spike condition: current 1d volume > 2x 20-period average
-        volume_spike = volume[i] > (2.0 * vol_ma_val) if not np.isnan(vol_ma_val) else False
+        pp_val = pp_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        r2_val = r2_aligned[i]
+        s2_val = s2_aligned[i]
+        adx_val = adx_aligned[i]
+        vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: price breaks above upper channel with volume spike and above 1w EMA
-            if close_val > upper and volume_spike and close_val > ema_val:
+            # Long: price crosses above PP with volume surge and in range (ADX < 25)
+            if close_val > pp_val and vol_filter and adx_val < 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower channel with volume spike and below 1w EMA
-            elif close_val < lower and volume_spike and close_val < ema_val:
+            # Short: price crosses below PP with volume surge and in range (ADX < 25)
+            elif close_val < pp_val and vol_filter and adx_val < 25:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to middle channel
-            if close_val <= middle:
+            # Long exit: price reaches S1 (support) or reverses below PP
+            if close_val <= s1_val or close_val < pp_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to middle channel
-            if close_val >= middle:
+            # Short exit: price reaches R1 (resistance) or reverses above PP
+            if close_val >= r1_val or close_val > pp_val:
                 signals[i] = 0.0
                 position = 0
             else:
