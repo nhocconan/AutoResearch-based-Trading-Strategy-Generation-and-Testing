@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyTrend_DonchianBreakout_VolumeFilter
-Hypothesis: Trade Donchian(20) breakouts on daily timeframe with weekly trend filter and volume confirmation. Long when price breaks above 20-day high, weekly close > weekly open (bullish weekly candle), and volume > 1.5x 20-day average volume. Short when price breaks below 20-day low, weekly close < weekly open (bearish weekly candle), and volume > 1.5x average. Uses weekly trend to avoid counter-trend trades in strong weekly trends. Volume confirmation ensures breakouts have institutional interest. Designed for low trade frequency (<25/year) to minimize fee impact while capturing major moves in both bull and bear markets.
+4h_WeeklyKAMA_Direction_1dRSI_Pullback_v1
+Hypothesis: Trade KAMA direction on 4h with 1d RSI pullback, but only in alignment with weekly trend (weekly KAMA slope). This reduces false signals in sideways markets by requiring alignment with higher timeframe trend. Works in bull/bear by following adaptive trend (KAMA) with pullback entry for better risk/reward. Uses volume > 2x 24-period average for confirmation. Targets 20-40 trades/year via KAMA's adaptive smoothing + RSI pullback rarity + weekly filter.
 """
 
 import numpy as np
 import pandas as pd
-from mf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,72 +18,134 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # Get 1d data for RSI
+    df_1d = get_htf_data(prices, '1d')
+    
+    # 1d RSI(14)
+    rsi_period = 14
+    close_1d = df_1d['close'].values
+    rsi_1d = np.full_like(close_1d, np.nan)
+    
+    if len(close_1d) >= rsi_period + 1:
+        delta = np.diff(close_1d)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.full_like(close_1d, np.nan)
+        avg_loss = np.full_like(close_1d, np.nan)
+        
+        # First average
+        avg_gain[rsi_period] = np.mean(gain[:rsi_period])
+        avg_loss[rsi_period] = np.mean(loss[:rsi_period])
+        
+        # Wilder smoothing
+        for i in range(rsi_period + 1, len(close_1d)):
+            avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i-1]) / rsi_period
+            avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i-1]) / rsi_period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi_1d = 100 - (100 / (1 + rs))
+    
+    # Align 1d RSI to 4h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
     # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Weekly trend: bullish if close > open, bearish if close < open
-    weekly_bullish = df_1w['close'].values > df_1w['open'].values
-    weekly_bearish = df_1w['close'].values < df_1w['open'].values
+    # Weekly KAMA for trend filter
+    fast_sc = 2 / (2 + 1)  # 2-period EMA
+    slow_sc = 2 / (30 + 1) # 30-period EMA
+    kama_1w = np.full_like(close_1w, np.nan)
     
-    # Align weekly trend to daily
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
+    if len(close_1w) >= 2:
+        kama_1w[0] = close_1w[0]
+        for i in range(1, len(close_1w)):
+            change = abs(close_1w[i] - close_1w[i-1])
+            volatility = 0
+            for j in range(1, i+1):
+                volatility += abs(close_1w[j] - close_1w[j-1])
+            er = change / volatility if volatility != 0 else 0
+            sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+            kama_1w[i] = kama_1w[i-1] + sc * (close_1w[i] - kama_1w[i-1])
     
-    # Donchian channels (20-day)
-    lookback = 20
-    highest_high = np.full_like(high, np.nan)
-    lowest_low = np.full_like(low, np.nan)
+    # Align weekly KAMA to 4h timeframe
+    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
     
-    if len(high) >= lookback:
-        for i in range(lookback, len(high)):
-            highest_high[i] = np.max(high[i-lookback:i])
-            lowest_low[i] = np.min(low[i-lookback:i])
+    # Weekly KAMA slope (trend direction)
+    kama_1w_slope = np.full_like(kama_1w_aligned, np.nan)
+    for i in range(1, len(kama_1w_aligned)):
+        if not np.isnan(kama_1w_aligned[i]) and not np.isnan(kama_1w_aligned[i-1]):
+            kama_1w_slope[i] = kama_1w_aligned[i] - kama_1w_aligned[i-1]
     
-    # Volume confirmation: volume > 1.5x 20-day average
+    # KAMA on 4h
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    
+    kama_4h = np.full_like(close_4h, np.nan)
+    
+    if len(close_4h) >= 2:
+        kama_4h[0] = close_4h[0]
+        for i in range(1, len(close_4h)):
+            change = abs(close_4h[i] - close_4h[i-1])
+            volatility = 0
+            for j in range(1, i+1):
+                volatility += abs(close_4h[j] - close_4h[j-1])
+            er = change / volatility if volatility != 0 else 0
+            sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+            kama_4h[i] = kama_4h[i-1] + sc * (close_4h[i] - kama_4h[i-1])
+    
+    # Align 4h KAMA to 4h timeframe
+    kama_4h_aligned = align_htf_to_ltf(prices, df_4h, kama_4h)
+    
+    # Volume confirmation: volume > 2x 24-period average
     vol_ma = np.full_like(volume, np.nan)
-    vol_period = 20
+    vol_period = 24
     
     if len(volume) >= vol_period:
         for i in range(vol_period, len(volume)):
-            vol_ma[i] = np.mean(volume[i-vol_period:i])
+            vol_ma[i] = np.mean(volume[i - vol_period:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback, vol_period)
+    start_idx = max(30, vol_period)  # KAMA needs ~30 periods, vol MA needs 24
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(weekly_bullish_aligned[i]) or 
-            np.isnan(weekly_bearish_aligned[i])):
+        if (np.isnan(kama_4h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(kama_1w_slope[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        vol_confirm = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: price breaks above 20-day high, weekly bullish, volume confirmation
-            if close[i] > highest_high[i] and weekly_bullish_aligned[i] > 0.5 and vol_confirm:
+            # Long: KAMA turning up + RSI pullback (<35) + volume + weekly uptrend (KAMA slope > 0)
+            if (i > 0 and not np.isnan(kama_4h_aligned[i-1]) and kama_4h_aligned[i] > kama_4h_aligned[i-1] and 
+                rsi_1d_aligned[i] < 35 and vol_confirm and kama_1w_slope[i] > 0):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 20-day low, weekly bearish, volume confirmation
-            elif close[i] < lowest_low[i] and weekly_bearish_aligned[i] > 0.5 and vol_confirm:
+            # Short: KAMA turning down + RSI pullback (>65) + volume + weekly downtrend (KAMA slope < 0)
+            elif (i > 0 and not np.isnan(kama_4h_aligned[i-1]) and kama_4h_aligned[i] < kama_4h_aligned[i-1] and 
+                  rsi_1d_aligned[i] > 65 and vol_confirm and kama_1w_slope[i] < 0):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below 20-day low or weekly turns bearish
-            if close[i] < lowest_low[i] or weekly_bearish_aligned[i] > 0.5:
+            # Long exit: KAMA turns down or RSI > 65 (overbought) or weekly trend turns down
+            if ((i > 0 and not np.isnan(kama_4h_aligned[i-1]) and kama_4h_aligned[i] < kama_4h_aligned[i-1]) or 
+                rsi_1d_aligned[i] > 65 or kama_1w_slope[i] < 0):
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above 20-day high or weekly turns bullish
-            if close[i] > highest_high[i] or weekly_bullish_aligned[i] > 0.5:
+            # Short exit: KAMA turns up or RSI < 35 (oversold) or weekly trend turns up
+            if ((i > 0 and not np.isnan(kama_4h_aligned[i-1]) and kama_4h_aligned[i] > kama_4h_aligned[i-1]) or 
+                rsi_1d_aligned[i] < 35 or kama_1w_slope[i] > 0):
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -91,6 +153,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyTrend_DonchianBreakout_VolumeFilter"
-timeframe = "1d"
+name = "4h_WeeklyKAMA_Direction_1dRSI_Pullback_v1"
+timeframe = "4h"
 leverage = 1.0
