@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d volatility regime filter and volume confirmation.
-# Donchian(20) breakout captures trend continuation.
-# 1d ATR-based volatility filter: low volatility (ATR < 20-period mean) = range (fade breakouts),
-# high volatility (ATR > 20-period mean) = trend (follow breakouts).
-# Volume confirmation (>1.5x 20-period average) ensures conviction.
-# Works in bull markets (breakouts up) and bear markets (breakouts down).
-# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
-name = "4h_Donchian20_1dVolatilityRegime_Volume"
-timeframe = "4h"
+# Hypothesis: 1d Williams Alligator with 1w ADX filter and volume confirmation.
+# Williams Alligator uses three SMAs (Jaw=13, Teeth=8, Lips=5) to identify trends.
+# 1w ADX > 25 ensures we trade only in strong trending markets.
+# Volume spike (>2x 20-period average) confirms conviction.
+# In uptrend: Lips > Teeth > Jaw (all rising). In downtrend: Lips < Teeth < Jaw (all falling).
+# Works in bull markets (trend up) and bear markets (trend down).
+# Target: 7-25 trades/year (30-100 total over 4 years) to minimize fee drag.
+name = "1d_WilliamsAlligator_1wADX_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,67 +24,107 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volatility regime filter (ONCE before loop)
+    # Get 1d data for Williams Alligator (needed for SMAs)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Williams Alligator SMAs on 1d data
+    close_1d = pd.Series(df_1d['close'].values)
+    # Jaw: 13-period SMA, shifted 8 bars forward
+    jaw = close_1d.rolling(window=13, min_periods=13).mean().shift(8).values
+    # Teeth: 8-period SMA, shifted 5 bars forward
+    teeth = close_1d.rolling(window=8, min_periods=8).mean().shift(5).values
+    # Lips: 5-period SMA, shifted 3 bars forward
+    lips = close_1d.rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Calculate 1d ATR(14) for volatility regime
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr2 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, tr2)
-    tr = np.concatenate([[np.nan], tr])  # align with original index
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma_20 = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    atr_ma_20_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20)
+    # Align Alligator lines to lower timeframe (1d)
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
-    # Calculate volume confirmation: current volume > 1.5 * 20-period average volume
+    # Get 1w data for ADX filter
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate ADX on 1w data
+    high_1w = pd.Series(df_1w['high'].values)
+    low_1w = pd.Series(df_1w['low'].values)
+    close_1w = pd.Series(df_1w['close'].values)
+    
+    # True Range
+    tr1 = high_1w - low_1w
+    tr2 = abs(high_1w - close_1w.shift(1))
+    tr3 = abs(low_1w - close_1w.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1w = tr.rolling(window=14, min_periods=14).mean()
+    
+    # Directional Movement
+    up_move = high_1w.diff()
+    down_move = low_1w.diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed DM
+    plus_di = 100 * (pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean() / atr_1w)
+    minus_di = 100 * (pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean() / atr_1w)
+    
+    # DX and ADX
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx_1w = dx.ewm(alpha=1/14, adjust=False).mean().values
+    
+    # Align ADX to lower timeframe (1d)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    
+    # Calculate volume spike: current volume > 2.0 * 20-period average volume
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicator calculations
+    start_idx = 60  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or
-            np.isnan(atr_14_aligned[i]) or np.isnan(atr_ma_20_aligned[i]) or
+        if (np.isnan(lips_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(jaw_aligned[i]) or np.isnan(adx_1w_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility regime: high volatility = trend following, low volatility = mean reversion
-        high_volatility = atr_14_aligned[i] > atr_ma_20_aligned[i]
+        # Trend conditions based on Alligator alignment
+        # Uptrend: Lips > Teeth > Jaw (all rising)
+        # Downtrend: Lips < Teeth < Jaw (all falling)
+        lips_val = lips_aligned[i]
+        teeth_val = teeth_aligned[i]
+        jaw_val = jaw_aligned[i]
+        
+        # Check if Alligator lines are properly aligned and trending
+        uptrend_aligned = lips_val > teeth_val > jaw_val
+        downtrend_aligned = lips_val < teeth_val < jaw_val
+        
+        # Strong trend filter: ADX > 25
+        strong_trend = adx_1w_aligned[i] > 25
         
         if position == 0:
-            # Long: price breaks above upper Donchian band AND high volatility AND volume confirmation
-            if close[i] > high_20[i] and high_volatility and volume_confirm[i]:
+            # Long: Uptrend alignment AND strong trend AND volume spike
+            if uptrend_aligned and strong_trend and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian band AND high volatility AND volume confirmation
-            elif close[i] < low_20[i] and high_volatility and volume_confirm[i]:
+            # Short: Downtrend alignment AND strong trend AND volume spike
+            elif downtrend_aligned and strong_trend and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below lower Donchian band OR volatility drops
-            if close[i] < low_20[i] or not high_volatility:
+            # Long exit: Trend breaks down OR ADX weakens
+            if not uptrend_aligned or adx_1w_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above upper Donchian band OR volatility drops
-            if close[i] > high_20[i] or not high_volatility:
+            # Short exit: Trend breaks up OR ADX weakens
+            if not downtrend_aligned or adx_1w_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
