@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with Volume Confirmation and ADX Filter
-Hypothesis: Price breaking above/below Donchian Channel (20-period high/low) with volume confirmation 
-(volume > 1.5x average) and trend strength (ADX > 20) indicates strong momentum. 
-Donchian breakouts capture sustained moves, reducing false signals in choppy markets.
+1h Intraday Mean Reversion with 1d RSI Filter and Volume Spike
+Hypothesis: In 1h timeframe, price often reverts to mean after sharp moves. 
+We use 1d RSI to filter regime (RSI<40 for long bias, RSI>60 for short bias) and 
+enter on 1h when price deviates >1.5*ATR from VWAP with volume spike (>2x avg volume).
+This works in both bull/bear as mean reversion persists across regimes.
 Target: 20-40 trades/year to minimize fee drain.
 """
 
@@ -21,94 +22,98 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === 1D INDICATORS (HTF) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # True Range and ATR(20)
+    # 14-period RSI on daily
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    # === 1H INDICATORS (LTF) ===
+    # VWAP (typical price * volume cumulative)
+    typical_price = (high + low + close) / 3
+    vwap = np.cumsum(typical_price * volume) / (np.cumsum(volume) + 1e-10)
+    
+    # ATR for deviation measurement
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # ADX for trend strength (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
-    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
-    
-    di_plus = np.where(tr14 > 0, 100 * dm_plus14 / tr14, 0)
-    di_minus = np.where(tr14 > 0, 100 * dm_minus14 / tr14, 0)
-    
-    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Volume confirmation: volume > 1.5x 20-period EMA
+    # Volume filter: volume > 2x 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_ratio = volume / vol_ema
+    vol_spike = volume > (2 * vol_ema)
+    
+    # Session filter: 08:00-20:00 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # Warmup for indicators (max of 20,20,14)
+    start_idx = 30  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(atr[i]) or 
-            np.isnan(adx[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(vwap[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ema[i])):
             signals[i] = 0.0
             continue
         
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         price = close[i]
-        upper = donch_high[i]
-        lower = donch_low[i]
-        adx_val = adx[i]
-        vol_conf = vol_ratio[i] > 1.5
+        vwap_val = vwap[i]
+        atr_val = atr[i]
+        rsi_val = rsi_1d_aligned[i]
+        vol_ok = vol_spike[i]
+        
+        # Deviation from VWAP
+        dev_upper = vwap_val + 1.5 * atr_val
+        dev_lower = vwap_val - 1.5 * atr_val
         
         if position == 0:
-            # Strong trend (ADX > 20) and volume confirmation
-            # Price breaks above upper Donchian = long
-            if adx_val > 20 and price > upper and vol_conf:
-                signals[i] = 0.25
+            # Long: RSI<40 (oversold bias) + price below VWAP-1.5*ATR + volume spike
+            if rsi_val < 40 and price < dev_lower and vol_ok:
+                signals[i] = 0.20
                 position = 1
-            # Price breaks below lower Donchian = short
-            elif adx_val > 20 and price < lower and vol_conf:
-                signals[i] = -0.25
+            # Short: RSI>60 (overbought bias) + price above VWAP+1.5*ATR + volume spike
+            elif rsi_val > 60 and price > dev_upper and vol_ok:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit if trend weakens or price returns to midpoint
-            midpoint = (upper + lower) / 2
-            if adx_val < 15 or price < midpoint:
+            # Exit: price returns to VWAP or RSI neutral (40-60)
+            if price >= vwap_val or (rsi_val >= 40 and rsi_val <= 60):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit if trend weakens or price returns to midpoint
-            midpoint = (upper + lower) / 2
-            if adx_val < 15 or price > midpoint:
+            # Exit: price returns to VWAP or RSI neutral (40-60)
+            if price <= vwap_val or (rsi_val >= 40 and rsi_val <= 60):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_ADX"
-timeframe = "4h"
+name = "1h_VWAP_MeanReversion_RSI1D_Volume"
+timeframe = "1h"
 leverage = 1.0
