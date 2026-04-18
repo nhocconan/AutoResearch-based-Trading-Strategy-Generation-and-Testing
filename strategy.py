@@ -1,10 +1,16 @@
+# 1d_WeeklyPivot_R4_S4_Breakout_VolumeFilter_v3
+# Hypothesis: Weekly R4/S4 levels act as strong weekly support/resistance. 
+# Breaking above R4 with volume indicates bullish continuation; breaking below S4 indicates bearish continuation.
+# Weekly timeframe reduces noise; volume filter ensures conviction; breakout logic works in both bull/bear markets.
+# Target: 30-100 trades over 4 years (7-25/year) to avoid fee drag.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian20_Volume_Confirm_TrendFilter"
-timeframe = "4h"
+name = "1d_WeeklyPivot_R4_S4_Breakout_VolumeFilter_v3"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,19 +23,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily trend filter: EMA34 on daily close
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Load weekly data for pivot levels
+    df_1w = get_htf_data(prices, '1w')
     
-    # Donchian channels (20-period) on 4h
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate weekly pivot and R4/S4 from previous weekly bar
+    prev_close_w = df_1w['close'].shift(1).values
+    prev_high_w = df_1w['high'].shift(1).values
+    prev_low_w = df_1w['low'].shift(1).values
     
-    # Volume confirmation: current volume > 1.5 * 20-period average
+    pivot_w = (prev_high_w + prev_low_w + prev_close_w) / 3
+    range_w = prev_high_w - prev_low_w
+    R4_w = pivot_w + (range_w * 1.1 / 2) * 2  # R4 = pivot + 1.1*range
+    S4_w = pivot_w - (range_w * 1.1 / 2) * 2  # S4 = pivot - 1.1*range
+    
+    # Align weekly R4/S4 to daily (wait for weekly close)
+    R4_w_aligned = align_htf_to_ltf(prices, df_1w, R4_w)
+    S4_w_aligned = align_htf_to_ltf(prices, df_1w, S4_w)
+    pivot_w_aligned = align_htf_to_ltf(prices, df_1w, pivot_w)
+    
+    # Volume filter: current volume > 2.0 * 20-day average (avoid chop)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    volume_filter = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -38,38 +52,38 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(R4_w_aligned[i]) or np.isnan(S4_w_aligned[i]) or
+            np.isnan(pivot_w_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        upper_channel = high_roll[i]
-        lower_channel = low_roll[i]
-        trend_filter = ema34_1d_aligned[i]
+        R4_val = R4_w_aligned[i]
+        S4_val = S4_w_aligned[i]
+        pivot_val = pivot_w_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: break above upper channel with volume and above daily EMA34
-            if close_val > upper_channel and vol_filter and close_val > trend_filter:
+            # Long: break above R4 with volume
+            if close_val > R4_val and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower channel with volume and below daily EMA34
-            elif close_val < lower_channel and vol_filter and close_val < trend_filter:
+            # Short: break below S4 with volume
+            elif close_val < S4_val and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls back below lower channel
-            if close_val < lower_channel:
+            # Long exit: price falls back below weekly pivot
+            if close_val < pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises back above upper channel
-            if close_val > upper_channel:
+            # Short exit: price rises back above weekly pivot
+            if close_val > pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
