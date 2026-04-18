@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 12h trend filter and volume confirmation.
-# Donchian channels provide clear breakout levels based on price extremes.
-# 12h EMA trend filter ensures we only trade in the direction of higher timeframe trend.
-# Volume confirmation adds conviction to breakouts.
-# Designed for low trade frequency (20-50/year) to minimize fee drag in 4h timeframe.
-# Works in bull markets (breakouts above upper band in uptrend) and bear markets (breakouts below lower band in downtrend).
-name = "4h_Donchian20_12hEMA21_Volume_Filter"
-timeframe = "4h"
+# Hypothesis: 1h RSI mean reversion with 4h trend filter and volume confirmation.
+# RSI(14) < 30 for long, > 70 for short in ranging markets.
+# 4h EMA(50) trend filter ensures we only trade counter-trend in strong trends.
+# Volume spike (>1.5x 20-period average) confirms momentum exhaustion.
+# Session filter (08-20 UTC) reduces noise.
+# Designed for 15-30 trades/year to minimize fee drag in 1h timeframe.
+# Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
+name = "1h_RSI_MeanReversion_4hEMA50_VolumeSpike"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,19 +24,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA trend filter (ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
+    # Get 4h data for trend filter (ONCE before loop)
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate Donchian channels (20-period) using previous period's data to avoid look-ahead
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
-    upper_band = high_20
-    lower_band = low_20
+    # Calculate RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate 12h EMA (21-period)
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
+    
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Calculate 4h EMA(50) for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     # Calculate 20-period average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -50,8 +63,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
-            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -62,37 +74,38 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume above average
-        vol_confirm = volume[i] > vol_ma_20[i]
+        # Volume spike confirmation: current volume > 1.5x average
+        vol_spike = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Long: price breaks above upper band AND 12h EMA uptrend AND volume confirmation
-            long_breakout = close[i] > upper_band[i]
-            uptrend = close[i] > ema_12h_aligned[i]
-            if vol_confirm and uptrend and long_breakout:
-                signals[i] = 0.25
+            # Long: RSI < 30 (oversold) AND price above 4h EMA50 (uptrend) AND volume spike
+            long_condition = rsi[i] < 30 and close[i] > ema_50_4h_aligned[i] and vol_spike
+            # Short: RSI > 70 (overbought) AND price below 4h EMA50 (downtrend) AND volume spike
+            short_condition = rsi[i] > 70 and close[i] < ema_50_4h_aligned[i] and vol_spike
+            
+            if long_condition:
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below lower band AND 12h EMA downtrend AND volume confirmation
-            elif vol_confirm and (not uptrend) and close[i] < lower_band[i]:
-                signals[i] = -0.25
+            elif short_condition:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls below lower band OR 12h EMA turns down
-            exit_condition = close[i] < lower_band[i] or close[i] <= ema_12h_aligned[i]
+            # Long exit: RSI > 50 (mean reversion complete) OR price below 4h EMA50 (trend change)
+            exit_condition = rsi[i] > 50 or close[i] < ema_50_4h_aligned[i]
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price rises above upper band OR 12h EMA turns up
-            exit_condition = close[i] > upper_band[i] or close[i] >= ema_12h_aligned[i]
+            # Short exit: RSI < 50 (mean reversion complete) OR price above 4h EMA50 (trend change)
+            exit_condition = rsi[i] < 50 or close[i] > ema_50_4h_aligned[i]
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
