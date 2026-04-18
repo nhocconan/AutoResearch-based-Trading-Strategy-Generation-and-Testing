@@ -3,9 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: Weekly Bollinger Band breakout with daily volume confirmation
+# Works in bull markets (breakouts continue) and bear markets (mean reversion at bands)
+# Uses weekly timeframe for structure, daily for entry - low frequency to avoid fee drag
+# Target: 15-25 trades/year, fits 1d timeframe constraints
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,31 +18,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for EMA200
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get weekly data for Bollinger Bands
+    df_weekly = get_htf_data(prices, '1w')
+    weekly_close = df_weekly['close'].values
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
     
-    # Calculate EMA200 on daily data
-    close_1d_series = pd.Series(close_1d)
-    ema200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate weekly Bollinger Bands (20, 2.0)
+    weekly_close_series = pd.Series(weekly_close)
+    bb_middle = weekly_close_series.rolling(window=20, min_periods=20).mean().values
+    bb_std = weekly_close_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2.0 * bb_std
+    bb_lower = bb_middle - 2.0 * bb_std
     
-    # Align daily EMA200 to 12h timeframe
-    ema200_12h = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Align weekly BB to daily timeframe (only after weekly bar closes)
+    bb_middle_daily = align_htf_to_ltf(prices, df_weekly, bb_middle)
+    bb_upper_daily = align_htf_to_ltf(prices, df_weekly, bb_upper)
+    bb_lower_daily = align_htf_to_ltf(prices, df_weekly, bb_lower)
     
-    # Calculate 12h EMA34 for trend filter
-    close_series = pd.Series(close)
-    ema34_12h = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Calculate RSI(14) on 12h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate volume moving average (20-period)
+    # Daily volume confirmation (20-period average)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -45,47 +44,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 200, 20)  # need EMA34, EMA200, volume MA
+    start_idx = max(20, 20)  # need BB and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema200_12h[i]) or np.isnan(ema34_12h[i]) or 
-            np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(bb_middle_daily[i]) or np.isnan(bb_upper_daily[i]) or 
+            np.isnan(bb_lower_daily[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3 * 20-period average
-        vol_confirmed = volume[i] > 1.3 * vol_ma[i]
+        # Volume confirmation: current volume > 1.5 * 20-period average
+        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long entry: price above daily EMA200, EMA34 trending up, RSI not overbought, with volume
-            if (close[i] > ema200_12h[i] and 
-                ema34_12h[i] > ema34_12h[i-1] and 
-                rsi[i] < 70 and 
-                vol_confirmed):
+            # Long entry: price breaks above upper BB with volume
+            if close[i] > bb_upper_daily[i] and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price below daily EMA200, EMA34 trending down, RSI not oversold, with volume
-            elif (close[i] < ema200_12h[i] and 
-                  ema34_12h[i] < ema34_12h[i-1] and 
-                  rsi[i] > 30 and 
-                  vol_confirmed):
+            # Short entry: price breaks below lower BB with volume
+            elif close[i] < bb_lower_daily[i] and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price crosses below EMA34 or RSI overbought
-            if close[i] < ema34_12h[i] or rsi[i] > 75:
+            # Long exit: price returns to middle BB (mean reversion)
+            if close[i] < bb_middle_daily[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above EMA34 or RSI oversold
-            if close[i] > ema34_12h[i] or rsi[i] < 25:
+            # Short exit: price returns to middle BB (mean reversion)
+            if close[i] > bb_middle_daily[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA200_EMA34_RSI_Volume_Filter"
-timeframe = "12h"
+name = "Weekly_Bollinger_Breakout_Daily_Volume"
+timeframe = "1d"
 leverage = 1.0
