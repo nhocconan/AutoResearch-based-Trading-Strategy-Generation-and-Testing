@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_1w_Volume_Weighted_VWAP_Slope_Trend
-Hypothesis: Buy when VWAP slope on 1w is positive and volume is above average, with price above VWAP; short when slope negative, volume above average, price below VWAP. Uses weekly VWAP slope as trend filter and volume confirmation to avoid false signals. Designed for low trade frequency (<30/year) to minimize fee decay while capturing sustained trends in both bull and bear markets.
+4h_Keltner_Channel_Breakout_With_Volume_and_1wTrend
+Hypothesis: Breakouts above Keltner upper band with volume confirmation and above 1-week EMA50 indicate strong momentum in bull markets, while breakdowns below lower band with volume and below 1-week EMA50 capture bear market moves. Keltner channels adapt to volatility better than fixed bands, and weekly trend ensures alignment with higher-timeframe momentum. Designed for low trade frequency (target 20-50/year) to minimize fee decay while capturing sustained trends.
 """
 
 import numpy as np
@@ -18,76 +18,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1-week data (HTF)
+    # Keltner Channel (20, 2.0) on 4h
+    # Middle = EMA20, Width = ATR(10) * 2
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr_10 = pd.Series(high - low).ewm(span=10, adjust=False, min_periods=10).mean().values
+    upper = ema_20 + 2.0 * atr_10
+    lower = ema_20 - 2.0 * atr_10
+    
+    # Volume spike: >1.8x 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_spike = volume > (1.8 * vol_ma)
+    
+    # 1-week EMA50 trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Calculate VWAP on 1w: cumulative (price * volume) / cumulative volume
-    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
-    vwap = (typical_price * df_1w['volume']).cumsum() / df_1w['volume'].cumsum()
-    vwap = vwap.values
-    
-    # VWAP slope: 5-period linear regression slope (approximate with 5-bar difference)
-    vwap_slope = np.zeros_like(vwap)
-    for i in range(5, len(vwap)):
-        vwap_slope[i] = (vwap[i] - vwap[i-5]) / 5
-    
-    # Volume average on 1w (20-period)
-    vol_ma_1w = pd.Series(df_1w['volume']).rolling(window=20, min_periods=20).mean().values
-    
-    # Align VWAP, slope, and volume MA to 12h timeframe
-    vwap_aligned = align_htf_to_ltf(prices, df_1w, vwap)
-    vwap_slope_aligned = align_htf_to_ltf(prices, df_1w, vwap_slope)
-    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 50  # Need sufficient history for VWAP and slope
+    start_idx = 50  # Need all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(vwap_aligned[i]) or 
-            np.isnan(vwap_slope_aligned[i]) or
-            np.isnan(vol_ma_1w_aligned[i])):
+        if (np.isnan(upper[i]) or 
+            np.isnan(lower[i]) or
+            np.isnan(volume_spike[i]) or
+            np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vwap_val = vwap_aligned[i]
-        slope = vwap_slope_aligned[i]
-        vol_ma = vol_ma_1w_aligned[i]
-        vol = volume[i]
-        
-        # Volume confirmation: current volume > 1.5x weekly average volume
-        vol_confirm = vol > (1.5 * vol_ma)
+        up = upper[i]
+        lowb = lower[i]
+        vol_spike = volume_spike[i]
+        ema_50_val = ema_50_1w_aligned[i]
         
         if position == 0:
-            # Long: price above VWAP, positive slope, volume confirmation
-            if price > vwap_val and slope > 0 and vol_confirm:
+            # Long: price > upper band with volume spike and above weekly EMA50
+            if price > up and vol_spike and price > ema_50_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below VWAP, negative slope, volume confirmation
-            elif price < vwap_val and slope < 0 and vol_confirm:
+            # Short: price < lower band with volume spike and below weekly EMA50
+            elif price < lowb and vol_spike and price < ema_50_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price crosses below VWAP or slope turns negative
-            if price < vwap_val or slope < 0:
+            # Exit: price < middle line (EMA20) or loss of weekly trend
+            if price < ema_20[i] or price < ema_50_val:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price crosses above VWAP or slope turns positive
-            if price > vwap_val or slope > 0:
+            # Exit: price > middle line or above weekly EMA50
+            if price > ema_20[i] or price > ema_50_val:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_1w_Volume_Weighted_VWAP_Slope_Trend"
-timeframe = "12h"
+name = "4h_Keltner_Channel_Breakout_With_Volume_and_1wTrend"
+timeframe = "4h"
 leverage = 1.0
