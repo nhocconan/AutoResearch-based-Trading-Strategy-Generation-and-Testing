@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-4h Williams %R Mean Reversion with 1d ADX Trend Filter and Volume Spike
-- Uses Williams %R(14) on 4h for mean reversion signals: long when < -80, short when > -20
-- Filters by 1-day ADX > 25 to ensure trending market (avoids chop)
+4h RSI(14) Mean Reversion with 1d ADX Filter and Volume Spike
+- Long when RSI < 30, short when RSI > 70 in trending markets (ADX > 25)
 - Requires volume > 1.5x 20-period average for confirmation
-- Exits when Williams %R crosses back through -50 (mean reversion complete)
+- Exits when RSI crosses back through 50 (mean reversion complete)
 - Designed for 20-50 trades/year to minimize fee drag
 """
 
@@ -12,23 +11,35 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_williams_r(high, low, close, period):
-    """Calculate Williams %R with proper handling."""
-    highest_high = np.full(len(high), np.nan)
-    lowest_low = np.full(len(low), np.nan)
+def calculate_rsi(close, period):
+    """Calculate Relative Strength Index."""
+    if len(close) < period + 1:
+        return np.full(len(close), np.nan)
     
-    for i in range(period-1, len(high)):
-        highest_high[i] = np.max(high[i-period+1:i+1])
-        lowest_low[i] = np.min(low[i-period+1:i+1])
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    williams_r = np.full(len(close), np.nan)
-    for i in range(period-1, len(close)):
-        if highest_high[i] != lowest_low[i]:
-            williams_r[i] = -100 * (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i])
+    avg_gain = np.full(len(close), np.nan)
+    avg_loss = np.full(len(close), np.nan)
+    
+    if len(gain) >= period:
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
+        for i in range(period + 1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
+    
+    rs = np.full(len(close), np.nan)
+    rsi = np.full(len(close), np.nan)
+    for i in range(period, len(close)):
+        if avg_loss[i] != 0:
+            rs[i] = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs[i]))
         else:
-            williams_r[i] = -50  # neutral when no range
+            rsi[i] = 100  # when no losses
     
-    return williams_r
+    return rsi
 
 def calculate_adx(high, low, close, period):
     """Calculate Average Directional Index with Wilder's smoothing."""
@@ -105,7 +116,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Williams %R and volume
+    # Get 4h data for RSI and volume
     df_4h = get_htf_data(prices, '4h')
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
@@ -118,8 +129,8 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Williams %R(14) on 4h
-    williams_r_4h = calculate_williams_r(high_4h, low_4h, close_4h, 14)
+    # Calculate RSI(14) on 4h
+    rsi_4h = calculate_rsi(close_4h, 14)
     
     # Calculate 1-day ADX(14)
     adx_14_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
@@ -130,18 +141,18 @@ def generate_signals(prices):
     # Align 1d ADX to 4h timeframe
     adx_14_1d_4h = align_htf_to_ltf(prices, df_1d, adx_14_1d)
     
-    # Align 4h Williams %R and volume MA to 4h (no alignment needed)
-    williams_r_4h_aligned = williams_r_4h
+    # Align 4h RSI and volume MA to 4h (no alignment needed)
+    rsi_4h_aligned = rsi_4h
     vol_ma_4h_aligned = vol_ma_4h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # need sufficient data for Williams %R, ADX, and volume MA
+    start_idx = 40  # need sufficient data for RSI, ADX, and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(williams_r_4h_aligned[i]) or np.isnan(adx_14_1d_4h[i]) or 
+        if (np.isnan(rsi_4h_aligned[i]) or np.isnan(adx_14_1d_4h[i]) or 
             np.isnan(vol_ma_4h_aligned[i])):
             signals[i] = 0.0
             continue
@@ -153,26 +164,26 @@ def generate_signals(prices):
         vol_spike = vol_4h_aligned[i] > 1.5 * vol_ma_4h_aligned[i]
         
         if position == 0:
-            # Long: Williams %R < -80 (oversold), volume spike, ADX > 25
-            if williams_r_4h_aligned[i] < -80 and vol_spike and adx_14_1d_4h[i] > 25:
+            # Long: RSI < 30 (oversold), volume spike, ADX > 25
+            if rsi_4h_aligned[i] < 30 and vol_spike and adx_14_1d_4h[i] > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R > -20 (overbought), volume spike, ADX > 25
-            elif williams_r_4h_aligned[i] > -20 and vol_spike and adx_14_1d_4h[i] > 25:
+            # Short: RSI > 70 (overbought), volume spike, ADX > 25
+            elif rsi_4h_aligned[i] > 70 and vol_spike and adx_14_1d_4h[i] > 25:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Williams %R crosses back above -50 (mean reversion)
-            if williams_r_4h_aligned[i] > -50:
+            # Long exit: RSI crosses back above 50 (mean reversion)
+            if rsi_4h_aligned[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Williams %R crosses back below -50 (mean reversion)
-            if williams_r_4h_aligned[i] < -50:
+            # Short exit: RSI crosses back below 50 (mean reversion)
+            if rsi_4h_aligned[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -180,6 +191,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_ADX14_VolumeSpike"
+name = "4h_RSI14_ADX14_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
