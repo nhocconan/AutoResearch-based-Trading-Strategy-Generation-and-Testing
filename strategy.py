@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Pivot_R1S1_Breakout_VolumeSpike_1dEMA34
-Hypothesis: Daily pivot levels (R1, S1) act as strong support/resistance on the 12h chart.
-Breakouts beyond these levels with volume confirmation and 1d EMA34 trend filter capture momentum.
-Designed for 12-37 trades/year on 12h timeframe with low trade frequency to minimize fee fade.
-Works in bull/bear markets by requiring volume spike and 1d EMA34 trend filter.
+4h_Pivot_R1S1_Breakout_Volume_1dATRStop
+Hypothesis: Breakouts beyond daily pivot R1/S1 levels with volume confirmation and 1d ATR stop loss capture momentum while limiting downside. Designed for 20-40 trades/year on 4h timeframe with low trade frequency to minimize fee drift. Works in bull/bear markets by requiring volume spike and using volatility-based stops.
 """
 
 import numpy as np
@@ -21,10 +18,10 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivot calculation (once before loop)
+    # Get 1d data for pivot and ATR calculation (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d pivot points using standard formula
+    # Calculate daily pivot points using standard formula
     # P = (H + L + C) / 3
     # R1 = 2*P - L
     # S1 = 2*P - H
@@ -41,27 +38,31 @@ def generate_signals(prices):
     r1_prev = r1.shift(1).values
     s1_prev = s1.shift(1).values
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_prev)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_prev)
     
-    # Get 1d data for EMA trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1d ATR (14) for stop loss
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr2 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, tr2)])
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Volume spike: 2x 20-period average on 12h
+    # Volume spike: 2x 20-period average on 4h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
+    entry_price = 0.0
     
     start_idx = 100
     
     for i in range(start_idx, n):
         if (np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(atr_14_1d_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -69,36 +70,38 @@ def generate_signals(prices):
         price = close[i]
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
-        ema_trend = ema_34_1d_aligned[i]
+        atr = atr_14_1d_aligned[i]
         
         if position == 0:
-            # Long: break above R1 with volume spike and price above 1d EMA (uptrend)
-            if price > r1_val and volume_spike[i] and price > ema_trend:
+            # Long: break above R1 with volume spike
+            if price > r1_val and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with volume spike and price below 1d EMA (downtrend)
-            elif price < s1_val and volume_spike[i] and price < ema_trend:
+                entry_price = price
+            # Short: break below S1 with volume spike
+            elif price < s1_val and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         elif position == 1:
             # Long position
             signals[i] = 0.25
-            # Exit: price returns to S1 or breaks below 1d EMA
-            if price <= s1_val or price < ema_trend:
+            # Exit: price returns to S1 or hits ATR stop
+            if price <= s1_val or price <= entry_price - 1.5 * atr:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position
             signals[i] = -0.25
-            # Exit: price returns to R1 or breaks above 1d EMA
-            if price >= r1_val or price > ema_trend:
+            # Exit: price returns to R1 or hits ATR stop
+            if price >= r1_val or price >= entry_price + 1.5 * atr:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Pivot_R1S1_Breakout_VolumeSpike_1dEMA34"
-timeframe = "12h"
+name = "4h_Pivot_R1S1_Breakout_Volume_1dATRStop"
+timeframe = "4h"
 leverage = 1.0
