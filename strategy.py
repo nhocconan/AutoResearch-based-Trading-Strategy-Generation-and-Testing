@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Pivot_R1S1_Breakout_Trend_Filter_v1
-Hypothesis: Weekly pivot levels (R1/S1) act as strong support/resistance on daily timeframe.
-Buy when price breaks above R1 with bullish trend filter (price > 50 EMA), sell when breaks below S1 with bearish trend (price < 50 EMA).
-Uses volume confirmation to avoid false breakouts. Designed for low frequency (~10-15 trades/year) to minimize fee drag.
-Works in bull via trend-following breaks and bear via mean-reversion at extreme pivots.
+12h_1w_VWAP_Reversion_with_Volume_Confirmation
+Hypothesis: Price reverts to weekly VWAP after significant deviations, with volume confirmation filtering false signals.
+Works in bull/bear as mean reversion around institutional value areas. Target: 15-25 trades/year.
 """
 
 import numpy as np
@@ -21,80 +19,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly pivot points from previous week
+    # Weekly VWAP calculation
     df_1w = get_htf_data(prices, '1w')
-    # Need at least 2 weeks of data to calculate pivots from previous week
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
+    vwap_numerator = (typical_price * df_1w['volume']).cumsum()
+    vwap_denominator = df_1w['volume'].cumsum()
+    vwap = vwap_numerator / vwap_denominator
+    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap.values)
     
-    # Use previous week's OHLC to calculate pivot points for current week
-    # Shift by 1 to use previous week's data
-    prev_week_high = df_1w['high'].shift(1).values
-    prev_week_low = df_1w['low'].shift(1).values
-    prev_week_close = df_1w['close'].shift(1).values
+    # 12-period ATR for volatility filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = np.zeros(n)
+    for i in range(12, n):
+        atr[i] = np.mean(tr[i-11:i+1])
     
-    # Calculate pivot points
-    pivot = (prev_week_high + prev_week_low + prev_week_close) / 3
-    r1 = 2 * pivot - prev_week_low
-    s1 = 2 * pivot - prev_week_high
-    
-    # Align to daily timeframe (wait for weekly bar to close)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    
-    # EMA trend filter (50-period on daily)
-    close_series = pd.Series(close)
-    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Volume confirmation: >1.5x 20-day average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # Volume spike: >2x 24-period average (2 days at 12h)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 50  # Need enough data for EMA
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(ema_50[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(vwap_1w_aligned[i]) or np.isnan(atr[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema_val = ema_50[i]
+        vwap_val = vwap_1w_aligned[i]
+        atr_val = atr[i]
         vol_spike = volume_spike[i]
         
+        # Deviation from VWAP in ATR units
+        if atr_val > 0:
+            deviation = (price - vwap_val) / atr_val
+        else:
+            deviation = 0
+        
         if position == 0:
-            # Long: price breaks above R1 with bullish trend and volume
-            if price > r1_val and price > ema_val and vol_spike:
+            # Long when price significantly below VWAP with volume spike
+            if deviation < -1.5 and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with bearish trend and volume
-            elif price < s1_val and price < ema_val and vol_spike:
+            # Short when price significantly above VWAP with volume spike
+            elif deviation > 1.5 and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price crosses below pivot or trend turns bearish
-            if price < pivot_aligned[i] or price < ema_val:
+            # Exit when price returns to VWAP or overextends further
+            if deviation > -0.5 or deviation < -3.0:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price crosses above pivot or trend turns bullish
-            if price > pivot_aligned[i] or price > ema_val:
+            # Exit when price returns to VWAP or overextends further
+            if deviation < 0.5 or deviation > 3.0:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Weekly_Pivot_R1S1_Breakout_Trend_Filter_v1"
-timeframe = "1d"
+name = "12h_1w_VWAP_Reversion_with_Volume_Confirmation"
+timeframe = "12h"
 leverage = 1.0
