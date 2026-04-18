@@ -1,26 +1,32 @@
-# 1d_KAMA_Trend_Filter_With_Volume_Spike
-# Hypothesis: KAMA trend direction on 1d with volume spike confirmation and 1w trend filter.
-# Buy when KAMA turns up with volume spike and weekly uptrend; short when KAMA turns down with volume spike and weekly downtrend.
-# Uses only 3 conditions (KAMA turn, volume spike, weekly trend) to keep trades ~15-25/year.
-# Designed for 1d timeframe to avoid overtrading and work in both bull and bear markets via trend alignment.
+#!/usr/bin/env python3
+"""
+6h_Trix_15_Signal_MeanReversion
+Hypothesis: TRIX (triple-smoothed EMA) identifies overbought/oversold conditions.
+In ranging markets (6h), TRIX > 0.15 signals overextended long, TRIX < -0.15 signals overextended short.
+Mean reversion to TRIX=0 works in both bull and bear regimes as price oscillates around mean.
+Uses 1d trend filter: only take long signals when price > 1d EMA50, short when price < 1d EMA50.
+Targets 15-30 trades/year to minimize fee decay while capturing mean reversion swings.
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_kama(close, er_length=10, fast_sc=2, slow_sc=30):
-    """Calculate Kaufman Adaptive Moving Average."""
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    # Fix: volatility should be rolling sum of changes
-    volatility = pd.Series(change).rolling(window=er_length, min_periods=1).sum().values
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    return kama
+def calculate_trix(close, period=15):
+    """Calculate TRIX: triple EMA of log returns."""
+    # Calculate log returns
+    log_close = np.log(close)
+    # First EMA
+    ema1 = pd.Series(log_close).ewm(span=period, adjust=False, min_periods=period).mean().values
+    # Second EMA
+    ema2 = pd.Series(ema1).ewm(span=period, adjust=False, min_periods=period).mean().values
+    # Third EMA
+    ema3 = pd.Series(ema2).ewm(span=period, adjust=False, min_periods=period).mean().values
+    # TRIX = percentage change of third EMA
+    trix = np.diff(ema3, prepend=ema3[0]) / ema3[:-1] * 100
+    # Handle first element
+    trix = np.insert(trix, 0, 0.0)
+    return trix
 
 def generate_signals(prices):
     n = len(prices)
@@ -28,85 +34,56 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for KAMA
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    kama = calculate_kama(df_1d['close'].values)
-    kama_1d = align_htf_to_ltf(prices, df_1d, kama)
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # Simple trend: price above/below 50-period EMA on weekly
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Volume spike: >2.0x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Calculate TRIX on 6h close
+    trix = calculate_trix(close, 15)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 20)  # Warmup for weekly EMA and volume
+    start_idx = 50  # Warmup for TRIX and EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_1d[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or
-            np.isnan(volume_spike[i])):
+        if np.isnan(trix[i]) or np.isnan(ema_50_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        kama_val = kama_1d[i]
-        ema50w = ema_50_1w_aligned[i]
-        vol_spike = volume_spike[i]
-        
-        # Detect KAMA turning points (using 2-bar lookback for confirmation)
-        if i >= 2:
-            kama_prev = kama_1d[i-1]
-            kama_prev2 = kama_1d[i-2]
-            kama_rising = kama_val > kama_prev and kama_prev > kama_prev2
-            kama_falling = kama_val < kama_prev and kama_prev < kama_prev2
-        else:
-            kama_rising = False
-            kama_falling = False
+        trix_val = trix[i]
+        ema50 = ema_50_1d_aligned[i]
         
         if position == 0:
-            # Long: KAMA turning up with volume spike and weekly uptrend
-            if kama_rising and vol_spike and price > ema50w:
+            # Long: TRIX oversold (< -0.15) and price above 1d EMA50 (uptrend filter)
+            if trix_val < -0.15 and price > ema50:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA turning down with volume spike and weekly downtrend
-            elif kama_falling and vol_spike and price < ema50w:
+            # Short: TRIX overbought (> 0.15) and price below 1d EMA50 (downtrend filter)
+            elif trix_val > 0.15 and price < ema50:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: KAMA turns down OR weekly trend turns down
-            if kama_falling:
-                signals[i] = 0.0
-                position = 0
-            elif price < ema50w:
+            # Exit: TRIX returns to zero (mean reversion) or trend fails
+            if trix_val >= 0.0 or price < ema50:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: KAMA turns up OR weekly trend turns up
-            if kama_rising:
-                signals[i] = 0.0
-                position = 0
-            elif price > ema50w:
+            # Exit: TRIX returns to zero (mean reversion) or trend fails
+            if trix_val <= 0.0 or price > ema50:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_KAMA_Trend_Filter_With_Volume_Spike"
-timeframe = "1d"
+name = "6h_Trix_15_Signal_MeanReversion"
+timeframe = "6h"
 leverage = 1.0
