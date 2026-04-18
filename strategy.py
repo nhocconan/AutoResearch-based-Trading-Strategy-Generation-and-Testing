@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 4h_1D_Camarilla_R1S1_Breakout_Volume_V1
-Hypothesis: Use daily Camarilla R1/S1 levels for directional bias on 4h timeframe.
-Enter long when price breaks above daily R1 with volume > 1.3x average during active session (08-20 UTC).
-Enter short when price breaks below daily S1 with volume > 1.3x average during active session.
-Fixed position size 0.25. Uses volatility filter (ATR) to avoid chop.
-Target: 20-40 trades/year per symbol (80-160 total over 4 years) to minimize fee drag.
+Hypothesis: Use 1D Camarilla R1/S1 for directional bias with 4H entry.
+Long when price breaks above daily R1 with volume > 1.3x average during active session (08-20 UTC).
+Short when price breaks below daily S1 with volume > 1.3x average during active session.
+Fixed position size 0.25. Added volatility filter (ATR) to avoid chop.
+Target: 20-50 trades/year per symbol (80-200 total over 4 years) to minimize fee drag.
 Works in bull/bear via volatility regime filter and session timing.
 """
 
