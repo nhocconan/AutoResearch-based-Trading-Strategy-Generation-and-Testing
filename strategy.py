@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_1W_Camarilla_R1S1_Breakout_Volume_Sparse_v3
-Hypothesis: Use weekly and daily price action with sparse entries - only trade when weekly trend aligns with daily breakout, volume confirms, and price is outside weekly Bollinger Bands. Target 15-25 trades/year to avoid fee drag. Works in bull via weekly uptrend + daily breakouts, in bear via weekly downtrend + daily breakdowns. Bollinger Band filter ensures we only trade significant moves, reducing whipsaw.
+4h_Donchian_Breakout_Volume_Trend_Filter_v1
+Hypothesis: 4-hour Donchian(20) breakouts with volume confirmation (>1.5x 20-period avg) and ADX(14) > 25 for trend strength. 
+Long when price breaks above upper band, short when breaks below lower band. 
+Exit when price returns to midpoint or ADX drops below 20. 
+Uses daily timeframe for context but primary signals on 4h. 
+Designed for low trade frequency (target 20-40/year) to minimize fee impact and work in both bull/bear markets via trend filter.
 """
 
 import numpy as np
@@ -18,109 +22,114 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend and Bollinger Bands
-    df_1w = get_htf_data(prices, '1w')
+    # Get 4h data for primary calculations
+    df_4h = get_htf_data(prices, '4h')
     
-    # Get daily data for entry signals
+    # Get 1d data for context (optional filter)
     df_1d = get_htf_data(prices, '1d')
     
-    # Weekly calculations
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # 4h Donchian channels (20-period)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Previous week's OHLC for calculations
-    prev_close_1w = np.roll(close_1w, 1)
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_close_1w[0] = close_1w[0]
-    prev_high_1w[0] = high_1w[0]
-    prev_low_1w[0] = low_1w[0]
+    # Upper band: highest high of last 20 periods
+    upper_band = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    # Lower band: lowest low of last 20 periods
+    lower_band = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Middle band: average of upper and lower
+    middle_band = (upper_band + lower_band) / 2
     
-    # Weekly Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
-    close_1w_series = pd.Series(close_1w)
-    bb_middle = close_1w_series.rolling(window=bb_period, min_periods=bb_period).mean().values
-    bb_std_dev = close_1w_series.rolling(window=bb_period, min_periods=bb_period).std().values
-    bb_upper = bb_middle + bb_std_dev * bb_std
-    bb_lower = bb_middle - bb_std_dev * bb_std
+    # 4h ADX for trend strength
+    # True Range
+    tr1 = np.maximum(high_4h - low_4h, np.abs(high_4h - np.roll(close_4h, 1)))
+    tr2 = np.abs(np.roll(close_4h, 1) - low_4h)
+    tr = np.maximum(tr1, tr2)
+    tr[0] = high_4h[0] - low_4h[0]
     
-    # Weekly trend: price above/below middle band
-    weekly_uptrend = close_1w > bb_middle
-    weekly_downtrend = close_1w < bb_middle
+    # Directional Movement
+    up_move = np.maximum(high_4h - np.roll(high_4h, 1), 0)
+    down_move = np.maximum(np.roll(low_4h, 1) - low_4h, 0)
+    up_move[0] = 0
+    down_move[0] = 0
     
-    # Daily calculations for entry
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Smoothed values (Wilder's smoothing)
+    tr_period = 14
+    tr_smooth = np.zeros_like(tr)
+    tr_smooth[tr_period] = np.nansum(tr[1:tr_period+1]) if not np.isnan(tr).all() else 0
+    for i in range(tr_period + 1, len(tr)):
+        tr_smooth[i] = tr_smooth[i-1] - (tr_smooth[i-1] / tr_period) + tr[i]
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d[0] = close_1d[0]
-    prev_high_1d[0] = high_1d[0]
-    prev_low_1d[0] = low_1d[0]
+    up_smooth = np.zeros_like(up_move)
+    down_smooth = np.zeros_like(down_move)
+    up_smooth[tr_period] = np.nansum(up_move[1:tr_period+1]) if not np.isnan(up_move).all() else 0
+    down_smooth[tr_period] = np.nansum(down_move[1:tr_period+1]) if not np.isnan(down_move).all() else 0
+    for i in range(tr_period + 1, len(up_move)):
+        up_smooth[i] = up_smooth[i-1] - (up_smooth[i-1] / tr_period) + up_move[i]
+        down_smooth[i] = down_smooth[i-1] - (down_smooth[i-1] / tr_period) + down_move[i]
     
-    # Daily Camarilla levels: R1 = close + (high-low)*1.1/12, S1 = close - (high-low)*1.1/12
-    range_1d = prev_high_1d - prev_low_1d
-    r1_1d = prev_close_1d + range_1d * 1.1 / 12
-    s1_1d = prev_close_1d - range_1d * 1.1 / 12
+    # Directional Indicators
+    plus_di = 100 * up_smooth / tr_smooth
+    minus_di = 100 * down_smooth / tr_smooth
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
     
-    # Align all higher timeframe data to daily
-    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend)
-    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend)
-    bb_upper_aligned = align_htf_to_ltf(prices, df_1w, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_1w, bb_lower)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # ADX
+    adx_period = 14
+    adx = np.zeros_like(dx)
+    adx[2*adx_period] = np.nanmean(dx[adx_period:2*adx_period+1]) if not np.isnan(dx).all() else 0
+    for i in range(2*adx_period + 1, len(dx)):
+        adx[i] = (adx[i-1] * (adx_period - 1) + dx[i]) / adx_period
     
-    # Volume confirmation: current volume > 1.8x 20-day average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > 1.8 * vol_ma
+    
+    # Align all 4h data to 4h timeframe (no alignment needed as we're using 4h data directly)
+    # But we need to align to the lower timeframe if we were using lower TF data
+    # Since we're generating signals at 4h frequency, we use the 4h arrays directly
+    
+    # However, prices dataframe is at 1min? No - it's at the strategy's timeframe
+    # The prices dataframe passed in is at the timeframe specified (4h in this case)
+    # So we can use the values directly
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # need enough for BB and averages
+    start_idx = max(20, 2*adx_period)  # need enough for Donchian and ADX
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(weekly_uptrend_aligned[i]) or np.isnan(weekly_downtrend_aligned[i]) or 
-            np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or
-            np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(middle_band[i]) or np.isnan(adx[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        
+        # Trend filter: ADX > 25 for strong trend
+        trend_filter = adx[i] > 25
+        
         if position == 0:
-            # Long: weekly uptrend, price breaks above daily R1, above weekly upper BB, volume confirms
-            if (weekly_uptrend_aligned[i] and 
-                close[i] > r1_1d_aligned[i] and 
-                close[i] > bb_upper_aligned[i] and 
-                vol_confirm[i]):
+            # Long: price breaks above upper band with volume and trend
+            if close[i] > upper_band[i] and vol_confirm and trend_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: weekly downtrend, price breaks below daily S1, below weekly lower BB, volume confirms
-            elif (weekly_downtrend_aligned[i] and 
-                  close[i] < s1_1d_aligned[i] and 
-                  close[i] < bb_lower_aligned[i] and 
-                  vol_confirm[i]):
+            # Short: price breaks below lower band with volume and trend
+            elif close[i] < lower_band[i] and vol_confirm and trend_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns below daily R1 or weekly trend changes
-            if close[i] < r1_1d_aligned[i] or not weekly_uptrend_aligned[i]:
+            # Long exit: price returns to middle band or trend weakens
+            if close[i] < middle_band[i] or adx[i] < 20:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns above daily S1 or weekly trend changes
-            if close[i] > s1_1d_aligned[i] or not weekly_downtrend_aligned[i]:
+            # Short exit: price returns to middle band or trend weakens
+            if close[i] > middle_band[i] or adx[i] < 20:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -128,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1W_Camarilla_R1S1_Breakout_Volume_Sparse_v3"
-timeframe = "1d"
+name = "4h_Donchian_Breakout_Volume_Trend_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
