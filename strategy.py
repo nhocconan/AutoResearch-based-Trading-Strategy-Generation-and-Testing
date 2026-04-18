@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Pivot_R1S1_Breakout_12hEMA34_Volume_Filtered
-Hypothesis: Uses Camarilla pivot levels from daily timeframe combined with EMA34 trend filter on 12h timeframe.
-Enters long when price breaks above R1 level with EMA34 rising and volume confirmation.
-Enters short when price breaks below S1 level with EMA34 falling and volume confirmation.
-Designed for low-moderate trade frequency (~20-50/year) with strong performance in both bull and bear markets.
+6h_RSI_Trend_Filter_v2
+Hypothesis: Combines RSI(14) with EMA(50) trend filter on 6h timeframe, enhanced with 1d trend confirmation.
+Enters long when RSI crosses above 50 with rising EMA50 and 1d EMA50 uptrend, short when RSI crosses below 50 with falling EMA50 and 1d EMA50 downtrend.
+Designed for moderate trade frequency (~15-25/year) with trend-following capability in both bull and bear markets.
+Uses volume confirmation to filter low-quality signals.
 """
 
 import numpy as np
@@ -17,39 +17,68 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY CAMARILLA PIVOT LEVELS (HTF) ===
+    # RSI(14) calculation
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    
+    for i in range(14, n):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[0:14])
+            avg_loss[i] = np.mean(loss[0:14])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
+    
+    rs = np.full(n, np.nan)
+    rsi = np.full(n, np.nan)
+    for i in range(14, n):
+        if avg_loss[i] != 0:
+            rs[i] = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs[i]))
+        else:
+            rsi[i] = 100
+    
+    # EMA(50) for trend filter (6h)
+    ema50 = np.full(n, np.nan)
+    k = 2 / (50 + 1)
+    for i in range(50, n):
+        if i == 50:
+            ema50[i] = np.mean(close[0:51])
+        else:
+            ema50[i] = close[i] * k + ema50[i-1] * (1 - k)
+    
+    # EMA50 slope (trend direction)
+    ema50_slope = np.full(n, np.nan)
+    for i in range(51, n):
+        ema50_slope[i] = ema50[i] - ema50[i-1]
+    
+    # Get 1d EMA50 for higher timeframe trend confirmation
     df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 51:
+        return np.zeros(n)
     
-    # Calculate Camarilla pivots: P = (H+L+C)/3
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    hl_range = df_1d['high'] - df_1d['low']
+    close_1d = df_1d['close'].values
+    ema50_1d = np.full(len(close_1d), np.nan)
+    for i in range(50, len(close_1d)):
+        if i == 50:
+            ema50_1d[i] = np.mean(close_1d[0:51])
+        else:
+            ema50_1d[i] = close_1d[i] * k + ema50_1d[i-1] * (1 - k)
     
-    camarilla_pivot = typical_price.values
-    camarilla_r1 = typical_price.values + hl_range.values * 1.1 / 12
-    camarilla_s1 = typical_price.values - hl_range.values * 1.1 / 12
+    ema50_1d_slope = np.full(len(close_1d), np.nan)
+    for i in range(51, len(close_1d)):
+        ema50_1d_slope[i] = ema50_1d[i] - ema50_1d[i-1]
     
-    # Align to 4h timeframe with proper delay (use previous day's close for calculation)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Align 1d EMA50 slope to 6h timeframe
+    ema50_1d_slope_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d_slope)
     
-    # === 12H EMA34 TREND FILTER (MTF) ===
-    df_12h = get_htf_data(prices, '12h')
-    ema34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
-    
-    # EMA34 slope for trend direction
-    ema34_slope = np.full(n, np.nan)
-    for i in range(1, n):
-        if not np.isnan(ema34_aligned[i]) and not np.isnan(ema34_aligned[i-1]):
-            ema34_slope[i] = ema34_aligned[i] - ema34_aligned[i-1]
-    
-    # === VOLUME CONFIRMATION ===
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -61,33 +90,31 @@ def generate_signals(prices):
     start_idx = 60  # Warmup
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema34_aligned[i]) or np.isnan(ema34_slope[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(rsi[i]) or np.isnan(ema50[i]) or np.isnan(ema50_slope[i]) or np.isnan(vol_ma[i]) or np.isnan(ema50_1d_slope_aligned[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: Price breaks above R1 with rising EMA34 and volume spike
-            if close[i] > r1_aligned[i] and ema34_slope[i] > 0 and vol_spike[i]:
+            # Long: RSI crosses above 50 with rising EMA50, rising 1d EMA50, and volume spike
+            if rsi[i] > 50 and rsi[i-1] <= 50 and ema50_slope[i] > 0 and ema50_1d_slope_aligned[i] > 0 and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with falling EMA34 and volume spike
-            elif close[i] < s1_aligned[i] and ema34_slope[i] < 0 and vol_spike[i]:
+            # Short: RSI crosses below 50 with falling EMA50, falling 1d EMA50, and volume spike
+            elif rsi[i] < 50 and rsi[i-1] >= 50 and ema50_slope[i] < 0 and ema50_1d_slope_aligned[i] < 0 and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Price returns to pivot level or EMA34 turns down
-            if close[i] < pivot_aligned[i] or ema34_slope[i] <= 0:
+            # Exit: RSI crosses below 50 or EMA50 turns down or 1d EMA50 turns down
+            if rsi[i] < 50 or ema50_slope[i] <= 0 or ema50_1d_slope_aligned[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Price returns to pivot level or EMA34 turns up
-            if close[i] > pivot_aligned[i] or ema34_slope[i] >= 0:
+            # Exit: RSI crosses above 50 or EMA50 turns up or 1d EMA50 turns up
+            if rsi[i] > 50 or ema50_slope[i] >= 0 or ema50_1d_slope_aligned[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -95,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Pivot_R1S1_Breakout_12hEMA34_Volume_Filtered"
-timeframe = "4h"
+name = "6h_RSI_Trend_Filter_v2"
+timeframe = "6h"
 leverage = 1.0
