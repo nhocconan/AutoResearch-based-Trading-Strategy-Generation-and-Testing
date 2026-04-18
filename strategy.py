@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_12hEMA34_Volume_Momentum
-Hypothesis: Uses 1d Camarilla R1/S1 breakouts with 12h EMA34 trend filter and volume spike confirmation to capture strong moves. Filters out weak breakouts with momentum check (price > EMA34 for longs, < EMA34 for shorts). Designed for fewer, higher-quality trades to reduce fee drag and improve robustness in bull and bear markets.
+1h_Time_Range_Reversal
+Hypothesis: Trade mean reversions during high-liquidity London/NY overlap (08-12 UTC) and NY alone (12-16 UTC). Uses 4h RSI(14) for direction and 1h Stochastic for entry timing. Low-frequency (~20 trades/year) to avoid fee drag, works in ranging markets (2025+).
 """
 
 import numpy as np
@@ -10,116 +10,106 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 4h data for RSI direction filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 14:
         return np.zeros(n)
     
-    # Get 12h data for EMA34 trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
-        return np.zeros(n)
+    # Calculate 4h RSI(14)
+    close_4h = df_4h['close'].values
+    delta = np.diff(close_4h, prepend=close_4h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate 1d Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    camarilla_r1 = np.zeros_like(close_1d)
-    camarilla_s1 = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
-        if i == 0:
-            camarilla_r1[i] = close_1d[i]
-            camarilla_s1[i] = close_1d[i]
+    avg_gain = np.zeros_like(close_4h)
+    avg_loss = np.zeros_like(close_4h)
+    for i in range(len(close_4h)):
+        if i < 14:
+            if i > 0:
+                avg_gain[i] = np.mean(gain[:i+1])
+                avg_loss[i] = np.mean(loss[:i+1])
+            else:
+                avg_gain[i] = gain[0]
+                avg_loss[i] = loss[0]
         else:
-            rang = high_1d[i-1] - low_1d[i-1]
-            camarilla_r1[i] = close_1d[i-1] + rang * 1.1 / 12
-            camarilla_s1[i] = close_1d[i-1] - rang * 1.1 / 12
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Align 1d Camarilla levels to 4h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_4h = 100 - (100 / (1 + rs))
     
-    # Calculate 12h EMA34 for trend filter
-    close_12h = df_12h['close'].values
-    ema_34_12h = np.zeros_like(close_12h)
-    ema_34_12h[:] = np.nan
-    if len(close_12h) >= 34:
-        k = 2 / (34 + 1)
-        ema_34_12h[33] = np.mean(close_12h[:34])
-        for i in range(34, len(close_12h)):
-            ema_34_12h[i] = close_12h[i] * k + ema_34_12h[i-1] * (1 - k)
+    # Align 4h RSI to 1h
+    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
     
-    # Align 12h EMA34 to 4h timeframe
-    ema_34_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Calculate 1h Stochastic(14,3,3) for entry
+    lowest_low = np.zeros_like(low)
+    highest_high = np.zeros_like(high)
+    for i in range(n):
+        start_idx = max(0, i - 13)
+        lowest_low[i] = np.min(low[start_idx:i+1])
+        highest_high[i] = np.max(high[start_idx:i+1])
     
-    # Volume confirmation: current volume > 1.8x 20-period average
-    vol_ma = np.zeros_like(volume)
-    for i in range(len(volume)):
-        if i < 20:
-            vol_ma[i] = np.mean(volume[0:i+1]) if i >= 0 else volume[i]
-        else:
-            vol_ma[i] = np.mean(volume[i-20+1:i+1])
-    vol_spike = volume > (vol_ma * 1.8)
+    stoch_k = np.where((highest_high - lowest_low) != 0, 
+                       (close - lowest_low) / (highest_high - lowest_low) * 100, 50)
+    
+    stoch_d = np.zeros_like(stoch_k)
+    for i in range(n):
+        start_idx = max(0, i - 2)
+        stoch_d[i] = np.mean(stoch_k[start_idx:i+1])
+    
+    # Session filter: 08-16 UTC (London/NY overlap + NY)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours < 16)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0
     
-    start_idx = 35  # Warmup for EMA
+    start_idx = 20  # Warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i])):
+        if not in_session[i]:
             signals[i] = 0.0
             continue
         
-        bars_since_entry += 1
+        if np.isnan(rsi_4h_aligned[i]) or np.isnan(stoch_k[i]) or np.isnan(stoch_d[i]):
+            signals[i] = 0.0
+            continue
         
         if position == 0:
-            # Long: price breaks above R1 with volume spike and above 12h EMA34
-            if close[i] > camarilla_r1_aligned[i] and vol_spike[i] and close[i] > ema_34_aligned[i]:
-                signals[i] = 0.25
+            # Long: 4h RSI < 40 (not strong downtrend) + Stochastic bullish crossover from oversold
+            if rsi_4h_aligned[i] < 40 and stoch_k[i-1] < stoch_d[i-1] and stoch_k[i] > stoch_d[i] and stoch_k[i] < 30:
+                signals[i] = 0.20
                 position = 1
-                bars_since_entry = 0
-            # Short: price breaks below S1 with volume spike and below 12h EMA34
-            elif close[i] < camarilla_s1_aligned[i] and vol_spike[i] and close[i] < ema_34_aligned[i]:
-                signals[i] = -0.25
+            # Short: 4h RSI > 60 (not strong uptrend) + Stochastic bearish crossover from overbought
+            elif rsi_4h_aligned[i] > 60 and stoch_k[i-1] > stoch_d[i-1] and stoch_k[i] < stoch_d[i] and stoch_k[i] > 70:
+                signals[i] = -0.20
                 position = -1
-                bars_since_entry = 0
         
         elif position == 1:
-            # Exit: minimum 4 bars hold, then exit on mean reversion or trend change
-            if bars_since_entry >= 4:
-                if close[i] < camarilla_s1_aligned[i] or close[i] < ema_34_aligned[i] or not vol_spike[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Exit: Stochastic bearish crossover or hold max 8 hours
+            if stoch_k[i] < stoch_d[i] or (i % 8 == 0 and i > start_idx):  # time-based exit every 8 bars
+                signals[i] = 0.0
+                position = 0
             else:
-                signals[i] = 0.25  # Hold during minimum period
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit: minimum 4 bars hold, then exit on mean reversion or trend change
-            if bars_since_entry >= 4:
-                if close[i] > camarilla_r1_aligned[i] or close[i] > ema_34_aligned[i] or not vol_spike[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Exit: Stochastic bullish crossover or hold max 8 hours
+            if stoch_k[i] > stoch_d[i] or (i % 8 == 0 and i > start_idx):
+                signals[i] = 0.0
+                position = 0
             else:
-                signals[i] = -0.25  # Hold during minimum period
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_12hEMA34_Volume_Momentum"
-timeframe = "4h"
+name = "1h_Time_Range_Reversal"
+timeframe = "1h"
 leverage = 1.0
