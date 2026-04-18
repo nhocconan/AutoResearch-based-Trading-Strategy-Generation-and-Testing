@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_Volume_Regime
-Hypothesis: On 4h timeframe, enter long when price breaks above Camarilla R1 with volume confirmation, short when breaks below S1. Use 1-day ADX > 25 to filter for trending markets only. Exit on opposite Camarilla level (S1 for longs, R1 for shorts). Uses tight entry conditions to limit trades (~25-35/year) and avoid fee drag. Works in both bull (breakouts) and bear (strong reversals at S1/R1).
+1d_WeeklyPivot_R1S1_Breakout_Volume_RangeFilter
+Hypothesis: On 1d timeframe, use weekly Camarilla pivot levels (R1, S1) for breakout signals, filtered by weekly RSI and daily volume confirmation. Long when price breaks above R1 with volume > 1.5x 20-day average and weekly RSI > 50; short when price breaks below S1 with volume > 1.5x 20-day average and weekly RSI < 50. Exit on opposite break. This captures momentum while avoiding false breakouts in ranging markets. Targets 10-20 trades/year by requiring multiple confluence factors, with position size 0.25.
 """
 
 import numpy as np
@@ -10,137 +10,102 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels from previous day
-    # We'll calculate daily pivot points and then Camarilla levels
-    # First get daily data
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Calculate 20-day average volume for filtering
+    vol_ma20 = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma20[i] = np.mean(volume[i-20:i])
+    
+    # Get weekly data for Camarilla pivots and RSI
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 5:
         return np.zeros(n)
     
-    # Calculate daily OHLC
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # Previous day's values for Camarilla calculation
-    prev_high = np.roll(daily_high, 1)
-    prev_low = np.roll(daily_low, 1)
-    prev_close = np.roll(daily_close, 1)
-    # First day has no previous
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Calculate Camarilla pivot levels for each week
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    camarilla_r1 = np.full(len(weekly_close), np.nan)
+    camarilla_s1 = np.full(len(weekly_close), np.nan)
     
-    # Calculate pivot point
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_val = prev_high - prev_low
+    for i in range(len(weekly_close)):
+        if not (np.isnan(weekly_high[i]) or np.isnan(weekly_low[i]) or np.isnan(weekly_close[i])):
+            rang = weekly_high[i] - weekly_low[i]
+            camarilla_r1[i] = weekly_close[i] + rang * 1.1 / 12
+            camarilla_s1[i] = weekly_close[i] - rang * 1.1 / 12
     
-    # Camarilla levels
-    R1 = pivot + (range_val * 1.1 / 12)
-    S1 = pivot - (range_val * 1.1 / 12)
+    # Calculate weekly RSI(14)
+    delta = np.diff(weekly_close, prepend=weekly_close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Align Camarilla levels to 4h timeframe (wait for day close)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    avg_gain = np.full_like(weekly_close, np.nan)
+    avg_loss = np.full_like(weekly_close, np.nan)
     
-    # Get 1-day ADX for trend filter
-    # Calculate TR, +DM, -DM
-    tr1 = np.abs(np.diff(daily_high, prepend=daily_high[0]))
-    tr2 = np.abs(np.diff(daily_low, prepend=daily_low[0]))
-    tr3 = np.abs(daily_high - daily_low)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    for i in range(14, len(weekly_close)):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[0:14])
+            avg_loss[i] = np.mean(loss[0:14])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    dm_plus = np.where((daily_high - np.roll(daily_high, 1)) > (np.roll(daily_low, 1) - daily_low), 
-                       np.maximum(daily_high - np.roll(daily_high, 1), 0), 0)
-    dm_minus = np.where((np.roll(daily_low, 1) - daily_low) > (daily_high - np.roll(daily_high, 1)), 
-                        np.maximum(np.roll(daily_low, 1) - daily_low, 0), 0)
-    # First values
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    weekly_rsi = 100 - (100 / (1 + rs))
     
-    # Smoothed values (Wilder's smoothing)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            result[period-1] = np.mean(data[:period])
-            for i in range(period, len(data)):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    period = 14
-    tr14 = wilders_smoothing(tr, period)
-    dm_plus_14 = wilders_smoothing(dm_plus, period)
-    dm_minus_14 = wilders_smoothing(dm_minus, period)
-    
-    # DI+ and DI-
-    di_plus = np.where(tr14 != 0, 100 * dm_plus_14 / tr14, 0)
-    di_minus = np.where(tr14 != 0, 100 * dm_minus_14 / tr14, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilders_smoothing(dx, period)
-    
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume filter: volume > 1.5 * 20-period average
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    volume_filter = volume > (1.5 * vol_ma)
+    # Align weekly data to daily timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_weekly, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_weekly, camarilla_s1)
+    weekly_rsi_aligned = align_htf_to_ltf(prices, df_weekly, weekly_rsi)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # need enough data for calculations
+    start_idx = 20  # need volume MA20
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(vol_ma20[i]) or np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or np.isnan(weekly_rsi_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Check volume filter
-        if not volume_filter[i]:
-            # If volume filter fails, maintain current position or flat
-            if position == 0:
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.25 if position == 1 else -0.25
-            continue
-        
         if position == 0:
-            # Long entry: price breaks above R1 with volume and ADX > 25
-            if (close[i] > R1_aligned[i] and adx_aligned[i] > 25):
+            # Long entry: price breaks above R1 with volume confirmation and RSI > 50
+            if (close[i] > camarilla_r1_aligned[i] and 
+                volume[i] > 1.5 * vol_ma20[i] and 
+                weekly_rsi_aligned[i] > 50):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S1 with volume and ADX > 25
-            elif (close[i] < S1_aligned[i] and adx_aligned[i] > 25):
+            # Short entry: price breaks below S1 with volume confirmation and RSI < 50
+            elif (close[i] < camarilla_s1_aligned[i] and 
+                  volume[i] > 1.5 * vol_ma20[i] and 
+                  weekly_rsi_aligned[i] < 50):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price breaks below S1 (opposite level)
-            if close[i] < S1_aligned[i]:
+            # Long exit: price breaks below S1
+            if close[i] < camarilla_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above R1 (opposite level)
-            if close[i] > R1_aligned[i]:
+            # Short exit: price breaks above R1
+            if close[i] > camarilla_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -148,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_Volume_Regime"
-timeframe = "4h"
+name = "1d_WeeklyPivot_R1S1_Breakout_Volume_RangeFilter"
+timeframe = "1d"
 leverage = 1.0
