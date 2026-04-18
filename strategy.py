@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6s Pivot R1/S1 Breakout with 12h EMA34 Trend Filter and Volume Surge
-# Long when price breaks above 1d R1 with volume > 1.5x 24-period average and price > 12h EMA(34)
-# Short when price breaks below 1d S1 with volume > 1.5x 24-period average and price < 12h EMA(34)
-# Exit when price crosses back through pivot point (R1 for longs, S1 for shorts)
-# Uses 1d Pivot for entry levels, 12h EMA for trend filter, volume surge for conviction
-# Designed for ~15-30 trades/year per symbol
-name = "6h_1dPivot_R1S1_Breakout_Volume_EMA34Filter"
-timeframe = "6h"
+# Hypothesis: 4h price action relative to 1-day VWAP with volume confirmation.
+# Long when price crosses above 1-day VWAP with volume > 1.5x 20-period average.
+# Short when price crosses below 1-day VWAP with volume > 1.5x 20-period average.
+# Exit when price crosses back over 1-day VWAP.
+# Uses 1-day VWAP as dynamic fair value, volume surge for conviction.
+# Designed for ~25-40 trades/year per symbol.
+name = "4h_1dVWAP_VolumeSurge"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,80 +23,59 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for Pivot Points
+    # 1-day data for VWAP calculation
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Daily Pivot Points (standard formula)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Typical price for VWAP
+    typical_price = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
+    # VWAP calculation: cumulative sum of typical price * volume / cumulative volume
+    tpv = typical_price * df_1d['volume'].values
+    cum_tpv = np.cumsum(tpv)
+    cum_vol = np.cumsum(df_1d['volume'].values)
+    vwap = cum_tpv / cum_vol
+    vwap = np.where(cum_vol > 0, vwap, typical_price)  # avoid division by zero
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap)
     
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
-    r2_1d = pivot_1d + (high_1d - low_1d)
-    s2_1d = pivot_1d - (high_1d - low_1d)
-    
-    # Align 1d Pivot levels to 6h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    
-    # 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    
-    # EMA(34) on 12h close
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
-    
-    # Volume filter: current volume > 1.5 * 24-period average (24 * 6h = 6 days)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > (1.5 * vol_ma_24)
+    # Volume filter: current volume > 1.5 * 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicator calculations
+    start_idx = 30  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(ema_34_12h_aligned[i]) or
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(vwap_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        pivot_val = pivot_1d_aligned[i]
-        r1_val = r1_1d_aligned[i]
-        s1_val = s1_1d_aligned[i]
-        ema_val = ema_34_12h_aligned[i]
+        vwap_val = vwap_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume surge and above 12h EMA
-            if close_val > r1_val and vol_filter and close_val > ema_val:
+            # Long: price crosses above VWAP with volume surge
+            if close_val > vwap_val and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume surge and below 12h EMA
-            elif close_val < s1_val and vol_filter and close_val < ema_val:
+            # Short: price crosses below VWAP with volume surge
+            elif close_val < vwap_val and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses back below pivot point
-            if close_val < pivot_val:
+            # Long exit: price crosses back below VWAP
+            if close_val < vwap_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back above pivot point
-            if close_val > pivot_val:
+            # Short exit: price crosses back above VWAP
+            if close_val > vwap_val:
                 signals[i] = 0.0
                 position = 0
             else:
