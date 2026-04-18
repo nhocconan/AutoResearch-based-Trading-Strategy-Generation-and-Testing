@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_Pivot_Fib618_Extension_Breakout_Volume
-6h strategy using daily pivot points with Fibonacci 61.8% extension levels and volume confirmation.
-- Long: Close breaks above daily pivot + 0.618 extension + volume > 1.5x daily avg
-- Short: Close breaks below daily pivot - 0.618 extension + volume > 1.5x daily avg
-- Exit: Opposite breakout or volume divergence
-Designed for ~25-35 trades/year per symbol (100-140 total over 4 years)
-Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
+12h_RSI_Pullback_Trend
+12h strategy using RSI pullbacks in trend with volume confirmation.
+- Long: RSI(14) pulls back to 40-50 in uptrend (EMA50 > EMA200) + volume > 1.3x average
+- Short: RSI(14) pulls back to 50-60 in downtrend (EMA50 < EMA200) + volume > 1.3x average
+- Exit: RSI reaches opposite extreme (60 for long, 40 for short) or trend reversal
+Designed for ~20-30 trades/year per symbol (80-120 total over 4 years)
+Works in bull markets (buy pullbacks) and bear markets (sell rallies)
 """
 
 import numpy as np
@@ -18,81 +18,88 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points and volume average
+    # Get daily data for trend filter and volume average
     df_1d = get_htf_data(prices, '1d')
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate daily pivot point and Fibonacci 61.8% extension
-    # Pivot = (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Daily EMA50 and EMA200 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Range = H - L
-    range_1d = high_1d - low_1d
-    
-    # Fibonacci 61.8% extension levels
-    # Resistance = Pivot + 0.618 * Range
-    # Support = Pivot - 0.618 * Range
-    resistance_1d = pivot_1d + 0.618 * range_1d
-    support_1d = pivot_1d - 0.618 * range_1d
-    
-    # Align daily levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    resistance_aligned = align_htf_to_ltf(prices, df_1d, resistance_1d)
-    support_aligned = align_htf_to_ltf(prices, df_1d, support_1d)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     # Daily volume average (20-period)
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
+    # RSI(14) on 12h closes
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing (alpha = 1/14)
+    alpha = 1.0 / 14
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[0] = gain[0]
+    avg_loss[0] = loss[0]
+    
+    for i in range(1, len(gain)):
+        avg_gain[i] = alpha * gain[i] + (1 - alpha) * avg_gain[i-1]
+        avg_loss[i] = alpha * loss[i] + (1 - alpha) * avg_loss[i-1]
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, 0.0), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # need enough for volume MA
+    start_idx = 50  # need enough for EMA200 and RSI
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(resistance_aligned[i]) or 
-            np.isnan(support_aligned[i]) or np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
+            np.isnan(vol_ma_aligned[i]) or np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
+        # Trend conditions
+        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
+        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
         
-        # Breakout conditions
-        breakout_up = close[i] > resistance_aligned[i]
-        breakdown_down = close[i] < support_aligned[i]
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.3 * vol_ma_aligned[i]
+        
+        # RSI conditions
+        rsi_val = rsi[i]
         
         if position == 0:
-            # Long: volume + breakout above resistance (pivot + 0.618 ext)
-            if vol_confirm and breakout_up:
+            # Long: uptrend + volume + RSI pullback to 40-50
+            if uptrend and vol_confirm and 40 <= rsi_val <= 50:
                 signals[i] = 0.25
                 position = 1
-            # Short: volume + breakdown below support (pivot - 0.618 ext)
-            elif vol_confirm and breakdown_down:
+            # Short: downtrend + volume + RSI pullback to 50-60
+            elif downtrend and vol_confirm and 50 <= rsi_val <= 60:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: volume confirmation + breakdown below pivot
-            if vol_confirm and close[i] < pivot_aligned[i]:
+            # Long exit: RSI reaches 60 or trend reversal
+            if rsi_val >= 60 or not uptrend:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: volume confirmation + breakout above pivot
-            if vol_confirm and close[i] > pivot_aligned[i]:
+            # Short exit: RSI reaches 40 or trend reversal
+            if rsi_val <= 40 or not downtrend:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -100,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Pivot_Fib618_Extension_Breakout_Volume"
-timeframe = "6h"
+name = "12h_RSI_Pullback_Trend"
+timeframe = "12h"
 leverage = 1.0
