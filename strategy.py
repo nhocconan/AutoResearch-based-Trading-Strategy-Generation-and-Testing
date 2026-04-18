@@ -13,45 +13,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get 1D data for EMA200
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate Weekly Pivot Points
-    # P = (H + L + C)/3
-    # R1 = 2*P - L
-    # S1 = 2*P - H
-    # R2 = P + (H - L)
-    # S2 = P - (H - L)
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
-    r2_1w = pivot_1w + (high_1w - low_1w)
-    s2_1w = pivot_1w - (high_1w - low_1w)
-    r3_1w = high_1w + 2 * (pivot_1w - low_1w)
-    s3_1w = low_1w - 2 * (high_1w - pivot_1w)
-    r4_1w = pivot_1w + 3 * (high_1w - low_1w)
-    s4_1w = pivot_1w - 3 * (high_1w - low_1w)
+    # Calculate EMA200 on daily data
+    close_1d_series = pd.Series(close_1d)
+    ema200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Align weekly pivot levels to 6h
-    pivot_6h = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_6h = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_6h = align_htf_to_ltf(prices, df_1w, s1_1w)
-    r2_6h = align_htf_to_ltf(prices, df_1w, r2_1w)
-    s2_6h = align_htf_to_ltf(prices, df_1w, s2_1w)
-    r3_6h = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_6h = align_htf_to_ltf(prices, df_1w, s3_1w)
-    r4_6h = align_htf_to_ltf(prices, df_1w, r4_1w)
-    s4_6h = align_htf_to_ltf(prices, df_1w, s4_1w)
+    # Align daily EMA200 to 12h timeframe
+    ema200_12h = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Calculate volume moving average (20-period) on 6h
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+    # Calculate 12h EMA34 for trend filter
+    close_series = pd.Series(close)
+    ema34_12h = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 6h RSI(14) for momentum filter
+    # Calculate RSI(14) on 12h
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -60,46 +37,55 @@ def generate_signals(prices):
     rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
     rsi = 100 - (100 / (1 + rs))
     
+    # Calculate volume moving average (20-period)
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 14)  # need volume MA and RSI
+    start_idx = max(34, 200, 20)  # need EMA34, EMA200, volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or
-            np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or np.isnan(r3_6h[i]) or
-            np.isnan(s3_6h[i]) or np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(rsi[i])):
+        if (np.isnan(ema200_12h[i]) or np.isnan(ema34_12h[i]) or 
+            np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5 * 20-period average
-        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current volume > 1.3 * 20-period average
+        vol_confirmed = volume[i] > 1.3 * vol_ma[i]
         
         if position == 0:
-            # Long entry: price breaks above R4 with volume (strong bullish breakout)
-            if close[i] > r4_6h[i] and vol_confirmed:
+            # Long entry: price above daily EMA200, EMA34 trending up, RSI not overbought, with volume
+            if (close[i] > ema200_12h[i] and 
+                ema34_12h[i] > ema34_12h[i-1] and 
+                rsi[i] < 70 and 
+                vol_confirmed):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S4 with volume (strong bearish breakdown)
-            elif close[i] < s4_6h[i] and vol_confirmed:
+            # Short entry: price below daily EMA200, EMA34 trending down, RSI not oversold, with volume
+            elif (close[i] < ema200_12h[i] and 
+                  ema34_12h[i] < ema34_12h[i-1] and 
+                  rsi[i] > 30 and 
+                  vol_confirmed):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price falls back below R1 (failure of breakout) or RSI overbought
-            if close[i] < r1_6h[i] or rsi[i] > 70:
+            # Long exit: price crosses below EMA34 or RSI overbought
+            if close[i] < ema34_12h[i] or rsi[i] > 75:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises back above S1 (failure of breakdown) or RSI oversold
-            if close[i] > s1_6h[i] or rsi[i] < 30:
+            # Short exit: price crosses above EMA34 or RSI oversold
+            if close[i] > ema34_12h[i] or rsi[i] < 25:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R4S4_Breakout_Volume_RSI_Filter"
-timeframe = "6h"
+name = "12h_EMA200_EMA34_RSI_Volume_Filter"
+timeframe = "12h"
 leverage = 1.0
