@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Momentum_Follow_Trend
-Hypothesis: Combines EMA trend filter with momentum breakouts on 4h timeframe. 
-Enters long when price crosses above EMA21 with RSI > 50 and volume spike, 
-short when price crosses below EMA21 with RSI < 50 and volume spike. 
-Uses 1h timeframe for trend confirmation (EMA50) to avoid counter-trend trades. 
-Designed for 20-40 trades/year with strong trend capture in both bull and bear markets.
+12h_RSI_Trend_Filter
+Hypothesis: Uses RSI(14) with EMA(50) trend filter on 12h timeframe.
+Enters long when RSI crosses above 50 with EMA50 rising, short when RSI crosses below 50 with EMA50 falling.
+Designed for moderate trade frequency (~20-30/year) with trend-following capability in both bull and bear markets.
 """
 
 import numpy as np
@@ -14,41 +12,50 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # EMA21 for entry signal
-    ema21 = np.full(n, np.nan)
-    k21 = 2 / (21 + 1)
-    for i in range(21, n):
-        if i == 21:
-            ema21[i] = np.mean(close[i-21+1:i+1])
-        else:
-            ema21[i] = close[i] * k21 + ema21[i-1] * (1 - k21)
-    
-    # RSI(14) for momentum filter
-    rsi_period = 14
-    delta = np.diff(close, prepend=close[0])
+    # RSI(14) calculation
+    delta = np.diff(close)
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
     avg_gain = np.full(n, np.nan)
     avg_loss = np.full(n, np.nan)
-    for i in range(rsi_period, n):
-        if i == rsi_period:
-            avg_gain[i] = np.mean(gain[i-rsi_period+1:i+1])
-            avg_loss[i] = np.mean(loss[i-rsi_period+1:i+1])
-        else:
-            avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i]) / rsi_period
-            avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i]) / rsi_period
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    for i in range(14, n):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[0:14])
+            avg_loss[i] = np.mean(loss[0:14])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
+    
+    rs = np.full(n, np.nan)
+    rsi = np.full(n, np.nan)
+    for i in range(14, n):
+        if avg_loss[i] != 0:
+            rs[i] = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs[i]))
+        else:
+            rsi[i] = 100
+    
+    # EMA(50) for trend filter
+    ema50 = np.full(n, np.nan)
+    k = 2 / (50 + 1)
+    for i in range(50, n):
+        if i == 50:
+            ema50[i] = np.mean(close[0:51])
+        else:
+            ema50[i] = close[i] * k + ema50[i-1] * (1 - k)
+    
+    # EMA50 slope (trend direction)
+    ema50_slope = np.full(n, np.nan)
+    for i in range(51, n):
+        ema50_slope[i] = ema50[i] - ema50[i-1]
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = np.full(n, np.nan)
@@ -56,49 +63,37 @@ def generate_signals(prices):
         vol_ma[i] = np.mean(volume[i-20:i])
     vol_spike = volume > (vol_ma * 1.5)
     
-    # 1h trend filter (EMA50) - load once before loop
-    df_1h = get_htf_data(prices, '1h')
-    ema50_1h = np.full(len(df_1h), np.nan)
-    k50 = 2 / (50 + 1)
-    for i in range(50, len(df_1h)):
-        if i == 50:
-            ema50_1h[i] = np.mean(df_1h['close'].values[i-50+1:i+1])
-        else:
-            ema50_1h[i] = df_1h['close'].values[i] * k50 + ema50_1h[i-1] * (1 - k50)
-    ema50_1h_aligned = align_htf_to_ltf(prices, df_1h, ema50_1h)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup
+    start_idx = 60  # Warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(ema21[i]) or np.isnan(rsi[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(ema50_1h_aligned[i])):
+        if np.isnan(rsi[i]) or np.isnan(ema50[i]) or np.isnan(ema50_slope[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price crosses above EMA21 with bullish momentum and volume
-            if close[i] > ema21[i] and close[i-1] <= ema21[i-1] and rsi[i] > 50 and vol_spike[i] and ema50_1h_aligned[i] < close[i]:
+            # Long: RSI crosses above 50 with rising EMA50 and volume spike
+            if rsi[i] > 50 and rsi[i-1] <= 50 and ema50_slope[i] > 0 and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below EMA21 with bearish momentum and volume
-            elif close[i] < ema21[i] and close[i-1] >= ema21[i-1] and rsi[i] < 50 and vol_spike[i] and ema50_1h_aligned[i] > close[i]:
+            # Short: RSI crosses below 50 with falling EMA50 and volume spike
+            elif rsi[i] < 50 and rsi[i-1] >= 50 and ema50_slope[i] < 0 and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price crosses below EMA21 or momentum fades
-            if close[i] < ema21[i] and close[i-1] >= ema21[i-1] or rsi[i] < 40:
+            # Exit: RSI crosses below 50 or EMA50 turns down
+            if rsi[i] < 50 or ema50_slope[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price crosses above EMA21 or momentum fades
-            if close[i] > ema21[i] and close[i-1] <= ema21[i-1] or rsi[i] > 60:
+            # Exit: RSI crosses above 50 or EMA50 turns up
+            if rsi[i] > 50 or ema50_slope[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Momentum_Follow_Trend"
-timeframe = "4h"
+name = "12h_RSI_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
