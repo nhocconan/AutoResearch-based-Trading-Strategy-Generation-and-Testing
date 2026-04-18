@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,50 +13,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian channel and trend filter
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    
+    # Calculate 50-day EMA on daily
+    if len(close_1d) >= 50:
+        ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    else:
+        ema_50_1d = np.full_like(close_1d, np.nan)
+    
+    # Align 1d EMA to 1h
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Get 4h data for volume confirmation
     df_4h = get_htf_data(prices, '4h')
     volume_4h = df_4h['volume'].values
-    
-    # Calculate 20-period Donchian channels on 12h
-    upper_channel = np.full_like(close_12h, np.nan)
-    lower_channel = np.full_like(close_12h, np.nan)
-    
-    for i in range(19, len(close_12h)):
-        upper_channel[i] = np.max(high_12h[i-19:i+1])
-        lower_channel[i] = np.min(low_12h[i-19:i+1])
-    
-    # Calculate 34-period EMA on 12h for trend filter
-    if len(close_12h) >= 34:
-        ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False).mean().values
-    else:
-        ema_12h = np.full_like(close_12h, np.nan)
-    
-    # Calculate ATR on 12h for volatility filter
-    def calculate_atr(high, low, close, period=14):
-        if len(high) < period + 1:
-            return np.full_like(high, np.nan)
-        
-        # True Range
-        tr = np.zeros(len(high))
-        tr[0] = high[0] - low[0]
-        for i in range(1, len(high)):
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Wilder smoothing for ATR
-        atr = np.full_like(high, np.nan)
-        atr[period] = np.mean(tr[1:period+1])
-        for i in range(period+1, len(high)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        
-        return atr
-    
-    atr_12h = calculate_atr(high_12h, low_12h, close_12h, 14)
     
     # Calculate 20-period volume average on 4h
     vol_ma_4h = np.full_like(volume_4h, np.nan)
@@ -66,64 +38,64 @@ def generate_signals(prices):
         for i in range(vol_period, len(volume_4h)):
             vol_ma_4h[i] = np.mean(volume_4h[i-vol_period:i])
     
-    # Align all data to 4h timeframe (primary)
-    upper_channel_4h = align_htf_to_ltf(prices, df_12h, upper_channel)
-    lower_channel_4h = align_htf_to_ltf(prices, df_12h, lower_channel)
-    ema_12h_4h = align_htf_to_ltf(prices, df_12h, ema_12h)
-    atr_12h_4h = align_htf_to_ltf(prices, df_12h, atr_12h)
+    # Align 4h volume average to 1h
     vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(19, 34, 14, 20) + 1
+    start_idx = max(50, 20) + 1
+    
+    # Pre-compute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available
-        if (np.isnan(upper_channel_4h[i]) or np.isnan(lower_channel_4h[i]) or 
-            np.isnan(ema_12h_4h[i]) or np.isnan(atr_12h_4h[i]) or 
-            np.isnan(vol_ma_4h_aligned[i])):
+        # Session filter: 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
+        # Skip if any required data is not available
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_4h_aligned[i]):
+            signals[i] = 0.0
+            continue
+        
+        # Volume confirmation: current volume > 1.5x 20-period average on 4h
         vol_confirm = volume[i] > 1.5 * vol_ma_4h_aligned[i]
         
-        # Trend filter: price above/below EMA
-        uptrend = close[i] > ema_12h_4h[i]
-        downtrend = close[i] < ema_12h_4h[i]
-        
-        # Volatility filter: avoid extremely low volatility
-        vol_filter = atr_12h_4h[i] > 0.01 * close[i]  # ATR > 1% of price
+        # Trend filter: price above/below 50-day EMA
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
         if position == 0:
-            # Long: price breaks above upper Donchian channel with uptrend and volume
-            if close[i] > upper_channel_4h[i] and uptrend and vol_confirm and vol_filter:
-                signals[i] = 0.25
+            # Long: price above 50-day EMA with volume confirmation
+            if uptrend and vol_confirm:
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below lower Donchian channel with downtrend and volume
-            elif close[i] < lower_channel_4h[i] and downtrend and vol_confirm and vol_filter:
-                signals[i] = -0.25
+            # Short: price below 50-day EMA with volume confirmation
+            elif downtrend and vol_confirm:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below lower Donchian channel OR trend reverses
-            if close[i] < lower_channel_4h[i] or not uptrend:
-                signals[i] = -0.25  # reverse to short
+            # Long exit: price crosses below 50-day EMA
+            if not uptrend:
+                signals[i] = -0.20  # reverse to short
                 position = -1
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price crosses above upper Donchian channel OR trend reverses
-            if close[i] > upper_channel_4h[i] or not downtrend:
-                signals[i] = 0.25  # reverse to long
+            # Short exit: price crosses above 50-day EMA
+            if not downtrend:
+                signals[i] = 0.20  # reverse to long
                 position = 1
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Donchian20_12hEMA_VolumeTrend"
-timeframe = "4h"
+name = "1h_50dEMA_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
