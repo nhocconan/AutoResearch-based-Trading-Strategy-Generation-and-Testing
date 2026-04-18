@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h breakout of previous 1-week high/low with 1-day ATR filter and volume confirmation.
-# Weekly highs/lows provide strong structural levels; breakouts indicate momentum shifts.
-# Daily ATR filter ensures sufficient volatility to avoid false breakouts in low-volatility regimes.
-# Volume confirmation adds conviction. Designed for low trade frequency (<50/year) to minimize fee drag.
-# Works in bull markets (break above weekly high) and bear markets (break below weekly low).
-name = "4h_WeeklyBreakout_DailyATR_Volume_Filter"
-timeframe = "4h"
+# Hypothesis: 1d Donchian(20) breakout with weekly ATR filter and volume confirmation.
+# This strategy targets multi-day trends with low frequency to minimize fee drag.
+# Donchian breakouts capture breakouts from consolidation, while weekly ATR ensures
+# sufficient volatility to avoid choppy markets. Volume confirmation adds conviction.
+# Designed for 1d timeframe with target 30-100 trades over 4 years (7-25/year).
+# Works in bull markets (breakouts above upper band) and bear markets (breakouts below lower band).
+name = "1d_Donchian20_WeeklyATR_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
-    n = len(prrices)
+    n = len(prices)
     if n < 50:
         return np.zeros(n)
     
@@ -22,29 +23,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily and weekly data
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for ATR filter (ONCE before loop)
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly high and low (using previous week's data to avoid look-ahead)
+    # Calculate Donchian channels (20-period) using previous period's data to avoid look-ahead
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    upper_band = high_20
+    lower_band = low_20
+    
+    # Calculate weekly ATR (14-period)
     high_w = df_1w['high'].values
     low_w = df_1w['low'].values
-    weekly_high = pd.Series(high_w).rolling(window=1, min_periods=1).max().shift(1).values
-    weekly_low = pd.Series(low_w).rolling(window=1, min_periods=1).min().shift(1).values
-    
-    # Align weekly levels to 4h timeframe
-    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
-    
-    # Calculate daily ATR (14-period) for volatility filter
-    high_d = df_1d['high'].values
-    low_d = df_1d['low'].values
-    close_d = df_1d['close'].values
+    close_w = df_1w['close'].values
     
     # True Range calculation
-    tr1 = high_d[1:] - low_d[1:]
-    tr2 = np.abs(high_d[1:] - close_d[:-1])
-    tr3 = np.abs(low_d[1:] - close_d[:-1])
+    tr1 = high_w[1:] - low_w[1:]
+    tr2 = np.abs(high_w[1:] - close_w[:-1])
+    tr3 = np.abs(low_w[1:] - close_w[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
     # ATR using Wilder's smoothing (EMA with alpha=1/14)
@@ -62,13 +58,13 @@ def generate_signals(prices):
     atr_mult = 1.5
     atr_threshold = atr * atr_mult
     
-    # Align daily ATR threshold to 4h timeframe
-    atr_threshold_aligned = align_htf_to_ltf(prices, df_1d, atr_threshold)
+    # Align weekly ATR threshold to 1d timeframe
+    atr_threshold_aligned = align_htf_to_ltf(prices, df_1w, atr_threshold)
     
     # Calculate 20-period average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Session filter: 08-20 UTC
+    # Session filter: 08-20 UTC (applied to daily bars)
     hour_index = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
@@ -78,7 +74,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
             np.isnan(atr_threshold_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -97,19 +93,19 @@ def generate_signals(prices):
         vol_filter = not np.isnan(atr_threshold_aligned[i]) and atr_threshold_aligned[i] > 0
         
         if position == 0:
-            # Long: price breaks above weekly high AND volume confirmation AND volatility filter
-            long_breakout = close[i] > weekly_high_aligned[i]
+            # Long: price breaks above upper band AND volume confirmation AND volatility filter
+            long_breakout = close[i] > upper_band[i]
             if vol_confirm and vol_filter and long_breakout:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly low AND volume confirmation AND volatility filter
-            elif vol_confirm and vol_filter and close[i] < weekly_low_aligned[i]:
+            # Short: price breaks below lower band AND volume confirmation AND volatility filter
+            elif vol_confirm and vol_filter and close[i] < lower_band[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls below weekly low OR ATR drops below threshold (volatility collapse)
-            exit_condition = close[i] < weekly_low_aligned[i] or (np.isnan(atr_threshold_aligned[i]) or atr_threshold_aligned[i] <= 0)
+            # Long exit: price falls below lower band OR ATR drops below threshold (volatility collapse)
+            exit_condition = close[i] < lower_band[i] or (np.isnan(atr_threshold_aligned[i]) or atr_threshold_aligned[i] <= 0)
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
@@ -117,8 +113,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises above weekly high OR ATR drops below threshold (volatility collapse)
-            exit_condition = close[i] > weekly_high_aligned[i] or (np.isnan(atr_threshold_aligned[i]) or atr_threshold_aligned[i] <= 0)
+            # Short exit: price rises above upper band OR ATR drops below threshold (volatility collapse)
+            exit_condition = close[i] > upper_band[i] or (np.isnan(atr_threshold_aligned[i]) or atr_threshold_aligned[i] <= 0)
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
