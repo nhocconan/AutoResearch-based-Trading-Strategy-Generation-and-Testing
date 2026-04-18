@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot levels from 12h timeframe. 
-# Long when price breaks above R4 with volume confirmation.
-# Short when price breaks below S4 with volume confirmation.
-# Exit when price returns to R3/S3 levels.
-# Camarilla levels from higher timeframe (12h) provide institutional reference points.
-# Volume surge confirms institutional participation.
-# Designed for ~15-25 trades/year per symbol.
-name = "6h_12hCamarilla_R4_S4_Breakout_Volume"
-timeframe = "6h"
+# Hypothesis: 4h Camarilla pivot breakout with volume confirmation and daily trend filter.
+# Long when price breaks above R1 with volume > 2x 24-period average and price > daily EMA(34).
+# Short when price breaks below S1 with same conditions.
+# Exit when price crosses back below R1 (long) or above S1 (short).
+# Uses daily EMA for trend filter, volume surge for conviction.
+# Designed for ~25-40 trades/year per symbol.
+name = "4h_Camarilla_R1_S1_Breakout_Volume_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,34 +23,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h data for Camarilla pivot calculation
-    df_12h = get_htf_data(prices, '12h')
+    # Daily data for pivot calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla levels from previous 12h bar
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Daily close for EMA trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Camarilla formula: range = high - low
-    # R4 = close + range * 1.1/2
-    # R3 = close + range * 1.1/4
-    # S3 = close - range * 1.1/4
-    # S4 = close - range * 1.1/2
-    range_12h = high_12h - low_12h
-    r4_12h = close_12h + (range_12h * 1.1 / 2)
-    r3_12h = close_12h + (range_12h * 1.1 / 4)
-    s3_12h = close_12h - (range_12h * 1.1 / 4)
-    s4_12h = close_12h - (range_12h * 1.1 / 2)
+    # Daily high, low, close for Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align Camarilla levels to 6h timeframe (wait for 12h bar close)
-    r4_12h_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
-    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
-    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
-    s4_12h_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
+    # Camarilla pivot calculation (based on previous day)
+    # Pivot = (High + Low + Close) / 3
+    # R1 = Close + 1.1 * (High - Low) / 12
+    # S1 = Close - 1.1 * (High - Low) / 12
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = close_1d + 1.1 * (high_1d - low_1d) / 12.0
+    s1 = close_1d - 1.1 * (high_1d - low_1d) / 12.0
     
-    # Volume filter: current volume > 1.5 * 24-period average (24 * 6h = 12 days)
+    # Align pivot levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Volume filter: current volume > 2 * 24-period average (24 * 4h = 4 days)
     vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > (1.5 * vol_ma_24)
+    volume_filter = volume > (2.0 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,40 +59,38 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r4_12h_aligned[i]) or np.isnan(r3_12h_aligned[i]) or
-            np.isnan(s3_12h_aligned[i]) or np.isnan(s4_12h_aligned[i]) or
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        r4_level = r4_12h_aligned[i]
-        r3_level = r3_12h_aligned[i]
-        s3_level = s3_12h_aligned[i]
-        s4_level = s4_12h_aligned[i]
+        ema_val = ema_34_1d_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: price breaks above R4 with volume
-            if close_val > r4_level and vol_filter:
+            # Long: price breaks above R1 with volume surge and above daily EMA
+            if close_val > r1_val and vol_filter and close_val > ema_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S4 with volume
-            elif close_val < s4_level and vol_filter:
+            # Short: price breaks below S1 with volume surge and below daily EMA
+            elif close_val < s1_val and vol_filter and close_val < ema_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to R3 level
-            if close_val <= r3_level:
+            # Long exit: price crosses back below R1
+            if close_val < r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to S3 level
-            if close_val >= s3_level:
+            # Short exit: price crosses back above S1
+            if close_val > s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
