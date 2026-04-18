@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_DailyPivot_R1S1_Breakout_VolumeATRFilter_v5"
+name = "4h_DailyPivot_R1S1_Breakout_VolumeATRFilter_v6"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -31,7 +31,7 @@ def generate_signals(prices):
     R1_d = pivot_d + range_d
     S1_d = pivot_d - range_d
     
-    # ATR(14) for volatility filter
+    # ATR(14) for stop filter
     tr1 = prev_high_d - prev_low_d
     tr2 = np.abs(prev_high_d - prev_close_d)
     tr3 = np.abs(prev_low_d - prev_close_d)
@@ -44,20 +44,20 @@ def generate_signals(prices):
     pivot_d_aligned = align_htf_to_ltf(prices, df_1d, pivot_d)
     atr_d_aligned = align_htf_to_ltf(prices, df_1d, atr_d)
     
-    # Volume filter: current volume > 1.5 * 20-period average (20 * 4h = 3.33 days)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    # Volume filter: current volume > 2.0 * 24-period average (24 * 4h = 4 days)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_filter = volume > (2.0 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Wait for indicator calculations
+    start_idx = 50  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(R1_d_aligned[i]) or np.isnan(S1_d_aligned[i]) or
             np.isnan(pivot_d_aligned[i]) or np.isnan(atr_d_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+            np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
@@ -69,7 +69,7 @@ def generate_signals(prices):
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: break above R1 with volume and ATR filter
+            # Long: break above R1 with volume and ATR filter (avoid low-vol breakouts)
             if close_val > R1_val and vol_filter and atr_val > 0:
                 signals[i] = 0.25
                 position = 1
