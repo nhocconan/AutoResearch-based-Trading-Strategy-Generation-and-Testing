@@ -1,10 +1,11 @@
-# 1h_TRIX_Momentum_Trend
-# Hypothesis: TRIX (Triple Exponential Average) filters out market noise and identifies momentum trends.
-# In trending markets, TRIX crossovers with signal line provide reliable entry signals.
-# Works in both bull and bear markets by capturing momentum shifts.
-# Uses 4h trend filter and volume confirmation to reduce false signals.
-# Limits trades via momentum strength filter and session filter (08-20 UTC).
-# Target: 15-37 trades/year (~60-150 total over 4 years).
+#!/usr/bin/env python3
+"""
+6h_LongOnly_Momentum_Volume
+Hypothesis: In the 6h timeframe, price momentum combined with volume spikes captures
+continuation moves in both bull and bear markets. Long-only with volatility-based exits
+reduces whipsaw and limits trade frequency to avoid fee drag. Uses 1-week trend filter
+to avoid counter-trend entries.
+"""
 
 import numpy as np
 import pandas as pd
@@ -15,88 +16,77 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate TRIX (15-period) and signal line (9-period EMA of TRIX)
-    # TRIX = EMA(EMA(EMA(close, 15), 15), 15) * 100
-    ema1 = pd.Series(close).ewm(span=15, adjust=False).values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False).values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False).values
-    trix = ema3 * 100
-    
-    # Signal line: 9-period EMA of TRIX
-    signal_line = pd.Series(trix).ewm(span=9, adjust=False).values
-    
-    # Histogram: TRIX - signal line
-    histogram = trix - signal_line
-    
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 4h EMA34 for trend direction
-    ema34_4h = pd.Series(df_4h['close'].values).ewm(span=34, adjust=False).values
-    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
+    # Weekly 50-period EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = np.zeros_like(close_1w)
+    ema_50_1w[:] = np.nan
+    if len(close_1w) >= 50:
+        ema = np.zeros(len(close_1w))
+        alpha = 2 / (50 + 1)
+        ema[0] = close_1w[0]
+        for i in range(1, len(close_1w)):
+            ema[i] = alpha * close_1w[i] + (1 - alpha) * ema[i-1]
+        ema_50_1w = ema
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Align weekly EMA to 6h
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # 6h momentum: price change over 3 periods (~18h)
+    mom = np.zeros_like(close)
+    mom[:] = np.nan
+    for i in range(3, n):
+        mom[i] = (close[i] - close[i-3]) / close[i-3]
+    
+    # 6h volume spike: current volume > 2x 20-period average
     vol_ma = np.zeros_like(volume)
-    for i in range(len(volume)):
+    vol_ma[:] = np.nan
+    for i in range(n):
         if i < 20:
-            vol_ma[i] = np.mean(volume[0:i+1]) if i >= 0 else volume[i]
+            if i >= 0:
+                vol_ma[i] = np.mean(volume[0:i+1])
         else:
             vol_ma[i] = np.mean(volume[i-20+1:i+1])
-    vol_filter = volume > (vol_ma * 1.5)
-    
-    # Momentum strength: |histogram| > 0.1
-    mom_filter = np.abs(histogram) > 0.1
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0  # 0: flat, 1: long
     
-    start_idx = 30  # Warmup
+    start_idx = 50  # Warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(trix[i]) or np.isnan(signal_line[i]) or 
-            np.isnan(ema34_4h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(mom[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: TRIX crosses above signal line with bullish 4h trend and volume/momentum
-            if (trix[i] > signal_line[i] and trix[i-1] <= signal_line[i-1] and
-                ema34_4h_aligned[i] > ema34_4h_aligned[i-1] and
-                vol_filter[i] and mom_filter[i]):
-                signals[i] = 0.20
+            # Long: bullish weekly trend, positive momentum, volume spike
+            if (close[i] > ema_50_1w_aligned[i] and  # price above weekly EMA
+                mom[i] > 0.005 and                 # minimum 0.5% momentum
+                vol_spike[i]):                     # volume confirmation
+                signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below signal line with bearish 4h trend and volume/momentum
-            elif (trix[i] < signal_line[i] and trix[i-1] >= signal_line[i-1] and
-                  ema34_4h_aligned[i] < ema34_4h_aligned[i-1] and
-                  vol_filter[i] and mom_filter[i]):
-                signals[i] = -0.20
-                position = -1
         
         elif position == 1:
-            # Exit long: TRIX crosses below signal line or trend turns bearish
-            if (trix[i] < signal_line[i] and trix[i-1] >= signal_line[i-1]) or \
-               ema34_4h_aligned[i] < ema34_4h_aligned[i-1]:
+            # Exit: momentum turns negative or volume dies
+            if mom[i] < -0.002 or not vol_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
-        
-        elif position == -1:
-            # Exit short: TRIX crosses above signal line or trend turns bullish
-            if (trix[i] > signal_line[i] and trix[i-1] <= signal_line[i-1]) or \
-               ema34_4h_aligned[i] > ema34_4h_aligned[i-1]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.20
+                signals[i] = 0.25
     
     return signals
 
-name = "1h_TRIX_Momentum_Trend"
-timeframe = "1h"
+name = "6h_LongOnly_Momentum_Volume"
+timeframe = "6h"
 leverage = 1.0
