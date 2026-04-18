@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h Daily Pivot R1/S1 Breakout with Volume Spike and ATR Stop
-Hypothesis: Daily pivot levels (R1, S1) act as key support/resistance. Breakouts beyond these levels with volume confirmation capture momentum in both bull and bear markets. Using 12h timeframe reduces trade frequency to minimize fee drag, while daily pivots provide structure. Volume spike filter ensures breakouts have conviction. ATR-based stop loss manages risk.
+4h Donchian Breakout + Daily EMA Trend + Volume Spike
+Hypothesis: Donchian(20) breakouts on 4h capture trend continuations. Daily EMA(50) filters for higher timeframe trend direction, and volume spikes confirm institutional participation. This combination works in both bull and bear markets by requiring alignment with daily trend and volume confirmation, reducing false breakouts. Designed for 20-50 trades/year on 4h timeframe to minimize fee drag.
 """
 
 import numpy as np
@@ -18,36 +18,16 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculation (once before loop)
+    # Get daily data for EMA trend filter (once before loop)
     df_d = get_htf_data(prices, '1d')
     
-    # Calculate daily pivot points using standard formula
-    # P = (H + L + C) / 3
-    # R1 = 2*P - L
-    # S1 = 2*P - H
-    # Using previous day's data to avoid look-ahead
-    daily_high = df_d['high']
-    daily_low = df_d['low']
-    daily_close = df_d['close']
+    # Daily EMA50 for trend filter
+    ema_50_d = pd.Series(df_d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_d, ema_50_d)
     
-    pivot = (daily_high + daily_low + daily_close) / 3
-    r1 = 2 * pivot - daily_low
-    s1 = 2 * pivot - daily_high
-    
-    # Shift by 1 to use previous day's levels only
-    r1_prev = r1.shift(1).values
-    s1_prev = s1.shift(1).values
-    
-    # Align to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_d, r1_prev)
-    s1_aligned = align_htf_to_ltf(prices, df_d, s1_prev)
-    
-    # ATR for stop loss and volatility filter
-    tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]))
-    tr2 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, tr2)
-    tr = np.concatenate([[np.nan], tr])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Donchian channels on 4h (20-period high/low)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume spike: 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,52 +35,50 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
-    entry_price = 0.0
     
-    start_idx = 50
+    start_idx = 50  # enough for Donchian and EMA warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or
-            np.isnan(atr[i]) or
+        if (np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or
+            np.isnan(ema_50_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
+        upper = high_20[i]
+        lower = low_20[i]
+        ema_trend = ema_50_aligned[i]
         
         if position == 0:
-            # Long: break above R1 with volume spike
-            if price > r1_val and volume_spike[i]:
+            # Long: break above upper Donchian with volume spike and price above daily EMA (uptrend)
+            if price > upper and volume_spike[i] and price > ema_trend:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-            # Short: break below S1 with volume spike
-            elif price < s1_val and volume_spike[i]:
+            # Short: break below lower Donchian with volume spike and price below daily EMA (downtrend)
+            elif price < lower and volume_spike[i] and price < ema_trend:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
         
         elif position == 1:
             # Long position
             signals[i] = 0.25
-            # Stop loss: 2.5 * ATR below entry
-            if price <= entry_price - 2.5 * atr[i]:
+            # Exit: price returns to lower Donchian or breaks below daily EMA
+            if price < lower or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position
             signals[i] = -0.25
-            # Stop loss: 2.5 * ATR above entry
-            if price >= entry_price + 2.5 * atr[i]:
+            # Exit: price returns to upper Donchian or breaks above daily EMA
+            if price > upper or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_DailyPivot_R1S1_Breakout_Volume_ATRStop"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_DailyEMA50_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
