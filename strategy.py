@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_Volume_Spice_4h_Trend_Filter_v1
-Hypothesis: On 1h timeframe, enter long when price breaks above 20-period high with volume spike (>1.5x avg) and 4h trend is up (price > 4h EMA20); enter short when price breaks below 20-period low with volume spike and 4h trend is down (price < 4h EMA20). Exit on opposite break or trend reversal. Uses volume to confirm institutional interest and 4h EMA20 for trend filter to avoid counter-trend trades. Designed for 15-30 trades/year to minimize fee drag while capturing momentum in both bull and bear markets.
+6h_ElderRay_Energy_Index_With_WeeklyTrend_v1
+Hypothesis: Use Elder Ray Index (Bull Power/Bear Power) on 6h to detect institutional buying/selling pressure, filtered by weekly trend direction. Bull Power > 0 and Bear Power < 0 indicates balanced momentum; we go long when Bull Power rises above its 13-period EMA and weekly trend is up, short when Bear Power falls below its 13-period EMA and weekly trend is down. This captures momentum shifts with trend filtering to avoid whipsaws in ranging markets. Designed for low trade frequency (<30/year) to minimize fee drag while capturing sustained moves in both bull and bear markets.
 """
 
 import numpy as np
@@ -10,76 +10,86 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # 20-period high/low for breakout
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    highest_20 = high_series.rolling(window=20, min_periods=20).max().values
-    lowest_20 = low_series.rolling(window=20, min_periods=20).min().values
+    # Elder Ray Index components: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    close_series = pd.Series(close)
+    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Volume spike: >1.5x 20-period average
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # Signal lines: EMA of Bull/Bear Power
+    bull_ema = pd.Series(bull_power).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bear_ema = pd.Series(bear_power).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # 4h EMA20 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Weekly trend filter: EMA34 on weekly close
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 40  # Need 20-period high/low and volume MA
+    start_idx = 30  # Need EMA13 and signal lines
     
     for i in range(start_idx, n):
-        if (np.isnan(highest_20[i]) or 
-            np.isnan(lowest_20[i]) or
-            np.isnan(volume_spike[i]) or
-            np.isnan(ema_4h_aligned[i])):
+        if (np.isnan(ema34_1w_aligned[i]) or 
+            np.isnan(bull_power[i]) or
+            np.isnan(bear_power[i]) or
+            np.isnan(bull_ema[i]) or
+            np.isnan(bear_ema[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        highest = highest_20[i]
-        lowest = lowest_20[i]
-        vol_spike = volume_spike[i]
-        ema_4h_val = ema_4h_aligned[i]
+        bp = bull_power[i]
+        br = bear_power[i]
+        be = bull_ema[i]
+        re = bear_ema[i]
+        weekly_trend_up = ema34_1w_aligned[i] > close_1w[-1] if len(close_1w) > 0 else False  # placeholder, will be replaced properly below
+        # Fix: Get current weekly EMA value properly
+        weekly_ema_val = ema34_1w_aligned[i]
+        # We need the actual weekly close value at this point - but we don't have it aligned
+        # Instead, use the weekly EMA vs previous weekly EMA to determine trend
+        if i >= 1:
+            weekly_prev = ema34_1w_aligned[i-1]
+            weekly_trend_up = weekly_ema_val > weekly_prev
+            weekly_trend_down = weekly_ema_val < weekly_prev
+        else:
+            weekly_trend_up = False
+            weekly_trend_down = False
         
         if position == 0:
-            # Long: price > 20-period high with volume spike and above 4h EMA20
-            if price > highest and vol_spike and price > ema_4h_val:
-                signals[i] = 0.20
+            # Long: Bull Power rising above its EMA and weekly trend up
+            if bp > be and weekly_trend_up:
+                signals[i] = 0.25
                 position = 1
-            # Short: price < 20-period low with volume spike and below 4h EMA20
-            elif price < lowest and vol_spike and price < ema_4h_val:
-                signals[i] = -0.20
+            # Short: Bear Power falling below its EMA and weekly trend down
+            elif br < re and weekly_trend_down:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            signals[i] = 0.20
-            # Exit: price < 20-period low or below 4h EMA20 (trend change)
-            if price < lowest or price < ema_4h_val:
+            signals[i] = 0.25
+            # Exit: Bull Power falls below its EMA or weekly trend turns down
+            if bp < be or not weekly_trend_up:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
-            signals[i] = -0.20
-            # Exit: price > 20-period high or above 4h EMA20 (trend change)
-            if price > highest or price > ema_4h_val:
+            signals[i] = -0.25
+            # Exit: Bear Power rises above its EMA or weekly trend turns up
+            if br > re or not weekly_trend_down:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1h_Volume_Spice_4h_Trend_Filter_v1"
-timeframe = "1h"
+name = "6h_ElderRay_Energy_Index_With_WeeklyTrend_v1"
+timeframe = "6h"
 leverage = 1.0
