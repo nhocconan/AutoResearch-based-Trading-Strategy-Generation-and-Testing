@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-1h Volume Spike Reversion with 4h Trend Filter
-Hypothesis: After extreme volume spikes, price often reverts to the mean. 
-We use 4h EMA50 as trend filter to avoid counter-trend trades, and enter on 1h 
-when price deviates significantly from VWAP with volume confirmation (>2x avg volume).
-This strategy targets 15-30 trades/year by requiring multiple confirmations,
-reducing fee drag while capturing mean reversion moves in both bull and bear markets.
+6h Weekly Pivot Breakout with Volume Confirmation
+Hypothesis: Weekly pivot levels (R4/S4) act as strong support/resistance in both bull and bear markets.
+Breakouts beyond these levels with volume continuation capture strong momentum moves.
+Weekly pivot provides structure that works across regimes, while volume filters false breakouts.
+Targets 15-25 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,87 +21,82 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter (once before loop)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data for pivot points (once before loop)
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 5:
         return np.zeros(n)
     
-    # 4h EMA50 for trend filter
-    ema50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate weekly pivot points: P = (H+L+C)/3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H-L), S2 = P - (H-L)
+    # R3 = H + 2*(P-L), S3 = L - 2*(H-P)
+    # R4 = R3 + (H-L), S4 = S3 - (H-L)
+    H_w = df_w['high'].values
+    L_w = df_w['low'].values
+    C_w = df_w['close'].values
     
-    # Calculate VWAP for 1h
-    typical_price = (high + low + close) / 3.0
-    vwap_numerator = typical_price * volume
-    vwap_denominator = volume
+    P_w = (H_w + L_w + C_w) / 3.0
+    R1_w = 2*P_w - L_w
+    S1_w = 2*P_w - H_w
+    range_w = H_w - L_w
+    R2_w = P_w + range_w
+    S2_w = P_w - range_w
+    R3_w = H_w + 2*(P_w - L_w)
+    S3_w = L_w - 2*(H_w - P_w)
+    R4_w = R3_w + range_w
+    S4_w = S3_w - range_w
     
-    # Rolling VWAP (24 periods = 1 day)
-    vwap = pd.Series(vwap_numerator).rolling(window=24, min_periods=12).sum().values / \
-           pd.Series(vwap_denominator).rolling(window=24, min_periods=12).sum().values
+    # Align weekly pivot levels to 6h (wait for weekly close)
+    P_w_a = align_htf_to_ltf(prices, df_w, P_w)
+    R4_w_a = align_htf_to_ltf(prices, df_w, R4_w)
+    S4_w_a = align_htf_to_ltf(prices, df_w, S4_w)
     
-    # VWAP deviation in ATR units
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    vwap_dev = (close - vwap) / atr  # Deviation in ATR multiples
-    
-    # Volume filter: current volume > 2x 24-period volume average
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_filter = volume > (vol_ma * 2.0)
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Volume filter: current volume > 1.3x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup for indicators
+    start_idx = 20  # Warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(vwap_dev[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(P_w_a[i]) or np.isnan(R4_w_a[i]) or np.isnan(S4_w_a[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vdev = vwap_dev[i]
         vol_ok = vol_filter[i]
-        sess_ok = session_filter[i]
-        trend = ema50_4h_aligned[i]
         
         if position == 0:
-            # Long: price below VWAP with high volume, in uptrend (mean reversion long)
-            if vdev < -1.0 and vol_ok and sess_ok and price > trend:
-                signals[i] = 0.20
+            # Long breakout: price closes above R4 with volume
+            if price > R4_w_a[i] and vol_ok:
+                signals[i] = 0.25
                 position = 1
-            # Short: price above VWAP with high volume, in downtrend (mean reversion short)
-            elif vdev > 1.0 and vol_ok and sess_ok and price < trend:
-                signals[i] = -0.20
+            # Short breakdown: price closes below S4 with volume
+            elif price < S4_w_a[i] and vol_ok:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit if price returns to VWAP or trend weakens
-            if vdev > -0.2 or price < trend:
+            # Exit: price returns to weekly pivot or opposite S4
+            if price < P_w_a[i] or price > R4_w_a[i] * 1.02:  # slight buffer above R4
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit if price returns to VWAP or trend weakens
-            if vdev < 0.2 or price > trend:
+            # Exit: price returns to weekly pivot or opposite R4
+            if price > P_w_a[i] or price < S4_w_a[i] * 0.98:  # slight buffer below S4
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Volume_Spike_Reversion_4hTrend"
-timeframe = "1h"
+name = "6h_Weekly_Pivot_R4S4_Breakout_Volume"
+timeframe = "6h"
 leverage = 1.0
