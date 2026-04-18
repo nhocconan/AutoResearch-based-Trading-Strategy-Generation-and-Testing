@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Pivot_R1S1_Volume_EMA34
-12h strategy using daily Camarilla pivot levels (R1/S1) with volume confirmation and EMA34 trend filter.
-- Long: Close above R1 + volume > 1.5x daily avg + EMA34 > EMA89
-- Short: Close below S1 + volume > 1.5x daily avg + EMA34 < EMA89
-- Exit: Opposite pivot level break or trend reversal
-Designed for ~15-25 trades/year per symbol (60-100 total over 4 years)
-Works in bull markets (trend continuation) and bear markets (mean reversion at pivot levels)
+6h_Pivot_Fib618_Extension_Breakout_Volume
+6h strategy using daily pivot points with Fibonacci 61.8% extension levels and volume confirmation.
+- Long: Close breaks above daily pivot + 0.618 extension + volume > 1.5x daily avg
+- Short: Close breaks below daily pivot - 0.618 extension + volume > 1.5x daily avg
+- Exit: Opposite breakout or volume divergence
+Designed for ~25-35 trades/year per symbol (100-140 total over 4 years)
+Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,7 +23,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots, EMA, and volume average
+    # Get daily data for pivot points and volume average
     df_1d = get_htf_data(prices, '1d')
     
     high_1d = df_1d['high'].values
@@ -31,24 +31,23 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla pivot levels (R1, S1)
+    # Calculate daily pivot point and Fibonacci 61.8% extension
     # Pivot = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
     pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
     
-    # Align pivot levels to 12h
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Range = H - L
+    range_1d = high_1d - low_1d
     
-    # EMA34 and EMA89 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_89_1d = pd.Series(close_1d).ewm(span=89, adjust=False, min_periods=89).mean().values
+    # Fibonacci 61.8% extension levels
+    # Resistance = Pivot + 0.618 * Range
+    # Support = Pivot - 0.618 * Range
+    resistance_1d = pivot_1d + 0.618 * range_1d
+    support_1d = pivot_1d - 0.618 * range_1d
     
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    ema_89_aligned = align_htf_to_ltf(prices, df_1d, ema_89_1d)
+    # Align daily levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    resistance_aligned = align_htf_to_ltf(prices, df_1d, resistance_1d)
+    support_aligned = align_htf_to_ltf(prices, df_1d, support_1d)
     
     # Daily volume average (20-period)
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
@@ -57,48 +56,43 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 89  # need enough for EMA89
+    start_idx = 30  # need enough for volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(ema_89_aligned[i]) or
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(resistance_aligned[i]) or 
+            np.isnan(support_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
-        
-        # Trend conditions
-        uptrend = ema_34_aligned[i] > ema_89_aligned[i]
-        downtrend = ema_34_aligned[i] < ema_89_aligned[i]
         
         # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
         
-        # Pivot level break conditions
-        break_above_r1 = close[i] > r1_aligned[i]
-        break_below_s1 = close[i] < s1_aligned[i]
+        # Breakout conditions
+        breakout_up = close[i] > resistance_aligned[i]
+        breakdown_down = close[i] < support_aligned[i]
         
         if position == 0:
-            # Long: uptrend + volume + break above R1
-            if uptrend and vol_confirm and break_above_r1:
+            # Long: volume + breakout above resistance (pivot + 0.618 ext)
+            if vol_confirm and breakout_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + volume + break below S1
-            elif downtrend and vol_confirm and break_below_s1:
+            # Short: volume + breakdown below support (pivot - 0.618 ext)
+            elif vol_confirm and breakdown_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend change, volume confirmation, or break below S1
-            if not uptrend or (vol_confirm and break_below_s1):
+            # Long exit: volume confirmation + breakdown below pivot
+            if vol_confirm and close[i] < pivot_aligned[i]:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend change, volume confirmation, or break above R1
-            if not downtrend or (vol_confirm and break_above_r1):
+            # Short exit: volume confirmation + breakout above pivot
+            if vol_confirm and close[i] > pivot_aligned[i]:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -106,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_R1S1_Volume_EMA34"
-timeframe = "12h"
+name = "6h_Pivot_Fib618_Extension_Breakout_Volume"
+timeframe = "6h"
 leverage = 1.0
