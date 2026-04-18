@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-"""
-12h_Pivot_S1R1_Breakout_Volume_v2
-Refined version of the original strategy with tighter entry conditions to reduce trade frequency.
-Target: 20-50 trades/year per symbol (80-200 total over 4 years).
-Uses daily Camarilla pivot points (S1/R1) with volume confirmation and daily trend filter.
-Long: Close breaks above daily R1 + volume > 1.5x daily avg + daily EMA50 > EMA200
-Short: Close breaks below daily S1 + volume > 1.5x daily avg + daily EMA50 < EMA200
-Exit: Opposite breakout or trend reversal
-Designed to work in both bull and breakout continuation and bear markets (breakdown continuation).
-"""
+# 12h_Pivot_S1R1_TrendFollow_Volume
+# 12h strategy using daily Camarilla pivot points (S1/R1) with volume confirmation and daily trend filter.
+# Long: Close breaks above daily R1 + volume > 1.5x daily avg + daily EMA50 > EMA200
+# Short: Close breaks below daily S1 + volume > 1.5x daily avg + daily EMA50 < EMA200
+# Exit: Opposite breakout or trend reversal
+# Designed for ~15-25 trades/year per symbol (60-100 total over 4 years)
+# Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
 
 import numpy as np
 import pandas as pd
@@ -33,8 +30,11 @@ def generate_signals(prices):
     volume_1d = df_1d['volume'].values
     
     # Calculate Camarilla pivot points for daily timeframe
+    # Pivot = (H + L + C) / 3
     pivot = (high_1d + low_1d + close_1d) / 3.0
+    # R1 = C + (H - L) * 1.1 / 12
     r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    # S1 = C - (H - L) * 1.1 / 12
     s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
     
     # Daily EMA50 and EMA200 for trend filter
@@ -68,8 +68,8 @@ def generate_signals(prices):
         uptrend = ema_50_aligned[i] > ema_200_aligned[i]
         downtrend = ema_50_aligned[i] < ema_200_aligned[i]
         
-        # Volume confirmation - increased threshold to reduce trades
-        vol_confirm = volume[i] > 2.0 * vol_ma_aligned[i]
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
         
         # Breakout conditions
         breakout_up = close[i] > r1_aligned[i]
@@ -103,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_S1R1_Breakout_Volume_v2"
+name = "12h_Pivot_S1R1_TrendFollow_Volume"
 timeframe = "12h"
 leverage = 1.0
