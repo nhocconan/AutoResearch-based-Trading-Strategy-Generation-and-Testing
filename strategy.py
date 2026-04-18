@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_1D_Trend_Confluence_V1
-Hypothesis: Use 1D EMA34 for daily trend direction, 12H for entry with volume confirmation.
-Long when price > daily EMA34 and breaks above 12H high of last 20 bars with volume > 1.3x average.
-Short when price < daily EMA34 and breaks below 12H low of last 20 bars with volume > 1.3x average.
-Only trade during active session (08-20 UTC). Fixed position size 0.25.
-Target: 20-40 trades/year per symbol (80-160 total over 4 years) to minimize fee drain.
-Works in bull/bear via daily EMA trend filter and volume confirmation.
+12h_Pivot_R1S1_Breakout_Volume_Tight_V1
+Hypothesis: Use daily pivot R1/S1 for directional bias, 12h for entry with volume confirmation.
+Long when price breaks above daily R1 with volume > 1.5x average during active session (08-20 UTC).
+Short when price breaks below daily S1 with volume > 1.5x average during active session.
+Tighten: require price to close outside pivot band for 2 consecutive 12h bars to avoid false breaks.
+Position size 0.25. Target ~25 trades/year per symbol (100 total over 4 years) to minimize fee drag.
+Works in bull/bear via session timing and volume confirmation.
 """
 
 import numpy as np
@@ -23,23 +23,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA34 trend
+    # Get daily data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
     
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate EMA34 on daily close
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Previous day's OHLC for standard pivot calculation
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = close_1d[0]
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
     
-    # Align EMA34 to 12h timeframe
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Pivot point and support/resistance levels
+    pivot = (prev_high + prev_low + prev_close) / 3
+    r1 = 2 * pivot - prev_low
+    s1 = 2 * pivot - prev_high
     
-    # Calculate 12H Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Volatility filter: avoid extreme volatility (stop hunting)
+    tr1 = np.maximum(high_1d - low_1d, np.absolute(high_1d - np.roll(close_1d, 1)))
+    tr2 = np.absolute(np.roll(close_1d, 1) - low_1d)
+    tr = np.maximum(tr1, tr2)
+    tr[0] = high_1d[0] - low_1d[0]
+    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    atr_ma_50 = pd.Series(atr_20).rolling(window=50, min_periods=50).mean().values
     
-    # Volume confirmation: current volume > 1.3x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align all daily data to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    atr_20_aligned = align_htf_to_ltf(prices, df_1d, atr_20)
+    atr_ma_50_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_50)
     
     # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -47,50 +64,74 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    consecutive_outside = 0  # count of consecutive bars outside pivot band
     
-    start_idx = 50  # need enough for EMA and Donchian
+    start_idx = 50  # need enough for ATR
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(atr_20_aligned[i]) or np.isnan(atr_ma_50_aligned[i])):
             signals[i] = 0.0
+            consecutive_outside = 0
             continue
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.3 * vol_ma[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        vol_confirm = volume[i] > 1.5 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
+        
+        # Volatility filter: avoid extreme volatility
+        vol_filter = atr_20_aligned[i] < atr_ma_50_aligned[i] * 2 if not np.isnan(atr_ma_50_aligned[i]) else False
         
         # Only trade during active session
         in_session = session_mask[i]
         
+        # Check if price is outside pivot band
+        price_above_r1 = close[i] > r1_aligned[i]
+        price_below_s1 = close[i] < s1_aligned[i]
+        outside_band = price_above_r1 or price_below_s1
+        
+        # Count consecutive bars outside band
+        if outside_band:
+            consecutive_outside += 1
+        else:
+            consecutive_outside = 0
+        
+        # Require 2 consecutive bars outside band to confirm breakout
+        confirmed_breakout = consecutive_outside >= 2
+        
         if position == 0:
-            # Long: price > daily EMA34 and breaks above 20-period high with volume
-            if close[i] > ema_34_aligned[i] and close[i] > high_20[i] and vol_confirm and in_session:
+            # Long: price breaks above R1 with volume and volatility filter during session
+            if price_above_r1 and vol_confirm and vol_filter and in_session and confirmed_breakout:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < daily EMA34 and breaks below 20-period low with volume
-            elif close[i] < ema_34_aligned[i] and close[i] < low_20[i] and vol_confirm and in_session:
+            # Short: price breaks below S1 with volume and volatility filter during session
+            elif price_below_s1 and vol_confirm and vol_filter and in_session and confirmed_breakout:
                 signals[i] = -0.25
                 position = -1
+            else:
+                signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price breaks below 20-period low or outside session
-            if close[i] < low_20[i] or not in_session:
+            # Long exit: price returns below pivot or volatility spike or outside session
+            if close[i] < pivot_aligned[i] or not vol_filter or not in_session:
                 signals[i] = -0.25  # reverse to short
                 position = -1
+                consecutive_outside = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above 20-period high or outside session
-            if close[i] > high_20[i] or not in_session:
+            # Short exit: price returns above pivot or volatility spike or outside session
+            if close[i] > pivot_aligned[i] or not vol_filter or not in_session:
                 signals[i] = 0.25  # reverse to long
                 position = 1
+                consecutive_outside = 0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "12h_1D_Trend_Confluence_V1"
+name = "12h_Pivot_R1S1_Breakout_Volume_Tight_V1"
 timeframe = "12h"
 leverage = 1.0
