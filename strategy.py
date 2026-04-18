@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_InsideBarBreakout_Pullback
-Hypothesis: Trade breakouts from inside bars (narrow range) on 4h, entering on pullback to the inside bar's midpoint in direction of 1d EMA(50) trend. Inside bars indicate consolidation; breakouts capture momentum. Pullback entry improves risk-reward. Works in bull/bear by following higher timeframe trend. Target ~30 trades/year to avoid fee drag.
+6h_Pivot_R1_S1_Breakout_Volume_CCIFilter
+Hypothesis: Trade breakouts of daily pivot R1/S1 levels on 6h timeframe with volume confirmation and CCI(20) trend filter. 
+In bull markets, buy R1 breakouts; in bear markets, sell S1 breakdowns. Uses daily pivot levels as dynamic support/resistance 
+that work in both regimes. Volume >1.5x average confirms breakout strength. CCI(20) >0 for longs, <0 for shorts ensures 
+trend alignment. Targets 15-30 trades/year to avoid fee drag.
 """
 
 import numpy as np
@@ -16,82 +19,84 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 4h data for inside bar detection
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Get 1d data for trend filter
+    # Get daily data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
+    
+    # Daily OHLC for pivot points
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous 4h bar's OHLC (completed bar)
-    prev_high_4h = np.roll(high_4h, 1)
-    prev_low_4h = np.roll(low_4h, 1)
-    prev_close_4h = np.roll(close_4h, 1)
-    prev_high_4h[0] = high_4h[0]
-    prev_low_4h[0] = low_4h[0]
-    prev_close_4h[0] = close_4h[0]
+    # Calculate daily pivot points: P = (H+L+C)/3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # R1 = 2*P - L, S1 = 2*P - H
+    r1_1d = 2 * pivot_1d - low_1d
+    s1_1d = 2 * pivot_1d - high_1d
     
-    # Inside bar: current range inside previous range
-    inside_bar = (high_4h <= prev_high_4h) & (low_4h >= prev_low_4h)
+    # Align daily pivot levels to 6h
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Inside bar midpoint
-    ib_mid = (prev_high_4h + prev_low_4h) / 2.0
+    # CCI(20) calculation on 6h close
+    typical_price = (high + low + close) / 3.0
+    cci_period = 20
+    cci_ma = np.zeros_like(typical_price)
+    cci_mad = np.zeros_like(typical_price)
     
-    # 1d EMA(50) trend
-    ema_period = 50
-    ema_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= ema_period:
-        ema_1d[ema_period-1] = np.mean(close_1d[:ema_period])
-        for i in range(ema_period, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * 2 / (ema_period + 1)) + (ema_1d[i-1] * (ema_period - 1) / (ema_period + 1))
+    for i in range(cci_period - 1, len(typical_price)):
+        tp_slice = typical_price[i - cci_period + 1:i + 1]
+        cci_ma[i] = np.mean(tp_slice)
+        cci_mad[i] = np.mean(np.abs(tp_slice - cci_ma[i]))
     
-    # Align to 4h timeframe
-    inside_bar_aligned = align_htf_to_ltf(prices, df_4h, inside_bar)
-    ib_mid_aligned = align_htf_to_ltf(prices, df_4h, ib_mid)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    cci = np.zeros_like(typical_price)
+    for i in range(cci_period - 1, len(typical_price)):
+        if cci_mad[i] != 0:
+            cci[i] = (typical_price[i] - cci_ma[i]) / (0.015 * cci_mad[i])
+        else:
+            cci[i] = 0
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = np.zeros_like(volume)
+    vol_period = 20
+    for i in range(vol_period, len(volume)):
+        vol_ma[i] = np.mean(volume[i - vol_period:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, ema_period)
+    start_idx = max(cci_period, vol_period)
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available
-        if np.isnan(ib_mid_aligned[i]) or np.isnan(ema_1d_aligned[i]):
+        # Skip if pivot data not available
+        if np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        
         if position == 0:
-            # Long: inside bar breakout up + pullback to midpoint + above 1d EMA
-            if (inside_bar_aligned[i] and 
-                close[i] > prev_high_4h[i] and 
-                close[i] <= ib_mid_aligned[i] * 1.02 and  # Allow small overshoot
-                close[i] > ema_1d_aligned[i]):
+            # Long: break above R1 with volume and CCI > 0
+            if close[i] > r1_1d_aligned[i] and vol_confirm and cci[i] > 0:
                 signals[i] = 0.25
                 position = 1
-            # Short: inside bar breakout down + pullback to midpoint + below 1d EMA
-            elif (inside_bar_aligned[i] and 
-                  close[i] < prev_low_4h[i] and 
-                  close[i] >= ib_mid_aligned[i] * 0.98 and  # Allow small undershoot
-                  close[i] < ema_1d_aligned[i]):
+            # Short: break below S1 with volume and CCI < 0
+            elif close[i] < s1_1d_aligned[i] and vol_confirm and cci[i] < 0:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: close below inside bar low or below 1d EMA
-            if close[i] < prev_low_4h[i] or close[i] < ema_1d_aligned[i]:
+            # Long exit: price closes below S1 or CCI turns negative
+            if close[i] < s1_1d_aligned[i] or cci[i] < 0:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: close above inside bar high or above 1d EMA
-            if close[i] > prev_high_4h[i] or close[i] > ema_1d_aligned[i]:
+            # Short exit: price closes above R1 or CCI turns positive
+            if close[i] > r1_1d_aligned[i] or cci[i] > 0:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -99,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_InsideBarBreakout_Pullback"
-timeframe = "4h"
+name = "6h_Pivot_R1_S1_Breakout_Volume_CCIFilter"
+timeframe = "6h"
 leverage = 1.0
