@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_DonchianBreakout_VolumeTrend
-4h strategy using Donchian(20) breakout with 1d EMA trend filter and volume confirmation.
-- Long: Close breaks above Donchian Upper (20-period high) + 1d EMA50 > EMA200 + Volume > 1.5x 20-period average
-- Short: Close breaks below Donchian Lower (20-period low) + 1d EMA50 < EMA200 + Volume > 1.5x 20-period average
-- Exit: Opposite breakout
-Designed for ~20-40 trades/year per symbol (80-160 total over 4 years)
+12h_SR_Breakout_Volume_SRFilter
+12h strategy using Support/Resistance breakouts with volume confirmation and multi-timeframe trend filter.
+- Long: Close breaks above 1w High + volume > 1.5x avg + 1d EMA50 > EMA200
+- Short: Close breaks below 1w Low + volume > 1.5x avg + 1d EMA50 < EMA200
+- Exit: Opposite breakout or trend reversal
+Designed for ~15-25 trades/year per symbol (60-100 total over 4 years)
 Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
 """
 
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,43 +23,48 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get weekly data for Support/Resistance levels
+    df_1w = get_htf_data(prices, '1w')
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Weekly High and Low (resistance/support)
+    weekly_high = high_1w
+    weekly_low = low_1w
+    
+    # Align weekly S/R levels to 12h
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
+    
+    # Get daily data for trend filter and volume average
     df_1d = get_htf_data(prices, '1d')
     
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # 1d EMA50 and EMA200 for trend filter
+    # Daily EMA50 and EMA200 for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Donchian Channels (20-period)
-    lookback = 20
-    donchian_upper = np.full(n, np.nan)
-    donchian_lower = np.full(n, np.nan)
-    
-    for i in range(n):
-        if i >= lookback - 1:
-            donchian_upper[i] = np.max(high[i - lookback + 1:i + 1])
-            donchian_lower[i] = np.min(low[i - lookback + 1:i + 1])
-    
-    # Volume average (20-period)
-    vol_avg = np.full(n, np.nan)
-    for i in range(n):
-        if i >= lookback - 1:
-            vol_avg[i] = np.mean(volume[i - lookback + 1:i + 1])
+    # Daily volume average (20-period)
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, lookback - 1)  # need enough for EMA200 and Donchian
+    start_idx = 50  # need enough for EMA200
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(vol_avg[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i])):
+        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
+            np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -68,33 +73,33 @@ def generate_signals(prices):
         downtrend = ema_50_aligned[i] < ema_200_aligned[i]
         
         # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_avg[i]
+        vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
         
         # Breakout conditions
-        breakout_up = close[i] > donchian_upper[i]
-        breakdown_down = close[i] < donchian_lower[i]
+        breakout_up = close[i] > weekly_high_aligned[i]
+        breakdown_down = close[i] < weekly_low_aligned[i]
         
         if position == 0:
-            # Long: uptrend + breakout above Donchian Upper + volume confirmation
-            if uptrend and breakout_up and vol_confirm:
+            # Long: uptrend + volume + breakout above weekly high
+            if uptrend and vol_confirm and breakout_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + breakdown below Donchian Lower + volume confirmation
-            elif downtrend and breakdown_down and vol_confirm:
+            # Short: downtrend + volume + breakdown below weekly low
+            elif downtrend and vol_confirm and breakdown_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: breakdown below Donchian Lower
-            if breakdown_down:
+            # Long exit: trend change, volume confirmation, or breakdown below weekly low
+            if not uptrend or (vol_confirm and breakdown_down):
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: breakout above Donchian Upper
-            if breakout_up:
+            # Short exit: trend change, volume confirmation, or breakout above weekly high
+            if not downtrend or (vol_confirm and breakout_up):
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -102,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DonchianBreakout_VolumeTrend"
-timeframe = "4h"
+name = "12h_SR_Breakout_Volume_SRFilter"
+timeframe = "12h"
 leverage = 1.0
