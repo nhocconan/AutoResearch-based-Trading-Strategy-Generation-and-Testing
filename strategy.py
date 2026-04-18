@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_1D_Camarilla_R1S1_Breakout_Volume_Tight_V6
-Hypothesis: Use daily Camarilla R1/S1 levels on 12h timeframe with strict volume confirmation (2x 20-period average) and ADX > 25 filter. Only trade during 08-20 UTC. Target 15-25 trades/year to avoid fee drag. Works in bull/bear via volatility regime filter.
+4h_12h_Camarilla_R1S1_Breakout_Volume_Median
+Hypothesis: Use daily and 12h Camarilla R1/S1 for directional bias with 4h entry, requiring volume > 1.5x 20-period average and session filter (08-20 UTC). Add 12h ADX > 20 to avoid chop and ensure trending conditions. This reduces whipsaw and increases win rate while keeping trade frequency low (target 15-35 trades/year). Works in bull/bear via volatility regime filter using 12h ADX. Targeting 75-200 total trades over 4 years.
 """
 
 import numpy as np
@@ -18,8 +18,11 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels
+    # Get daily data for primary directional bias
     df_1d = get_htf_data(prices, '1d')
+    
+    # Get 12h data for ADX filter and volatility context
+    df_12h = get_htf_data(prices, '12h')
     
     # Daily calculations for bias
     close_1d = df_1d['close'].values
@@ -39,15 +42,20 @@ def generate_signals(prices):
     r1_1d = prev_close + range_1d * 1.1 / 12
     s1_1d = prev_close - range_1d * 1.1 / 12
     
-    # 1d ADX for trend strength filter (avoid chop)
-    tr1 = np.maximum(high_1d - low_1d, np.abs(high_1d - np.roll(close_1d, 1)))
-    tr2 = np.abs(np.roll(close_1d, 1) - low_1d)
+    # 12h ADX for trend strength filter (avoid chop)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # True Range
+    tr1 = np.maximum(high_12h - low_12h, np.abs(high_12h - np.roll(close_12h, 1)))
+    tr2 = np.abs(np.roll(close_12h, 1) - low_12h)
     tr = np.maximum(tr1, tr2)
-    tr[0] = high_1d[0] - low_1d[0]
+    tr[0] = high_12h[0] - low_12h[0]
     
     # Directional Movement
-    up_move = np.maximum(high_1d - np.roll(high_1d, 1), 0)
-    down_move = np.maximum(np.roll(low_1d, 1) - low_1d, 0)
+    up_move = np.maximum(high_12h - np.roll(high_12h, 1), 0)
+    down_move = np.maximum(np.roll(low_12h, 1) - low_12h, 0)
     up_move[0] = 0
     down_move[0] = 0
     
@@ -78,10 +86,10 @@ def generate_signals(prices):
     for i in range(2*adx_period + 1, len(dx)):
         adx[i] = (adx[i-1] * (adx_period - 1) + dx[i]) / adx_period
     
-    # Align all higher timeframe data to 12h
+    # Align all higher timeframe data to 4h
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
     # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -95,16 +103,16 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i])):
+            np.isnan(adx_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2x 20-period average
+        # Volume confirmation: current volume > 1.5x 20-period average
         vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_confirm = volume[i] > 2.0 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
+        vol_confirm = volume[i] > 1.5 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
         
-        # Trend filter: ADX > 25 to avoid chop
-        trend_filter = adx_1d_aligned[i] > 25 if not np.isnan(adx_1d_aligned[i]) else False
+        # Trend filter: ADX > 20 to avoid chop
+        trend_filter = adx_12h_aligned[i] > 20 if not np.isnan(adx_12h_aligned[i]) else False
         
         # Only trade during active session
         in_session = session_mask[i]
@@ -137,6 +145,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1D_Camarilla_R1S1_Breakout_Volume_Tight_V6"
-timeframe = "12h"
+name = "4h_12h_Camarilla_R1S1_Breakout_Volume_Median"
+timeframe = "4h"
 leverage = 1.0
