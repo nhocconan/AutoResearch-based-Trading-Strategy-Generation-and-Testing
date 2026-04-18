@@ -3,6 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 6h timeframe with 1d trend filter (EMA34) and volume confirmation
+# Uses 6h Donchian breakout (20-period) with volume spike (>2x 30-period avg)
+# Entry only when price breaks Donchian channel in direction of 1d EMA34 trend
+# Exit when price reverses back to opposite Donchian level or trend changes
+# Designed for 12-37 trades/year on 6h timeframe to avoid fee drag
+# Works in bull markets via trend-following breakouts
+# Works in bear markets via short-side breakdowns with volume confirmation
+# Volume filter reduces false breakouts during low-volume periods
+
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
@@ -20,10 +29,10 @@ def generate_signals(prices):
     # Calculate 34-period EMA on 1d for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA to 4h (properly delayed for completed 1d bar)
+    # Align 1d EMA to 6h (properly delayed for completed 1d bar)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 4h ATR (14-period)
+    # Calculate 6h ATR (14-period)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -32,11 +41,11 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 4h volume spike (volume > 2.0x 30-period average)
+    # Calculate 6h volume spike (volume > 2.0x 30-period average)
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
-    # Calculate 4h Donchian channel (20-period)
+    # Calculate 6h Donchian channel (20-period)
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -93,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_VolumeSpike_v2"
-timeframe = "4h"
+name = "6h_Donchian20_1dEMA34_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
