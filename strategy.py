@@ -1,35 +1,25 @@
 #!/usr/bin/env python3
 """
-4h Camarilla Pivot (R1/S1) Breakout with Volume Spike and ADX Filter
-- Uses 1-day Camarilla pivot levels (R1, S1) for breakout signals
-- Confirms with 4-hour volume > 1.8x 20-period average
-- Filters by 1-day ADX > 20 to ensure trending market
-- Exits on opposite Camarilla level touch
-- Designed for 20-40 trades/year (80-160 total) to minimize fee drag
+1d Donchian Breakout with Volume Spike and Weekly ADX Trend Filter
+- Uses daily Donchian channel (20-period) for breakout signals
+- Confirms with daily volume > 2.0x 20-period average
+- Filters by weekly ADX > 25 to ensure trending market
+- Exits on opposite Donchian band touch
+- Designed for 10-25 trades/year (40-100 total) to minimize fee drift
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf  # Wait, need align_htf_to_ltf
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given high, low, close."""
-    range_val = high - low
-    if range_val == 0:
-        return close, close, close, close
-    multiplier = 1.1 / 12
-    c = close
-    h = high
-    l = low
-    r4 = c + range_val * 1.1 / 2
-    r3 = c + range_val * 1.1 / 4
-    r2 = c + range_val * 1.1 / 6
-    r1 = c + range_val * multiplier
-    s1 = c - range_val * multiplier
-    s2 = c - range_val * 1.1 / 6
-    s3 = c - range_val * 1.1 / 4
-    s4 = c - range_val * 1.1 / 2
-    return r1, r2, r3, r4, s1, s2, s3, s4
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channel upper and lower bands."""
+    upper = np.full(len(high), np.nan)
+    lower = np.full(len(high), np.nan)
+    for i in range(period-1, len(high)):
+        upper[i] = np.max(high[i-period+1:i+1])
+        lower[i] = np.min(low[i-period+1:i+1])
+    return upper, lower
 
 def calculate_sma(arr, period):
     """Calculate Simple Moving Average with NaN for insufficient data."""
@@ -106,83 +96,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla and ADX
+    # Get daily data for Donchian and volume
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1-day Camarilla levels (using previous day's OHLC)
-    r1_1d = np.full(len(high_1d), np.nan)
-    r2_1d = np.full(len(high_1d), np.nan)
-    s1_1d = np.full(len(high_1d), np.nan)
-    s2_1d = np.full(len(high_1d), np.nan)
+    # Calculate daily Donchian channel (20-period)
+    upper_1d, lower_1d = calculate_donchian(high_1d, low_1d, 20)
     
-    for i in range(1, len(high_1d)):
-        r1, r2, _, _, s1, s2, _, _ = calculate_camarilla(high_1d[i-1], low_1d[i-1], close_1d[i-1])
-        r1_1d[i] = r1
-        r2_1d[i] = r2
-        s1_1d[i] = s1
-        s2_1d[i] = s2
+    # Calculate daily volume moving average (20-period)
+    vol_ma_1d = calculate_sma(volume_1d, 20)
     
-    # Calculate 1-day ADX (14-period)
-    adx_14_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    # Get weekly data for ADX filter
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Get 4h data for volume
-    df_4h = get_htf_data(prices, '4h')
-    volume_4h = df_4h['volume'].values
+    # Calculate weekly ADX (14-period)
+    adx_14_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
     
-    # Calculate 4h volume moving average (20-period)
-    vol_ma_4h = calculate_sma(volume_4h, 20)
+    # Align daily indicators to daily timeframe (no alignment needed)
+    upper_1d_aligned = upper_1d
+    lower_1d_aligned = lower_1d
+    vol_ma_1d_aligned = vol_ma_1d
     
-    # Align 1d indicators to 4h timeframe
-    r1_1d_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    r2_1d_4h = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s1_1d_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
-    s2_1d_4h = align_htf_to_ltf(prices, df_1d, s2_1d)
-    adx_14_1d_4h = align_htf_to_ltf(prices, df_1d, adx_14_1d)
-    
-    # Align 4h volume and volume MA to 4h timeframe
-    volume_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_4h)
-    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
+    # Align weekly ADX to daily timeframe
+    adx_14_1w_1d = align_htf_to_ltf(prices, df_1w, adx_14_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # need sufficient data for calculations
+    start_idx = 40  # need sufficient data for Donchian, volume MA, and ADX
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_1d_4h[i]) or np.isnan(s1_1d_4h[i]) or 
-            np.isnan(volume_4h_aligned[i]) or np.isnan(vol_ma_4h_aligned[i]) or 
-            np.isnan(adx_14_1d_4h[i])):
+        if (np.isnan(upper_1d_aligned[i]) or np.isnan(lower_1d_aligned[i]) or 
+            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(adx_14_1w_1d[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.8x 20-period average
-        vol_spike = volume_4h_aligned[i] > 1.8 * vol_ma_4h_aligned[i]
+        # Get aligned daily volume for current day
+        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+        
+        # Volume confirmation: current daily volume > 2.0x 20-period average
+        vol_spike = vol_1d_aligned[i] > 2.0 * vol_ma_1d_aligned[i]
         
         if position == 0:
-            # Long: price above R1, volume spike, ADX > 20
-            if close[i] > r1_1d_4h[i] and vol_spike and adx_14_1d_4h[i] > 20:
+            # Long: price above upper Donchian band, volume spike, ADX > 25
+            if close[i] > upper_1d_aligned[i] and vol_spike and adx_14_1w_1d[i] > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below S1, volume spike, ADX > 20
-            elif close[i] < s1_1d_4h[i] and vol_spike and adx_14_1d_4h[i] > 20:
+            # Short: price below lower Donchian band, volume spike, ADX > 25
+            elif close[i] < lower_1d_aligned[i] and vol_spike and adx_14_1w_1d[i] > 25:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price touches or goes below S1
-            if close[i] < s1_1d_4h[i]:
+            # Long exit: price touches or goes below lower Donchian band
+            if close[i] < lower_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price touches or goes above R1
-            if close[i] > r1_1d_4h[i]:
+            # Short exit: price touches or goes above upper Donchian band
+            if close[i] > upper_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -190,6 +172,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_VolumeSpike_ADX20"
-timeframe = "4h"
+name = "1d_Donchian20_VolumeSpike_ADX14_Weekly"
+timeframe = "1d"
 leverage = 1.0
