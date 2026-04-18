@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_Pivot_R1_S1_Breakout_Volume_Filter
-Strategy: Camarilla pivot breakout with volume confirmation and ATR filter.
-Long: Price breaks above R1 with volume > 1.5x average, in uptrend (EMA34 > EMA89).
-Short: Price breaks below S1 with volume > 1.5x average, in downtrend (EMA34 < EMA89).
-Exit: Trend reversal or opposite breakout.
-Designed for 4h timeframe: ~20-30 trades/year per symbol (80-120 total over 4 years).
-Works in bull/bear via EMA trend filter and volume confirmation.
+1d_Keltner_Squeeze_Breakout_v1
+Hypothesis: In low-volatility regimes (BB/KC squeeze), price often breaks out with momentum.
+We use daily timeframe with weekly trend filter to capture multi-day moves.
+Long when: price breaks above upper Keltner + weekly trend up + volume spike.
+Short when: price breaks below lower Keltner + weekly trend down + volume spike.
+Exit when: opposite Keltner break or trend change.
+Designed for 1d timeframe: ~10-25 trades/year per symbol (40-100 total over 4 years).
+Works in bull/bear via weekly trend filter and volatility squeeze logic.
 """
 
 import numpy as np
@@ -23,91 +24,90 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for trend filter (using 1w as HTF)
+    df_1w = get_htf_data(prices, '1w')
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly EMA20 and EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Align weekly data to daily timeframe
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Camarilla pivot levels
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_ = prev_high - prev_low
-    r1 = pivot + (range_ * 1.1 / 12)
-    s1 = pivot - (range_ * 1.1 / 12)
-    
-    # Trend filters: EMA34 and EMA89 on daily close
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_89_1d = pd.Series(close_1d).ewm(span=89, adjust=False, min_periods=89).mean().values
-    
-    # Average true range for volatility filter
-    tr1 = np.abs(np.roll(high_1d, 1) - np.roll(low_1d, 1))
-    tr2 = np.abs(np.roll(high_1d, 1) - np.roll(close_1d, 1))
-    tr3 = np.abs(np.roll(low_1d, 1) - np.roll(close_1d, 1))
+    # Daily Keltner Channel (20, 2.0)
+    # Typical Price = (H+L+C)/3
+    typical_price = (high + low + close) / 3.0
+    atr_period = 20
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    tr[0] = tr1[0]  # first period
+    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
     
-    # Align all daily data to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    ema_89_aligned = align_htf_to_ltf(prices, df_1d, ema_89_1d)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    ema_tp = pd.Series(typical_price).ewm(span=20, adjust=False, min_periods=20).mean().values
+    kc_upper = ema_tp + 2.0 * atr
+    kc_lower = ema_tp - 2.0 * atr
+    
+    # Bollinger Bands (20, 2.0) for squeeze detection
+    sma_close = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_close = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper = sma_close + 2.0 * std_close
+    bb_lower = sma_close - 2.0 * std_close
+    
+    # Squeeze condition: BB inside KC (low volatility)
+    squeeze = (bb_upper <= kc_upper) & (bb_lower >= kc_lower)
+    
+    # Volume confirmation (20-period average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for EMA89 and ATR
+    start_idx = 50  # need enough for weekly EMA50 and daily indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(ema_89_aligned[i]) or
-            np.isnan(atr_aligned[i])):
+        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or
+            np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or
+            np.isnan(squeeze[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend conditions
-        uptrend = ema_34_aligned[i] > ema_89_aligned[i]
-        downtrend = ema_34_aligned[i] < ema_89_aligned[i]
+        # Weekly trend conditions
+        weekly_uptrend = ema_20_1w_aligned[i] > ema_50_1w_aligned[i]
+        weekly_downtrend = ema_20_1w_aligned[i] < ema_50_1w_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma_20[i]
         
         # Breakout conditions
-        breakout_long = close[i] > r1_aligned[i]
-        breakout_short = close[i] < s1_aligned[i]
+        buy_breakout = close[i] > kc_upper[i] and squeeze[i]
+        sell_breakout = close[i] < kc_lower[i] and squeeze[i]
         
         if position == 0:
-            # Long: uptrend + volume + breakout above R1
-            if uptrend and vol_confirm and breakout_long:
+            # Long: weekly uptrend + volume + buy breakout in squeeze
+            if weekly_uptrend and vol_confirm and buy_breakout:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + volume + breakout below S1
-            elif downtrend and vol_confirm and breakout_short:
+            # Short: weekly downtrend + volume + sell breakout in squeeze
+            elif weekly_downtrend and vol_confirm and sell_breakout:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend reversal or breakdown below S1
-            if not uptrend or breakout_short:
+            # Long exit: weekly trend change, sell breakout, or squeeze release
+            if (not weekly_uptrend) or sell_breakout or (not squeeze[i]):
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend reversal or breakout above R1
-            if not downtrend or breakout_long:
+            # Short exit: weekly trend change, buy breakout, or squeeze release
+            if (not weekly_downtrend) or buy_breakout or (not squeeze[i]):
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -115,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_Pivot_R1_S1_Breakout_Volume_Filter"
-timeframe = "4h"
+name = "1d_Keltner_Squeeze_Breakout_v1"
+timeframe = "1d"
 leverage = 1.0
