@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6s strategy using weekly pivot levels (R1/S1) from 1w combined with 1d EMA(50) trend filter and volume confirmation. 
-Weekly pivot levels provide strong support/resistance in ranging markets while the 1d EMA filters for trend direction.
-Volume confirmation ensures breakouts have conviction. Designed for 15-30 trades/year to minimize fee drag.
-Works in bull markets (buy R1 breaks in uptrend) and bear markets (sell S1 breaks in downtrend).
+Hypothesis: 12h-based strategy using Donchian channel breakout (20-period) with 1d EMA(34) trend filter and volume confirmation.
+Donchian channels provide clear breakout signals while 1d EMA filters for trend direction to avoid counter-trend trades.
+Volume confirmation ensures breakouts have conviction. Designed for 12-37 trades/year to minimize fee drag.
+Works in bull markets (buy upper band breaks in uptrend) and bear markets (sell lower band breaks in downtrend).
 """
 import numpy as np
 import pandas as pd
@@ -19,40 +19,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for weekly pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate Weekly Pivot levels (R1, S1) from previous week
-    # R1 = close + 1.1*(high-low)/12
-    # S1 = close - 1.1*(high-low)/12
-    weekly_r1 = np.full(len(close_1w), np.nan)
-    weekly_s1 = np.full(len(close_1w), np.nan)
-    
-    for i in range(1, len(close_1w)):
-        if not (np.isnan(high_1w[i-1]) or np.isnan(low_1w[i-1]) or np.isnan(close_1w[i-1])):
-            weekly_r1[i] = close_1w[i-1] + 1.1 * (high_1w[i-1] - low_1w[i-1]) / 12
-            weekly_s1[i] = close_1w[i-1] - 1.1 * (high_1w[i-1] - low_1w[i-1]) / 12
-    
-    # Align Weekly Pivot levels to 6h timeframe
-    weekly_r1_6h = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    weekly_s1_6h = align_htf_to_ltf(prices, df_1w, weekly_s1)
-    
-    # Get 1d data for EMA(50) trend filter
+    # Get 1d data for EMA(34) trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate EMA(50) on 1d close
-    ema_50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema_50_1d[49] = np.mean(close_1d[:50])
-        for i in range(50, len(close_1d)):
-            ema_50_1d[i] = (close_1d[i] * 2/51) + (ema_50_1d[i-1] * 49/51)
+    # Calculate EMA(34) on 1d close with proper initialization
+    ema_34_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 34:
+        ema_34_1d[33] = np.mean(close_1d[:34])
+        for i in range(34, len(close_1d)):
+            ema_34_1d[i] = (close_1d[i] * 2/35) + (ema_34_1d[i-1] * 33/35)
     
-    # Align 1d EMA to 6h timeframe
-    ema_50_1d_6h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align 1d EMA to 12h timeframe
+    ema_34_1d_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate Donchian channel (20-period) on 12h timeframe
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
     
     # Calculate volume moving average (20-period)
     vol_ma = np.full(n, np.nan)
@@ -62,31 +48,31 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(51, 20)  # need EMA, weekly pivot, volume MA
+    start_idx = max(35, 20)  # need EMA, donchian, volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_50_1d_6h[i]) or np.isnan(weekly_r1_6h[i]) or 
-            np.isnan(weekly_s1_6h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_1d_12h[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5 * 20-period average
         vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
-        # Trend filter: price above/below 1d EMA50
-        trend_up = close[i] > ema_50_1d_6h[i]
-        trend_down = close[i] < ema_50_1d_6h[i]
+        # Trend filter: price above/below 1d EMA34
+        trend_up = close[i] > ema_34_1d_12h[i]
+        trend_down = close[i] < ema_34_1d_12h[i]
         
         if position == 0:
-            # Long entry: close above Weekly R1 with volume and uptrend
-            if (close[i] > weekly_r1_6h[i] and 
+            # Long entry: close above Donchian upper band with volume and uptrend
+            if (close[i] > donchian_high[i] and 
                 vol_confirmed and 
                 trend_up):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: close below Weekly S1 with volume and downtrend
-            elif (close[i] < weekly_s1_6h[i] and 
+            # Short entry: close below Donchian lower band with volume and downtrend
+            elif (close[i] < donchian_low[i] and 
                   vol_confirmed and 
                   trend_down):
                 signals[i] = -0.25
@@ -95,16 +81,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: close below Weekly S1 or reverse signal
-            if close[i] < weekly_s1_6h[i]:
+            # Long exit: close below Donchian lower band or reverse signal
+            if close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: close above Weekly R1 or reverse signal
-            if close[i] > weekly_r1_6h[i]:
+            # Short exit: close above Donchian upper band or reverse signal
+            if close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R1S1_1dEMA50_Volume"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
