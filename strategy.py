@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Pivot_R1_S1_Breakout_Volume_ATRFilter_V1"
-timeframe = "4h"
+name = "1h_Pivot_R1_S1_Breakout_Volume_1dTrendFilter_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Pivot Points
+    # Get daily data for Pivot Points (HTF direction)
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate Pivot Points for previous day
@@ -30,14 +30,9 @@ def generate_signals(prices):
     r1 = 2 * pp - low_prev
     s1 = 2 * pp - high_prev
     
-    # Align Pivot levels to 4h timeframe (using previous day's values)
+    # Align Pivot levels to 1h timeframe (using previous day's values)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Get 12h EMA34 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    ema34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
     # Volume filter: current volume > 1.5 * 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -48,20 +43,19 @@ def generate_signals(prices):
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    tr[0] = tr1[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 50  # Wait for indicator calculations
+    start_idx = 100  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema34_12h_aligned[i]) or np.isnan(vol_ma_20[i]) or
-            np.isnan(atr[i])):
+            np.isnan(vol_ma_20[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -70,18 +64,17 @@ def generate_signals(prices):
         low_val = low[i]
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
-        ema_val = ema34_12h_aligned[i]
         atr_val = atr[i]
         
         if position == 0:
-            # Long: Break above R1 with volume and above 12h EMA34
-            if high_val > r1_val and volume_filter[i] and close_val > ema_val:
-                signals[i] = 0.25
+            # Long: Break above R1 with volume
+            if high_val > r1_val and volume_filter[i]:
+                signals[i] = 0.20
                 position = 1
                 entry_price = close_val
-            # Short: Break below S1 with volume and below 12h EMA34
-            elif low_val < s1_val and volume_filter[i] and close_val < ema_val:
-                signals[i] = -0.25
+            # Short: Break below S1 with volume
+            elif low_val < s1_val and volume_filter[i]:
+                signals[i] = -0.20
                 position = -1
                 entry_price = close_val
         
@@ -91,7 +84,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
             # Short exit: Stop loss or reverse signal
@@ -99,6 +92,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
