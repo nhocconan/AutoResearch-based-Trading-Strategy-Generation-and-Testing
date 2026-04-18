@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_Filter_Volume_V1
-Hypothesis: Daily KAMA direction with 1-week EMA20 trend filter and volume confirmation.
-KAMA adapts to market noise, reducing whipsaws in sideways markets while capturing trends.
-Designed for low trade frequency (<25/year) with strong performance in both bull and bear markets.
-Uses proven EMA20 period and volume threshold (1.5x) to avoid overtrading while maintaining edge.
+6h_WeeklyPivot_DonchianBreakout_Trend_v3
+Hypothesis: 6-hour breakouts above/below weekly Donchian channels with weekly pivot direction filter and volume confirmation.
+Designed for low trade frequency (target: 12-37/year) with strong performance in both bull and bear markets.
+Weekly pivots provide institutional reference points, Donchian channels capture breakouts, and volume confirms strength.
 """
 
 import numpy as np
@@ -21,84 +20,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-day KAMA
-    er_period = 10
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
+    # Calculate weekly Donchian channel (20-period)
+    df_weekly = get_htf_data(prices, '1w')
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
     
-    change = np.abs(np.diff(close, n=er_period))
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)
+    # Donchian channels: 20-period high/low
+    donchian_high = np.full(len(high_weekly), np.nan)
+    donchian_low = np.full(len(low_weekly), np.nan)
+    for i in range(20, len(high_weekly)):
+        donchian_high[i] = np.max(high_weekly[i-20:i+1])
+        donchian_low[i] = np.min(low_weekly[i-20:i+1])
     
-    # Avoid division by zero
-    er = np.zeros_like(change)
-    mask = volatility != 0
-    er[mask] = change[mask] / volatility[mask]
+    # Align weekly Donchian to 6h
+    donchian_high_aligned = align_htf_to_ltf(prices, df_weekly, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_weekly, donchian_low)
     
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Calculate weekly pivot points (using weekly OHLC)
+    close_weekly = df_weekly['close'].values
+    weekly_pivot = (high_weekly + low_weekly + close_weekly) / 3
+    weekly_range = high_weekly - low_weekly
+    # Weekly R1 and S1 (standard pivot)
+    weekly_r1 = 2 * weekly_pivot - low_weekly
+    weekly_s1 = 2 * weekly_pivot - high_weekly
     
-    kama = np.full_like(close, np.nan)
-    kama[er_period] = close[er_period]
+    # Align weekly pivot levels to 6h
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
     
-    for i in range(er_period + 1, n):
-        if not np.isnan(sc[i-er_period]):
-            kama[i] = kama[i-1] + sc[i-er_period] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    
-    # Calculate 1-week EMA20 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    ema20_1w = np.full(len(close_1w), np.nan)
-    for i in range(20, len(close_1w)):
-        if i == 20:
-            ema20_1w[i] = np.mean(close_1w[0:21])
-        else:
-            k = 2 / (20 + 1)
-            ema20_1w[i] = close_1w[i] * k + ema20_1w[i-1] * (1 - k)
-    
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
-    
-    # Volume spike: current volume > 1.5 x 20-period average
+    # Volume spike: current volume > 2.0 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    vol_spike = volume > (vol_ma * 1.5)
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(er_period + 1, 20)
+    start_idx = max(20, 20)  # Ensure all indicators ready
     
     for i in range(start_idx, n):
-        if (np.isnan(kama[i]) or np.isnan(ema20_1w_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or
+            np.isnan(weekly_s1_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price above KAMA with volume spike and 1-week uptrend
-            if (close[i] > kama[i] and vol_spike[i] and 
-                close[i] > ema20_1w_aligned[i]):
+            # Long: break above weekly Donchian high with volume spike and above weekly pivot
+            if (close[i] > donchian_high_aligned[i] and vol_spike[i] and 
+                close[i] > weekly_pivot_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA with volume spike and 1-week downtrend
-            elif (close[i] < kama[i] and vol_spike[i] and 
-                  close[i] < ema20_1w_aligned[i]):
+            # Short: break below weekly Donchian low with volume spike and below weekly pivot
+            elif (close[i] < donchian_low_aligned[i] and vol_spike[i] and 
+                  close[i] < weekly_pivot_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price below KAMA or 1-week trend turns down
-            if (close[i] < kama[i] or close[i] < ema20_1w_aligned[i]):
+            # Long exit: close below weekly Donchian low or below weekly S1
+            if (close[i] < donchian_low_aligned[i] or close[i] < weekly_s1_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price above KAMA or 1-week trend turns up
-            if (close[i] > kama[i] or close[i] > ema20_1w_aligned[i]):
+            # Short exit: close above weekly Donchian high or above weekly R1
+            if (close[i] > donchian_high_aligned[i] or close[i] > weekly_r1_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Trend_Filter_Volume_V1"
-timeframe = "1d"
+name = "6h_WeeklyPivot_DonchianBreakout_Trend_v3"
+timeframe = "6h"
 leverage = 1.0
