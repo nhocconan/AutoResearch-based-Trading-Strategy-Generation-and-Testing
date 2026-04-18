@@ -1,14 +1,11 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-12h 1D Camarilla Pivot Breakout with Volume Confirmation
-Hypothesis: Daily Camarilla pivot levels (S1, S2, R1, R2) act as key support/resistance
-levels in BTC/ETH markets. Breakouts from these levels with volume confirmation
-capture genuine momentum moves while avoiding false breakouts. The 12h timeframe
-provides sufficient data to avoid excessive trading while capturing multi-day moves.
-Volume confirmation ensures participation, and the strategy works in both bull and
-bear markets by trading breakouts in either direction.
-Target: 15-30 trades/year to minimize fee drag.
+4h Donchian Breakout with Volume Confirmation and Trend Filter (HMA)
+Hypothesis: Donchian channel breakouts on 4h timeframe capture genuine momentum moves.
+Volume confirmation ensures institutional participation, while 1d HMA trend filter ensures
+we only trade in the direction of higher timeframe trend, reducing false breakouts.
+This combination works in both bull and bear markets by focusing on breakouts with
+volume and trend alignment. Target: 20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -25,69 +22,79 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1D data once before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Donchian Channel (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper = high_series.rolling(window=20, min_periods=20).max()
+    lower = low_series.rolling(window=20, min_periods=20).min()
     
-    # Calculate Camarilla pivot levels for previous day
-    # Using previous day's high, low, close
-    phigh = df_1d['high'].values
-    plow = df_1d['low'].values
-    pclose = df_1d['close'].values
-    
-    # Camarilla levels: R4 = close + ((high-low)*1.1/2), etc.
-    # We'll use R1, R2, S1, S2 (more commonly traded levels)
-    range_ = phigh - plow
-    r1 = pclose + range_ * 1.1 / 12
-    r2 = pclose + range_ * 1.1 / 6
-    s1 = pclose - range_ * 1.1 / 12
-    s2 = pclose - range_ * 1.1 / 6
-    
-    # Align to 12h timeframe (wait for daily bar to close)
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    r2_12h = align_htf_to_ltf(prices, df_1d, r2)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
-    s2_12h = align_htf_to_ltf(prices, df_1d, s2)
-    
-    # Volume filter: 1.5x 24-period average on 12h (approx 12 days)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume filter: 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
+    
+    # 1d HMA trend filter (Hull Moving Average)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 21:
+        hma_1d = np.full(len(prices), np.nan)
+    else:
+        # Calculate HMA: WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
+        def wma(values, window):
+            weights = np.arange(1, window + 1)
+            return np.convolve(values, weights/weights.sum(), mode='valid')
+        
+        close_1d = df_1d['close'].values
+        n = 21
+        half_n = n // 2
+        sqrt_n = int(np.sqrt(n))
+        
+        wma_full = wma(close_1d, n)
+        wma_half = wma(close_1d, half_n)
+        wma_2x_minus = 2 * wma_half - wma_full
+        hma_raw = wma(wma_2x_minus, sqrt_n)
+        
+        # Align to lower timeframe with proper delay
+        hma_1d_raw = np.full(len(close_1d), np.nan)
+        hma_1d_raw[sqrt_n-1:sqrt_n-1+len(hma_raw)] = hma_raw
+        hma_1d = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Warmup for volume MA
+    start_idx = 40  # Warmup for Donchian and volume
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_12h[i]) or np.isnan(r2_12h[i]) or 
-            np.isnan(s1_12h[i]) or np.isnan(s2_12h[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(hma_1d[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        upper_band = upper[i]
+        lower_band = lower[i]
         vol_ok = volume_filter[i]
+        hma_trend = hma_1d[i]
         
         if position == 0:
-            # Long: break above R1 with volume
-            if price > r1_12h[i] and vol_ok:
+            # Long: break above upper Donchian with volume and uptrend
+            if price > upper_band and vol_ok and price > hma_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with volume
-            elif price < s1_12h[i] and vol_ok:
+            # Short: break below lower Donchian with volume and downtrend
+            elif price < lower_band and vol_ok and price < hma_trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long if price returns to pivot (close) or breaks S1 (reversal)
-            if price < s1_12h[i] or price > r2_12h[i]:
+            # Exit long if price returns to lower band or trend changes
+            if price < lower_band or price < hma_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short if price returns to pivot (close) or breaks R1 (reversal)
-            if price > r1_12h[i] or price < s2_12h[i]:
+            # Exit short if price returns to upper band or trend changes
+            if price > upper_band or price > hma_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -95,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_Pivot_Breakout_Volume"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_Volume_HMA_Trend"
+timeframe = "4h"
 leverage = 1.0
