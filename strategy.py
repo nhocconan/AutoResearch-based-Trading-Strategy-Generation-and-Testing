@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_Pivot_R1_S1_Breakout_Volume_Trend
-Hypothesis: Price breaks above/below Camarilla R1/S1 levels (from prior 1d) with volume confirmation and EMA34 trend filter. Uses 1d OHLC to calculate pivot levels, which are leading support/resistance. Volume > 1.5x 20-period average confirms breakout strength. EMA34 ensures trend alignment. Designed to work in both bull (breakouts above R1) and bear (breakdowns below S1) markets with tight entry conditions to avoid overtrading.
-Target: 20-30 trades/year (80-120 total over 4 years) to minimize fee drag.
+1d_Camarilla_Pivot_R1_S1_Breakout_Volume_Trend
+Hypothesis: Camarilla pivot levels on 1d (R1/S1) act as strong support/resistance. 
+Price breaking above R1 or below S1 with volume confirmation and weekly trend alignment
+captures momentum moves. Weekly trend filter (EMA34) avoids counter-trend trades.
+Designed for 1d timeframe to reduce trade frequency and fee drag.
+Target: 10-25 trades/year (40-100 total over 4 years) to minimize fee drag.
+Works in both bull and bear markets by following the weekly trend direction.
 """
 
 import numpy as np
@@ -11,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 34:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,77 +23,73 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation (prior day's OHLC)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
-        return np.zeros(n)
+    # Weekly trend filter: EMA34 on weekly close
+    df_1w = get_htf_data(prices, '1w')
+    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate Camarilla levels from prior 1day OHLC
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    h_1d = df_1d['high'].values
-    l_1d = df_1d['low'].values
-    c_1d = df_1d['close'].values
+    # Daily Camarilla pivot levels (based on previous day)
+    # R1 = close + 1.1*(high - low)/12
+    # S1 = close - 1.1*(high - low)/12
+    # Using previous day's OHLC to avoid look-ahead
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = 0
+    prev_low[0] = 0
+    prev_close[0] = 0
     
-    # Camarilla R1 and S1
-    r1_1d = c_1d + (h_1d - l_1d) * 1.1 / 12
-    s1_1d = c_1d - (h_1d - l_1d) * 1.1 / 12
+    camarilla_range = prev_high - prev_low
+    R1 = prev_close + 1.1 * camarilla_range / 12
+    S1 = prev_close - 1.1 * camarilla_range / 12
     
-    # Align to 4h timeframe (use prior completed 1day's levels)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # Volume filter: >1.5x 20-period average
+    # Volume filter: >1.5x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
-    
-    # EMA34 trend filter
-    ema_34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 34  # Warmup for EMA34 and volume MA
+    start_idx = 20  # Warmup for volume MA and to have previous day data
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
-            np.isnan(volume_filter[i]) or np.isnan(ema_34[i])):
+        if (np.isnan(R1[i]) or np.isnan(S1[i]) or
+            np.isnan(volume_filter[i]) or np.isnan(ema_34_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1 = r1_1d_aligned[i]
-        s1 = s1_1d_aligned[i]
+        r1_level = R1[i]
+        s1_level = S1[i]
         vol_ok = volume_filter[i]
-        ema34 = ema_34[i]
+        weekly_trend = ema_34_1w_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume in uptrend
-            if price > r1 and vol_ok and price > ema34:
+            # Long: price breaks above R1 with volume in uptrend (weekly)
+            if price > r1_level and vol_ok and price > weekly_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume in downtrend
-            elif price < s1 and vol_ok and price < ema34:
+            # Short: price breaks below S1 with volume in downtrend (weekly)
+            elif price < s1_level and vol_ok and price < weekly_trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price returns to midpoint of R1-S1 or trend reverses
-            midpoint = (r1 + s1) / 2
-            if price < midpoint or price < ema34:
+            # Exit: price returns to previous day's close or trend reverses
+            if price < prev_close[i] or price < weekly_trend:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price returns to midpoint of R1-S1 or trend reverses
-            midpoint = (r1 + s1) / 2
-            if price > midpoint or price > ema34:
+            # Exit: price returns to previous day's close or trend reverses
+            if price > prev_close[i] or price > weekly_trend:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_Pivot_R1_S1_Breakout_Volume_Trend"
-timeframe = "4h"
+name = "1d_Camarilla_Pivot_R1_S1_Breakout_Volume_Trend"
+timeframe = "1d"
 leverage = 1.0
