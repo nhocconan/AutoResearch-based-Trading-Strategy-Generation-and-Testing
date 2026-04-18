@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyPivotResistanceBreakout
-Hypothesis: Break above weekly pivot resistance on daily close with volume confirmation signals strong bullish momentum. 
-Exit on close below weekly pivot support or loss of bullish momentum. 
-Designed for low trade frequency to avoid fee drag while capturing trending moves in both bull and bear markets.
+6h_DMI_Crossover_Trend_Strength
+Hypothesis: On 6h timeframe, use +DI/-DI crossover from DMI(14) as entry signal, 
+filtered by ADX>25 for trend strength and 1d EMA50 for higher timeframe trend alignment.
+Works in both bull and bear markets by capturing strong trending moves when ADX confirms strength.
+Designed for low trade frequency (target 20-50 trades/year) to avoid fee drag.
 """
 
 import numpy as np
@@ -12,80 +13,88 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Weekly high, low, close for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate True Range and Directional Movement
+    up_move = high[1:] - high[:-1]
+    down_move = low[:-1] - low[1:]
     
-    # Calculate weekly pivot and resistance/support levels
-    pivot = (high_1w + low_1w + close_1w) / 3.0
-    r1 = 2 * pivot - low_1w      # Resistance 1
-    s1 = 2 * pivot - high_1w     # Support 1
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Align weekly pivot levels to daily timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - low[:-1])
+    tr3 = np.abs(low[1:] - high[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Volume spike: >1.8x 20-day average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    tr = np.concatenate([[0], tr])
     
-    # RSI(14) for momentum confirmation
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean()
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # ATR and DI calculation
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Get 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(20, 14*2)  # Need warmup for volume MA and RSI
+    start_idx = 50  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
-            np.isnan(volume_spike[i]) or
-            np.isnan(rsi[i])):
+        if (np.isnan(plus_di[i]) or np.isnan(minus_di[i]) or 
+            np.isnan(adx[i]) or np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        pivot_val = pivot_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        vol_spike = volume_spike[i]
-        rsi_val = rsi[i]
+        # Entry conditions
+        di_cross_up = plus_di[i] > minus_di[i] and plus_di[i-1] <= minus_di[i-1]
+        di_cross_down = minus_di[i] > plus_di[i] and minus_di[i-1] <= plus_di[i-1]
+        strong_trend = adx[i] > 25
+        uptrend_1d = close[i] > ema_50_1d_aligned[i]
+        downtrend_1d = close[i] < ema_50_1d_aligned[i]
         
         if position == 0:
-            # Long: close above weekly R1 with volume spike and bullish momentum (RSI > 50)
-            if price > r1_val and vol_spike and rsi_val > 50:
+            # Long: DI bullish crossover + strong trend + 1d uptrend
+            if di_cross_up and strong_trend and uptrend_1d:
                 signals[i] = 0.25
                 position = 1
+            # Short: DI bearish crossover + strong trend + 1d downtrend
+            elif di_cross_down and strong_trend and downtrend_1d:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: close below weekly S1 OR loss of bullish momentum (RSI < 40)
-            if price < s1_val or rsi_val < 40:
+            # Exit: DI bearish crossover OR weak trend
+            if di_cross_down or adx[i] < 20:
+                signals[i] = 0.0
+                position = 0
+        
+        elif position == -1:
+            signals[i] = -0.25
+            # Exit: DI bullish crossover OR weak trend
+            if di_cross_up or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_WeeklyPivotResistanceBreakout"
-timeframe = "1d"
+name = "6h_DMI_Crossover_Trend_Strength"
+timeframe = "6h"
 leverage = 1.0
