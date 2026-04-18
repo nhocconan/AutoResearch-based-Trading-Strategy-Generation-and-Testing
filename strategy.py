@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-4h Fibonacci Pivot Breakout with Volume Spike and Trend Filter
-Hypothesis: Price breaking above/below Fibonacci pivot levels (R1/S1) on 4h with volume confirmation
-(volume > 2x average) and trend strength (ADX > 25) indicates strong momentum.
-Fibonacci pivots derived from 1d OHLC provide institutional support/resistance.
-Target: 20-30 trades/year to minimize fee drain and work in both bull and bear markets.
+4h Volume-Weighted Average Price (VWAP) Deviation with Volume Spike and ADX Trend Filter
+Hypothesis: Price deviating significantly from VWAP (volume-weighted average price) on 4h,
+combined with volume spikes (>2x average) and strong trend (ADX > 25), indicates mean-reversion
+or momentum continuation depending on deviation direction. VWAP acts as dynamic support/resistance.
+Designed to work in both bull and bear markets by capturing overextended moves.
+Target: 20-30 trades/year to minimize fee drain.
 """
 
 import numpy as np
@@ -21,26 +22,18 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Fibonacci pivot calculation (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Calculate VWAP for each bar (typical price * volume)
+    typical_price = (high + low + close) / 3.0
+    vwap_numerator = typical_price * volume
+    vwap_denominator = volume
     
-    # Calculate Fibonacci pivot levels from previous day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Cumulative VWAP (reset daily? but we'll use rolling for simplicity and stability)
+    # Using 20-period rolling VWAP to avoid look-ahead and stabilize
+    vwap = pd.Series(vwap_numerator).rolling(window=20, min_periods=20).sum().values / \
+           pd.Series(vwap_denominator).rolling(window=20, min_periods=20).sum().values
     
-    # Fibonacci pivot formulas: R1 = C + (H-L)*0.382, S1 = C - (H-L)*0.382
-    fib_r1 = close_1d + (high_1d - low_1d) * 0.382
-    fib_s1 = close_1d - (high_1d - low_1d) * 0.382
-    
-    # Align to 4h timeframe with proper delay (use previous day's levels)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, fib_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, fib_s1)
-    
-    # EMA20 for trend filter
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate deviation from VWAP as percentage
+    vwap_deviation = (close - vwap) / vwap * 100  # in percentage
     
     # ADX for trend strength (14-period)
     tr1 = high - low
@@ -66,7 +59,7 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Volume confirmation: volume > 2x 20-period EMA (stricter for fewer trades)
+    # Volume confirmation: volume > 2x 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     vol_ratio = volume / vol_ema
     
@@ -76,40 +69,39 @@ def generate_signals(prices):
     start_idx = 35  # Warmup for indicators (max of 20,20,14)
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema20[i]) or np.isnan(adx[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(vwap[i]) or np.isnan(vwap_deviation[i]) or 
+            np.isnan(adx[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
-        ema_val = ema20[i]
+        dev = vwap_deviation[i]
         adx_val = adx[i]
-        vol_conf = vol_ratio[i] > 2.0  # Stricter volume filter
+        vol_conf = vol_ratio[i] > 2.0  # Volume spike filter
         
         if position == 0:
-            # Strong trend (ADX > 25) and volume confirmation
-            # Price breaks above R1 = long
-            if adx_val > 25 and price > r1 and vol_conf:
-                signals[i] = 0.25
-                position = 1
-            # Price breaks below S1 = short
-            elif adx_val > 25 and price < s1 and vol_conf:
-                signals[i] = -0.25
-                position = -1
+            # Strong trend and volume confirmation
+            # Significant negative deviation (price below VWAP) = long (mean reversion)
+            # Significant positive deviation (price above VWAP) = short (mean reversion)
+            if adx_val > 25 and vol_conf:
+                if dev < -1.5:  # Price more than 1.5% below VWAP
+                    signals[i] = 0.25
+                    position = 1
+                elif dev > 1.5:  # Price more than 1.5% above VWAP
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Exit if trend weakens or price returns below EMA20
-            if adx_val < 20 or price < ema_val:
+            # Exit if deviation returns toward VWAP or trend weakens
+            if dev > -0.5 or adx_val < 20:  # Price back within 0.5% of VWAP or weak trend
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit if trend weakens or price returns above EMA20
-            if adx_val < 20 or price > ema_val:
+            # Exit if deviation returns toward VWAP or trend weakens
+            if dev < 0.5 or adx_val < 20:  # Price back within 0.5% of VWAP or weak trend
                 signals[i] = 0.0
                 position = 0
             else:
@@ -117,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Fibonacci_Pivot_Breakout_Volume_ADX"
+name = "4h_VWAP_Deviation_Volume_ADX"
 timeframe = "4h"
 leverage = 1.0
