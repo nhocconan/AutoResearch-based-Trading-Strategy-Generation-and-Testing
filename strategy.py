@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_20_Breakout_Volume_TrendFilter
-Hypothesis: Donchian channel (20-period high/low) breakouts on 4h timeframe with volume confirmation and trend filter (12h EMA34). 
-Enters long when price breaks above upper band with above-average volume and 12h uptrend; enters short when price breaks below lower band with volume and 12h downtrend. 
-Uses volatility-based position sizing (0.25) to limit drawdown. Designed for low trade frequency (<50/year) to minimize fee impact while capturing trends in both bull and bear markets via trend filter.
+12h_Volume_Weighted_SMA_Crossover_RSI_Filter
+Hypothesis: Combines volume-weighted SMA crossovers (9/21) on 12h chart with RSI momentum filter and volume confirmation.
+Designed to capture medium-term trends while avoiding whipsaws in low-volume or ranging conditions.
+Volume-weighted SMAs give more significance to price action on high-volume bars, improving signal quality.
+RSI filter prevents entries during overextended moves. Target: 15-25 trades/year per symbol.
 """
 
 import numpy as np
@@ -20,65 +21,105 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
-    lookback = 20
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    for i in range(lookback - 1, n):
-        upper[i] = np.max(high[i - lookback + 1:i + 1])
-        lower[i] = np.min(low[i - lookback + 1:i + 1])
-    
-    # 12h EMA34 trend filter
+    # Get 12h data for indicators
     df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema34_12h = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= 34:
-        ema34_12h[33] = np.mean(close_12h[0:34])
-        alpha = 2 / (34 + 1)
-        for i in range(34, len(close_12h)):
-            ema34_12h[i] = close_12h[i] * alpha + ema34_12h[i-1] * (1 - alpha)
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
-    # Volume spike: current volume > 1.5 x 20-period average
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    vol_spike = volume > (vol_ma * 1.5)
+    # Calculate volume-weighted SMA (9 and 21) on 12h close
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
+    
+    def vwma(source, length):
+        """Volume Weighted Moving Average"""
+        result = np.full_like(source, np.nan)
+        if len(source) < length:
+            return result
+        for i in range(length-1, len(source)):
+            window_close = source[i-length+1:i+1]
+            window_vol = volume_12h[i-length+1:i+1]
+            vol_sum = np.sum(window_vol)
+            if vol_sum > 0:
+                result[i] = np.sum(window_close * window_vol) / vol_sum
+            else:
+                result[i] = np.nan
+        return result
+    
+    vwma9 = vwma(close_12h, 9)
+    vwma21 = vwma(close_12h, 21)
+    
+    # Calculate RSI(14) on 12h close
+    def rsi(source, length=14):
+        delta = np.diff(source, prepend=source[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.full_like(source, np.nan)
+        avg_loss = np.full_like(source, np.nan)
+        
+        # Wilder's smoothing
+        if len(source) >= length:
+            avg_gain[length-1] = np.mean(gain[1:length+1])
+            avg_loss[length-1] = np.mean(loss[1:length+1])
+            
+            for i in range(length, len(source)):
+                avg_gain[i] = (avg_gain[i-1] * (length-1) + gain[i]) / length
+                avg_loss[i] = (avg_loss[i-1] * (length-1) + loss[i]) / length
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi_val = 100 - (100 / (1 + rs))
+        return rsi_val
+    
+    rsi_12h = rsi(close_12h, 14)
+    
+    # Volume confirmation: current 12h volume > 1.5 x 20-period average
+    vol_ma_12h = np.full_like(volume_12h, np.nan)
+    for i in range(20, len(volume_12h)):
+        vol_ma_12h[i] = np.mean(volume_12h[i-20:i])
+    vol_confirm_12h = volume_12h > (vol_ma_12h * 1.5)
+    
+    # Align all indicators to 12h timeframe (primary)
+    vwma9_aligned = align_htf_to_ltf(prices, df_12h, vwma9)
+    vwma21_aligned = align_htf_to_ltf(prices, df_12h, vwma21)
+    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
+    vol_confirm_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_confirm_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback - 1, 20, 34)
+    start_idx = max(21, 20)  # Need enough data for VWMA21 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(ema34_12h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(vwma9_aligned[i]) or np.isnan(vwma21_aligned[i]) or 
+            np.isnan(rsi_12h_aligned[i]) or np.isnan(vol_confirm_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above upper band with volume spike and 12h uptrend
-            if (close[i] > upper[i] and vol_spike[i] and 
-                close[i] > ema34_12h_aligned[i]):
+            # Long: VWMA9 crosses above VWMA21, RSI not overbought, volume confirmation
+            if (vwma9_aligned[i] > vwma21_aligned[i] and 
+                rsi_12h_aligned[i] < 70 and 
+                vol_confirm_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower band with volume spike and 12h downtrend
-            elif (close[i] < lower[i] and vol_spike[i] and 
-                  close[i] < ema34_12h_aligned[i]):
+            # Short: VWMA9 crosses below VWMA21, RSI not oversold, volume confirmation
+            elif (vwma9_aligned[i] < vwma21_aligned[i] and 
+                  rsi_12h_aligned[i] > 30 and 
+                  vol_confirm_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: close below lower band or 12h trend turns down
-            if (close[i] < lower[i] or close[i] < ema34_12h_aligned[i]):
+            # Long exit: VWMA9 crosses below VWMA21 or RSI overbought
+            if (vwma9_aligned[i] < vwma21_aligned[i] or 
+                rsi_12h_aligned[i] > 75):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: close above upper band or 12h trend turns up
-            if (close[i] > upper[i] or close[i] > ema34_12h_aligned[i]):
+            # Short exit: VWMA9 crosses above VWMA21 or RSI oversold
+            if (vwma9_aligned[i] > vwma21_aligned[i] or 
+                rsi_12h_aligned[i] < 25):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -86,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_20_Breakout_Volume_TrendFilter"
-timeframe = "4h"
+name = "12h_Volume_Weighted_SMA_Crossover_RSI_Filter"
+timeframe = "12h"
 leverage = 1.0
