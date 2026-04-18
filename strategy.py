@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_DailyPivot_R1S1_Breakout_WeeklyTrend
-Hypothesis: Breakout from daily pivot levels R1/S1 with weekly trend filter and volume confirmation.
-Works in bull/bear by only taking breakouts aligned with higher timeframe weekly trend,
-reducing false signals. Low frequency (12-37 trades/year) with strong risk-adjusted returns.
+1h_4h1d_CCI_MeanReversion_WithVolume
+Hypothesis: On 1h timeframe, use daily CCI to detect oversold/overbought conditions (CCI < -100 for long, CCI > +100 for short)
+and 4h EMA for trend filter (only long when price > EMA, short when price < EMA).
+Require volume spike (>1.5x 20-period average) to confirm entry.
+Trade only during active session (08-20 UTC).
+Target: 15-35 trades/year per symbol, using mean reversion in ranging markets and trend alignment in trending markets.
 """
 
 import numpy as np
@@ -20,89 +22,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate weekly EMA34 trend filter
-    close_1w = df_1w['close'].values
-    ema34_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 34:
-        ema34_1w[33] = np.mean(close_1w[0:34])
-        alpha = 2 / (34 + 1)
-        for i in range(34, len(close_1w)):
-            ema34_1w[i] = close_1w[i] * alpha + ema34_1w[i-1] * (1 - alpha)
-    
-    # Get daily data for pivot levels
+    # Get daily data for CCI
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate daily Camarilla levels (R1/S1 from prior day)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    r1 = np.full(len(close_1d), np.nan)  # R1 level
-    s1 = np.full(len(close_1d), np.nan)  # S1 level
+    # Calculate CCI(20) on daily
+    typical_price = (high_1d + low_1d + close_1d) / 3.0
+    sma_tp = np.full(len(typical_price), np.nan)
+    mad = np.full(len(typical_price), np.nan)
+    cci = np.full(len(typical_price), np.nan)
     
-    for i in range(1, len(close_1d)):
-        ph = high_1d[i-1]
-        pl = low_1d[i-1]
-        pc = close_1d[i-1]
-        diff = ph - pl
-        r1[i] = pc + 1.0 * diff  # R1
-        s1[i] = pc - 1.0 * diff  # S1
+    if len(typical_price) >= 20:
+        for i in range(19, len(typical_price)):
+            sma_tp[i] = np.mean(typical_price[i-19:i+1])
+            mad[i] = np.mean(np.abs(typical_price[i-19:i+1] - sma_tp[i]))
+            if mad[i] != 0:
+                cci[i] = (typical_price[i] - sma_tp[i]) / (0.015 * mad[i])
     
-    # Align weekly EMA and daily levels to 12h timeframe
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Get 4h data for EMA trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_4h = np.full(len(close_4h), np.nan)
+    if len(close_4h) >= 20:
+        ema_4h[19] = np.mean(close_4h[0:20])
+        alpha = 2 / (20 + 1)
+        for i in range(20, len(close_4h)):
+            ema_4h[i] = close_4h[i] * alpha + ema_4h[i-1] * (1 - alpha)
     
-    # Volume spike: current volume > 2.0 x 20-period average
+    # Align daily CCI and 4h EMA to 1h
+    cci_aligned = align_htf_to_ltf(prices, df_1d, cci)
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    
+    # Volume spike: current volume > 1.5 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    vol_spike = volume > (vol_ma * 2.0)
+    vol_spike = volume > (vol_ma * 1.5)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)
+    start_idx = max(20, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(cci_aligned[i]) or np.isnan(ema_4h_aligned[i]) or 
+            np.isnan(vol_ma[i]) or not session[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above daily R1 with volume spike and weekly uptrend
-            if (close[i] > r1_aligned[i] and vol_spike[i] and 
-                close[i] > ema34_1w_aligned[i]):
-                signals[i] = 0.25
+            # Long: daily CCI < -100 (oversold), price above 4h EMA (uptrend filter), volume spike
+            if (cci_aligned[i] < -100 and close[i] > ema_4h_aligned[i] and vol_spike[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: break below daily S1 with volume spike and weekly downtrend
-            elif (close[i] < s1_aligned[i] and vol_spike[i] and 
-                  close[i] < ema34_1w_aligned[i]):
-                signals[i] = -0.25
+            # Short: daily CCI > +100 (overbought), price below 4h EMA (downtrend filter), volume spike
+            elif (cci_aligned[i] > 100 and close[i] < ema_4h_aligned[i] and vol_spike[i]):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: close below daily S1 or weekly trend turns down
-            if (close[i] < s1_aligned[i] or close[i] < ema34_1w_aligned[i]):
+            # Long exit: CCI returns to neutral (> -50) or trend turns down
+            if (cci_aligned[i] > -50 or close[i] < ema_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: close above daily R1 or weekly trend turns up
-            if (close[i] > r1_aligned[i] or close[i] > ema34_1w_aligned[i]):
+            # Short exit: CCI returns to neutral (< +50) or trend turns up
+            if (cci_aligned[i] < 50 or close[i] > ema_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "12h_DailyPivot_R1S1_Breakout_WeeklyTrend"
-timeframe = "12h"
+name = "1h_4h1d_CCI_MeanReversion_WithVolume"
+timeframe = "1h"
 leverage = 1.0
