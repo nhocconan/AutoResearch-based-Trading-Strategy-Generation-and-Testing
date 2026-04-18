@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-1d_Fibonacci_Retracement_Breakout_WeeklyTrend
-Hypothesis: On the daily timeframe, price retracements to key Fibonacci levels (38.2%, 61.8%) of the weekly swing
-combined with weekly trend alignment and volume confirmation capture high-probability continuation moves.
-Works in bull/bear by following the weekly trend direction. Target: 10-25 trades/year (40-100 total over 4 years).
+6h_MultiTimeframe_RSI_Divergence_Trend
+Hypothesis: Combines 6h RSI divergence with 12h EMA trend and volume confirmation to capture momentum reversals.
+Works in both bull and bear by using RSI for reversal signals and higher timeframe trend for direction.
+Target: 20-40 trades/year (80-160 total over 4 years) to balance opportunity and fee drag.
 """
 
 import numpy as np
@@ -15,86 +15,107 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for swing and trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # 12-hour data for trend and RSI
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Weekly swing high/low over last 4 weeks
-    swing_high = pd.Series(df_1w['high']).rolling(window=4, min_periods=4).max().shift(1).values
-    swing_low = pd.Series(df_1w['low']).rolling(window=4, min_periods=4).min().shift(1).values
-    swing_range = swing_high - swing_low
+    # 12h EMA for trend filter
+    ema_12h = pd.Series(df_12h['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Fibonacci retracement levels: 38.2% and 61.8%
-    fib_382 = swing_low + swing_range * 0.382
-    fib_618 = swing_low + swing_range * 0.618
+    # 12h RSI for momentum
+    delta = pd.Series(df_12h['close']).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_12h = 100 - (100 / (1 + rs))
+    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h.values)
     
-    # Align to daily timeframe
-    fib_382_d = align_htf_to_ltf(prices, df_1w, fib_382)
-    fib_618_d = align_htf_to_ltf(prices, df_1w, fib_618)
-    swing_high_d = align_htf_to_ltf(prices, df_1w, swing_high)
-    swing_low_d = align_htf_to_ltf(prices, df_1w, swing_low)
-    
-    # Weekly trend: 8-period EMA of weekly close
-    ema_8w = pd.Series(df_1w['close']).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema_8w_d = align_htf_to_ltf(prices, df_1w, ema_8w)
-    
-    # Daily volume filter: >1.8x 20-day average
+    # 6h volume filter: >1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.8 * vol_ma)
+    volume_filter = volume > (1.3 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
+    bars_since_entry = 0
     
-    start_idx = 20  # Warmup for volume MA
+    start_idx = 30  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(fib_382_d[i]) or np.isnan(fib_618_d[i]) or
-            np.isnan(swing_high_d[i]) or np.isnan(swing_low_d[i]) or
-            np.isnan(ema_8w_d[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(rsi_12h_aligned[i]) or
+            np.isnan(volume_filter[i])):
             signals[i] = 0.0
+            bars_since_entry = 0
             continue
         
         price = close[i]
+        ema_trend = ema_12h_aligned[i]
+        rsi = rsi_12h_aligned[i]
         vol_ok = volume_filter[i]
-        weekly_trend_up = ema_8w_d[i] > close[i-7] if i >= 7 else ema_8w_d[i] > close[0]
-        weekly_trend_down = ema_8w_d[i] < close[i-7] if i >= 7 else ema_8w_d[i] < close[0]
+        
+        # Detect RSI divergence (simplified: look for RSI extremum with price continuation)
+        if i >= 5:
+            # Bearish divergence: price makes higher high, RSI makes lower high
+            if (high[i] > high[i-3] and high[i-3] > high[i-6] and
+                rsi < rsi_12h_aligned[i-3] and rsi_12h_aligned[i-3] < rsi_12h_aligned[i-6]):
+                div_signal = -1  # Bearish divergence
+            # Bullish divergence: price makes lower low, RSI makes higher low
+            elif (low[i] < low[i-3] and low[i-3] < low[i-6] and
+                  rsi > rsi_12h_aligned[i-3] and rsi_12h_aligned[i-3] > rsi_12h_aligned[i-6]):
+                div_signal = 1   # Bullish divergence
+            else:
+                div_signal = 0
+        else:
+            div_signal = 0
         
         if position == 0:
-            # Long: pullback to 61.8% in uptrend with volume
-            if (price >= fib_618_d[i] * 0.995 and price <= fib_618_d[i] * 1.005) and \
-               weekly_trend_up and vol_ok:
+            # Long: bullish divergence with uptrend and volume
+            if div_signal == 1 and price > ema_trend and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: pullback to 38.2% in downtrend with volume
-            elif (price >= fib_382_d[i] * 0.995 and price <= fib_382_d[i] * 1.005) and \
-                 weekly_trend_down and vol_ok:
+                bars_since_entry = 0
+            # Short: bearish divergence with downtrend and volume
+            elif div_signal == -1 and price < ema_trend and vol_ok:
                 signals[i] = -0.25
                 position = -1
+                bars_since_entry = 0
         
         elif position == 1:
-            # Exit: weekly trend reverses or price reaches swing high
-            if not weekly_trend_up or price >= swing_high_d[i] * 0.995:
-                signals[i] = 0.0
-                position = 0
+            bars_since_entry += 1
+            # Minimum holding: 3 bars (1.5 days)
+            if bars_since_entry < 3:
+                signals[i] = 0.25
             else:
                 signals[i] = 0.25
+                # Exit: RSI overbought or trend breaks
+                if rsi > 70 or price < ema_trend:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
         
         elif position == -1:
-            # Exit: weekly trend reverses or price reaches swing low
-            if not weekly_trend_down or price <= swing_low_d[i] * 1.005:
-                signals[i] = 0.0
-                position = 0
+            bars_since_entry += 1
+            # Minimum holding: 3 bars (1.5 days)
+            if bars_since_entry < 3:
+                signals[i] = -0.25
             else:
                 signals[i] = -0.25
+                # Exit: RSI oversold or trend breaks
+                if rsi < 30 or price > ema_trend:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
     
     return signals
 
-name = "1d_Fibonacci_Retracement_Breakout_WeeklyTrend"
-timeframe = "1d"
+name = "6h_MultiTimeframe_RSI_Divergence_Trend"
+timeframe = "6h"
 leverage = 1.0
