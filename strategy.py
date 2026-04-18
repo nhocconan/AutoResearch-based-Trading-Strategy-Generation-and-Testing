@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Weekly trend filter + daily price action + volume confirmation.
-# Long when price closes above daily open AND weekly EMA(34) AND volume > 1.5x daily average.
-# Short when price closes below daily open AND weekly EMA(34) AND volume > 1.5x daily average.
-# Exit when price crosses back below/above daily open.
-# Uses weekly EMA for trend filter, daily open-close for price action, volume for conviction.
-# Designed for ~10-25 trades/year per symbol to avoid fee drag.
-name = "1d_weeklyEMA34_dailyOpenClose_volume"
-timeframe = "1d"
+# Hypothesis: 4h/1d momentum with volume surge and ATR volatility filter.
+# Long when price breaks above 1d EMA(34) with volume > 1.8x 24-period average and ATR > 0.
+# Short when price breaks below 1d EMA(34) with same conditions.
+# Exit when price crosses back over 1d EMA(34).
+# Uses 1d EMA for trend filter, volume surge for conviction, ATR for volatility.
+# Designed for ~15-30 trades/year per symbol.
+name = "4h_1dEMA34_VolumeSurge_ATR_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,20 +21,30 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    open_price = prices['open'].values
     volume = prices['volume'].values
     
-    # Weekly data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # EMA(34) on weekly close
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # EMA(34) on 1d close
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Daily average volume (20-day average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    # ATR(14) on 1d for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - close_1d)
+    tr3 = np.abs(low_1d - close_1d)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # Volume filter: current volume > 1.8 * 6-period average (6 * 4h = 1 day)
+    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    volume_filter = volume > (1.8 * vol_ma_6)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -43,36 +53,37 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or
+            np.isnan(vol_ma_6[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        open_val = open_price[i]
-        ema_val = ema_34_1w_aligned[i]
+        ema_val = ema_34_1d_aligned[i]
+        atr_val = atr_1d_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: close above open AND above weekly EMA with volume surge
-            if close_val > open_val and close_val > ema_val and vol_filter:
+            # Long: price above EMA with volume surge and volatility
+            if close_val > ema_val and vol_filter and atr_val > 0:
                 signals[i] = 0.25
                 position = 1
-            # Short: close below open AND below weekly EMA with volume surge
-            elif close_val < open_val and close_val < ema_val and vol_filter:
+            # Short: price below EMA with volume surge and volatility
+            elif close_val < ema_val and vol_filter and atr_val > 0:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: close back below open
-            if close_val < open_val:
+            # Long exit: price crosses back below EMA
+            if close_val < ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: close back above open
-            if close_val > open_val:
+            # Short exit: price crosses back above EMA
+            if close_val > ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
