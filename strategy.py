@@ -1,10 +1,13 @@
-# 12h_Camarilla_R1_S1_Breakout_Volume_Regime_V1
-# Hypothesis: Use 1d Camarilla pivot levels (R1/S1) for key support/resistance, with volume confirmation and 1d ADX trend filter.
-# Long when price breaks above R1 with volume > 1.5x average and ADX > 25 (trending).
-# Short when price breaks below S1 with volume > 1.5x average and ADX > 25.
-# Exit when price returns to the Pivot point (PP) or ADX drops below 20 (range).
-# Uses 12h timeframe for lower frequency to reduce fee churn. Designed to work in both bull and bear markets via long/short symmetry.
-# Target: 15-30 trades/year to stay within optimal range and avoid fee drag.
+#!/usr/bin/env python3
+"""
+4h_Donchian_Breakout_VolumeTrend_v1
+Hypothesis: Use 4h Donchian breakout with volume confirmation and trend filter for directional entries. 
+Long when price breaks above Donchian upper band (20), volume > 1.5x 20-period average, and price > 4h EMA34 (trend filter).
+Short when price breaks below Donchian lower band (20), volume > 1.5x 20-period average, and price < 4h EMA34.
+Exit on opposite Donchian breakout. Uses 1d ADX > 25 to ensure trending market regime.
+Target: 20-40 trades/year by combining breakout with volume and trend filters to reduce false signals.
+Works in bull via long breakouts and in bear via short breakouts during downtrends.
+"""
 
 import numpy as np
 import pandas as pd
@@ -20,88 +23,102 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and ADX
+    # Get 4h data for Donchian channels and EMA
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # 4h Donchian channels (20-period)
+    donch_len = 20
+    upper_4h = np.full_like(high_4h, np.nan)
+    lower_4h = np.full_like(low_4h, np.nan)
+    
+    if len(high_4h) >= donch_len:
+        for i in range(donch_len, len(high_4h)):
+            upper_4h[i] = np.max(high_4h[i-donch_len:i])
+            lower_4h[i] = np.min(low_4h[i-donch_len:i])
+    
+    # 4h EMA34 for trend filter
+    ema_len = 34
+    ema_4h = np.full_like(close_4h, np.nan)
+    if len(close_4h) >= ema_len:
+        multiplier = 2 / (ema_len + 1)
+        ema_4h[ema_len-1] = np.mean(close_4h[:ema_len])
+        for i in range(ema_len, len(close_4h)):
+            ema_4h[i] = (close_4h[i] * multiplier) + (ema_4h[i-1] * (1 - multiplier))
+    
+    # Align 4h indicators to 4h timeframe (same as primary)
+    upper_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_4h)
+    lower_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_4h)
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    
+    # Get 1d data for ADX (trend strength filter)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Camarilla pivot levels (using previous day's OHLC)
-    # PP = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pp_1d = np.full_like(close_1d, np.nan)
-    r1_1d = np.full_like(close_1d, np.nan)
-    s1_1d = np.full_like(close_1d, np.nan)
-    
-    for i in range(1, len(close_1d)):
-        # Use previous day's data to avoid look-ahead
-        ph = high_1d[i-1]
-        pl = low_1d[i-1]
-        pc = close_1d[i-1]
-        pp_1d[i] = (ph + pl + pc) / 3.0
-        r1_1d[i] = pc + (ph - pl) * 1.1 / 12.0
-        s1_1d[i] = pc - (ph - pl) * 1.1 / 12.0
-    
-    # Calculate 1d ADX(14) for trend strength
-    # +DM = max(0, high[i] - high[i-1]) if > max(0, low[i-1] - low[i])
-    # -DM = max(0, low[i-1] - low[i]) if > max(0, high[i] - high[i-1])
-    # TR = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    # +DI = 100 * smoothed(+DM) / smoothed(TR)
-    # -DI = 100 * smoothed(-DM) / smoothed(TR)
-    # DX = 100 * abs(+DI - -DI) / (+DI + -DI)
-    # ADX = smoothed(DX)
-    adx_period = 14
-    tr = np.full_like(high_1d, np.nan)
-    plus_dm = np.full_like(high_1d, np.nan)
-    minus_dm = np.full_like(high_1d, np.nan)
-    
-    for i in range(1, len(high_1d)):
-        hl = high_1d[i] - low_1d[i]
-        hc = abs(high_1d[i] - close_1d[i-1])
-        lc = abs(low_1d[i] - close_1d[i-1])
-        tr[i] = max(hl, hc, lc)
+    # 1d ADX(14) calculation
+    adx_len = 14
+    if len(high_1d) >= adx_len * 2:
+        # True Range
+        tr = np.maximum(high_1d[1:] - low_1d[1:], 
+                        np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
+                                   np.abs(low_1d[1:] - close_1d[:-1])))
+        tr = np.concatenate([[np.nan], tr])
         
-        up = high_1d[i] - high_1d[i-1]
-        down = low_1d[i-1] - low_1d[i]
-        plus_dm[i] = up if up > down and up > 0 else 0
-        minus_dm[i] = down if down > up and down > 0 else 0
+        # Directional Movement
+        dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                           np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+        dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                            np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+        dm_plus = np.concatenate([[np.nan], dm_plus])
+        dm_minus = np.concatenate([[np.nan], dm_minus])
+        
+        # Smoothed values
+        atr = np.full_like(tr, np.nan)
+        dm_plus_smooth = np.full_like(dm_plus, np.nan)
+        dm_minus_smooth = np.full_like(dm_minus, np.nan)
+        
+        if len(tr) >= adx_len:
+            # Initial averages
+            atr[adx_len-1] = np.nanmean(tr[1:adx_len])
+            dm_plus_smooth[adx_len-1] = np.nanmean(dm_plus[1:adx_len])
+            dm_minus_smooth[adx_len-1] = np.nanmean(dm_minus[1:adx_len])
+            
+            # Wilder smoothing
+            for i in range(adx_len, len(tr)):
+                atr[i] = (atr[i-1] * (adx_len - 1) + tr[i]) / adx_len
+                dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (adx_len - 1) + dm_plus[i]) / adx_len
+                dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (adx_len - 1) + dm_minus[i]) / adx_len
+        
+        # DI and DX
+        di_plus = np.full_like(dm_plus_smooth, np.nan)
+        di_minus = np.full_like(dm_minus_smooth, np.nan)
+        dx = np.full_like(atr, np.nan)
+        
+        valid = (atr != 0) & ~np.isnan(atr)
+        di_plus[valid] = 100 * dm_plus_smooth[valid] / atr[valid]
+        di_minus[valid] = 100 * dm_minus_smooth[valid] / atr[valid]
+        
+        dx_valid = (di_plus + di_minus) != 0
+        dx[dx_valid & ~np.isnan(di_plus) & ~np.isnan(di_minus)] = 100 * np.abs(di_plus[dx_valid] - di_minus[dx_valid]) / (di_plus[dx_valid] + di_minus[dx_valid])
+        
+        # ADX: smoothed DX
+        adx_1d = np.full_like(dx, np.nan)
+        if len(dx) >= adx_len:
+            valid_dx = ~np.isnan(dx)
+            if np.sum(valid_dx) >= adx_len:
+                adx_1d[adx_len-1] = np.nanmean(dx[valid_dx][:adx_len])
+                for i in range(adx_len, len(dx)):
+                    if not np.isnan(dx[i]):
+                        adx_1d[i] = (adx_1d[i-1] * (adx_len - 1) + dx[i]) / adx_len
+    else:
+        adx_1d = np.full_like(close_1d, np.nan)
     
-    # Smooth TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(data[1:period])  # Skip index 0 as it's undefined
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period - 1) + data[i]) / period
-        return result
-    
-    tr_smooth = wilders_smoothing(tr, adx_period)
-    plus_dm_smooth = wilders_smoothing(plus_dm, adx_period)
-    minus_dm_smooth = wilders_smoothing(minus_dm, adx_period)
-    
-    # Avoid division by zero
-    plus_di = np.full_like(tr_smooth, np.nan)
-    minus_di = np.full_like(tr_smooth, np.nan)
-    dx = np.full_like(tr_smooth, np.nan)
-    
-    for i in range(len(tr_smooth)):
-        if not np.isnan(tr_smooth[i]) and tr_smooth[i] != 0:
-            plus_di[i] = 100 * plus_dm_smooth[i] / tr_smooth[i]
-            minus_di[i] = 100 * minus_dm_smooth[i] / tr_smooth[i]
-            if plus_di[i] + minus_di[i] != 0:
-                dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-    
-    # Smooth DX to get ADX
-    adx = wilders_smoothing(dx, adx_period)
-    
-    # Align 1d indicators to 12h timeframe
-    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align 1d ADX to 4h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = np.full_like(volume, np.nan)
@@ -114,40 +131,43 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(vol_period, 1) + 1  # Start after volume MA and pivot calculation
+    start_idx = max(donch_len, ema_len, vol_period) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pp_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(adx_aligned[i]) or 
+        if (np.isnan(upper_4h_aligned[i]) or np.isnan(lower_4h_aligned[i]) or 
+            np.isnan(ema_4h_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Trend filter: ADX > 25 indicates trending market
+        trending = adx_1d_aligned[i] > 25
+        
         # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        if position == 0:
-            # Long: price breaks above R1 with volume and trend (ADX > 25)
-            if close[i] > r1_1d_aligned[i] and vol_confirm and adx_aligned[i] > 25:
+        if position == 0 and trending:
+            # Long: price breaks above Donchian upper + volume + price > EMA34 (uptrend)
+            if close[i] > upper_4h_aligned[i] and vol_confirm and close[i] > ema_4h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume and trend (ADX > 25)
-            elif close[i] < s1_1d_aligned[i] and vol_confirm and adx_aligned[i] > 25:
+            # Short: price breaks below Donchian lower + volume + price < EMA34 (downtrend)
+            elif close[i] < lower_4h_aligned[i] and vol_confirm and close[i] < ema_4h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to PP or trend weakens (ADX < 20)
-            if close[i] <= pp_1d_aligned[i] or adx_aligned[i] < 20:
+            # Long exit: price breaks below Donchian lower
+            if close[i] < lower_4h_aligned[i]:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to PP or trend weakens (ADX < 20)
-            if close[i] >= pp_1d_aligned[i] or adx_aligned[i] < 20:
+            # Short exit: price breaks above Donchian upper
+            if close[i] > upper_4h_aligned[i]:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -155,6 +175,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_Volume_Regime_V1"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_VolumeTrend_v1"
+timeframe = "4h"
 leverage = 1.0
