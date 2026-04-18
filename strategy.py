@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-1h_4h1d_Camarilla_Pivot_R1S1_Breakout_Volume
-Hypothesis: Trade breakouts above/below 4h and 1d Camarilla R1/S1 levels with volume confirmation. 
-Use 4h/1d for direction (trend filter) and 1h for precise entry timing. 
-Position size 0.20 to limit risk and reduce trade frequency. 
-Session filter (08-20 UTC) to avoid low-liquidity hours. 
-Designed to work in bull/bear by capturing breakouts with institutional volume support.
+6h_IchiKumo_1dCloud_TKCross
+Hypothesis: Trade Ichimoku Tenkan/Kijun cross with daily cloud filter on 6h timeframe.
+Long when TK crosses above AND price above daily Kumo cloud; short when TK crosses below AND price below daily Kumo.
+Uses daily Ichimoku for trend filter to avoid counter-trend trades in both bull and bear markets.
+Target: 50-150 total trades over 4 years (12-37/year). Position size 0.25.
 """
 
 import numpy as np
@@ -14,133 +13,109 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get 4h data for Camarilla calculation
-    df_4h = get_htf_data(prices, '4h')
-    
-    # Get 1d data for Camarilla calculation
+    # Get 1d data for Ichimoku cloud
     df_1d = get_htf_data(prices, '1d')
     
-    # 4h calculations (previous bar's OHLC)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Previous 4h bar's OHLC (completed bar)
-    prev_high_4h = np.roll(high_4h, 1)
-    prev_low_4h = np.roll(low_4h, 1)
-    prev_close_4h = np.roll(close_4h, 1)
-    prev_high_4h[0] = high_4h[0]
-    prev_low_4h[0] = low_4h[0]
-    prev_close_4h[0] = close_4h[0]
-    
-    # 4h Camarilla levels (based on previous bar)
-    R1_4h = np.full_like(high_4h, np.nan)
-    S1_4h = np.full_like(low_4h, np.nan)
-    
-    for i in range(1, len(high_4h)):
-        range_ = prev_high_4h[i] - prev_low_4h[i]
-        R1_4h[i] = prev_close_4h[i] + range_ * 1.1 / 12
-        S1_4h[i] = prev_close_4h[i] - range_ * 1.1 / 12
-    
-    # 1d calculations (previous day's OHLC)
+    # Daily Ichimoku components (9, 26, 52 periods)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Previous 1d bar's OHLC (completed day)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d[0] = high_1d[0]
-    prev_low_1d[0] = low_1d[0]
-    prev_close_1d[0] = close_1d[0]
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    period_tenkan = 9
+    tenkan_sen = np.full_like(high_1d, np.nan)
+    if len(high_1d) >= period_tenkan:
+        for i in range(period_tenkan - 1, len(high_1d)):
+            tenkan_sen[i] = (np.max(high_1d[i - period_tenkan + 1:i + 1]) + 
+                            np.min(low_1d[i - period_tenkan + 1:i + 1])) / 2
     
-    # 1d Camarilla levels (based on previous day)
-    R1_1d = np.full_like(high_1d, np.nan)
-    S1_1d = np.full_like(low_1d, np.nan)
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    period_kijun = 26
+    kijun_sen = np.full_like(high_1d, np.nan)
+    if len(high_1d) >= period_kijun:
+        for i in range(period_kijun - 1, len(high_1d)):
+            kijun_sen[i] = (np.max(high_1d[i - period_kijun + 1:i + 1]) + 
+                           np.min(low_1d[i - period_kijun + 1:i + 1])) / 2
     
-    for i in range(1, len(high_1d)):
-        range_ = prev_high_1d[i] - prev_low_1d[i]
-        R1_1d[i] = prev_close_1d[i] + range_ * 1.1 / 12
-        S1_1d[i] = prev_close_1d[i] - range_ * 1.1 / 12
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_span_a = np.full_like(high_1d, np.nan)
+    valid_tenkan = ~np.isnan(tenkan_sen)
+    valid_kijun = ~np.isnan(kijun_sen)
+    valid_both = valid_tenkan & valid_kijun
+    senkou_span_a[valid_both] = (tenkan_sen[valid_both] + kijun_sen[valid_both]) / 2
     
-    # Align 4h Camarilla levels to 1h timeframe
-    R1_4h_aligned = align_htf_to_ltf(prices, df_4h, R1_4h)
-    S1_4h_aligned = align_htf_to_ltf(prices, df_4h, S1_4h)
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    period_senkou_b = 52
+    senkou_span_b = np.full_like(high_1d, np.nan)
+    if len(high_1d) >= period_senkou_b:
+        for i in range(period_senkou_b - 1, len(high_1d)):
+            senkou_span_b[i] = (np.max(high_1d[i - period_senkou_b + 1:i + 1]) + 
+                               np.min(low_1d[i - period_senkou_b + 1:i + 1])) / 2
     
-    # Align 1d Camarilla levels to 1h timeframe
-    R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
-    S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
+    # Align daily Ichimoku components to 6h timeframe
+    tenkan_sen_6h = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_6h = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_6h = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    senkou_span_b_6h = align_htf_to_ltf(prices, df_1d, senkou_span_b)
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = np.full_like(volume, np.nan)
-    vol_period = 20
-    
-    if len(volume) >= vol_period:
-        for i in range(vol_period, len(volume)):
-            vol_ma[i] = np.mean(volume[i - vol_period:i])
+    # Calculate Kumo cloud edges (Senkou Span A and B)
+    # Cloud top = max(Senkou A, Senkou B)
+    # Cloud bottom = min(Senkou A, Senkou B)
+    cloud_top = np.maximum(senkou_span_a_6h, senkou_span_b_6h)
+    cloud_bottom = np.minimum(senkou_span_a_6h, senkou_span_b_6h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, vol_period)
-    
-    # Pre-compute session hours for efficiency
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    start_idx = max(52, 26)  # Need enough data for Ichimoku
     
     for i in range(start_idx, n):
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
-        
         # Skip if any required data is not available
-        if (np.isnan(R1_4h_aligned[i]) or np.isnan(S1_4h_aligned[i]) or 
-            np.isnan(R1_1d_aligned[i]) or np.isnan(S1_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(tenkan_sen_6h[i]) or np.isnan(kijun_sen_6h[i]) or 
+            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        # TK crossover signals
+        tk_cross_above = (tenkan_sen_6h[i] > kijun_sen_6h[i] and 
+                         tenkan_sen_6h[i-1] <= kijun_sen_6h[i-1])
+        tk_cross_below = (tenkan_sen_6h[i] < kijun_sen_6h[i] and 
+                         tenkan_sen_6h[i-1] >= kijun_sen_6h[i-1])
         
         if position == 0:
-            # Long: price breaks above both 4h R1 and 1d R1 with volume
-            if close[i] > R1_4h_aligned[i] and close[i] > R1_1d_aligned[i] and vol_confirm:
-                signals[i] = 0.20
+            # Long: TK cross above AND price above cloud
+            if tk_cross_above and close[i] > cloud_top[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below both 4h S1 and 1d S1 with volume
-            elif close[i] < S1_4h_aligned[i] and close[i] < S1_1d_aligned[i] and vol_confirm:
-                signals[i] = -0.20
+            # Short: TK cross below AND price below cloud
+            elif tk_cross_below and close[i] < cloud_bottom[i]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price closes below either 4h S1 or 1d S1
-            if close[i] < S1_4h_aligned[i] or close[i] < S1_1d_aligned[i]:
-                signals[i] = -0.20  # reverse to short
+            # Long exit: TK cross below OR price below cloud
+            if tk_cross_below or close[i] < cloud_bottom[i]:
+                signals[i] = -0.25  # reverse to short
                 position = -1
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price closes above either 4h R1 or 1d R1
-            if close[i] > R1_4h_aligned[i] or close[i] > R1_1d_aligned[i]:
-                signals[i] = 0.20  # reverse to long
+            # Short exit: TK cross above OR price above cloud
+            if tk_cross_above or close[i] > cloud_top[i]:
+                signals[i] = 0.25  # reverse to long
                 position = 1
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_4h1d_Camarilla_Pivot_R1S1_Breakout_Volume"
-timeframe = "1h"
+name = "6h_IchiKumo_1dCloud_TKCross"
+timeframe = "6h"
 leverage = 1.0
