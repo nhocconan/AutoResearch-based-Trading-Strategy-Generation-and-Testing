@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Pivot_Point_Reversal_with_Trend_Filter
-Hypothesis: Weekly pivot point reversals on 1d with trend filter using 1w EMA50.
-Buy when price touches weekly S1 with bullish trend (close > EMA50) and sells at weekly R1.
-Sell when price touches weekly R1 with bearish trend (close < EMA50) and buys back at weekly S1.
-Designed for very low trade frequency (10-30/year) to minimize fee drag while capturing
-mean-reversion moves in ranging markets and trend continuations in trending markets.
+12h_KAMA_Direction_RSI_Pullback_With_Volume
+Hypothesis: On 12h timeframe, use Kaufman's Adaptive Moving Average (KAMA) for trend direction,
+RSI for pullback entries, and volume confirmation to filter false signals.
+KAMA adapts to market noise, reducing whipsaws in sideways markets. RSI pullbacks
+provide entries in the direction of the trend during temporary countertrend moves.
+Volume confirmation ensures institutional participation. Designed for low trade
+frequency (12-37/year) to avoid fee drag while capturing trending moves in both
+bull and bear markets via trend alignment.
 """
 
 import numpy as np
@@ -17,75 +19,105 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for pivot point calculation
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points (using previous week's data)
-    # Pivot = (H + L + C) / 3
-    # S1 = (2 * Pivot) - High
-    # R1 = (2 * Pivot) - Low
-    pivot = (high_1w + low_1w + close_1w) / 3
-    s1 = (2 * pivot) - high_1w
-    r1 = (2 * pivot) - low_1w
+    # KAMA parameters
+    er_period = 10
+    fast_sc = 2 / (2 + 1)
+    slow_sc = 2 / (30 + 1)
     
-    # Align to 1d timeframe (wait for weekly bar to close)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    # Calculate Efficiency Ratio
+    change = np.abs(np.diff(close, n=er_period))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)
+    # Fix: calculate volatility correctly using rolling sum
+    volatility = pd.Series(np.abs(np.diff(close))).rolling(window=er_period, min_periods=1).sum().values
+    volatility = np.concatenate([np.full(er_period-1, np.nan), volatility])
+    er = np.where(volatility != 0, change / volatility, 0)
     
-    # 1w EMA(50) for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate smoothing constant
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[er_period] = close[er_period]
+    for i in range(er_period + 1, len(close)):
+        if not np.isnan(kama[i-1]) and not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    # Align KAMA to 12h timeframe (already on 12h, no alignment needed)
+    # But we need 1d trend filter
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    
+    # RSI(14) for pullback entries
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    # Handle first 14 values
+    rsi[:14] = np.nan
+    
+    # Volume confirmation: >1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirmed = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 30)  # Warmup for EMA
+    start_idx = max(200, 14, 20)  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or
-            np.isnan(ema_50_aligned[i])):
+        if (np.isnan(kama[i]) or 
+            np.isnan(ema_200_aligned[i]) or
+            np.isnan(rsi[i]) or
+            np.isnan(volume_confirmed[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        s1_val = s1_aligned[i]
-        r1_val = r1_aligned[i]
-        ema50 = ema_50_aligned[i]
+        kama_val = kama[i]
+        ema200 = ema_200_aligned[i]
+        rsi_val = rsi[i]
+        vol_conf = volume_confirmed[i]
         
         if position == 0:
-            # Long: price touches or goes below S1 with bullish trend
-            if price <= s1_val and close[i] > ema50:
+            # Long: price above KAMA (uptrend), RSI pulled back to oversold, volume confirmation
+            if price > kama_val and rsi_val < 30 and vol_conf and price > ema200:
                 signals[i] = 0.25
                 position = 1
-            # Short: price touches or goes above R1 with bearish trend
-            elif price >= r1_val and close[i] < ema50:
+            # Short: price below KAMA (downtrend), RSI pulled back to overbought, volume confirmation
+            elif price < kama_val and rsi_val > 70 and vol_conf and price < ema200:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price touches or goes above R1 (take profit)
-            if price >= r1_val:
+            # Exit: price crosses below KAMA OR RSI overbought
+            if price < kama_val or rsi_val > 70:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price touches or goes below S1 (take profit)
-            if price <= s1_val:
+            # Exit: price crosses above KAMA OR RSI oversold
+            if price > kama_val or rsi_val < 30:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Weekly_Pivot_Point_Reversal_with_Trend_Filter"
-timeframe = "1d"
+name = "12h_KAMA_Direction_RSI_Pullback_With_Volume"
+timeframe = "12h"
 leverage = 1.0
