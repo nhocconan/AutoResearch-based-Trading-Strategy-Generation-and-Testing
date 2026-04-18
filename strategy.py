@@ -1,112 +1,113 @@
 #!/usr/bin/env python3
 """
-12h KAMA + 1d ATR volatility filter + volume confirmation
-KAMA adapts to market noise - trending when efficiency ratio high, mean-reverting when low.
-In trending markets: follow KAMA direction with volume confirmation.
-In ranging markets: fade extreme deviations from KAMA with volume confirmation.
-ATR filter ensures we only trade when volatility is sufficient.
-Designed for 15-30 trades/year on 12h timeframe to minimize fee drag.
+Hypothesis: 4h Camarilla Pivot Levels (R1/S1) with 1d volume spike and 1w ADX regime filter.
+Long when price breaks above R1 with volume spike in trending market (ADX>25).
+Short when price breaks below S1 with volume spike in trending market.
+Uses discrete positions (0.0, ±0.25) to minimize churn. Target: 20-40 trades/year.
+Works in bull/bear via ADX filter - only trades in clear trends, avoids chop.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_kama(close, er_len=10, fast=2, slow=30):
-    """Calculate Kaufman Adaptive Moving Average."""
-    n = len(close)
-    kama = np.full(n, np.nan)
-    if n < 1:
-        return kama
+def calculate_adx(high, low, close, period=14):
+    """Calculate Average Directional Index."""
+    if len(high) < period + 1:
+        return np.full(len(high), np.nan)
     
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=er_len))
-    abs_change = np.sum(np.abs(np.diff(close)), axis=0) if hasattr(np.diff(close), 'shape') else None
-    if abs_change is None:
-        # Manual calculation for ER
-        er = np.zeros(n)
-        for i in range(er_len, n):
-            if i >= er_len:
-                price_change = abs(close[i] - close[i-er_len])
-                total_change = 0
-                for j in range(1, er_len+1):
-                    total_change += abs(close[i-j+1] - close[i-j])
-                if total_change != 0:
-                    er[i] = price_change / total_change
-                else:
-                    er[i] = 0
-    else:
-        # Vectorized if possible
-        er = np.zeros(n)
-        for i in range(er_len, n):
-            price_change = abs(close[i] - close[i-er_len])
-            total_change = np.sum(np.abs(np.diff(close[i-er_len:i+1])))
-            if total_change != 0:
-                er[i] = price_change / total_change
-            else:
-                er[i] = 0
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    # Smoothing constants
-    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+    # Directional Movement
+    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                       np.maximum(high[1:] - high[:-1], 0), 0)
+    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                        np.maximum(low[:-1] - low[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
     
-    # Initialize KAMA
-    kama[0] = close[0]
-    for i in range(1, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Smoothed values
+    atr = np.full(len(high), np.nan)
+    dm_plus_smooth = np.full(len(high), np.nan)
+    dm_minus_smooth = np.full(len(high), np.nan)
+    
+    if len(high) >= period:
+        atr[period-1] = np.nanmean(tr[1:period])
+        dm_plus_smooth[period-1] = np.nanmean(dm_plus[1:period])
+        dm_minus_smooth[period-1] = np.nanmean(dm_minus[1:period])
+        
+        for i in range(period, len(high)):
+            atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
+            dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period - 1) + dm_plus[i]) / period
+            dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period - 1) + dm_minus[i]) / period
+    
+    # Directional Indicators
+    di_plus = np.full(len(high), np.nan)
+    di_minus = np.full(len(high), np.nan)
+    dx = np.full(len(high), np.nan)
+    
+    for i in range(period, len(high)):
+        if atr[i] != 0:
+            di_plus[i] = 100 * dm_plus_smooth[i] / atr[i]
+            di_minus[i] = 100 * dm_minus_smooth[i] / atr[i]
+            if (di_plus[i] + di_minus[i]) != 0:
+                dx[i] = 100 * np.abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])
+    
+    # ADX
+    adx = np.full(len(high), np.nan)
+    for i in range(2*period-1, len(high)):
+        if i == 2*period-1:
+            adx[i] = np.nanmean(dx[period:i+1])
         else:
-            kama[i] = kama[i-1]
+            adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
     
-    return kama
+    return adx
 
-def calculate_atr(high, low, close, period=14):
-    """Average True Range."""
-    n = len(high)
-    tr = np.zeros(n)
-    for i in range(n):
-        if i == 0:
-            tr[i] = high[i] - low[i]
-        else:
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = np.zeros(n)
-    for i in range(n):
-        if i < period:
-            atr[i] = np.nan
-        elif i == period:
-            atr[i] = np.mean(tr[:period+1])
-        else:
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-    return atr
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels."""
+    pivot = (high + low + close) / 3
+    range_ = high - low
+    R1 = close + (range_ * 1.1 / 12)
+    S1 = close - (range_ * 1.1 / 12)
+    return R1, S1
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR and KAMA context
+    # Get 1d data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d ATR(14) for volatility filter
-    atr_14_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
+    # Get 1w data for ADX
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d KAMA for trend context
-    kama_1d = calculate_kama(close_1d, er_len=10, fast=2, slow=30)
+    # Calculate Camarilla levels (R1, S1) on 1d
+    R1_1d, S1_1d = calculate_camarilla(high_1d, low_1d, close_1d)
     
-    # Align to 12h timeframe
-    atr_14_1d_12h = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    kama_1d_12h = align_htf_to_ltf(prices, df_1d, kama_1d)
+    # Calculate ADX on 1w
+    adx_14_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
     
-    # Calculate 12h KAMA for entry signals
-    kama_12h = calculate_kama(close, er_len=10, fast=2, slow=30)
+    # Align to 4h timeframe
+    R1_1d_4h = align_htf_to_ltf(prices, df_1d, R1_1d)
+    S1_1d_4h = align_htf_to_ltf(prices, df_1d, S1_1d)
+    adx_14_1w_4h = align_htf_to_ltf(prices, df_1w, adx_14_1w)
     
     # Calculate volume moving average (20-period)
     vol_ma = np.full(n, np.nan)
@@ -116,57 +117,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 30)  # need sufficient data
+    start_idx = 20  # need volume MA calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(kama_12h[i]) or np.isnan(kama_1d_12h[i]) or 
-            np.isnan(atr_14_1d_12h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(R1_1d_4h[i]) or np.isnan(S1_1d_4h[i]) or 
+            np.isnan(adx_14_1w_4h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5 * 20-period average
         vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
-        # Volatility filter: ATR > 0.5 * 20-period average ATR
-        if i >= 20:
-            atr_ma = np.mean(atr_14_1d_12h[i-20:i]) if not np.isnan(atr_14_1d_12h[i-20:i]).any() else 0
-            vol_filter = atr_14_1d_12h[i] > 0.5 * atr_ma if atr_ma > 0 else False
-        else:
-            vol_filter = True  # Not enough data for MA, allow trade
+        # Regime filter: trending market (ADX > 25)
+        trending = adx_14_1w_4h[i] > 25
         
         if position == 0:
-            # Determine market regime: trending if price away from KAMA, ranging if near
-            kama_dist = abs(close[i] - kama_12h[i]) / kama_12h[i] if kama_12h[i] != 0 else 0
-            
-            if kama_dist > 0.015:  # Trending regime (>1.5% deviation)
-                # Follow KAMA direction
-                if close[i] > kama_12h[i] and vol_confirmed and vol_filter:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] < kama_12h[i] and vol_confirmed and vol_filter:
-                    signals[i] = -0.25
-                    position = -1
-            else:  # Ranging regime (<1.5% deviation)
-                # Fade extreme deviations from 1d KAMA
-                if close[i] > kama_1d_12h[i] * 1.02 and vol_confirmed and vol_filter:  # 2% above
-                    signals[i] = -0.20  # Short
-                    position = -1
-                elif close[i] < kama_1d_12h[i] * 0.98 and vol_confirmed and vol_filter:  # 2% below
-                    signals[i] = 0.20   # Long
-                    position = 1
+            # Long: price breaks above R1 with volume in trending market
+            if close[i] > R1_1d_4h[i] and vol_confirmed and trending:
+                signals[i] = 0.25
+                position = 1
+            # Short: price breaks below S1 with volume in trending market
+            elif close[i] < S1_1d_4h[i] and vol_confirmed and trending:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Long exit: price crosses below 12h KAMA or volatility drops
-            if close[i] <= kama_12h[i] or (atr_14_1d_12h[i] < 0.3 * atr_ma if i >= 20 and 'atr_ma' in locals() else False):
+            # Long exit: price crosses below S1 or ADX drops (range market)
+            if close[i] < S1_1d_4h[i] or adx_14_1w_4h[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above 12h KAMA or volatility drops
-            if close[i] >= kama_12h[i] or (atr_14_1d_12h[i] < 0.3 * atr_ma if i >= 20 and 'atr_ma' in locals() else False):
+            # Short exit: price crosses above R1 or ADX drops (range market)
+            if close[i] > R1_1d_4h[i] or adx_14_1w_4h[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -174,6 +160,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_KAMA_ATR_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Volume_ADX"
+timeframe = "4h"
 leverage = 1.0
