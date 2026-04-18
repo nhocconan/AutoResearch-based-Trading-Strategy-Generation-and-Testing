@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_RangeBreakout_4hTrend_Volume
-Hypothesis: Trade 1h breakouts in direction of 4h EMA trend, confirmed by volume >1.5x average.
-Uses 4h EMA(34) as trend filter to avoid counter-trend trades. Range breakouts capture momentum
-after volatility expansion. Position size 0.20 to limit drawdown. Target 15-37 trades/year.
-Works in both bull/bear markets by following higher timeframe trend.
+6h_WeeklyPivot_Breakout_Volume
+Hypothesis: Trade 6h breakouts above/below weekly pivot levels (R1/S1) with volume confirmation in the direction of 1w EMA trend. Weekly pivots provide strong institutional support/resistance, breakouts indicate institutional participation, and volume confirms follow-through. EMA filter prevents counter-trend trades. Designed for 10-30 trades/year to avoid fee drag. Works in bull/bear via trend filter.
 """
 
 import numpy as np
@@ -21,47 +18,49 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
+    # Get weekly data for pivot points and trend
+    df_1w = get_htf_data(prices, '1w')
     
-    # 4h EMA(34) for trend
-    close_4h = df_4h['close'].values
-    ema_period = 34
-    ema_4h = np.full_like(close_4h, np.nan)
-    if len(close_4h) >= ema_period:
-        ema_4h[ema_period-1] = np.mean(close_4h[:ema_period])
-        for i in range(ema_period, len(close_4h)):
-            ema_4h[i] = (close_4h[i] * 2 / (ema_period + 1)) + (ema_4h[i-1] * (ema_period - 1) / (ema_period + 1))
+    # Weekly OHLC for pivot calculation
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Align 4h EMA to 1h
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Weekly pivot points: P = (H+L+C)/3, R1 = 2P - L, S1 = 2P - H
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
     
-    # 1h range breakout parameters
-    lookback = 20
-    breakout_mult = 1.5
+    # Weekly EMA trend filter
+    ema_period = 21
+    if len(close_1w) >= ema_period:
+        ema_1w = np.zeros_like(close_1w)
+        ema_1w[ema_period-1] = np.mean(close_1w[:ema_period])
+        for i in range(ema_period, len(close_1w)):
+            ema_1w[i] = (close_1w[i] * 2 / (ema_period + 1)) + (ema_1w[i-1] * (ema_period - 1) / (ema_period + 1))
+    else:
+        ema_1w = np.full_like(close_1w, np.nan)
     
-    # Calculate rolling high/low for breakout levels
-    roll_high = np.full_like(high, np.nan)
-    roll_low = np.full_like(low, np.nan)
-    for i in range(lookback, n):
-        roll_high[i] = np.max(high[i-lookback:i])
-        roll_low[i] = np.min(low[i-lookback:i])
+    # Align weekly data to 6h
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = np.full_like(volume, np.nan)
-    vol_period = 20
-    for i in range(vol_period, n):
+    # Volume confirmation: volume > 1.5x 24-period average (4 days)
+    vol_ma = np.zeros_like(volume)
+    vol_period = 24
+    for i in range(vol_period, len(volume)):
         vol_ma[i] = np.mean(volume[i-vol_period:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback, vol_period, ema_period) + 1
+    start_idx = max(50, vol_period, ema_period)
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(roll_high[i]) or np.isnan(roll_low[i]) or 
-            np.isnan(ema_4h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or 
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -69,33 +68,33 @@ def generate_signals(prices):
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: price breaks above rolling high with volume and above 4h EMA
-            if close[i] > roll_high[i] and vol_confirm and close[i] > ema_4h_aligned[i]:
-                signals[i] = 0.20
+            # Long: price breaks above R1 with volume and above weekly EMA
+            if close[i] > r1_1w_aligned[i] and vol_confirm and close[i] > ema_1w_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below rolling low with volume and below 4h EMA
-            elif close[i] < roll_low[i] and vol_confirm and close[i] < ema_4h_aligned[i]:
-                signals[i] = -0.20
+            # Short: price breaks below S1 with volume and below weekly EMA
+            elif close[i] < s1_1w_aligned[i] and vol_confirm and close[i] < ema_1w_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price closes below rolling low or below 4h EMA
-            if close[i] < roll_low[i] or close[i] < ema_4h_aligned[i]:
-                signals[i] = -0.20  # reverse to short
+            # Long exit: price closes below S1 (reverse signal) or below weekly EMA
+            if close[i] < s1_1w_aligned[i] or close[i] < ema_1w_aligned[i]:
+                signals[i] = -0.25  # reverse to short
                 position = -1
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price closes above rolling high or above 4h EMA
-            if close[i] > roll_high[i] or close[i] > ema_4h_aligned[i]:
-                signals[i] = 0.20  # reverse to long
+            # Short exit: price closes above R1 (reverse signal) or above weekly EMA
+            if close[i] > r1_1w_aligned[i] or close[i] > ema_1w_aligned[i]:
+                signals[i] = 0.25  # reverse to long
                 position = 1
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_RangeBreakout_4hTrend_Volume"
-timeframe = "1h"
+name = "6h_WeeklyPivot_Breakout_Volume"
+timeframe = "6h"
 leverage = 1.0
