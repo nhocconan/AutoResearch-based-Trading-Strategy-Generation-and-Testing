@@ -1,54 +1,41 @@
 #!/usr/bin/env python3
 """
-4h RSI Divergence + Volume Confirmation + ADX Trend Filter
-Hypothesis: RSI divergences (hidden and regular) at extremes with volume confirmation and ADX > 25 capture exhaustion moves in both bull and bear markets. Limited trades due to strict divergence and volume requirements.
+1d Weekly ATR Breakout + Volume Confirmation + Trend Filter
+Hypothesis: Weekly volatility expansion (ATR breakout) signals institutional participation. Combined with volume surge and trend alignment (price > weekly EMA50), it captures strong trends in both bull and bear markets. Low trade frequency due to strict weekly timeframe and multi-condition entry.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_rsi(prices, period=14):
-    """Calculate Relative Strength Index"""
-    delta = np.diff(prices, prepend=prices[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+def calculate_atr(high, low, close, period=14):
+    """Calculate Average True Range"""
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    avg_gain = np.zeros_like(prices)
-    avg_loss = np.zeros_like(prices)
-    
-    # Wilder's smoothing
-    avg_gain[period] = np.mean(gain[1:period+1])
-    avg_loss[period] = np.mean(loss[1:period+1])
-    
-    for i in range(period+1, len(prices)):
-        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+    atr = np.zeros_like(close)
+    if len(close) < period:
+        return atr
+    atr[period-1] = np.mean(tr[:period])
+    for i in range(period, len(tr)):
+        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+    return atr
 
-def find_divergences(price, rsi, lookback=5):
-    """Find bullish and bearish divergences"""
-    n = len(price)
-    bullish_div = np.zeros(n, dtype=bool)
-    bearish_div = np.zeros(n, dtype=bool)
-    
-    for i in range(lookback, n):
-        # Regular bullish divergence: price makes lower low, RSI makes higher low
-        if price[i] < price[i-lookback] and rsi[i] > rsi[i-lookback]:
-            # Check if it's a meaningful low
-            if price[i] == np.min(price[i-lookback:i+1]):
-                bullish_div[i] = True
-        
-        # Regular bearish divergence: price makes higher high, RSI makes lower high
-        if price[i] > price[i-lookback] and rsi[i] < rsi[i-lookback]:
-            # Check if it's a meaningful high
-            if price[i] == np.max(price[i-lookback:i+1]):
-                bearish_div[i] = True
-    
-    return bullish_div, bearish_div
+def calculate_ema(data, period):
+    """Calculate Exponential Moving Average"""
+    if len(data) < period:
+        return np.full_like(data, np.nan)
+    ema = np.zeros_like(data)
+    ema[0] = data[0]
+    alpha = 2 / (period + 1)
+    for i in range(1, len(data)):
+        ema[i] = alpha * data[i] + (1 - alpha) * ema[i-1]
+    return ema
 
 def generate_signals(prices):
     n = len(prices)
@@ -60,101 +47,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for volatility and trend filters
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 50:
         return np.zeros(n)
     
-    # Calculate RSI on 4h
-    rsi = calculate_rsi(close, 14)
+    # Calculate weekly ATR for volatility breakout
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
+    atr_weekly = calculate_atr(high_weekly, low_weekly, close_weekly, period=14)
     
-    # Find divergences
-    bullish_div, bearish_div = find_divergences(close, rsi, lookback=10)
+    # Calculate weekly EMA50 for trend filter
+    ema50_weekly = calculate_ema(close_weekly, period=50)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Align weekly indicators to daily timeframe
+    atr_weekly_aligned = align_htf_to_ltf(prices, df_weekly, atr_weekly)
+    ema50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)
+    
+    # Volume confirmation: daily volume > 2.0x 20-day average
     vol_ma = np.zeros_like(volume)
     for i in range(len(volume)):
         if i < 20:
-            vol_ma[i] = np.mean(volume[max(0, i-19):i+1])
+            vol_ma[i] = np.mean(volume[max(0, i-19):i+1]) if i >= 0 else volume[i]
         else:
             vol_ma[i] = np.mean(volume[i-19:i+1])
-    vol_conf = volume > (vol_ma * 1.5)
-    
-    # ADX for trend strength (avoid choppy markets)
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    up_move[0] = 0
-    down_move[0] = 0
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values with Wilder smoothing
-    def wilders_smooth(data, period):
-        result = np.zeros_like(data)
-        if len(data) < period:
-            return result
-        # Initial value
-        result[period-1] = np.mean(data[:period])
-        # Wilder smoothing
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    atr = wilders_smooth(tr, 14)
-    plus_di = 100 * wilders_smooth(plus_dm, 14) / np.where(atr != 0, atr, 1)
-    minus_di = 100 * wilders_smooth(minus_dm, 14) / np.where(atr != 0, atr, 1)
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = wilders_smooth(dx, 14)
+    vol_surge = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Warmup for indicators
+    start_idx = 50  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(rsi[i]) or np.isnan(adx[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(atr_weekly_aligned[i]) or np.isnan(ema50_weekly_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
+        atr_val = atr_weekly_aligned[i]
+        ema50_val = ema50_weekly_aligned[i]
+        vol_ok = vol_surge[i]
+        
         if position == 0:
-            # Enter long: bullish divergence + ADX > 20 + volume confirmation
-            if (bullish_div[i] and 
-                adx[i] > 20 and 
-                vol_conf[i]):
+            # Enter long: price > weekly EMA50 (uptrend) + weekly ATR breakout + volume surge
+            # ATR breakout: today's true range > 1.5x weekly ATR
+            tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+            if (close[i] > ema50_val and 
+                tr > 1.5 * atr_val and 
+                vol_ok):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: bearish divergence + ADX > 20 + volume confirmation
-            elif (bearish_div[i] and 
-                  adx[i] > 20 and 
-                  vol_conf[i]):
+            # Enter short: price < weekly EMA50 (downtrend) + weekly ATR breakdown + volume surge
+            # ATR breakdown: today's true range > 1.5x weekly ATR
+            elif (close[i] < ema50_val and 
+                  tr > 1.5 * atr_val and 
+                  vol_ok):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: bearish divergence or RSI overbought (>70) or ADX weakens
-            if (bearish_div[i] or 
-                rsi[i] > 70 or 
-                adx[i] < 15):
+            # Exit long: price crosses below weekly EMA50 or volatility contracts
+            tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+            if close[i] < ema50_val or tr < 0.8 * atr_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bullish divergence or RSI oversold (<30) or ADX weakens
-            if (bullish_div[i] or 
-                rsi[i] < 30 or 
-                adx[i] < 15):
+            # Exit short: price crosses above weekly EMA50 or volatility contracts
+            tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+            if close[i] > ema50_val or tr < 0.8 * atr_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -162,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI_Divergence_Volume_ADXFilter"
-timeframe = "4h"
+name = "1d_Weekly_ATRBreakout_VolumeSurge_TrendFilter"
+timeframe = "1d"
 leverage = 1.0
