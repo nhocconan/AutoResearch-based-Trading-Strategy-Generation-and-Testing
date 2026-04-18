@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_VolumeSpike_12hEMA34
-Hypothesis: Camarilla pivot levels (R1, S1) from 12h chart act as strong support/resistance.
-Breakouts beyond these levels with volume confirmation and 12h EMA34 trend filter capture momentum.
-Designed for 20-50 trades/year on 4h timeframe with low trade frequency to minimize fee drag.
-Works in bull/bear markets by requiring volume spike and 12h EMA34 trend filter.
+1h_4HTrend_RSI20_80_1DVolume
+Hypothesis: In both bull and bear markets, 4h EMA50 trend provides directional bias.
+On 1h timeframe, we wait for RSI extremes (20 oversold, 80 overbought) to enter
+in direction of 4h trend, confirmed by 1d volume spike. Designed for 15-30 trades/year
+on 1h timeframe with low frequency to minimize fee drag.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,84 +21,78 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for pivot calculation (once before loop)
-    df_12h = get_htf_data(prices, '12h')
+    # Get 4h data for EMA trend (once before loop)
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close']
     
-    # Calculate 12h pivot points using standard formula
-    # P = (H + L + C) / 3
-    # R1 = 2*P - L
-    # S1 = 2*P - H
-    # Using previous 12h bar's data to avoid look-ahead
-    high_12h = df_12h['high']
-    low_12h = df_12h['low']
-    close_12h = df_12h['close']
+    # 4h EMA50 trend filter
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    pivot = (high_12h + low_12h + close_12h) / 3
-    r1 = 2 * pivot - low_12h
-    s1 = 2 * pivot - high_12h
+    # Get 1d data for volume spike filter
+    df_1d = get_htf_data(prices, '1d')
+    volume_1d = df_1d['volume']
     
-    # Shift by 1 to use previous 12h bar's levels only
-    r1_prev = r1.shift(1).values
-    s1_prev = s1.shift(1).values
+    # 1d volume spike: 2x 20-period average
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = volume_1d > (2.0 * vol_ma_1d)
+    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
     
-    # Align to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_12h, r1_prev)
-    s1_aligned = align_htf_to_ltf(prices, df_12h, s1_prev)
-    
-    # Get 12h data for EMA trend filter
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
-    
-    # Volume spike: 2x 20-period average on 4h
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # 1h RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or
-            np.isnan(ema_34_12h_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_4h_aligned[i]) or
+            np.isnan(volume_spike_1d_aligned[i]) or
+            np.isnan(rsi_values[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema_trend = ema_34_12h_aligned[i]
+        ema_trend = ema_50_4h_aligned[i]
+        vol_spike = volume_spike_1d_aligned[i]
+        rsi_val = rsi_values[i]
         
         if position == 0:
-            # Long: break above R1 with volume spike and price above 12h EMA (uptrend)
-            if price > r1_val and volume_spike[i] and price > ema_trend:
-                signals[i] = 0.25
+            # Long: 4h uptrend + RSI oversold + 1d volume spike
+            if price > ema_trend and rsi_val < 20 and vol_spike:
+                signals[i] = 0.20
                 position = 1
-            # Short: break below S1 with volume spike and price below 12h EMA (downtrend)
-            elif price < s1_val and volume_spike[i] and price < ema_trend:
-                signals[i] = -0.25
+            # Short: 4h downtrend + RSI overbought + 1d volume spike
+            elif price < ema_trend and rsi_val > 80 and vol_spike:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
             # Long position
-            signals[i] = 0.25
-            # Exit: price returns to S1 or breaks below 12h EMA
-            if price <= s1_val or price < ema_trend:
+            signals[i] = 0.20
+            # Exit: RSI returns to neutral or trend breaks
+            if rsi_val >= 50 or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position
-            signals[i] = -0.25
-            # Exit: price returns to R1 or breaks above 12h EMA
-            if price >= r1_val or price > ema_trend:
+            signals[i] = -0.20
+            # Exit: RSI returns to neutral or trend breaks
+            if rsi_val <= 50 or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_VolumeSpike_12hEMA34"
-timeframe = "4h"
+name = "1h_4HTrend_RSI20_80_1DVolume"
+timeframe = "1h"
 leverage = 1.0
