@@ -1,31 +1,16 @@
-# %pip install git+https://github.com/upbit-oss/ta-momentum.git
 #!/usr/bin/env python3
 """
-12h_TRIX_Volume_Spike_1wTrend
-Hypothesis: TRIX (triple-smoothed EMA) momentum on 12h combined with weekly trend filter and volume spike
-provides robust signals in both bull and bear markets. Weekly trend ensures we only trade with the higher
-timeframe direction, reducing whipsaw. Volume spike confirms institutional participation. Target: 20-40
-trades/year on 12h timeframe with strict entry conditions.
+1d_Pivot_R1S1_Breakout_Volume_1wTrend
+Hypothesis: Daily chart breakouts above weekly R1 or below weekly S1 with volume confirmation work in both bull and bear markets. Weekly trend filter ensures alignment with higher timeframe momentum. Target: 15-30 trades/year on 1d timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def _ema(arr, period):
-    """Calculate EMA with proper handling of initial values."""
-    ema = np.full_like(arr, np.nan, dtype=float)
-    if len(arr) < period:
-        return ema
-    k = 2.0 / (period + 1)
-    ema[period-1] = np.mean(arr[:period])
-    for i in range(period, len(arr)):
-        ema[i] = arr[i] * k + ema[i-1] * (1 - k)
-    return ema
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -33,64 +18,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # TRIX on 12h: triple EMA of percent change
-    # TRIX = EMA(EMA(EMA(ROC, 12), 12), 12) where ROC = (close - close_prev)/close_prev * 100
-    if len(close) < 2:
-        return np.zeros(n)
-    roc = np.zeros(n)
-    roc[1:] = (close[1:] - close[:-1]) / close[:-1] * 100.0
-    
-    ema1 = _ema(roc, 12)
-    ema2 = _ema(ema1, 12)
-    ema3 = _ema(ema2, 12)
-    trix = ema3  # Already the final smoothed value
-    
-    # Weekly trend filter: EMA34 on weekly close
+    # Calculate weekly R1 and S1 from 1-week data
     df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema34_1w = _ema(close_1w, 34)
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Volume spike: current volume > 2.0 x 24-period average (24*12h = 12 days)
+    # Weekly pivot and R1/S1 levels
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
+    r1_1w = pivot_1w + range_1w * 1.1 / 12
+    s1_1w = pivot_1w - range_1w * 1.1 / 12
+    
+    # Align weekly levels to daily timeframe
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    
+    # Weekly EMA21 trend filter
+    ema21_1w = np.full(len(close_1w), np.nan)
+    k = 2 / (21 + 1)
+    for i in range(21, len(close_1w)):
+        if i == 21:
+            ema21_1w[i] = np.mean(close_1w[0:22])
+        else:
+            ema21_1w[i] = close_1w[i] * k + ema21_1w[i-1] * (1 - k)
+    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
+    
+    # Volume spike: current volume > 1.8 x 20-day average
     vol_ma = np.full(n, np.nan)
-    for i in range(24, n):
-        vol_ma[i] = np.mean(volume[i-24:i])
-    vol_spike = volume > (vol_ma * 2.0)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    vol_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(24, 12*3)  # Ensure TRIX and volume MA ready
+    start_idx = max(21, 20)  # Ensure all indicators ready
     
     for i in range(start_idx, n):
-        if (np.isnan(trix[i]) or np.isnan(ema34_1w_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or 
+            np.isnan(ema21_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: TRIX turns positive with volume spike and weekly uptrend
-            if (trix[i] > 0.0 and trix[i-1] <= 0.0 and vol_spike[i] and 
-                close[i] > ema34_1w_aligned[i]):
+            # Long: break above weekly R1 with volume spike and weekly uptrend
+            if (close[i] > r1_1w_aligned[i] and vol_spike[i] and 
+                close[i] > ema21_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX turns negative with volume spike and weekly downtrend
-            elif (trix[i] < 0.0 and trix[i-1] >= 0.0 and vol_spike[i] and 
-                  close[i] < ema34_1w_aligned[i]):
+            # Short: break below weekly S1 with volume spike and weekly downtrend
+            elif (close[i] < s1_1w_aligned[i] and vol_spike[i] and 
+                  close[i] < ema21_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: TRIX turns negative or weekly trend turns down
-            if (trix[i] < 0.0 and trix[i-1] >= 0.0) or close[i] < ema34_1w_aligned[i]:
+            # Long exit: close below weekly EMA21
+            if close[i] < ema21_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: TRIX turns positive or weekly trend turns up
-            if (trix[i] > 0.0 and trix[i-1] <= 0.0) or close[i] > ema34_1w_aligned[i]:
+            # Short exit: close above weekly EMA21
+            if close[i] > ema21_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_TRIX_Volume_Spike_1wTrend"
-timeframe = "12h"
+name = "1d_Pivot_R1S1_Breakout_Volume_1wTrend"
+timeframe = "1d"
 leverage = 1.0
