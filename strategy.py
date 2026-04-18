@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Pivot_R1S1_Breakout_Trend_Volume
-Hypothesis: Weekly trend filter with daily pivot breakouts (R1/S1) and volume confirmation captures momentum across cycles.
-Weekly trend provides directional bias; daily R1/S1 breakouts offer precise entries; volume filters false breakouts.
-Designed for low trade frequency (10-20/year) on 1d timeframe to minimize fee drag and improve generalization.
+12h_Stochastic_KD_Signal_With_Trend_Filter_v1
+Hypothesis: Stochastic oscillator (K% and D%) crossovers on 12h timeframe provide reliable momentum signals. 
+Filtered by 1d EMA50 trend direction and volume confirmation to avoid false signals in choppy markets.
+Designed for low trade frequency (15-25/year) to minimize fee drag and improve generalization.
+Works in bull markets via trend-following crosses and in bear markets via mean-reversion at extremes.
 """
 
 import numpy as np
@@ -12,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,81 +21,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close']
-    # Weekly EMA34 for trend direction
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Get 12h data for Stochastic calculation (once before loop)
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Get daily data for pivot levels (once before loop)
+    # Calculate Stochastic K% and D% (14,3)
+    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    k_percent = 100 * ((close_12h - lowest_low) / (highest_high - lowest_low))
+    d_percent = pd.Series(k_percent).rolling(window=3, min_periods=3).mean().values
+    
+    # Align Stochastic to 12h timeframe (primary)
+    k_aligned = align_htf_to_ltf(prices, df_12h, k_percent)
+    d_aligned = align_htf_to_ltf(prices, df_12h, d_percent)
+    
+    # Get 1d data for EMA50 trend filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high']
-    low_1d = df_1d['low']
-    close_1d = df_1d['close']
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate daily pivot points and R1/S1 levels
-    # Pivot = (High + Low + Close) / 3
-    # R1 = 2*Pivot - Low
-    # S1 = 2*Pivot - High
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1_level = 2 * pivot - low_1d
-    s1_level = 2 * pivot - high_1d
-    
-    # Align daily pivot levels to daily timeframe (no shift needed as we're on 1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_level)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_level)
-    
-    # Volume spike: volume > 1.5 * 20-day average
+    # Volume spike detection: volume > 1.8 * 20-period average (12h equivalent)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 50
+    start_idx = 60
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or
-            np.isnan(ema_34_1w_aligned[i]) or
+        if (np.isnan(k_aligned[i]) or 
+            np.isnan(d_aligned[i]) or
+            np.isnan(ema_50_aligned[i]) or
             np.isnan(volume_spike[i]) or
-            np.isnan(vol_ma[i])):
+            np.isnan(vol_ma[i]) or
+            (highest_high[i] - lowest_low[i]) == 0):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
-        weekly_trend = ema_34_1w_aligned[i]
+        k = k_aligned[i]
+        d = d_aligned[i]
+        ema_trend = ema_50_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: break above R1 with weekly uptrend and volume spike
-            if price > r1 and price > weekly_trend and vol_spike:
+            # Long: K crosses above D with uptrend and volume confirmation
+            if k > d and k < 20 and ema_trend > price and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with weekly downtrend and volume spike
-            elif price < s1 and price < weekly_trend and vol_spike:
+            # Short: K crosses below D with downtrend and volume confirmation
+            elif k < d and k > 80 and ema_trend < price and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price returns to S1 or breaks below weekly EMA
-            if price < s1 or price < weekly_trend:
+            # Exit: K crosses below D or price breaks below EMA
+            if k < d or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price returns to R1 or breaks above weekly EMA
-            if price > r1 or price > weekly_trend:
+            # Exit: K crosses above D or price breaks above EMA
+            if k > d or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Weekly_Pivot_R1S1_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "12h_Stochastic_KD_Signal_With_Trend_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
