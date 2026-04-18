@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_ParabolicSAR_Trend_With_Volume_And_Trend_Filter
-Hypothesis: Parabolic SAR signals combined with volume confirmation and 4h EMA trend filter.
-Captures trending moves while avoiding whipsaws in sideways markets. Works in both bull and bear regimes
-by using the trend filter to align with higher timeframe momentum.
+4h_RSI_Momentum_With_Trend
+Hypothesis: RSI momentum (cross above 50) in the direction of the 4h EMA trend, with volume confirmation, yields fewer false signals than pure RSI extremes.
+Works in bull markets (trend-following) and bear markets (only trades when RSI>50 in downtrend for shorts).
+Target: 20-40 trades/year to minimize fee drag while capturing momentum with trend alignment.
 """
 
 import numpy as np
@@ -20,110 +20,66 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Parabolic SAR calculation
-    def parabolic_sar(high, low, af_start=0.02, af_increment=0.02, af_max=0.2):
-        n = len(high)
-        sar = np.zeros(n)
-        trend = np.zeros(n)  # 1 for uptrend, -1 for downtrend
-        af = np.zeros(n)
-        ep = np.zeros(n)
-        
-        # Initialize
-        sar[0] = low[0]
-        trend[0] = 1
-        af[0] = af_start
-        ep[0] = high[0]
-        
-        for i in range(1, n):
-            if trend[i-1] == 1:  # uptrend
-                sar[i] = sar[i-1] + af[i-1] * (ep[i-1] - sar[i-1])
-                if low[i] <= sar[i]:  # trend reversal
-                    trend[i] = -1
-                    sar[i] = ep[i-1]
-                    af[i] = af_start
-                    ep[i] = low[i]
-                else:
-                    trend[i] = 1
-                    if high[i] > ep[i-1]:
-                        ep[i] = high[i]
-                    else:
-                        ep[i] = ep[i-1]
-                    af[i] = min(af[i-1] + af_increment, af_max)
-            else:  # downtrend
-                sar[i] = sar[i-1] + af[i-1] * (ep[i-1] - sar[i-1])
-                if high[i] >= sar[i]:  # trend reversal
-                    trend[i] = 1
-                    sar[i] = ep[i-1]
-                    af[i] = af_start
-                    ep[i] = high[i]
-                else:
-                    trend[i] = -1
-                    if low[i] < ep[i-1]:
-                        ep[i] = low[i]
-                    else:
-                        ep[i] = ep[i-1]
-                    af[i] = min(af[i-1] + af_increment, af_max)
-        return sar, trend
+    # Trend: 4h EMA34
+    ema_34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate Parabolic SAR
-    sar, psar_trend = parabolic_sar(high, low)
+    # RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
     # Volume spike: >1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
-    # Trend filter: 4h EMA34
-    ema_34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(35, 20)  # Warmup for EMA and indicators
+    start_idx = 34  # Warmup for EMA and RSI
     
     for i in range(start_idx, n):
-        if (np.isnan(sar[i]) or 
-            np.isnan(ema_34[i]) or
+        if (np.isnan(ema_34[i]) or 
+            np.isnan(rsi[i]) or
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        sar_val = sar[i]
         ema_val = ema_34[i]
+        rsi_val = rsi[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: price above SAR (uptrend signal) with volume spike and above EMA
-            if price > sar_val and vol_spike and price > ema_val:
+            # Long: RSI crosses above 50, price above EMA, volume spike
+            if rsi_val > 50 and rsi[i-1] <= 50 and price > ema_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below SAR (downtrend signal) with volume spike and below EMA
-            elif price < sar_val and vol_spike and price < ema_val:
+            # Short: RSI crosses below 50, price below EMA, volume spike
+            elif rsi_val < 50 and rsi[i-1] >= 50 and price < ema_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price crosses below SAR (trend reversal) OR below EMA
-            if price < sar_val:
-                signals[i] = 0.0
-                position = 0
-            elif price < ema_val:
+            # Exit: RSI falls below 40 OR price crosses below EMA
+            if rsi_val < 40 or price < ema_val:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price crosses above SAR (trend reversal) OR above EMA
-            if price > sar_val:
-                signals[i] = 0.0
-                position = 0
-            elif price > ema_val:
+            # Exit: RSI rises above 60 OR price crosses above EMA
+            if rsi_val > 60 or price > ema_val:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_ParabolicSAR_Trend_With_Volume_And_Trend_Filter"
+name = "4h_RSI_Momentum_With_Trend"
 timeframe = "4h"
 leverage = 1.0
