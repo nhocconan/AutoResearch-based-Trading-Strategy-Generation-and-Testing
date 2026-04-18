@@ -1,110 +1,88 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyPivot_R1S1_Breakout_With_Volume_Confirmation
-Hypothesis: Daily price breaks above/below weekly pivot R1/S1 with volume confirmation and trend filter.
-In bull markets, captures breakouts above weekly resistance; in bear markets, captures breakdowns below weekly support.
-Uses weekly pivot levels (calculated from prior week) to avoid look-ahead, volume surge for momentum, and 1w EMA for trend filter.
-Designed for 10-25 trades/year to minimize fee drag while capturing significant directional moves in BTC/ETH.
+12h_TRIX_VolumeSpike_TrendFilter
+Hypothesis: 12h TRIX momentum oscillator with volume spike and 1d trend filter captures sustained moves in both bull and bear markets.
+TRIX filters noise and identifies momentum shifts; volume spike confirms strength; 1d trend avoids counter-trend trades.
+Designed for ~15-30 trades/year to minimize fee drag while capturing major trends.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf
-
-def calculate_pivot_points(high, low, close):
-    """Calculate pivot points: P = (H+L+C)/3, R1 = 2P - L, S1 = 2P - H"""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    return pivot, r1, s1
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation (using prior week's data)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # TRIX (15-period EMA applied 3 times)
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix = np.diff(ema3, prepend=ema3[0]) / ema3 * 100  # percentage change
+    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
     
-    # Calculate weekly pivot points using prior week's HLC
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    
-    # Calculate pivots for each week
-    pivots, r1_levels, s1_levels = calculate_pivot_points(weekly_high, weekly_low, weekly_close)
-    
-    # Align weekly pivot levels to daily timeframe (use prior week's levels)
-    pivots_aligned = align_ltf_to_htf(prices, df_1w, pivots)
-    r1_aligned = align_ltf_to_htf(prices, df_1w, r1_levels)
-    s1_aligned = align_ltf_to_htf(prices, df_1w, s1_levels)
-    
-    # Volume spike: >2.0x 20-day average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume spike: >2.0x 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
-    # Trend filter: 1-week EMA20
-    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_ltf_to_htf(prices, df_1w, ema_20_1w)
+    # Trend filter: 1d EMA34
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(20, 30)  # Warmup for indicators
+    start_idx = max(45, 30)  # Warmup for TRIX and volume
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or
-            np.isnan(ema_20_1w_aligned[i]) or
+        if (np.isnan(trix_signal[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
-        ema20 = ema_20_1w_aligned[i]
+        t_signal = trix_signal[i]
+        ema34 = ema_34_1d_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: price breaks above weekly R1 with volume spike and uptrend
-            if price > r1 and vol_spike and price > ema20:
+            # Long: TRIX crosses above signal with volume spike and uptrend
+            if i > 0 and trix[i] > trix_signal[i] and trix[i-1] <= trix_signal[i-1] and vol_spike and close[i] > ema34:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly S1 with volume spike and downtrend
-            elif price < s1 and vol_spike and price < ema20:
+            # Short: TRIX crosses below signal with volume spike and downtrend
+            elif i > 0 and trix[i] < trix_signal[i] and trix[i-1] >= trix_signal[i-1] and vol_spike and close[i] < ema34:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price closes below weekly pivot OR trend turns down
-            if price < pivots_aligned[i]:
+            # Exit: TRIX crosses below signal OR trend turns down
+            if i > 0 and trix[i] < trix_signal[i] and trix[i-1] >= trix_signal[i-1]:
                 signals[i] = 0.0
                 position = 0
-            elif price < ema20:
+            elif close[i] < ema34:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price closes above weekly pivot OR trend turns up
-            if price > pivots_aligned[i]:
+            # Exit: TRIX crosses above signal OR trend turns up
+            if i > 0 and trix[i] > trix_signal[i] and trix[i-1] <= trix_signal[i-1]:
                 signals[i] = 0.0
                 position = 0
-            elif price > ema20:
+            elif close[i] > ema34:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_WeeklyPivot_R1S1_Breakout_With_Volume_Confirmation"
-timeframe = "1d"
+name = "12h_TRIX_VolumeSpike_TrendFilter"
+timeframe = "12h"
 leverage = 1.0
