@@ -1,19 +1,11 @@
 #!/usr/bin/env python3
-"""
-12h_KAMA_With_Volume_And_Chop_Filter
-Hypothesis: KAMA adapts to market noise, providing a smoother trend signal than traditional MAs.
-In trending markets, price stays above/below KAMA; in ranging markets, price oscillates around it.
-Combined with volume confirmation (to avoid false breakouts) and Choppiness Index (to avoid choppy markets),
-this strategy aims to capture strong trends while avoiding whipsaws. Works in both bull and bear markets
-by only trading when trend is strong and volume confirms. Targets 12-37 trades/year with position size 0.25.
-"""
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,125 +13,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for Choppiness Index
+    # Get 4h and 1d data for trend and regime
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
+    
+    # 4h EMA34 for trend direction
+    close_4h = df_4h['close'].values
+    ema34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
+    
+    # 1d Donchian20 for volatility regime
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    donchian_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_width = donchian_high_20 - donchian_low_20
+    donchian_width_ma = pd.Series(donchian_width).rolling(window=10, min_periods=10).mean().values
+    donchian_width_ratio = donchian_width / donchian_width_ma
+    donchian_width_ratio_aligned = align_htf_to_ltf(prices, df_1d, donchian_width_ratio)
     
-    # Calculate True Range for Choppiness Index
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    # 1h RSI14 for entry timing
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate ATR (14-period) for Choppiness Index
-    atr_1d = np.full(len(high_1d), np.nan)
-    for i in range(14, len(high_1d)):
-        atr_1d[i] = np.mean(tr_1d[i-13:i+1])
-    
-    # Calculate highest high and lowest low over 14 periods
-    hh_1d = np.full(len(high_1d), np.nan)
-    ll_1d = np.full(len(high_1d), np.nan)
-    for i in range(14, len(high_1d)):
-        hh_1d[i] = np.max(high_1d[i-13:i+1])
-        ll_1d[i] = np.min(low_1d[i-13:i+1])
-    
-    # Calculate Choppiness Index (14-period)
-    chop_1d = np.full(len(high_1d), 50.0)  # default to middle
-    for i in range(14, len(high_1d)):
-        if hh_1d[i] > ll_1d[i] and atr_1d[i] > 0:
-            sum_atr = np.sum(tr_1d[i-13:i+1])
-            chop_1d[i] = 100 * np.log10(sum_atr / (hh_1d[i] - ll_1d[i])) / np.log10(14)
-        else:
-            chop_1d[i] = 50.0
-    
-    # Align Choppiness Index to 12h timeframe (wait for daily bar close)
-    chop_12h = align_htf_to_ltf(prices, df_1d, chop_1d)
-    
-    # Calculate KAMA (10-period) on close
-    # Efficiency Ratio (ER) = |net change| / sum of absolute changes
-    change = np.abs(np.diff(close, n=1))
-    abs_change = np.abs(np.diff(close, n=1))
-    
-    # Pad arrays for calculation
-    change_pad = np.concatenate([[np.nan], change])
-    abs_change_pad = np.concatenate([[np.nan], abs_change])
-    
-    er = np.full(n, np.nan)
-    for i in range(10, n):
-        if np.sum(abs_change_pad[i-9:i+1]) > 0:
-            er[i] = np.nansum(change_pad[i-9:i+1]) / np.nansum(abs_change_pad[i-9:i+1])
-        else:
-            er[i] = 0
-    
-    # Smoothing constants
-    sc = np.full(n, np.nan)
-    for i in range(10, n):
-        sc[i] = (er[i] * (0.6667 - 0.0645) + 0.0645) ** 2
-    
-    # Calculate KAMA
-    kama = np.full(n, np.nan)
-    kama[9] = close[9]  # seed
-    for i in range(10, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    
-    # Calculate volume average (20-period) for confirmation
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+    # Time filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    start_idx = max(20, 10)  # need volume MA and KAMA
-    
-    for i in range(start_idx, n):
-        # Skip if any required data is not available
-        if (np.isnan(chop_12h[i]) or np.isnan(kama[i]) or 
-            np.isnan(vol_ma[i])):
+    for i in range(100, n):
+        # Skip if data not ready
+        if np.isnan(ema34_4h_aligned[i]) or np.isnan(donchian_width_ratio_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3 * 20-period average
-        vol_confirmed = volume[i] > 1.3 * vol_ma[i]
+        # Trend filter: price above/below 4h EMA34
+        trend_up = close[i] > ema34_4h_aligned[i]
+        trend_down = close[i] < ema34_4h_aligned[i]
         
-        # Chop filter: only trade when market is not too choppy (CHOP < 61.8 = trending)
-        chop_filter = chop_12h[i] < 61.8
+        # Volatility regime: only trade in low volatility (width ratio < 0.8)
+        low_vol = donchian_width_ratio_aligned[i] < 0.8
+        
+        # Time filter
+        in_session = (8 <= hours[i] <= 20)
         
         if position == 0:
-            # Long entry: price crosses above KAMA with volume confirmation and trend filter
-            if close[i] > kama[i] and close[i-1] <= kama[i-1] and vol_confirmed and chop_filter:
-                signals[i] = 0.25
+            # Long: uptrend + low vol + RSI oversold
+            if trend_up and low_vol and in_session and rsi[i] < 30:
+                signals[i] = 0.20
                 position = 1
-            # Short entry: price crosses below KAMA with volume confirmation and trend filter
-            elif close[i] < kama[i] and close[i-1] >= kama[i-1] and vol_confirmed and chop_filter:
-                signals[i] = -0.25
+            # Short: downtrend + low vol + RSI overbought
+            elif trend_down and low_vol and in_session and rsi[i] > 70:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price crosses back below KAMA
-            if close[i] < kama[i] and close[i-1] >= kama[i-1]:
+            # Exit long: trend reversal or RSI overbought
+            if not trend_up or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price crosses back above KAMA
-            if close[i] > kama[i] and close[i-1] <= kama[i-1]:
+            # Exit short: trend reversal or RSI oversold
+            if not trend_down or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "12h_KAMA_With_Volume_And_Chop_Filter"
-timeframe = "12h"
+name = "1h_EMA34_Trend_DonchianVol_RSI_Entry"
+timeframe = "1h"
 leverage = 1.0
