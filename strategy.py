@@ -1,40 +1,22 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyDonchianBreakout_1dVolumeSpike_1dTrend
-Weekly Donchian breakout with daily volume spike and trend filter:
-- Long when price breaks above weekly Donchian high + daily volume spike + price above daily EMA200
-- Short when price breaks below weekly Donchian low + daily volume spike + price below daily EMA200
-- Exit when price crosses back below/above daily EMA200
-- Uses weekly Donchian (20 periods) for structure, daily volume spike for conviction, daily EMA200 for trend filter
-- Designed for 10-25 trades/year per symbol
-Works in both bull (captures breakouts) and bear (short breakdowns) markets
+4h_Camarilla_R1_S1_Breakout_Volume_Strict
+Camarilla pivot breakout with volume spike and volume regime filter:
+- Long when close breaks above R1 + volume spike above 20-period average
+- Short when close breaks below S1 + volume spike above 20-period average
+- Only trade in low-volume regime (volume < 30-period median) to avoid chop
+- Uses 1d Camarilla levels for structure
+- Designed for 20-40 trades/year per symbol
+Works in bull (breakouts) and bear (breakdowns) markets
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_donchian(high, low, window=20):
-    """Calculate Donchian channels."""
-    n = len(high)
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    for i in range(window-1, n):
-        upper[i] = np.max(high[i-window+1:i+1])
-        lower[i] = np.min(low[i-window+1:i+1])
-    return upper, lower
-
-def calculate_ema(arr, span):
-    """Calculate EMA with proper handling."""
-    if len(arr) < span:
-        return np.full(len(arr), np.nan)
-    s = pd.Series(arr)
-    ema = s.ewm(span=span, adjust=False, min_periods=span).mean()
-    return ema.values
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -42,62 +24,69 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Donchian channels
-    df_weekly = get_htf_data(prices, '1w')
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
+    # Get 1d data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly Donchian channels (20 periods)
-    donchian_upper_weekly, donchian_lower_weekly = calculate_donchian(high_weekly, low_weekly, window=20)
+    # Calculate 1d Camarilla levels (based on previous day)
+    # R1 = C + (H-L)*1.1/12
+    # S1 = C - (H-L)*1.1/12
+    # where C, H, L are from previous day
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    # First day will have NaN due to roll, handled by isnan check later
     
-    # Align weekly Donchian to daily timeframe
-    donchian_upper_daily = align_htf_to_ltf(prices, df_weekly, donchian_upper_weekly)
-    donchian_lower_daily = align_htf_to_ltf(prices, df_weekly, donchian_lower_weekly)
+    r1_1d = prev_close_1d + (prev_high_1d - prev_low_1d) * 1.1 / 12
+    s1_1d = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.1 / 12
     
-    # Calculate daily EMA200 for trend filter
-    ema200 = calculate_ema(close, 200)
+    # Align 1d Camarilla levels to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Calculate daily volume spike (volume > 2x 20-day average)
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma20)
+    # Volume indicators
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_median_30 = pd.Series(volume).rolling(window=30, min_periods=30).median().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # need sufficient data for EMA200 and volume MA
+    start_idx = 30  # need volume median
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_upper_daily[i]) or np.isnan(donchian_lower_daily[i]) or
-            np.isnan(ema200[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(vol_median_30[i])):
             signals[i] = 0.0
             continue
         
+        # Volume conditions
+        volume_spike = volume[i] > vol_ma_20[i] * 2.0  # volume spike > 2x average
+        low_volume_regime = volume[i] < vol_median_30[i]  # avoid high volume chop
+        
         if position == 0:
-            # Long: break above weekly Donchian high + volume spike + price above EMA200
-            if (close[i] > donchian_upper_daily[i] and 
-                volume_spike[i] and 
-                close[i] > ema200[i]):
+            # Long: close breaks above R1 + volume spike + low volume regime
+            if close[i] > r1_4h[i] and volume_spike and low_volume_regime:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below weekly Donchian low + volume spike + price below EMA200
-            elif (close[i] < donchian_lower_daily[i] and 
-                  volume_spike[i] and 
-                  close[i] < ema200[i]):
+            # Short: close breaks below S1 + volume spike + low volume regime
+            elif close[i] < s1_4h[i] and volume_spike and low_volume_regime:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below EMA200
-            if close[i] < ema200[i]:
+            # Long exit: close breaks below S1 (reversal signal)
+            if close[i] < s1_4h[i]:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above EMA200
-            if close[i] > ema200[i]:
+            # Short exit: close breaks above R1 (reversal signal)
+            if close[i] > r1_4h[i]:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -105,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyDonchianBreakout_1dVolumeSpike_1dTrend"
-timeframe = "1d"
+name = "4h_Camarilla_R1_S1_Breakout_Volume_Strict"
+timeframe = "4h"
 leverage = 1.0
