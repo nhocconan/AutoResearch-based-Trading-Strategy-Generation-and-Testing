@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d ADX trend filter
-# Works in bull (breakouts continue) and bear (mean reversion at opposite band) via price action at key levels
-# Target: 20-50 trades/year (80-200 total over 4 years) to avoid fee drag
-name = "4h_Donchian20_Volume_1dADXTrend"
-timeframe = "4h"
+# Hypothesis: 12h Pivot (R1/S1) breakout with volume confirmation and 1d ATR filter.
+# Works in bull (breakouts continue) and bear (mean reversion at S1/R1 in range) via price action at key levels.
+# Target: 12-37 trades/year (50-150 total over 4 years) to avoid fee drag.
+name = "12h_Pivot_R1_S1_Breakout_Volume_ATRFilter_V1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,37 +20,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for ADX trend filter
+    # Load daily data for Camarilla pivot levels and ATR
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels (R1, S1) from previous daily bar
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Calculate ADX (14) on daily timeframe
-    # True Range
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    R1 = pivot + (range_hl * 1.1 / 12)
+    S1 = pivot - (range_hl * 1.1 / 12)
+    
+    # Calculate daily ATR (14) for volatility filter
     tr1 = np.abs(df_1d['high'] - df_1d['low'])
     tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
     tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    # Directional Movement
-    up_move = df_1d['high'] - df_1d['high'].shift(1)
-    down_move = df_1d['low'].shift(1) - df_1d['low']
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    # Smooth TR, +DM, -DM
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
-    # Directional Indicators
-    plus_di_14 = 100 * plus_dm_14 / tr_14
-    minus_di_14 = 100 * minus_dm_14 / tr_14
-    # DX and ADX
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align daily ADX to 4h (wait for daily close)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align daily R1/S1 and ATR to 12h (wait for daily close)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
     # Volume filter: current volume > 1.5 * 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -63,38 +56,38 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
+            np.isnan(atr_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        upper_band = high_20[i]
-        lower_band = low_20[i]
-        adx_val = adx_aligned[i]
+        R1_val = R1_aligned[i]
+        S1_val = S1_aligned[i]
+        atr_val = atr_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: break above upper band with volume confirmation and strong trend (ADX > 25)
-            if close_val > upper_band and vol_filter and (adx_val > 25):
+            # Long: break above R1 with volume confirmation and sufficient volatility
+            if close_val > R1_val and vol_filter and (atr_val > 0):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower band with volume confirmation and strong trend (ADX > 25)
-            elif close_val < lower_band and vol_filter and (adx_val > 25):
+            # Short: break below S1 with volume confirmation and sufficient volatility
+            elif close_val < S1_val and vol_filter and (atr_val > 0):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls below lower band or trend weakens (ADX < 20)
-            if close_val < lower_band or (adx_val < 20):
+            # Long exit: price falls below S1 or ATR drops too low (low volatility)
+            if close_val < S1_val or (atr_val < 0.5 * atr_aligned[i-1] if i > 0 else False):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises above upper band or trend weakens (ADX < 20)
-            if close_val > upper_band or (adx_val < 20):
+            # Short exit: price rises above R1 or ATR drops too low (low volatility)
+            if close_val > R1_val or (atr_val < 0.5 * atr_aligned[i-1] if i > 0 else False):
                 signals[i] = 0.0
                 position = 0
             else:
