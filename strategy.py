@@ -1,29 +1,111 @@
-# 6h Weekly Pivot Breakout with Volume Confirmation and ADX Trend Filter
-# Hypothesis: In trending markets (ADX >= 25), weekly pivot levels act as breakout levels - 
-# price breaking above R1 or below S1 with volume continues the trend. In ranging markets (ADX < 25),
-# price reverts to the weekly pivot point. Weekly pivots derived from prior week's OHLC provide
-# institutional reference points. Volume confirms institutional participation. Designed for 6h timeframe
-# to capture fewer, higher-quality trades (target: 20-40 trades/year) minimizing fee drag.
-# Works in bull markets (breakouts above R1) and bear markets (breakdowns below S1).
+#!/usr/bin/env python3
+"""
+12h KAMA Direction + RSI + Chop Regime Filter
+KAMA adapts to market efficiency, reducing whipsaw in chop and trending in trends.
+RSI(14) filters for momentum strength. Chop filter avoids false signals in low volatility.
+Designed for 12h timeframe with 1d HTF for regime filtering. Target: 20-30 trades/year.
+Works in bull markets (trend following) and bear markets (mean reversion in chop).
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_weekly_pivot(high, low, close):
-    """Calculate weekly pivot points from prior week's OHLC."""
-    if high <= 0 or low <= 0 or close <= 0:
-        return close, close, close, close, close, close
-    pp = (high + low + close) / 3.0
-    r1 = 2 * pp - low
-    s1 = 2 * pp - high
-    r2 = pp + (high - low)
-    s2 = pp - (high - low)
-    return pp, r1, s1, r2, s2
+def calculate_kama(close, er_length=10, fast=2, slow=30):
+    """Calculate Kaufman Adaptive Moving Average."""
+    n = len(close)
+    if n < er_length:
+        return np.full(n, np.nan)
+    
+    # Efficiency Ratio
+    change = np.abs(close[er_length:] - close[:-er_length])
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # placeholder, will compute properly below
+    # Proper volatility calculation
+    volatility = np.array([np.sum(np.abs(np.diff(close[i:i+er_length]))) 
+                          for i in range(n - er_length + 1)])
+    volatility = np.concatenate([np.full(er_length-1, np.nan), volatility])
+    
+    er = np.where(volatility != 0, change / volatility, 0)
+    er = np.concatenate([np.full(er_length-1, np.nan), er])
+    
+    # Smoothing constants
+    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+    sc = np.concatenate([np.full(er_length-1, np.nan), sc[er_length-1:]])
+    
+    # KAMA
+    kama = np.full(n, np.nan)
+    kama[er_length-1] = close[er_length-1]  # seed
+    
+    for i in range(er_length, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    return kama
+
+def calculate_rsi(close, period=14):
+    """Calculate Relative Strength Index."""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    
+    # Initial average
+    avg_gain[period] = np.mean(gain[:period])
+    avg_loss[period] = np.mean(loss[:period])
+    
+    # Wilder smoothing
+    for i in range(period + 1, n):
+        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def calculate_chop(high, low, close, period=14):
+    """Calculate Choppiness Index."""
+    n = len(high)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
+    
+    # Sum of True Range
+    atr_sum = np.full(n, np.nan)
+    for i in range(period, n):
+        atr_sum[i] = np.sum(tr[i-period+1:i+1])
+    
+    # Highest high and lowest low over period
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    for i in range(period-1, n):
+        highest_high[i] = np.max(high[i-period+1:i+1])
+        lowest_low[i] = np.min(low[i-period+1:i+1])
+    
+    # Chop calculation
+    chop = np.full(n, np.nan)
+    for i in range(period-1, n):
+        if highest_high[i] != lowest_low[i] and not np.isnan(atr_sum[i]):
+            chop[i] = 100 * np.log10(atr_sum[i] / (highest_high[i] - lowest_low[i])) / np.log10(period)
+    
+    return chop
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -31,171 +113,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points
-    df_weekly = get_htf_data(prices, '1w')
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
+    # Get 1d data for Chop filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Get daily data for ADX trend filter
-    df_daily = get_htf_data(prices, '1d')
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
-    close_daily = df_daily['close'].values
+    # Calculate indicators
+    kama = calculate_kama(close, 10, 2, 30)
+    rsi = calculate_rsi(close, 14)
+    chop_1d = calculate_chop(high_1d, low_1d, close_1d, 14)
+    chop_1d_12h = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Calculate weekly pivot points (using prior week's data)
-    pp = np.full(n, np.nan)
-    r1 = np.full(n, np.nan)
-    s1 = np.full(n, np.nan)
-    r2 = np.full(n, np.nan)
-    s2 = np.full(n, np.nan)
-    
-    for i in range(len(df_weekly)):
-        pp_val, r1_val, s1_val, r2_val, s2_val = calculate_weekly_pivot(
-            high_weekly[i], low_weekly[i], close_weekly[i]
-        )
-        # These values are valid for the entire following week
-        # We'll align them to 6h timeframe with proper delay
-        pass
-    
-    # Calculate ADX on daily data for trend filter
-    def calculate_adx(high, low, close, period=14):
-        n = len(high)
-        if n < period * 2:
-            return np.full(n, np.nan)
-        
-        # True Range
-        tr = np.maximum(high[1:] - low[1:], 
-                       np.maximum(np.abs(high[1:] - close[:-1]), 
-                                  np.abs(low[1:] - close[:-1])))
-        tr = np.concatenate([[np.nan], tr])
-        
-        # Directional Movement
-        up_move = high[1:] - high[:-1]
-        down_move = low[:-1] - low[1:]
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-        plus_dm = np.concatenate([[0], plus_dm])
-        minus_dm = np.concatenate([[0], minus_dm])
-        
-        # Smoothed values (Wilder's smoothing)
-        atr = np.full(n, np.nan)
-        plus_dm_smooth = np.full(n, np.nan)
-        minus_dm_smooth = np.full(n, np.nan)
-        
-        if n >= period:
-            atr[period-1] = np.nanmean(tr[1:period+1])
-            plus_dm_smooth[period-1] = np.nanmean(plus_dm[1:period+1])
-            minus_dm_smooth[period-1] = np.nanmean(minus_dm[1:period+1])
-            
-            for i in range(period, n):
-                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-                plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
-                minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
-        
-        # Directional Indicators
-        plus_di = np.full(n, np.nan)
-        minus_di = np.full(n, np.nan)
-        dx = np.full(n, np.nan)
-        
-        for i in range(period, n):
-            if atr[i] != 0:
-                plus_di[i] = 100 * plus_dm_smooth[i] / atr[i]
-                minus_di[i] = 100 * minus_dm_smooth[i] / atr[i]
-                if plus_di[i] + minus_di[i] != 0:
-                    dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-        
-        # ADX
-        adx = np.full(n, np.nan)
-        if n >= 2*period-1:
-            adx[2*period-2] = np.nanmean(dx[period-1:2*period-1])
-            for i in range(2*period-1, n):
-                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
-    
-    adx_daily = calculate_adx(high_daily, low_daily, close_daily, 14)
-    
-    # Calculate volume moving average (24-period for 6h = 6 days)
+    # Volume confirmation (20-period average)
     vol_ma = np.full(n, np.nan)
-    for i in range(24, n):
-        vol_ma[i] = np.mean(volume[i-24:i])
-    
-    # Align weekly pivots and daily ADX to 6h timeframe
-    # For weekly pivots, we need to use the prior week's values
-    # Create arrays of weekly pivot values shifted by one week to avoid look-ahead
-    pp_weekly = np.full(len(df_weekly), np.nan)
-    r1_weekly = np.full(len(df_weekly), np.nan)
-    s1_weekly = np.full(len(df_weekly), np.nan)
-    r2_weekly = np.full(len(df_weekly), np.nan)
-    s2_weekly = np.full(len(df_weekly), np.nan)
-    
-    for i in range(1, len(df_weekly)):  # Start from 1 to use prior week
-        pp_val, r1_val, s1_val, r2_val, s2_val = calculate_weekly_pivot(
-            high_weekly[i-1], low_weekly[i-1], close_weekly[i-1]
-        )
-        pp_weekly[i] = pp_val
-        r1_weekly[i] = r1_val
-        s1_weekly[i] = s1_val
-        r2_weekly[i] = r2_val
-        s2_weekly[i] = s2_val
-    
-    # Align to 6h timeframe
-    pp_6h = align_htf_to_ltf(prices, df_weekly, pp_weekly)
-    r1_6h = align_htf_to_ltf(prices, df_weekly, r1_weekly)
-    s1_6h = align_htf_to_ltf(prices, df_weekly, s1_weekly)
-    r2_6h = align_htf_to_ltf(prices, df_weekly, r2_weekly)
-    s2_6h = align_htf_to_ltf(prices, df_weekly, s2_weekly)
-    adx_6h = align_htf_to_ltf(prices, df_daily, adx_daily)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # need indicators ready
+    start_idx = 50  # need all indicators warmed up
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pp_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or 
-            np.isnan(adx_6h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
+            np.isnan(chop_1d_12h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5 * 24-period average
+        # Volume confirmation: current volume > 1.5 * 20-period average
         vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
-        # Trend filter: ADX threshold
-        trending = adx_6h[i] >= 25
-        ranging = adx_6h[i] < 25
+        # Chop regime: Chop > 61.8 = ranging, Chop < 38.2 = trending
+        ranging = chop_1d_12h[i] > 61.8
+        trending = chop_1d_12h[i] < 38.2
         
         if position == 0:
+            # Ranging market: mean reversion at extremes
             if ranging:
-                # In ranging markets, revert to weekly pivot (PP)
-                if close[i] <= pp_6h[i] * 1.002 and vol_confirmed:  # Near PP with volume
+                # Long when price below KAMA and RSI oversold
+                if close[i] < kama[i] and rsi[i] < 30 and vol_confirmed:
                     signals[i] = 0.25
                     position = 1
-                elif close[i] >= pp_6h[i] * 0.998 and vol_confirmed:  # Near PP with volume
+                # Short when price above KAMA and RSI overbought
+                elif close[i] > kama[i] and rsi[i] > 70 and vol_confirmed:
                     signals[i] = -0.25
                     position = -1
+            # Trending market: follow momentum
             else:
-                # In trending markets, trade breakouts of R1/S1
-                if close[i] > r1_6h[i] and vol_confirmed:  # Break above R1
+                # Long when price above KAMA and RSI rising
+                if close[i] > kama[i] and rsi[i] > 50 and rsi[i] < 70 and vol_confirmed:
                     signals[i] = 0.25
                     position = 1
-                elif close[i] < s1_6h[i] and vol_confirmed:  # Break below S1
+                # Short when price below KAMA and RSI falling
+                elif close[i] < kama[i] and rsi[i] < 50 and rsi[i] > 30 and vol_confirmed:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Long exit: price reaches R2 or returns to PP
-            if close[i] >= r2_6h[i] or close[i] <= pp_6h[i]:
+            # Long exit: price crosses above KAMA or RSI overbought
+            if close[i] > kama[i] * 1.01 or rsi[i] > 75:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price reaches S2 or returns to PP
-            if close[i] <= s2_6h[i] or close[i] >= pp_6h[i]:
+            # Short exit: price crosses below KAMA or RSI oversold
+            if close[i] < kama[i] * 0.99 or rsi[i] < 25:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -203,6 +189,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_Breakout_ADX_Volume"
-timeframe = "6h"
+name = "12h_KAMA_RSI_Chop"
+timeframe = "12h"
 leverage = 1.0
