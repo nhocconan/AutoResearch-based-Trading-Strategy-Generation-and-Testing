@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Trend_RSI_OverboughtOversold_v1
-Hypothesis: KAMA adapts to market noise, providing reliable trend direction in both trending and choppy markets. 
-Combined with RSI extremes (overbought/oversold) and volume confirmation, this captures mean-reversion within the trend.
-Exit when RSI returns to neutral zone (40-60). Designed for fewer, higher-quality trades.
+1d_WeeklyPivot_R2S2_Breakout_VolumeTrend
+Hypothesis: Weekly pivot R2/S2 levels act as strong weekly support/resistance. 
+Breakouts with volume confirmation and weekly EMA(34) trend filter capture momentum in both bull and bear markets. 
+Uses daily timeframe for execution with weekly context to reduce noise and improve trade quality.
+Target: 10-25 trades/year on daily timeframe.
 """
 
 import numpy as np
@@ -12,114 +13,117 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # KAMA (Kaufman Adaptive Moving Average) parameters
-    fast_ema = 2
-    slow_ema = 30
+    # Get weekly data for pivot calculation and EMA (once before loop)
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate Efficiency Ratio and Smoothing Constant
-    change = np.abs(np.diff(close, k=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # will fix below
+    # Calculate weekly pivot points using standard formula
+    high_1w = df_1w['high']
+    low_1w = df_1w['low']
+    close_1w = df_1w['close']
     
-    # Proper ER calculation
-    er = np.zeros_like(close)
-    for i in range(10, len(close)):
-        if i >= 10:
-            price_change = np.abs(close[i] - close[i-10])
-            sum_abs_changes = 0
-            for j in range(1, 11):
-                sum_abs_changes += np.abs(close[i-j+1] - close[i-j])
-            if sum_abs_changes > 0:
-                er[i] = price_change / sum_abs_changes
-            else:
-                er[i] = 0
+    pivot = (high_1w + low_1w + close_1w) / 3
+    r2 = pivot + (high_1w - low_1w)  # R2 = P + (H - L)
+    s2 = pivot - (high_1w - low_1w)  # S2 = P - (H - L)
     
-    # Smoothing constant
-    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1))**2
-    sc[0:10] = 0  # initialize
+    # Shift by 1 to use previous week's levels only
+    r2_prev = r2.shift(1).values
+    s2_prev = s2.shift(1).values
     
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Align to daily timeframe
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2_prev)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2_prev)
     
-    # RSI calculation
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Get weekly data for EMA trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
+    # ATR for volatility filter (14-period)
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Wilder's smoothing
-    avg_gain[14] = np.mean(gain[1:15])
-    avg_loss[14] = np.mean(loss[1:15])
+    # Volatility filter: only trade when ATR > 20-period average (avoid chop)
+    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
+    volatility_filter = atr > atr_ma
     
-    for i in range(15, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume filter: 1.5x average volume
-    vol_ma = np.zeros_like(volume)
-    for i in range(20, len(volume)):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    vol_ma[:20] = volume[:20].mean() if len(volume) >= 20 else volume.mean()
-    volume_filter = volume > (1.5 * vol_ma)
+    # Volume spike: 2.5x 20-period average (balanced to avoid overtrading)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.5 * vol_ma)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # -1 short, 0 flat, 1 long
+    bars_since_entry = 0  # track holding period
     
-    start_idx = max(30, 20)  # ensure enough data for indicators
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(volume_filter[i]):
+        if (np.isnan(r2_aligned[i]) or 
+            np.isnan(s2_aligned[i]) or
+            np.isnan(ema_34_1w_aligned[i]) or
+            np.isnan(vol_ma[i]) or
+            np.isnan(atr[i]) or
+            np.isnan(atr_ma[i])):
             signals[i] = 0.0
+            bars_since_entry = 0
             continue
-            
+        
         price = close[i]
-        kama_val = kama[i]
-        rsi_val = rsi[i]
-        vol_filt = volume_filter[i]
+        r2_val = r2_aligned[i]
+        s2_val = s2_aligned[i]
+        ema_trend = ema_34_1w_aligned[i]
+        vol_filter = volatility_filter[i]
+        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: price above KAMA, RSI oversold (<30), volume confirmation
-            if price > kama_val and rsi_val < 30 and vol_filt:
+            bars_since_entry = 0
+            # Long: break above R2 with volume spike, price above weekly EMA, and sufficient volatility
+            if price > r2_val and vol_spike and price > ema_trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA, RSI overbought (>70), volume confirmation
-            elif price < kama_val and rsi_val > 70 and vol_filt:
+            # Short: break below S2 with volume spike, price below weekly EMA, and sufficient volatility
+            elif price < s2_val and vol_spike and price < ema_trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
-                
+        
         elif position == 1:
-            # Long: hold until RSI returns to neutral (40-60) or price crosses below KAMA
-            if 40 <= rsi_val <= 60 or price < kama_val:
-                signals[i] = 0.0
-                position = 0
+            # Minimum holding period: 3 days
+            if bars_since_entry < 3:
+                signals[i] = 0.25
+                bars_since_entry += 1
             else:
                 signals[i] = 0.25
-                
+                # Exit: price returns to S2 or breaks below weekly EMA
+                if price <= s2_val or price < ema_trend:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+        
         elif position == -1:
-            # Short: hold until RSI returns to neutral (40-60) or price crosses above KAMA
-            if 40 <= rsi_val <= 60 or price > kama_val:
-                signals[i] = 0.0
-                position = 0
+            # Minimum holding period: 3 days
+            if bars_since_entry < 3:
+                signals[i] = -0.25
+                bars_since_entry += 1
             else:
                 signals[i] = -0.25
+                # Exit: price returns to R2 or breaks above weekly EMA
+                if price >= r2_val or price > ema_trend:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
     
     return signals
 
-name = "4h_KAMA_Trend_RSI_OverboughtOversold_v1"
-timeframe = "4h"
+name = "1d_WeeklyPivot_R2S2_Breakout_VolumeTrend"
+timeframe = "1d"
 leverage = 1.0
