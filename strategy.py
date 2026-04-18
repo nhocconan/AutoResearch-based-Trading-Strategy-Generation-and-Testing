@@ -1,13 +1,7 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-12h_Williams_Alligator_Triple_Signal_V1
-Hypothesis: Williams Alligator (Jaw/Teeth/Lips) on 12h timeframe provides clear trend direction.
-Long when Lips > Teeth > Jaw (bullish alignment), Short when Lips < Teeth < Jaw (bearish alignment).
-Uses 1-week trend filter (close > EMA50 for long, close < EMA50 for short) to avoid counter-trend trades.
-Volume confirmation (volume > 1.5x 24-period average) reduces false signals.
-Designed for low trade frequency (12-37/year) to minimize fee drag on 12h timeframe.
-Works in bull/bear by following trend with strong filters.
+4h_PriceChannel_Volume_Regime
+Hypothesis: Trade breakouts from Donchian(20) and Keltner(20,1.5) channels on 4h timeframe with volume confirmation and Choppiness Index regime filter. Enter long when price breaks above upper channel with volume > 1.5x average and CHOP > 61.8 (ranging market). Enter short when price breaks below lower channel with volume confirmation and CHOP > 61.8. Uses ATR(20) for stop loss via signal=0 when price closes outside channel. Designed to capture breakouts in ranging markets while avoiding trends where breakouts fail. Works in bull/bear by focusing on mean-reversion breakouts in ranging conditions.
 """
 
 import numpy as np
@@ -24,125 +18,110 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Williams Alligator
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Donchian Channel (20)
+    donchian_len = 20
+    upper_dc = np.full(n, np.nan)
+    lower_dc = np.full(n, np.nan)
     
-    # Williams Alligator: Jaw (13-period SMMA, 8 offset), Teeth (8-period SMMA, 5 offset), Lips (5-period SMMA, 3 offset)
-    def smma(arr, period):
-        """Smoothed Moving Average"""
-        result = np.full_like(arr, np.nan)
-        if len(arr) >= period:
-            # First value is SMA
-            result[period-1] = np.mean(arr[:period])
-            # Subsequent values: SMMA = (PREV * (period-1) + CURRENT) / period
-            for i in range(period, len(arr)):
-                result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    for i in range(donchian_len - 1, n):
+        upper_dc[i] = np.max(high[i - donchian_len + 1:i + 1])
+        lower_dc[i] = np.min(low[i - donchian_len + 1:i + 1])
     
-    jaw_period = 13
-    jaw_offset = 8
-    teeth_period = 8
-    teeth_offset = 5
-    lips_period = 5
-    lips_offset = 3
+    # Keltner Channel (20, 1.5)
+    keltner_len = 20
+    keltner_mult = 1.5
+    atr = np.full(n, np.nan)
+    keltner_upper = np.full(n, np.nan)
+    keltner_lower = np.full(n, np.nan)
     
-    jaw_raw = smma((high_12h + low_12h) / 2, jaw_period)
-    teeth_raw = smma((high_12h + low_12h) / 2, teeth_period)
-    lips_raw = smma((high_12h + low_12h) / 2, lips_period)
+    if n >= keltner_len:
+        # True Range
+        tr = np.full(n, np.nan)
+        tr[0] = high[0] - low[0]
+        for i in range(1, n):
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # ATR
+        for i in range(keltner_len - 1, n):
+            atr[i] = np.mean(tr[i - keltner_len + 1:i + 1])
+        
+        # Keltner
+        for i in range(keltner_len - 1, n):
+            ema_mid = np.mean(close[i - keltner_len + 1:i + 1])  # Simple MA for mid
+            keltner_upper[i] = ema_mid + keltner_mult * atr[i]
+            keltner_lower[i] = ema_mid - keltner_mult * atr[i]
     
-    # Apply offsets (shift right by offset periods)
-    jaw = np.full_like(jaw_raw, np.nan)
-    teeth = np.full_like(teeth_raw, np.nan)
-    lips = np.full_like(lips_raw, np.nan)
+    # Combined channel: use Donchian for breakout, Keltner for filtering
+    upper_channel = upper_dc
+    lower_channel = lower_dc
     
-    if len(jaw_raw) > jaw_offset:
-        jaw[jaw_offset:] = jaw_raw[:-jaw_offset]
-    if len(teeth_raw) > teeth_offset:
-        teeth[teeth_offset:] = teeth_raw[:-teeth_offset]
-    if len(lips_raw) > lips_offset:
-        lips[lips_offset:] = lips_raw[:-lips_offset]
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = np.full(n, np.nan)
+    vol_len = 20
+    if n >= vol_len:
+        for i in range(vol_len, n):
+            vol_ma[i] = np.mean(volume[i - vol_len:i])
     
-    # Align Alligator lines to lower timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
+    # Choppiness Index (14) - regime filter
+    chop_len = 14
+    chop = np.full(n, np.nan)
+    if n >= chop_len * 2:  # Need enough data for ATR sum
+        atr_sum = np.full(n, np.nan)
+        for i in range(chop_len - 1, n):
+            atr_sum[i] = np.sum(tr[i - chop_len + 1:i + 1])
+        
+        max_hh = np.full(n, np.nan)
+        min_ll = np.full(n, np.nan)
+        for i in range(chop_len - 1, n):
+            max_hh[i] = np.max(high[i - chop_len + 1:i + 1])
+            min_ll[i] = np.min(low[i - chop_len + 1:i + 1])
+        
+        for i in range(chop_len - 1, n):
+            if atr_sum[i] > 0 and (max_hh[i] - min_ll[i]) > 0:
+                chop[i] = 100 * np.log10(atr_sum[i] / (max_hh[i] - min_ll[i])) / np.log10(chop_len)
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # 1-week EMA50 for trend filter
-    ema_period = 50
-    ema_1w = np.full_like(close_1w, np.nan)
-    if len(close_1w) >= ema_period:
-        ema_1w[ema_period-1] = np.mean(close_1w[:ema_period])
-        multiplier = 2 / (ema_period + 1)
-        for i in range(ema_period, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * multiplier) + (ema_1w[i-1] * (1 - multiplier))
-    
-    # Align 1w EMA50 to lower timeframe
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Volume confirmation: volume > 1.5x 24-period average
-    vol_ma = np.full_like(volume, np.nan)
-    vol_period = 24
-    if len(volume) >= vol_period:
-        for i in range(vol_period, len(volume)):
-            vol_ma[i] = np.mean(volume[i - vol_period:i])
+    # Chop > 61.8 = ranging market (good for mean-reversion breakouts)
+    chop_threshold = 61.8
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after all indicators are ready
-    start_idx = max(jaw_period + jaw_offset, teeth_period + teeth_offset, lips_period + lips_offset, vol_period, ema_period)
+    start_idx = max(donchian_len, keltner_len, vol_len, chop_len) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
-            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
-        
-        # Williams Alligator signals
-        lips_gt_teeth = lips_aligned[i] > teeth_aligned[i]
-        teeth_gt_jaw = teeth_aligned[i] > jaw_aligned[i]
-        bullish_alignment = lips_gt_teeth and teeth_gt_jaw
-        
-        lips_lt_teeth = lips_aligned[i] < teeth_aligned[i]
-        teeth_lt_jaw = teeth_aligned[i] < jaw_aligned[i]
-        bearish_alignment = lips_lt_teeth and teeth_lt_jaw
-        
-        # 1-week trend filter
-        uptrend_filter = close[i] > ema_1w_aligned[i]
-        downtrend_filter = close[i] < ema_1w_aligned[i]
         
         # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
+        # Chop filter: only trade in ranging markets
+        chop_filter = chop[i] > chop_threshold
+        
         if position == 0:
-            # Long: Bullish alignment + uptrend filter + volume
-            if bullish_alignment and uptrend_filter and vol_confirm:
+            # Long: price breaks above upper channel + volume + chop
+            if close[i] > upper_channel[i] and vol_confirm and chop_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish alignment + downtrend filter + volume
-            elif bearish_alignment and downtrend_filter and vol_confirm:
+            # Short: price breaks below lower channel + volume + chop
+            elif close[i] < lower_channel[i] and vol_confirm and chop_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Bearish alignment or price below 1w EMA50
-            if bearish_alignment or not uptrend_filter:
+            # Long: hold until price closes below lower channel
+            if close[i] < lower_channel[i]:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Bullish alignment or price above 1w EMA50
-            if bullish_alignment or not downtrend_filter:
+            # Short: hold until price closes above upper channel
+            if close[i] > upper_channel[i]:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -150,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Williams_Alligator_Triple_Signal_V1"
-timeframe = "12h"
+name = "4h_PriceChannel_Volume_Regime"
+timeframe = "4h"
 leverage = 1.0
