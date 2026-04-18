@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_KAMA_Direction_1wTrend_Filter
-Hypothesis: Weekly KAMA direction (1w) filters daily price action to capture institutional moves.
-In bull markets, price follows weekly KAMA up; in bear markets, price follows weekly KAMA down.
-Daily mean reversion at Bollinger Bands (20,2) provides entries in direction of weekly trend.
-Volume confirmation filters low-quality signals. Target: 10-25 trades/year (40-100 total over 4 years).
+6h_WeeklyPivot_R3S3_MeanReversion_Bounce
+Hypothesis: Weekly pivot levels (R3/S3) act as strong support/resistance on daily timeframe.
+Price tends to bounce from these levels with mean-reversion tendency. Works in both bull and bear
+markets as price respects weekly structure. Uses 6h for entry timing with volume confirmation.
+Target: 15-30 trades/year (60-120 total over 4 years) to balance opportunity and fee drag.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,75 +21,86 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for KAMA trend filter
+    # Weekly data for pivot calculation
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Weekly KAMA (adaptive moving average)
-    close_1w = df_1w['close']
-    change_1w = abs(close_1w.diff(1))
-    vol_1w = abs(close_1w.diff(10)).rolling(window=10, min_periods=10).sum()
-    er_1w = change_1w / vol_1w.replace(0, 1e-10)
-    sc_1w = (er_1w * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
-    kama_1w = [close_1w.iloc[0]]
-    for i in range(1, len(close_1w)):
-        kama_1w.append(kama_1w[-1] + sc_1w.iloc[i] * (close_1w.iloc[i] - kama_1w[-1]))
-    kama_1w = np.array(kama_1w)
+    # Previous week's OHLC for weekly pivot
+    prev_weekly_close = df_1w['close'].shift(1).values
+    prev_weekly_high = df_1w['high'].shift(1).values
+    prev_weekly_low = df_1w['low'].shift(1).values
+    prev_weekly_range = prev_weekly_high - prev_weekly_low
     
-    # Align weekly KAMA to daily (waits for weekly bar to close)
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
+    # Weekly pivot point and support/resistance levels
+    weekly_pivot = (prev_weekly_high + prev_weekly_low + prev_weekly_close) / 3
+    r1 = 2 * weekly_pivot - prev_weekly_low
+    s1 = 2 * weekly_pivot - prev_weekly_high
+    r2 = weekly_pivot + prev_weekly_range
+    s2 = weekly_pivot - prev_weekly_range
+    r3 = weekly_pivot + 2 * prev_weekly_range
+    s3 = weekly_pivot - 2 * prev_weekly_range
     
-    # Daily Bollinger Bands (20,2)
-    close_s = pd.Series(close)
-    basis = close_s.rolling(window=20, min_periods=20).mean()
-    dev = 2 * close_s.rolling(window=20, min_periods=20).std()
-    upper = basis + dev
-    lower = basis - dev
+    # Align weekly levels to 6h timeframe
+    r3_6h = align_htf_to_ltf(prices, df_1w, r3)
+    s3_6h = align_htf_to_ltf(prices, df_1w, s3)
+    weekly_pivot_6h = align_htf_to_ltf(prices, df_1w, weekly_pivot)
     
-    # Volume filter: >1.3x 20-day average
+    # Volume filter: >1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.3 * vol_ma)
+    
+    # 6-day RSI for overbought/oversold confirmation (using close prices)
+    close_series = pd.Series(close)
+    delta = close_series.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/6, min_periods=6).mean()
+    avg_loss = loss.ewm(alpha=1/6, min_periods=6).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 40  # Warmup for BB and volume MA
+    start_idx = max(20, 6)  # Warmup for volume MA and RSI
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_1w_aligned[i]) or np.isnan(basis[i]) or
-            np.isnan(upper[i]) or np.isnan(lower[i]) or
-            np.isnan(volume_filter[i])):
+        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or
+            np.isnan(weekly_pivot_6h[i]) or np.isnan(volume_filter[i]) or
+            np.isnan(rsi_values[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        kama_val = kama_1w_aligned[i]
-        bb_lower = lower[i]
-        bb_upper = upper[i]
+        r3_val = r3_6h[i]
+        s3_val = s3_6h[i]
+        pivot_val = weekly_pivot_6h[i]
         vol_ok = volume_filter[i]
+        rsi_val = rsi_values[i]
         
         if position == 0:
-            # Long: price at lower BB in weekly uptrend with volume
-            if price <= bb_lower and price > kama_val and vol_ok:
+            # Long: bounce from S3 with oversold RSI and volume
+            if price <= s3_val * 1.005 and rsi_val < 30 and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price at upper BB in weekly downtrend with volume
-            elif price >= bb_upper and price < kama_val and vol_ok:
+            # Short: bounce from R3 with overbought RSI and volume
+            elif price >= r3_val * 0.995 and rsi_val > 70 and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price crosses weekly KAMA or returns to BB middle
-            if price >= kama_val or price >= basis[i]:
+            # Exit: price reaches weekly pivot or RSI overbought
+            if price >= pivot_val * 0.995 or rsi_val > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price crosses weekly KAMA or returns to BB middle
-            if price <= kama_val or price <= basis[i]:
+            # Exit: price reaches weekly pivot or RSI oversold
+            if price <= pivot_val * 1.005 or rsi_val < 30:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Weekly_KAMA_Direction_1wTrend_Filter"
-timeframe = "1d"
+name = "6h_WeeklyPivot_R3S3_MeanReversion_Bounce"
+timeframe = "6h"
 leverage = 1.0
