@@ -1,22 +1,11 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-
-"""
-[60578] 1d_KAMA_Direction_PriceAction_Regime_Filter
-Hypothesis: On the daily timeframe, KAMA (Kaufman Adaptive Moving Average) adapts to market noise,
-providing a responsive trend filter. Combine with price action (close vs KAMA) and a regime filter
-using weekly ADX to avoid whipsaws in strong trends. Use volume confirmation to ensure conviction.
-Designed for low trade frequency (10-25 trades/year) on 1d timeframe to minimize fee drag.
-Works in bull markets by following KAMA trend; in bear markets, the regime filter prevents counter-trend trades.
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,46 +13,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for KAMA calculation
+    # Get 12h data for Donchian channels
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    # Get 1d data for weekly pivot calculation
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average) on daily close
-    def calculate_kama(close, volume, er_length=10, fast_sc=2, slow_sc=30):
-        # Change and volatility
-        change = np.abs(np.diff(close, prepend=close[0]))
-        vol = np.sum(np.abs(np.diff(close, prepend=close[0]))[:er_length])  # placeholder, will adjust
-        
-        # Efficiency Ratio (ER)
-        er = np.zeros_like(close)
-        for i in range(er_length, len(close)):
-            if np.sum(np.abs(np.diff(close[i-er_length:i+1]))) > 0:
-                er[i] = np.abs(close[i] - close[i-er_length]) / np.sum(np.abs(np.diff(close[i-er_length:i+1])))
-            else:
-                er[i] = 0
-        
-        # Smoothing constants
-        sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
-        
-        # KAMA calculation
-        kama = np.zeros_like(close)
-        kama[0] = close[0]
-        for i in range(1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        
-        return kama
+    # Calculate weekly pivot points (based on previous week)
+    P = np.full_like(high_1d, np.nan)
+    R1 = np.full_like(high_1d, np.nan)
+    S1 = np.full_like(low_1d, np.nan)
+    R2 = np.full_like(high_1d, np.nan)
+    S2 = np.full_like(low_1d, np.nan)
     
-    # Calculate KAMA on daily data
-    kama_1d = calculate_kama(close_1d, volume_1d, er_length=10, fast_sc=2, slow_sc=30)
+    for i in range(1, len(close_1d)):
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        
+        pivot = (prev_high + prev_low + prev_close) / 3
+        P[i] = pivot
+        R1[i] = 2 * pivot - prev_low
+        S1[i] = 2 * pivot - prev_high
+        R2[i] = pivot + (prev_high - prev_low)
+        S2[i] = pivot - (prev_high - prev_low)
     
-    # Get weekly data for ADX (regime filter)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate ADX on weekly data
+    # Calculate 14-period ADX for trend filter
     def calculate_adx(high, low, close, period=14):
         # True Range
         tr1 = high[1:] - low[1:]
@@ -119,15 +99,30 @@ def generate_signals(prices):
         
         return adx
     
-    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    # Align KAMA and ADX to daily timeframe
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    # Calculate Donchian channels (20-period) on 12h data
+    upper = np.full_like(high_12h, np.nan)
+    lower = np.full_like(low_12h, np.nan)
     
-    # Volume confirmation: volume > 1.5x 20-day average
+    for i in range(len(high_12h)):
+        if i >= 19:  # 20-period lookback
+            upper[i] = np.max(high_12h[i-19:i+1])
+            lower[i] = np.min(low_12h[i-19:i+1])
+    
+    # Align all data to 6h timeframe
+    upper_6h = align_htf_to_ltf(prices, df_12h, upper)
+    lower_6h = align_htf_to_ltf(prices, df_12h, lower)
+    P_6h = align_htf_to_ltf(prices, df_1d, P)
+    R1_6h = align_htf_to_ltf(prices, df_1d, R1)
+    S1_6h = align_htf_to_ltf(prices, df_1d, S1)
+    R2_6h = align_htf_to_ltf(prices, df_1d, R2)
+    S2_6h = align_htf_to_ltf(prices, df_1d, S2)
+    adx_6h = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Volume confirmation: volume > 1.5x 24-period average (48h lookback)
     vol_ma = np.full_like(volume, np.nan)
-    vol_period = 20
+    vol_period = 24
     
     if len(volume) >= vol_period:
         for i in range(vol_period, len(volume)):
@@ -136,42 +131,44 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20) + 5  # Ensure we have enough data
+    start_idx = max(20, 24) + 1  # Ensure we have enough data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(kama_1d_aligned[i]) or np.isnan(adx_1w_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(upper_6h[i]) or np.isnan(lower_6h[i]) or 
+            np.isnan(P_6h[i]) or np.isnan(R1_6h[i]) or np.isnan(S1_6h[i]) or
+            np.isnan(R2_6h[i]) or np.isnan(S2_6h[i]) or 
+            np.isnan(adx_6h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Regime filter: weekly ADX < 25 (avoid strong trends where counter-trend signals fail)
-        not_strong_trend = adx_1w_aligned[i] < 25
+        # Trend filter: ADX > 25 for trending market
+        trending = adx_6h[i] > 25
         
         if position == 0:
-            # Long: price above KAMA with volume confirmation and not strong trend
-            if close[i] > kama_1d_aligned[i] and vol_confirm and not_strong_trend:
+            # Long: breakout above upper Donchian with volume in trending market
+            if close[i] > upper_6h[i] and vol_confirm and trending:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA with volume confirmation and not strong trend
-            elif close[i] < kama_1d_aligned[i] and vol_confirm and not_strong_trend:
+            # Short: breakdown below lower Donchian with volume in trending market
+            elif close[i] < lower_6h[i] and vol_confirm and trending:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below KAMA OR strong trend emerges (ADX > 30)
-            if close[i] < kama_1d_aligned[i] or adx_1w_aligned[i] > 30:
+            # Long exit: price closes below pivot OR ADX drops below 20 (losing momentum)
+            if close[i] < P_6h[i] or adx_6h[i] < 20:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above KAMA OR strong trend emerges (ADX > 30)
-            if close[i] > kama_1d_aligned[i] or adx_1w_aligned[i] > 30:
+            # Short exit: price closes above pivot OR ADX drops below 20 (losing momentum)
+            if close[i] > P_6h[i] or adx_6h[i] < 20:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -179,6 +176,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Direction_PriceAction_Regime_Filter"
-timeframe = "1d"
+name = "6h_Donchian_Breakout_WeeklyPivot_Volume_ADXFilter"
+timeframe = "6h"
 leverage = 1.0
