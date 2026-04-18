@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_BullBearPower_1dTrendFilter
-Hypothesis: Uses 1-day EMA200 as trend filter and 6-hour Elder Ray (Bull Power/Bear Power) for entry.
-In bull trends (price > EMA200), go long when Bear Power crosses above zero (selling pressure weakening).
-In bear trends (price < EMA200), go short when Bull Power crosses below zero (buying pressure weakening).
-This captures mean-reversion within the trend, reducing false signals in strong trends.
-Targets 15-25 trades/year per symbol. Works in both bull (2021, 2023-24) and bear (2022) markets.
+4h_HTF_Camarilla_Pivot_S1S4_Breakout_Volume_Trend
+Hypothesis: Combines 12h Camarilla pivot levels (S1/S4) with volume confirmation and 4h EMA trend filter.
+Uses higher timeframe structure (12h) for signal direction to reduce false breakouts and
+improve performance in both bull and bear markets. Targets 20-35 trades/year.
 """
 
 import numpy as np
@@ -14,76 +12,94 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for EMA200 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get 12h data for Camarilla pivot levels
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d EMA200
-    ema200_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 200:
-        ema200_1d[199] = np.mean(close_1d[0:200])
-        alpha = 2 / (200 + 1)
-        for i in range(200, len(close_1d)):
-            ema200_1d[i] = close_1d[i] * alpha + ema200_1d[i-1] * (1 - alpha)
+    # Calculate 12h Camarilla pivot levels (S1, S4, R1, R4)
+    pivot = np.full(len(close_12h), np.nan)
+    s1 = np.full(len(close_12h), np.nan)
+    s4 = np.full(len(close_12h), np.nan)
+    r1 = np.full(len(close_12h), np.nan)
+    r4 = np.full(len(close_12h), np.nan)
     
-    # Align 1d EMA200 to 6h timeframe
-    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    for i in range(2, len(close_12h)):
+        high_prev = high_12h[i-1]
+        low_prev = low_12h[i-1]
+        close_prev = close_12h[i-1]
+        range_val = high_prev - low_prev
+        
+        pivot[i] = (high_prev + low_prev + close_prev) / 3.0
+        s1[i] = pivot[i] - (range_val * 1.0 / 6.0)
+        s4[i] = pivot[i] - (range_val * 2.0 / 3.0)
+        r1[i] = pivot[i] + (range_val * 1.0 / 6.0)
+        r4[i] = pivot[i] + (range_val * 2.0 / 3.0)
     
-    # Calculate 6-day EMA13 for Elder Ray (using 6h data, 6 periods = 1 day)
-    ema13 = np.full(n, np.nan)
-    if n >= 13:
-        ema13[12] = np.mean(close[0:13])
-        alpha = 2 / (13 + 1)
-        for i in range(13, n):
-            ema13[i] = close[i] * alpha + ema13[i-1] * (1 - alpha)
+    # Get 4h data for EMA trend filter (20-period)
+    ema20 = np.full(n, np.nan)
+    if n >= 20:
+        ema20[19] = np.mean(close[0:20])
+        alpha = 2 / (20 + 1)
+        for i in range(20, n):
+            ema20[i] = close[i] * alpha + ema20[i-1] * (1 - alpha)
     
-    # Elder Ray components
-    bull_power = high - ema13  # Bull Power = High - EMA13
-    bear_power = low - ema13   # Bear Power = Low - EMA13
+    # Volume spike: current volume > 1.5 x 20-period average
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    vol_spike = volume > (vol_ma * 1.5)
+    
+    # Align 12h Camarilla levels to 4h timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
+    s4_aligned = align_htf_to_ltf(prices, df_12h, s4)
+    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
+    r4_aligned = align_htf_to_ltf(prices, df_12h, r4)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 13)  # Need EMA200 and EMA13 ready
+    start_idx = max(20, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema200_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i])):
+        if (np.isnan(s1_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(ema20[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend from 1d EMA200
-        is_bull_trend = close[i] > ema200_aligned[i]
-        is_bear_trend = close[i] < ema200_aligned[i]
-        
         if position == 0:
-            # Long: in bull trend, Bear Power crosses above zero (selling pressure weakening)
-            if is_bull_trend and bear_power[i] > 0 and bear_power[i-1] <= 0:
+            # Long: break above S1 with volume spike and 4h uptrend
+            if (close[i] > s1_aligned[i] and vol_spike[i] and 
+                close[i] > ema20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: in bear trend, Bull Power crosses below zero (buying pressure weakening)
-            elif is_bear_trend and bull_power[i] < 0 and bull_power[i-1] >= 0:
+            # Short: break below R1 with volume spike and 4h downtrend
+            elif (close[i] < r1_aligned[i] and vol_spike[i] and 
+                  close[i] < ema20[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend turns bearish or Bear Power goes negative (selling pressure increases)
-            if not is_bull_trend or bear_power[i] < 0:
+            # Long exit: close below S4 or 4h trend turns down
+            if (close[i] < s4_aligned[i] or close[i] < ema20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend turns bullish or Bull Power goes positive (buying pressure increases)
-            if not is_bear_trend or bull_power[i] > 0:
+            # Short exit: close above R4 or 4h trend turns up
+            if (close[i] > r4_aligned[i] or close[i] > ema20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_BullBearPower_1dTrendFilter"
-timeframe = "6h"
+name = "4h_HTF_Camarilla_Pivot_S1S4_Breakout_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
