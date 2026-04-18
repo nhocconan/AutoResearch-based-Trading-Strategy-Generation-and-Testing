@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-6h Moving Average Convergence Divergence (MACD) with Volume Confirmation and Volatility Filter
-Hypothesis: MACD line crossing above/below signal line, with volume above 1.5x EMA(20) and 
-price outside Bollinger Bands (20,2) indicates strong momentum with institutional participation.
-Volatility filter (BB width > 0.05) avoids ranging markets. Designed for 6H timeframe to 
-capture multi-day trends while minimizing false signals in both bull and bear markets.
-Target: 15-35 trades/year (~60-140 total over 4 years) to minimize fee drag.
+4h EMA Trend with Volume Confirmation and 12h ADX Filter
+Hypothesis: In trending markets (12h ADX > 25), price staying above/below 4h EMA34 with 
+volume > 1.5x 20-period EMA indicates strong momentum. Mean reversion when price 
+crosses EMA34. Trend filter prevents whipsaws in chop. Works in bull/bear via 
+higher timeframe trend confirmation. Target: 25-40 trades/year.
 """
 
 import numpy as np
@@ -17,72 +16,87 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # MACD components
-    ema12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema26 = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
-    macd_line = ema12 - ema26
-    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
-    macd_hist = macd_line - signal_line
+    # 4h EMA34 for trend
+    ema34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Bollinger Bands for volatility filter and entry confirmation
-    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma20 + 2 * bb_std
-    lower_bb = sma20 - 2 * bb_std
-    bb_width = (upper_bb - lower_bb) / sma20  # Normalized bandwidth
-    
-    # Volume confirmation: volume > 1.5x EMA(20)
+    # Volume confirmation: volume > 1.5x 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     vol_ratio = volume / vol_ema
+    
+    # Get 12h ADX for trend filter (trending when > 25)
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # True Range for ADX
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    # Directional Movement
+    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
+                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)), 
+                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smooth with Wilder's smoothing (using EMA as approximation)
+    tr14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    di_plus = np.where(tr14 > 0, 100 * dm_plus14 / tr14, 0)
+    di_minus = np.where(tr14 > 0, 100 * dm_minus14 / tr14, 0)
+    
+    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx_12h_raw = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_12h = align_htf_to_ltf(prices, df_12h, adx_12h_raw)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # Warmup for indicators (max of 26,20,20,9)
+    start_idx = 50  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(macd_line[i]) or np.isnan(signal_line[i]) or 
-            np.isnan(bb_width[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(ema34[i]) or np.isnan(vol_ratio[i]) or np.isnan(adx_12h[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        macd = macd_line[i]
-        signal = signal_line[i]
-        bb_w = bb_width[i]
+        ema = ema34[i]
         vol_conf = vol_ratio[i] > 1.5
-        
-        # Volatility filter: avoid extremely low volatility ranging markets
-        vol_filter = bb_w > 0.05
+        adx_val = adx_12h[i]
         
         if position == 0:
-            # Long: MACD crosses above signal line, price above upper BB, volume confirmation, adequate volatility
-            if (macd > signal and macd_line[i-1] <= signal_line[i-1] and  # Bullish crossover
-                price > upper_bb[i] and vol_conf and vol_filter):
-                signals[i] = 0.25
-                position = 1
-            # Short: MACD crosses below signal line, price below lower BB, volume confirmation, adequate volatility
-            elif (macd < signal and macd_line[i-1] >= signal_line[i-1] and  # Bearish crossover
-                  price < lower_bb[i] and vol_conf and vol_filter):
-                signals[i] = -0.25
-                position = -1
+            # Only trade when 12h trend is strong (ADX > 25)
+            if adx_val > 25 and vol_conf:
+                if price > ema:
+                    signals[i] = 0.25
+                    position = 1
+                elif price < ema:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Exit: MACD crosses below signal line OR price returns to middle Bollinger Band
-            if (macd < signal and macd_line[i-1] >= signal_line[i-1]) or price < sma20[i]:
+            # Exit if trend weakens or price crosses back below EMA
+            if adx_val < 20 or price < ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: MACD crosses above signal line OR price returns to middle Bollinger Band
-            if (macd > signal and macd_line[i-1] <= signal_line[i-1]) or price > sma20[i]:
+            # Exit if trend weakens or price crosses back above EMA
+            if adx_val < 20 or price > ema:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_MACD_Volume_BBFilter"
-timeframe = "6h"
+name = "4h_EMA_Trend_Volume_12hADX"
+timeframe = "4h"
 leverage = 1.0
