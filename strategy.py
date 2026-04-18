@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_Volume_Trend
-Hypothesis: Price breaks above/below Donchian(20) channel with volume spike and 1h EMA50 trend filter.
-Captures breakouts in trending markets while avoiding false signals in chop. Uses volume to confirm breakout strength.
-Target: 20-30 trades/year to minimize fee drag while capturing strong directional moves.
+1d_WeeklyPivot_R1S1_Breakout_With_Volume_Confirmation
+Hypothesis: Price breaks above/below weekly pivot S1/R1 with volume spike on daily chart.
+Captures breakouts in trending markets with volume confirmation to filter false signals.
+Weekly pivot provides stronger support/resistance than daily, reducing whipsaw in BTC/ETH.
+Target: 10-25 trades/year to minimize fee decay while capturing sustained moves.
 """
 
 import numpy as np
@@ -20,71 +21,69 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period high/low)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Weekly pivot from previous week
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Volume spike: >1.8x 20-period average
+    # Pivot levels: P = (H+L+C)/3, R1 = C + (H-L)*1.1/2, S1 = C - (H-L)*1.1/2
+    pivot = (high_1w + low_1w + close_1w) / 3.0
+    r1 = close_1w + (high_1w - low_1w) * 1.1 / 2.0
+    s1 = close_1w - (high_1w - low_1w) * 1.1 / 2.0
+    
+    # Align to daily: previous week's levels available after weekly bar closes
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    
+    # Volume spike: >1.5x 20-period average on daily
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
-    
-    # Trend filter: 1h EMA50
-    df_1h = get_htf_data(prices, '1h')
-    close_1h = df_1h['close'].values
-    ema_50_1h = pd.Series(close_1h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1h_aligned = align_htf_to_ltf(prices, df_1h, ema_50_1h)
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 20)  # Warmup for EMA and Donchian
+    start_idx = 20  # Warmup for volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(high_roll[i]) or 
-            np.isnan(low_roll[i]) or
-            np.isnan(ema_50_1h_aligned[i]) or
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper = high_roll[i]
-        lower = low_roll[i]
-        ema50 = ema_50_1h_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: price breaks above upper band with volume spike and uptrend
-            if price > upper and vol_spike and price > ema50:
+            # Long: price breaks above R1 with volume spike
+            if price > r1_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower band with volume spike and downtrend
-            elif price < lower and vol_spike and price < ema50:
+            # Short: price breaks below S1 with volume spike
+            elif price < s1_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price closes below lower band OR trend turns down
-            if price < lower:
-                signals[i] = 0.0
-                position = 0
-            elif price < ema50:
+            # Exit: price closes below pivot
+            if price < pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price closes above upper band OR trend turns up
-            if price > upper:
-                signals[i] = 0.0
-                position = 0
-            elif price > ema50:
+            # Exit: price closes above pivot
+            if price > pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Donchian20_Breakout_Volume_Trend"
-timeframe = "4h"
+name = "1d_WeeklyPivot_R1S1_Breakout_With_Volume_Confirmation"
+timeframe = "1d"
 leverage = 1.0
