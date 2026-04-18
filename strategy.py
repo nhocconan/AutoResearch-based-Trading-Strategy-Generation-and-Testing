@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_R1S1_Breakout_VolumeSpike_12hTrend
-Hypothesis: KAMA trend direction + 12h Camarilla (R1/S1) breakouts with volume confirmation.
-KAMA adapts to market noise, reducing whipsaw in ranging markets. Combined with 12h trend filter
-and volume spike, this should yield high-quality trades in both bull and bear markets.
-Target: 20-40 trades/year on 4h to minimize fee drag.
+1h_12h_Pivot_R1S1_Breakout_4hTrend
+Hypothesis: 12h pivot levels (R1, S1) act as strong support/resistance.
+Breakouts beyond these levels on 1h chart with volume confirmation and 4h EMA50 trend filter capture momentum.
+Designed for 15-37 trades/year on 1h timeframe by using 12h for signal direction and 4h for trend filter.
+Works in bull/bear markets by requiring volume spike and 4h EMA50 trend filter.
 """
 
 import numpy as np
@@ -21,43 +21,33 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data once
+    # Get 12h data for pivot calculation (once before loop)
     df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 12h Camarilla pivot levels (R1, S1)
-    high_12h = df_12h['high']
-    low_12h = df_12h['low']
-    close_12h = df_12h['close']
+    # Calculate 12h pivot points using standard formula
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
     pivot = (high_12h + low_12h + close_12h) / 3
     r1 = 2 * pivot - low_12h
     s1 = 2 * pivot - high_12h
     
-    # Use previous 12h bar's levels to avoid look-ahead
-    r1_prev = r1.shift(1).values
-    s1_prev = s1.shift(1).values
+    # Shift by 1 to use previous 12h bar's levels only
+    r1_prev = np.roll(r1, 1)
+    s1_prev = np.roll(s1, 1)
+    r1_prev[0] = np.nan
+    s1_prev[0] = np.nan
     
-    # Align to 4h timeframe
+    # Align to 1h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_12h, r1_prev)
     s1_aligned = align_htf_to_ltf(prices, df_12h, s1_prev)
     
-    # KAMA trend on 4h price
-    def kama(close_series, er_length=10, fast_ema=2, slow_ema=30):
-        change = abs(close_series - close_series.shift(er_length))
-        volatility = abs(close_series.diff()).rolling(window=er_length).sum()
-        er = change / volatility.replace(0, np.nan)
-        sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
-        kama_vals = [np.nan] * len(close_series)
-        for i in range(1, len(close_series)):
-            if np.isnan(sc.iloc[i]) or np.isnan(kama_vals[i-1]):
-                kama_vals[i] = close_series.iloc[i]
-            else:
-                kama_vals[i] = kama_vals[i-1] + sc.iloc[i] * (close_series.iloc[i] - kama_vals[i-1])
-        return np.array(kama_vals)
-    
-    kama_vals = kama(pd.Series(close))
-    kama_dir = np.where(kama_vals > np.roll(kama_vals, 1), 1, -1)
-    kama_dir[0] = 1  # initialize
+    # Get 4h data for EMA trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     # Volume spike: 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -71,7 +61,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         if (np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or
-            np.isnan(kama_vals[i]) or
+            np.isnan(ema_50_4h_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -79,36 +69,36 @@ def generate_signals(prices):
         price = close[i]
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
-        kama_direction = kama_dir[i]
+        ema_trend = ema_50_4h_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume spike and KAMA up
-            if price > r1_val and volume_spike[i] and kama_direction > 0:
-                signals[i] = 0.25
+            # Long: break above R1 with volume spike and price above 4h EMA (uptrend)
+            if price > r1_val and volume_spike[i] and price > ema_trend:
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below S1 with volume spike and KAMA down
-            elif price < s1_val and volume_spike[i] and kama_direction < 0:
-                signals[i] = -0.25
+            # Short: break below S1 with volume spike and price below 4h EMA (downtrend)
+            elif price < s1_val and volume_spike[i] and price < ema_trend:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
             # Long position
-            signals[i] = 0.25
-            # Exit: price returns to S1 or KAMA turns down
-            if price <= s1_val or kama_direction < 0:
+            signals[i] = 0.20
+            # Exit: price returns to S1 or breaks below 4h EMA
+            if price <= s1_val or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position
-            signals[i] = -0.25
-            # Exit: price returns to R1 or KAMA turns up
-            if price >= r1_val or kama_direction > 0:
+            signals[i] = -0.20
+            # Exit: price returns to R1 or breaks above 4h EMA
+            if price >= r1_val or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_KAMA_R1S1_Breakout_VolumeSpike_12hTrend"
-timeframe = "4h"
+name = "1h_12h_Pivot_R1S1_Breakout_4hTrend"
+timeframe = "1h"
 leverage = 1.0
