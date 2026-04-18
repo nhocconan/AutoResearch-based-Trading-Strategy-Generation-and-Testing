@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_ZeroCross_VolumeSpike_TrendFilter
-Hypothesis: TRIX zero-cross with volume spike and 1d EMA trend filter on 4h timeframe.
-Goes long when TRIX crosses above zero with volume spike and uptrend (price > EMA34).
-Goes short when TRIX crosses below zero with volume spike and downtrend (price < EMA34).
-Designed for low trade frequency (20-50/year) to avoid fee decay while capturing
-momentum in both bull and bear markets via trend alignment and momentum confirmation.
+1d_Weekly_Pivot_R1_S1_Breakout_With_Trend_Filter
+Hypothesis: Weekly pivot R1/S1 breakouts on daily timeframe with volume spike and weekly EMA trend filter.
+Buy when price breaks above weekly R1 with volume spike and uptrend (price > weekly EMA34).
+Sell when price breaks below weekly S1 with volume spike and downtrend (price < weekly EMA34).
+Designed for low trade frequency (7-25/year) to avoid fee decay while capturing
+significant momentum moves in both bull and bear markets via weekly trend alignment.
 """
 
 import numpy as np
@@ -22,72 +22,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get weekly data for pivot calculation and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # TRIX calculation (15-period)
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
-    trix[0] = 0  # First value has no previous
+    # Calculate Weekly Camarilla pivot levels (using previous week's data)
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    rng = high_1w - low_1w
+    r1 = close_1w + rng * 1.1 / 12
+    s1 = close_1w - rng * 1.1 / 12
     
-    # TRIX zero-cross signals
-    trix_cross_up = (trix > 0) & (np.roll(trix, 1) <= 0)
-    trix_cross_down = (trix < 0) & (np.roll(trix, 1) >= 0)
+    # Align to daily timeframe (wait for weekly bar to close)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     
-    # 1d EMA(34) for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Weekly EMA(34) for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Volume spike: >2.0x 20-period average
+    # Volume spike: >2.0x 20-period average (higher threshold to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(30, 20)  # Warmup for TRIX and volume
+    start_idx = max(30, 20)  # Warmup for EMA and volume
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_aligned[i]) or
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or
+            np.isnan(ema_34_aligned[i]) or
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
         ema34 = ema_34_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: TRIX crosses above zero with volume spike and uptrend
-            if trix_cross_up[i] and vol_spike and price > ema34:
+            # Long: price breaks above R1 with volume spike and uptrend
+            if price > r1_val and vol_spike and price > ema34:
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below zero with volume spike and downtrend
-            elif trix_cross_down[i] and vol_spike and price < ema34:
+            # Short: price breaks below S1 with volume spike and downtrend
+            elif price < s1_val and vol_spike and price < ema34:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: TRIX crosses below zero OR trend turns down
-            if trix_cross_down[i] or price < ema34:
+            # Exit: price returns below R1 OR trend turns down
+            if price < r1_val or price < ema34:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: TRIX crosses above zero OR trend turns up
-            if trix_cross_up[i] or price > ema34:
+            # Exit: price returns above S1 OR trend turns up
+            if price > s1_val or price > ema34:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_TRIX_ZeroCross_VolumeSpike_TrendFilter"
-timeframe = "4h"
+name = "1d_Weekly_Pivot_R1_S1_Breakout_With_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
