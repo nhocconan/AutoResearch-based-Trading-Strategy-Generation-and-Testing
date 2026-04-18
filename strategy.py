@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-1h Momentum Breakout with 4h Trend Filter and Volume Spike
-Hypothesis: On 1h timeframe, enter long when price breaks above 4h EMA50 with volume spike,
-and enter short when price breaks below 4h EMA50 with volume spike. Use 1d ADX > 25 to filter
-trending markets and avoid whipsaws in ranging conditions. Designed for 15-30 trades/year on 1h.
+12h Williams Fractal Breakout with Volume Spike and Daily Trend Filter
+Hypothesis: Williams Fractals identify significant support/resistance levels.
+Breakouts with volume confirmation and daily EMA50 trend filter capture
+momentum moves. Designed for 12-37 trades/year on 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,40 +20,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA50 trend filter (once before loop)
-    df_4h = get_htf_data(prices, '4h')
-    ema_50 = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
+    # Get daily data for Williams fractals (once before loop)
+    df_d = get_htf_data(prices, '1d')
     
-    # Get 1d data for ADX trend strength filter
-    df_1d = get_htf_data(prices, '1d')
-    # Calculate ADX(14) on daily data
-    plus_dm = np.zeros(len(df_1d))
-    minus_dm = np.zeros(len(df_1d))
-    tr = np.zeros(len(df_1d))
+    # Calculate Williams fractals (requires 2 extra bars for confirmation)
+    bearish_fractal, bullish_fractal = compute_williams_fractals(
+        df_d['high'].values,
+        df_d['low'].values,
+    )
     
-    for i in range(1, len(df_1d)):
-        high_diff = df_1d['high'].iloc[i] - df_1d['high'].iloc[i-1]
-        low_diff = df_1d['low'].iloc[i-1] - df_1d['low'].iloc[i]
-        plus_dm[i] = max(high_diff, 0) if high_diff > low_diff else 0
-        minus_dm[i] = max(low_diff, 0) if low_diff > high_diff else 0
-        tr[i] = max(
-            df_1d['high'].iloc[i] - df_1d['low'].iloc[i],
-            abs(df_1d['high'].iloc[i] - df_1d['close'].iloc[i-1]),
-            abs(df_1d['low'].iloc[i] - df_1d['close'].iloc[i-1])
-        )
+    # Align fractals with 2-bar delay for confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(
+        prices, df_d, bearish_fractal, additional_delay_bars=2
+    )
+    bullish_fractal_aligned = align_htf_to_ltf(
+        prices, df_d, bullish_fractal, additional_delay_bars=2
+    )
     
-    # Smooth the values
-    atr_1d = pd.Series(tr).ewm(span=14, adjust=False).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False).mean().values / atr_1d
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False).mean().values / atr_1d
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(span=14, adjust=False).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Daily EMA50 for trend filter
+    ema_50 = pd.Series(df_d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_aligned = align_htf_to_ltf(prices, df_d, ema_50)
     
-    # Volume spike: 2x 20-period average on 1h
+    # Volume spike: 2x 20-period average on 12h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
+    
+    # ATR for stop loss (12h ATR)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
@@ -61,46 +61,48 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or
+        if (np.isnan(bearish_fractal_aligned[i]) or 
+            np.isnan(bullish_fractal_aligned[i]) or
+            np.isnan(ema_aligned[i]) or
+            np.isnan(atr[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_50_val = ema_50_aligned[i]
-        adx_val = adx_aligned[i]
+        bearish_level = bearish_fractal_aligned[i]
+        bullish_level = bullish_fractal_aligned[i]
+        ema = ema_aligned[i]
+        atr_val = atr[i]
         
         if position == 0:
-            # Only trade in trending markets (ADX > 25)
-            if adx_val > 25:
-                # Long: price breaks above 4h EMA50 with volume spike
-                if price > ema_50_val and volume_spike[i]:
-                    signals[i] = 0.20
-                    position = 1
-                # Short: price breaks below 4h EMA50 with volume spike
-                elif price < ema_50_val and volume_spike[i]:
-                    signals[i] = -0.20
-                    position = -1
+            # Long: break above bullish fractal with volume spike and price above EMA50 (uptrend)
+            if price > bullish_level and volume_spike[i] and price > ema:
+                signals[i] = 0.25
+                position = 1
+            # Short: break below bearish fractal with volume spike and price below EMA50 (downtrend)
+            elif price < bearish_level and volume_spike[i] and price < ema:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
             # Long position
-            signals[i] = 0.20
-            # Exit: price returns below 4h EMA50
-            if price < ema_50_val:
+            signals[i] = 0.25
+            # Exit: price returns to bearish fractal or ATR trailing stop
+            if price <= bearish_level or price < (high[i] - 2.0 * atr_val):
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position
-            signals[i] = -0.20
-            # Exit: price returns above 4h EMA50
-            if price > ema_50_val:
+            signals[i] = -0.25
+            # Exit: price returns to bullish fractal or ATR trailing stop
+            if price >= bullish_level or price > (low[i] + 2.0 * atr_val):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1h_EMA50_Breakout_VolumeSpike_ADXFilter"
-timeframe = "1h"
+name = "12h_WilliamsFractal_Breakout_VolumeSpike_EMA50"
+timeframe = "12h"
 leverage = 1.0
