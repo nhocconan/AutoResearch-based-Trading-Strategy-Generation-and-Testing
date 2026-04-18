@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-1h 4h/1d Trend + Volume Spike Strategy
-Hypothesis: In strong trends (4h EMA200) with volume spikes (>1.5x 20-period avg),
-price tends to continue in trend direction for 1-3 hours. Use 1d ADX>25 to filter
-weak trend days. Designed for low frequency: ~20-40 trades/year.
-Works in bull/bear by following trend direction. Entry: price > 4h EMA20 (long) or < (short)
-with volume spike and 1d ADX>25. Exit: trend reversal or volume dry-up.
+6h Weekly Pivot Reversal with Volume Confirmation
+Strategy: Buy near weekly S1/S2 support with volume spike, sell near weekly R1/R2 resistance with volume spike.
+          Use daily EMA50 as trend filter to avoid counter-trend trades.
+          Designed for mean reversion in ranging markets and breakout continuation in trending markets.
 """
 
 import numpy as np
@@ -22,79 +20,94 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA20 trend
-    df_4h = get_htf_data(prices, '4h')
-    ema_20_4h = pd.Series(df_4h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # Get weekly data for pivot points (once before loop)
+    df_1w = get_htf_data(prices, '1w')
     
-    # Get 1d data for ADX trend filter
+    # Calculate weekly pivot points
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    
+    # Calculate pivot point and support/resistance levels
+    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    r1 = 2 * pivot - weekly_low
+    s1 = 2 * pivot - weekly_high
+    r2 = pivot + (weekly_high - weekly_low)
+    s2 = pivot - (weekly_high - weekly_low)
+    
+    # Get daily data for trend filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
-    # Calculate ADX(14) on daily
-    plus_dm = np.diff(df_1d['high'], prepend=df_1d['high'][0])
-    minus_dm = np.diff(df_1d['low'], prepend=df_1d['low'][0])
-    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
-    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
-    tr = np.maximum.reduce([
-        np.abs(np.diff(df_1d['high'], prepend=df_1d['high'][0])),
-        np.abs(np.diff(df_1d['low'], prepend=df_1d['low'][0])),
-        np.abs(df_1d['high'] - df_1d['low'])
-    ])
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_14
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_14
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx_14 = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
     
-    # Volume spike detection on 1h (1.5x 20-period avg)
+    # Calculate daily EMA50 for trend filter
+    daily_close = df_1d['close'].values
+    ema_50_1d = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align weekly levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    
+    # Align daily EMA50 to 6h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume spike detection (2x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 50  # need enough history for ADX
+    start_idx = 50  # need enough history for calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_20_4h_aligned[i]) or 
-            np.isnan(adx_14_aligned[i]) or
+        if (np.isnan(pivot_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or
+            np.isnan(s2_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_20_4h = ema_20_4h_aligned[i]
-        adx = adx_14_aligned[i]
-        vol_spike = volume_spike[i]
+        pivot_level = pivot_aligned[i]
+        r1_level = r1_aligned[i]
+        s1_level = s1_aligned[i]
+        r2_level = r2_aligned[i]
+        s2_level = s2_aligned[i]
+        ema_50 = ema_50_1d_aligned[i]
         
         if position == 0:
-            # Long: price above 4h EMA20, strong trend (ADX>25), volume spike
-            if price > ema_20_4h and adx > 25 and vol_spike:
-                signals[i] = 0.20
+            # Long near S1/S2 with volume spike and above daily EMA50 (bullish bias)
+            if (price <= s1_level * 1.005 or price <= s2_level * 1.005) and volume_spike[i] and price > ema_50:
+                signals[i] = 0.25
                 position = 1
-            # Short: price below 4h EMA20, strong trend (ADX>25), volume spike
-            elif price < ema_20_4h and adx > 25 and vol_spike:
-                signals[i] = -0.20
+            # Short near R1/R2 with volume spike and below daily EMA50 (bearish bias)
+            elif (price >= r1_level * 0.995 or price >= r2_level * 0.995) and volume_spike[i] and price < ema_50:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long position management
-            signals[i] = 0.20
-            # Exit: trend weakens (ADX<20) or price crosses below EMA20
-            if adx < 20 or price < ema_20_4h:
+            signals[i] = 0.25
+            # Exit: price reaches pivot or R1, or breaks below daily EMA50
+            if price >= pivot_level * 0.995 or price >= r1_level * 0.995 or price < ema_50:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position management
-            signals[i] = -0.20
-            # Exit: trend weakens (ADX<20) or price crosses above EMA20
-            if adx < 20 or price > ema_20_4h:
+            signals[i] = -0.25
+            # Exit: price reaches pivot or S1, or breaks above daily EMA50
+            if price <= pivot_level * 1.005 or price <= s1_level * 1.005 or price > ema_50:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1h_Trend_VolumeSpike_ADXFilter"
-timeframe = "1h"
+name = "6h_WeeklyPivot_Reversal_Volume_EMA50"
+timeframe = "6h"
 leverage = 1.0
