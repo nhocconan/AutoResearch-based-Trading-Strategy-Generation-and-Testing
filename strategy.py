@@ -1,11 +1,9 @@
-#!/usr/bin/env python3
-"""
-6h_BollingerBandWidth_Squeeze_Breakout
-Hypothesis: Bollinger Band Width (BBW) squeeze on 1-day timeframe precedes volatility expansion.
-Breakouts from 60-period high/low on 6h chart after BBW squeeze capture explosive moves.
-Works in both bull and bear markets as volatility expansion occurs in all regimes.
-Target: 20-40 trades/year (80-160 total over 4 years) to avoid fee drag.
-"""
+# NEW STRATEGY: 4h_Camilla_Pivot_R1S1_Breakout_Volume_Trend_Hybrid
+# Hypothesis: Camarilla pivot levels R1/S1 from daily timeframe act as strong support/resistance.
+# Breakouts above R1 or below S1 with volume confirmation and daily EMA trend filter capture
+# institutional move initiation. Works in bull/bear by following institutional flow.
+# Uses 4h primary timeframe with 1d HTF to target 20-50 trades/year (80-200 total over 4 years).
+# Focus on BTC/ETH with volume confirmation to reduce false breakouts.
 
 import numpy as np
 import pandas as pd
@@ -13,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,91 +19,91 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day data for Bollinger Band Width calculation
+    # 1-day data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Bollinger Bands: 20-period SMA ± 2 standard deviations
-    close_1d = df_1d['close'].values
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + (2 * std_20)
-    lower_bb = sma_20 - (2 * std_20)
+    # Previous day's OHLC for Camarilla
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Bollinger Band Width: (Upper - Lower) / Middle
-    bb_width = (upper_bb - lower_bb) / sma_20
+    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # BBW squeeze: lowest 10% of BBW over last 50 days indicates compression
-    bb_width_rank = pd.Series(bb_width).rolling(window=50, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) == 50 else np.nan, raw=False
-    ).values
-    squeeze_signal = bb_width_rank <= 0.1  # Bottom 10% = squeeze
+    # Align to 4h timeframe (waits for 1-day bar to close)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Align squeeze signal to 6h timeframe
-    squeeze_6h = align_htf_to_ltf(prices, df_1d, squeeze_signal)
-    
-    # 60-period high/low for breakout levels on 6h
-    high_60 = pd.Series(high).rolling(window=60, min_periods=60).max().values
-    low_60 = pd.Series(low).rolling(window=60, min_periods=60).min().values
-    
-    # Volume filter: >1.3x 20-period average
+    # Volume filter: >1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.3 * vol_ma)
+    volume_filter = volume > (1.5 * vol_ma)
+    
+    # 1-day EMA trend filter
+    ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_4h = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     signals = np.zeros(n)
     position = 0
+    bars_since_entry = 0
     
-    start_idx = 60  # Wait for 60-period high/low calculation
+    start_idx = 20  # Warmup for volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(squeeze_6h[i]) or np.isnan(high_60[i]) or 
-            np.isnan(low_60[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
+            np.isnan(volume_filter[i]) or np.isnan(ema_1d_4h[i])):
             signals[i] = 0.0
+            bars_since_entry = 0
             continue
         
         price = close[i]
-        squeeze_active = squeeze_6h[i]
+        r1_val = r1_4h[i]
+        s1_val = s1_4h[i]
         vol_ok = volume_filter[i]
-        hi_60 = high_60[i]
-        lo_60 = low_60[i]
+        ema_trend = ema_1d_4h[i]
         
         if position == 0:
-            # Long: break above 60-period high during BBW squeeze with volume
-            if price > hi_60 and squeeze_active and vol_ok:
+            # Long: break above R1 with volume in uptrend
+            if price > r1_val and vol_ok and price > ema_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below 60-period low during BBW squeeze with volume
-            elif price < lo_60 and squeeze_active and vol_ok:
+                bars_since_entry = 0
+            # Short: break below S1 with volume in downtrend
+            elif price < s1_val and vol_ok and price < ema_trend:
                 signals[i] = -0.25
                 position = -1
+                bars_since_entry = 0
         
         elif position == 1:
-            # Long exit: price returns to 60-period low or volatility expands (BBW > 80th percentile)
-            bb_width_current = bb_width[min(i // 4, len(bb_width)-1)] if i // 4 < len(bb_width) else bb_width[-1]
-            bb_width_rank_current = pd.Series(bb_width[:min(i//4+1, len(bb_width))]).rank(pct=True).iloc[-1] if i//4 < len(bb_width) and i//4 >= 20 else 0.5
-            vol_expansion = bb_width_rank_current > 0.8 if not np.isnan(bb_width_rank_current) else False
-            
-            if price < lo_60 or vol_expansion:
-                signals[i] = 0.0
-                position = 0
+            bars_since_entry += 1
+            # Minimum holding period: 4 bars (1 day)
+            if bars_since_entry < 4:
+                signals[i] = 0.25
             else:
                 signals[i] = 0.25
+                # Exit: price returns to S1 or trend reverses
+                if price < s1_val or price < ema_trend:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
         
         elif position == -1:
-            # Short exit: price returns to 60-period high or volatility expands
-            bb_width_current = bb_width[min(i // 4, len(bb_width)-1)] if i // 4 < len(bb_width) else bb_width[-1]
-            bb_width_rank_current = pd.Series(bb_width[:min(i//4+1, len(bb_width))]).rank(pct=True).iloc[-1] if i//4 < len(bb_width) and i//4 >= 20 else 0.5
-            vol_expansion = bb_width_rank_current > 0.8 if not np.isnan(bb_width_rank_current) else False
-            
-            if price > hi_60 or vol_expansion:
-                signals[i] = 0.0
-                position = 0
+            bars_since_entry += 1
+            # Minimum holding period: 4 bars (1 day)
+            if bars_since_entry < 4:
+                signals[i] = -0.25
             else:
                 signals[i] = -0.25
+                # Exit: price returns to R1 or trend reverses
+                if price > r1_val or price > ema_trend:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
     
     return signals
 
-name = "6h_BollingerBandWidth_Squeeze_Breakout"
-timeframe = "6h"
+name = "4h_Camilla_Pivot_R1S1_Breakout_Volume_Trend_Hybrid"
+timeframe = "4h"
 leverage = 1.0
