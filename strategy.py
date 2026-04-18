@@ -1,9 +1,11 @@
-# NEW STRATEGY: 4h_Camilla_Pivot_R1S1_Breakout_Volume_Trend_Hybrid
-# Hypothesis: Camarilla pivot levels R1/S1 from daily timeframe act as strong support/resistance.
-# Breakouts above R1 or below S1 with volume confirmation and daily EMA trend filter capture
-# institutional move initiation. Works in bull/bear by following institutional flow.
-# Uses 4h primary timeframe with 1d HTF to target 20-50 trades/year (80-200 total over 4 years).
-# Focus on BTC/ETH with volume confirmation to reduce false breakouts.
+#!/usr/bin/env python3
+"""
+1d_Weekly_KAMA_Direction_1wTrend_Filter
+Hypothesis: Weekly KAMA direction (1w) filters daily price action to capture institutional moves.
+In bull markets, price follows weekly KAMA up; in bear markets, price follows weekly KAMA down.
+Daily mean reversion at Bollinger Bands (20,2) provides entries in direction of weekly trend.
+Volume confirmation filters low-quality signals. Target: 10-25 trades/year (40-100 total over 4 years).
+"""
 
 import numpy as np
 import pandas as pd
@@ -11,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,91 +21,82 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day data for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Weekly data for KAMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Weekly KAMA (adaptive moving average)
+    close_1w = df_1w['close']
+    change_1w = abs(close_1w.diff(1))
+    vol_1w = abs(close_1w.diff(10)).rolling(window=10, min_periods=10).sum()
+    er_1w = change_1w / vol_1w.replace(0, 1e-10)
+    sc_1w = (er_1w * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    kama_1w = [close_1w.iloc[0]]
+    for i in range(1, len(close_1w)):
+        kama_1w.append(kama_1w[-1] + sc_1w.iloc[i] * (close_1w.iloc[i] - kama_1w[-1]))
+    kama_1w = np.array(kama_1w)
     
-    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    # Align weekly KAMA to daily (waits for weekly bar to close)
+    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
     
-    # Align to 4h timeframe (waits for 1-day bar to close)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    # Daily Bollinger Bands (20,2)
+    close_s = pd.Series(close)
+    basis = close_s.rolling(window=20, min_periods=20).mean()
+    dev = 2 * close_s.rolling(window=20, min_periods=20).std()
+    upper = basis + dev
+    lower = basis - dev
     
-    # Volume filter: >1.5x 20-period average
+    # Volume filter: >1.3x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
-    
-    # 1-day EMA trend filter
-    ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_4h = align_htf_to_ltf(prices, df_1d, ema_1d)
+    volume_filter = volume > (1.3 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
-    bars_since_entry = 0
     
-    start_idx = 20  # Warmup for volume MA
+    start_idx = 40  # Warmup for BB and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
-            np.isnan(volume_filter[i]) or np.isnan(ema_1d_4h[i])):
+        if (np.isnan(kama_1w_aligned[i]) or np.isnan(basis[i]) or
+            np.isnan(upper[i]) or np.isnan(lower[i]) or
+            np.isnan(volume_filter[i])):
             signals[i] = 0.0
-            bars_since_entry = 0
             continue
         
         price = close[i]
-        r1_val = r1_4h[i]
-        s1_val = s1_4h[i]
+        kama_val = kama_1w_aligned[i]
+        bb_lower = lower[i]
+        bb_upper = upper[i]
         vol_ok = volume_filter[i]
-        ema_trend = ema_1d_4h[i]
         
         if position == 0:
-            # Long: break above R1 with volume in uptrend
-            if price > r1_val and vol_ok and price > ema_trend:
+            # Long: price at lower BB in weekly uptrend with volume
+            if price <= bb_lower and price > kama_val and vol_ok:
                 signals[i] = 0.25
                 position = 1
-                bars_since_entry = 0
-            # Short: break below S1 with volume in downtrend
-            elif price < s1_val and vol_ok and price < ema_trend:
+            # Short: price at upper BB in weekly downtrend with volume
+            elif price >= bb_upper and price < kama_val and vol_ok:
                 signals[i] = -0.25
                 position = -1
-                bars_since_entry = 0
         
         elif position == 1:
-            bars_since_entry += 1
-            # Minimum holding period: 4 bars (1 day)
-            if bars_since_entry < 4:
-                signals[i] = 0.25
+            # Exit: price crosses weekly KAMA or returns to BB middle
+            if price >= kama_val or price >= basis[i]:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = 0.25
-                # Exit: price returns to S1 or trend reverses
-                if price < s1_val or price < ema_trend:
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_entry = 0
         
         elif position == -1:
-            bars_since_entry += 1
-            # Minimum holding period: 4 bars (1 day)
-            if bars_since_entry < 4:
-                signals[i] = -0.25
+            # Exit: price crosses weekly KAMA or returns to BB middle
+            if price <= kama_val or price <= basis[i]:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = -0.25
-                # Exit: price returns to R1 or trend reverses
-                if price > r1_val or price > ema_trend:
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_entry = 0
     
     return signals
 
-name = "4h_Camilla_Pivot_R1S1_Breakout_Volume_Trend_Hybrid"
-timeframe = "4h"
+name = "1d_Weekly_KAMA_Direction_1wTrend_Filter"
+timeframe = "1d"
 leverage = 1.0
