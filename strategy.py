@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_Volume_AntiTrend_v1
-4h strategy using Camarilla pivot R1/S1 levels with volume confirmation and counter-trend bias.
-- Long: Close below S1 (support) + volume > 1.5x 20-period mean + price > 200 EMA (mean reversion in uptrend)
-- Short: Close above R1 (resistance) + volume > 1.5x 20-period mean + price < 200 EMA (mean reversion in downtrend)
-- Exit: Opposite condition or trend reversal
-Designed for ~20-30 trades/year per symbol (80-120 total over 4 years)
-Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend)
+1d_KAMA_Direction_RSI_ChopFilter
+1d strategy using KAMA direction as primary trend filter, RSI for overbought/oversold,
+and Choppiness Index to avoid ranging markets. Enters long when KAMA trending up,
+RSI < 40, and Chop > 61.8 (ranging). Enters short when KAMA trending down,
+RSI > 60, and Chop > 61.8. Exits on opposite signal.
+Designed for ~10-20 trades/year per symbol (40-80 total over 4 years).
+Works in bull markets (KAMA up + RSI pullback) and bear markets (KAMA down + RSI bounce).
 """
 
 import numpy as np
@@ -15,93 +15,150 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
+    # Get weekly data for Choppiness Index (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate Choppiness Index on weekly data
+    def choppiness_index(high, low, close, period=14):
+        atr = np.zeros_like(close)
+        for i in range(1, len(close)):
+            atr[i] = max(
+                high[i] - low[i],
+                abs(high[i] - close[i-1]),
+                abs(low[i] - close[i-1])
+            )
+        # Smoothed ATR (using simple moving average for simplicity)
+        atr_ma = np.zeros_like(close)
+        for i in range(period, len(close)):
+            atr_ma[i] = np.mean(atr[i-period+1:i+1])
+        
+        # Highest high and lowest low over period
+        highest_high = np.zeros_like(close)
+        lowest_low = np.zeros_like(close)
+        for i in range(period-1, len(close)):
+            highest_high[i] = np.max(high[i-period+1:i+1])
+            lowest_low[i] = np.min(low[i-period+1:i+1])
+        
+        # Chop calculation
+        chop = np.full_like(close, 50.0)
+        for i in range(period-1, len(close)):
+            if atr_ma[i] > 0 and (highest_high[i] - lowest_low[i]) > 0:
+                chop[i] = 100 * np.log10(np.sum(atr[i-period+1:i+1]) / (highest_high[i] - lowest_low[i])) / np.log10(period)
+        return chop
+    
+    chop_1w = choppiness_index(high_1w, low_1w, close_1w, 14)
+    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
+    
+    # Get daily data for KAMA and RSI
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate Camarilla levels from previous day's OHLC
-    # Using standard Camarilla formulas:
-    # R4 = C + ((H-L) * 1.5000)
-    # R3 = C + ((H-L) * 1.2500)
-    # R2 = C + ((H-L) * 1.1666)
-    # R1 = C + ((H-L) * 1.0833)
-    # PP = (H + L + C) / 3
-    # S1 = C - ((H-L) * 1.0833)
-    # S2 = C - ((H-L) * 1.1666)
-    # S3 = C - ((H-L) * 1.2500)
-    # S4 = C - ((H-L) * 1.5000)
-    
-    # We'll use R1 and S1 as primary levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot components
-    hl_range = high_1d - low_1d
-    r1 = close_1d + (hl_range * 1.0833)
-    s1 = close_1d - (hl_range * 1.0833)
+    # KAMA calculation
+    def kama(close, period=10, fast=2, slow=30):
+        # Efficiency Ratio
+        change = np.abs(np.diff(close, n=period))
+        volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(close) > 1 else 0
+        er = np.zeros_like(close)
+        for i in range(period, len(close)):
+            if volatility[i] > 0:
+                er[i] = change[i] / volatility[i]
+            else:
+                er[i] = 0
+        
+        # Smoothing constants
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        
+        # KAMA
+        kama_vals = np.zeros_like(close)
+        kama_vals[0] = close[0]
+        for i in range(1, len(close)):
+            kama_vals[i] = kama_vals[i-1] + sc[i] * (close[i] - kama_vals[i-1])
+        return kama_vals
     
-    # Align daily R1/S1 to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    kama_1d = kama(close_1d, 10, 2, 30)
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
     
-    # Get 4h EMA200 for trend filter
-    ema_200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # RSI calculation
+    def rsi(close, period=14):
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        
+        # First average
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
+        
+        # Subsequent averages
+        for i in range(period+1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        
+        rs = np.zeros_like(close)
+        rsi_vals = np.zeros_like(close)
+        for i in range(period, len(close)):
+            if avg_loss[i] != 0:
+                rs[i] = avg_gain[i] / avg_loss[i]
+                rsi_vals[i] = 100 - (100 / (1 + rs[i]))
+            else:
+                rsi_vals[i] = 100
+        return rsi_vals
     
-    # Volume confirmation: 20-period moving average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    rsi_1d = rsi(close_1d, 14)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # need enough for EMA200
+    start_idx = 50  # need enough for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_200[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(chop_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend condition
-        uptrend = close[i] > ema_200[i]
-        downtrend = close[i] < ema_200[i]
+        # KAMA direction (using 2-period slope)
+        kama_up = kama_1d_aligned[i] > kama_1d_aligned[i-1]
+        kama_down = kama_1d_aligned[i] < kama_1d_aligned[i-1]
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
-        
-        # Mean reversion conditions at Camarilla levels
-        touch_s1 = low[i] <= s1_aligned[i]  # price touches or goes below S1
-        touch_r1 = high[i] >= r1_aligned[i]  # price touches or goes above R1
+        # Chop filter: only trade in ranging markets (Chop > 61.8)
+        chop_filter = chop_1w_aligned[i] > 61.8
         
         if position == 0:
-            # Long: price at S1 support + volume + uptrend (buy dip in uptrend)
-            if touch_s1 and vol_confirm and uptrend:
+            # Long: KAMA up, RSI oversold (<40), ranging market
+            if kama_up and rsi_1d_aligned[i] < 40 and chop_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price at R1 resistance + volume + downtrend (sell rally in downtrend)
-            elif touch_r1 and vol_confirm and downtrend:
+            # Short: KAMA down, RSI overbought (>60), ranging market
+            elif kama_down and rsi_1d_aligned[i] > 60 and chop_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price at R1 resistance or trend reversal
-            if touch_r1 or not uptrend:
+            # Long exit: KAMA down or RSI overbought
+            if kama_down or rsi_1d_aligned[i] > 60:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price at S1 support or trend reversal
-            if touch_s1 or not downtrend:
+            # Short exit: KAMA up or RSI oversold
+            if kama_up or rsi_1d_aligned[i] < 40:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -109,6 +166,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_Volume_AntiTrend_v1"
-timeframe = "4h"
+name = "1d_KAMA_Direction_RSI_ChopFilter"
+timeframe = "1d"
 leverage = 1.0
