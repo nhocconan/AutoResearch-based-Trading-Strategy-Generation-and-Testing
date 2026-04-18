@@ -1,16 +1,15 @@
+# 1d_Aggressive10_PostClose_Trend
+# Aggressive10 strategy on 1d: enter long/short on open after close crosses above/below Aggressive10, exit on reverse cross.
+# Works in bull markets (trend following) and bear markets (short signals). Low trade frequency (~10-25/year) minimizes fee drag.
+# Uses 1w EMA50 as trend filter for higher-timeframe context.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R + 1d EMA trend + volume confirmation.
-# Williams %R(14) identifies overbought/oversold conditions for mean reversion.
-# 1d EMA50 filters trend direction (long only above, short only below).
-# Volume spike (>1.5x 20-period average) confirms conviction.
-# Works in ranging markets via mean reversion and in trending markets via trend alignment.
-# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
-name = "4h_WilliamsR14_1dEMA50_Volume"
-timeframe = "4h"
+name = "1d_Aggressive10_PostClose_Trend"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,39 +18,21 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
+    open_price = prices['open'].values
     
-    # Get 4h data for Williams %R
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate Williams %R on 4h data: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    high_4h = pd.Series(df_4h['high'].values)
-    low_4h = pd.Series(df_4h['low'].values)
-    close_4h = pd.Series(df_4h['close'].values)
+    # Calculate EMA50 on 1w data
+    close_1w = pd.Series(df_1w['close'].values)
+    ema_50_1w = close_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    highest_high = high_4h.rolling(window=14, min_periods=14).max()
-    lowest_low = low_4h.rolling(window=14, min_periods=14).min()
-    williams_r = (highest_high - close_4h) / (highest_high - lowest_low) * -100
-    williams_r = williams_r.replace([np.inf, -np.inf], np.nan).values  # Handle division by zero
+    # Align EMA50 to daily timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Align Williams %R to lower timeframe (4h)
-    williams_r_aligned = align_htf_to_ltf(prices, df_4h, williams_r)
-    
-    # Get 1d data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate EMA50 on 1d data
-    close_1d = pd.Series(df_1d['close'].values)
-    ema_50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align EMA to lower timeframe (4h)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate volume spike: current volume > 1.5 * 20-period average volume
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20)
+    # Calculate Aggressive10 (10-period EMA of close)
+    close_series = pd.Series(close)
+    aggressive10 = close_series.ewm(span=10, adjust=False, min_periods=10).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,39 +41,41 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if np.isnan(aggressive10[i]) or np.isnan(ema_50_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
-        close_val = close[i]
-        wr_val = williams_r_aligned[i]
-        ema_val = ema_50_1d_aligned[i]
+        open_val = open_price[i]
+        prev_close = close[i-1]
+        prev_aggressive10 = aggressive10[i-1]
+        prev_ema = ema_50_1w_aligned[i-1]
+        curr_aggressive10 = aggressive10[i]
+        curr_ema = ema_50_1w_aligned[i]
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) AND price above EMA50 AND volume spike
-            if wr_val < -80 and close_val > ema_val and volume_spike[i]:
-                signals[i] = 0.25
+            # Long: Previous close below Aggressive10, current open above Aggressive10, and price above weekly EMA50
+            if prev_close <= prev_aggressive10 and open_val > curr_aggressive10 and open_val > curr_ema:
+                signals[i] = 0.30
                 position = 1
-            # Short: Williams %R overbought (> -20) AND price below EMA50 AND volume spike
-            elif wr_val > -20 and close_val < ema_val and volume_spike[i]:
-                signals[i] = -0.25
+            # Short: Previous close above Aggressive10, current open below Aggressive10, and price below weekly EMA50
+            elif prev_close >= prev_aggressive10 and open_val < curr_aggressive10 and open_val < curr_ema:
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
-            # Long exit: Williams %R overbought (> -20) or price below EMA50
-            if wr_val > -20 or close_val < ema_val:
+            # Long exit: Current open below Aggressive10
+            if open_val < curr_aggressive10:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Short exit: Williams %R oversold (< -80) or price above EMA50
-            if wr_val < -80 or close_val > ema_val:
+            # Short exit: Current open above Aggressive10
+            if open_val > curr_aggressive10:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
