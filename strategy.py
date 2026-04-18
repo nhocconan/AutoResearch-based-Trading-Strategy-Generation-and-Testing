@@ -3,8 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_WeeklyPivot_R3S3_FadeWithVolumeFilter_v1"
-timeframe = "6h"
+# Hypothesis: Daily pivot-based breakout with volume confirmation and ATR volatility filter.
+# Uses daily pivot levels (R1/S1) as dynamic support/resistance on 4h chart.
+# Requires volume spike (>2x 24-period average) and minimum ATR volatility to avoid false breakouts in low volatility.
+# Exit when price returns to daily pivot (mean reversion to equilibrium).
+# Designed for fewer trades (<150/year) with clear entry/exit rules to minimize fee drag.
+# Works in both bull and bear markets by trading breakouts in direction of momentum with volatility filter.
+name = "4h_DailyPivot_R1S1_Breakout_VolumeATRFilter_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,33 +23,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot points
-    df_1w = get_htf_data(prices, '1w')
+    # Daily data for pivot and ATR
+    df_1d = get_htf_data(prices, '1d')
     
-    # Previous weekly OHLC
-    prev_high_w = df_1w['high'].shift(1).values
-    prev_low_w = df_1w['low'].shift(1).values
-    prev_close_w = df_1w['close'].shift(1).values
+    # Previous daily OHLC
+    prev_close_d = df_1d['close'].shift(1).values
+    prev_high_d = df_1d['high'].shift(1).values
+    prev_low_d = df_1d['low'].shift(1).values
     
-    # Weekly pivot and R3/S3 levels
-    pivot_w = (prev_high_w + prev_low_w + prev_close_w) / 3
-    range_w = prev_high_w - prev_low_w
-    R3_w = pivot_w + range_w * 1.1
-    S3_w = pivot_w - range_w * 1.1
+    # Pivot levels: R1, S1
+    pivot_d = (prev_high_d + prev_low_d + prev_close_d) / 3
+    range_d = prev_high_d - prev_low_d
+    R1_d = pivot_d + range_d
+    S1_d = pivot_d - range_d
     
-    # R4/S4 for breakout confirmation (optional filter)
-    R4_w = pivot_w + range_w * 1.6
-    S4_w = pivot_w - range_w * 1.6
+    # ATR(14) for stop filter
+    tr1 = prev_high_d - prev_low_d
+    tr2 = np.abs(prev_high_d - prev_close_d)
+    tr3 = np.abs(prev_low_d - prev_close_d)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align weekly levels to 6h
-    R3_w_aligned = align_htf_to_ltf(prices, df_1w, R3_w)
-    S3_w_aligned = align_htf_to_ltf(prices, df_1w, S3_w)
-    R4_w_aligned = align_htf_to_ltf(prices, df_1w, R4_w)
-    S4_w_aligned = align_htf_to_ltf(prices, df_1w, S4_w)
+    # Align to 4h
+    R1_d_aligned = align_htf_to_ltf(prices, df_1d, R1_d)
+    S1_d_aligned = align_htf_to_ltf(prices, df_1d, S1_d)
+    pivot_d_aligned = align_htf_to_ltf(prices, df_1d, pivot_d)
+    atr_d_aligned = align_htf_to_ltf(prices, df_1d, atr_d)
     
-    # Volume filter: current volume > 1.5 * 48-period average (48 * 6h = 2 weeks)
-    vol_ma_48 = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
-    volume_filter = volume > (1.5 * vol_ma_48)
+    # Volume filter: current volume > 2.0 * 24-period average (24 * 4h = 4 days)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_filter = volume > (2.0 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -52,41 +61,40 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(R3_w_aligned[i]) or np.isnan(S3_w_aligned[i]) or
-            np.isnan(R4_w_aligned[i]) or np.isnan(S4_w_aligned[i]) or
-            np.isnan(vol_ma_48[i])):
+        if (np.isnan(R1_d_aligned[i]) or np.isnan(S1_d_aligned[i]) or
+            np.isnan(pivot_d_aligned[i]) or np.isnan(atr_d_aligned[i]) or
+            np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        R3_val = R3_w_aligned[i]
-        S3_val = S3_w_aligned[i]
-        R4_val = R4_w_aligned[i]
-        S4_val = S4_w_aligned[i]
+        R1_val = R1_d_aligned[i]
+        S1_val = S1_d_aligned[i]
+        pivot_val = pivot_d_aligned[i]
+        atr_val = atr_d_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Fade at R3/S3 with volume confirmation
-            if close_val < R3_val and vol_filter:
-                # Fade short at resistance
-                signals[i] = -0.25
-                position = -1
-            elif close_val > S3_val and vol_filter:
-                # Fade long at support
+            # Long: break above R1 with volume and ATR filter (avoid low-vol breakouts)
+            if close_val > R1_val and vol_filter and atr_val > 0:
                 signals[i] = 0.25
                 position = 1
+            # Short: break below S1 with volume and ATR filter
+            elif close_val < S1_val and vol_filter and atr_val > 0:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Long exit: price reaches S4 (strong support) or closes back below S3
-            if close_val <= S4_val or close_val < S3_val:
+            # Long exit: price falls back below pivot
+            if close_val < pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price reaches R4 (strong resistance) or closes back above R3
-            if close_val >= R4_val or close_val > R3_val:
+            # Short exit: price rises back above pivot
+            if close_val > pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
