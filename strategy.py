@@ -14,13 +14,14 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR and SMA
+    # Get daily data for indicators
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate ATR(14) on daily data
+    # Calculate daily ATR(14) for volatility filter
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -30,78 +31,81 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Align daily ATR14 to 12h timeframe
+    # Align daily ATR14 to 4h timeframe
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate SMA(50) on daily close
-    sma_50_1d = np.full(len(close_1d), np.nan)
-    for i in range(50, len(close_1d)):
-        sma_50_1d[i] = np.mean(close_1d[i-50:i])
+    # Calculate daily ATR(7) for breakout sensitivity
+    tr1_7 = high_1d - low_1d
+    tr2_7 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3_7 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1_7[0] = high_1d[0] - low_1d[0]
+    tr2_7[0] = np.abs(high_1d[0] - close_1d[0])
+    tr3_7[0] = np.abs(low_1d[0] - close_1d[0])
+    tr_7 = np.maximum(tr1_7, np.maximum(tr2_7, tr3_7))
+    atr_7_1d = pd.Series(tr_7).ewm(alpha=1/7, adjust=False, min_periods=7).mean().values
+    atr_7_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_7_1d)
     
-    # Align daily SMA50 to 12h timeframe
-    sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
+    # Calculate daily Donchian channel (20-period)
+    donch_high_20 = np.full(len(close_1d), np.nan)
+    donch_low_20 = np.full(len(close_1d), np.nan)
+    for i in range(20, len(close_1d)):
+        donch_high_20[i] = np.max(high_1d[i-20:i])
+        donch_low_20[i] = np.min(low_1d[i-20:i])
     
-    # Calculate 12h ATR for stop loss
-    tr_12h_1 = high - low
-    tr_12h_2 = np.abs(high - np.roll(close, 1))
-    tr_12h_3 = np.abs(low - np.roll(close, 1))
-    tr_12h_1[0] = high[0] - low[0]
-    tr_12h_2[0] = np.abs(high[0] - close[0])
-    tr_12h_3[0] = np.abs(low[0] - close[0])
-    tr_12h = np.maximum(tr_12h_1, np.maximum(tr_12h_2, tr_12h_3))
-    atr_12h = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    donch_high_20_aligned = align_htf_to_ltf(prices, df_1d, donch_high_20)
+    donch_low_20_aligned = align_htf_to_ltf(prices, df_1d, donch_low_20)
     
-    # Calculate volume moving average (20-period)
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+    # Calculate volume moving average (20-period) for daily volume
+    vol_ma_1d = np.full(len(volume_1d), np.nan)
+    for i in range(20, len(volume_1d)):
+        vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # need daily SMA50, volume MA
+    start_idx = max(20, 20)  # need daily Donchian(20), volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(atr_1d_aligned[i]) or np.isnan(sma_50_1d_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(atr_12h[i])):
+        if (np.isnan(atr_1d_aligned[i]) or np.isnan(donch_high_20_aligned[i]) or 
+            np.isnan(donch_low_20_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5 * 20-period average
-        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current daily volume > 1.8 * 20-period average
+        vol_confirmed = volume_1d_aligned[i] > 1.8 * vol_ma_1d_aligned[i]
         
-        # Trend filter: price above daily SMA50 (uptrend) or below (downtrend)
-        trend_up = close[i] > sma_50_1d_aligned[i]
-        trend_down = close[i] < sma_50_1d_aligned[i]
+        # Volatility filter: ATR14 > ATR7 (expanding volatility)
+        vol_expanding = atr_1d_aligned[i] > atr_7_1d_aligned[i]
         
         if position == 0:
-            # Long entry: price above 12h open + 0.3*ATR, with volume and trend filter
-            if (close[i] > open_price[i] + 0.3 * atr_12h[i] and 
+            # Long entry: price breaks above daily Donchian high with volume and volatility expansion
+            if (close[i] > donch_high_20_aligned[i] and 
                 vol_confirmed and 
-                trend_up):
+                vol_expanding):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price below 12h open - 0.3*ATR, with volume and trend filter
-            elif (close[i] < open_price[i] - 0.3 * atr_12h[i] and 
+            # Short entry: price breaks below daily Donchian low with volume and volatility expansion
+            elif (close[i] < donch_low_20_aligned[i] and 
                   vol_confirmed and 
-                  trend_down):
+                  vol_expanding):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price crosses below 12h open or ATR-based stop
-            if close[i] < open_price[i] - 1.5 * atr_12h[i]:
+            # Long exit: price crosses below daily Donchian low or volatility contraction
+            if close[i] < donch_low_20_aligned[i] or not vol_expanding:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above 12h open or ATR-based stop
-            if close[i] > open_price[i] + 1.5 * atr_12h[i]:
+            # Short exit: price crosses above daily Donchian high or volatility contraction
+            if close[i] > donch_high_20_aligned[i] or not vol_expanding:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -109,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_ATR14Daily_SMA50Daily_VolumeFilter"
-timeframe = "12h"
+name = "4h_Donchian20_VolumeVolatility_Expansion"
+timeframe = "4h"
 leverage = 1.0
