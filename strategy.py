@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Pivot_R1S1_Breakout_Volume_Momentum_v1
-Strategy: 12h Camarilla pivot breakout with momentum confirmation.
-Long: Price breaks above R1 (bullish pivot) with momentum confirmation.
-Short: Price breaks below S1 (bearish pivot) with momentum confirmation.
-Uses 1d pivot levels, 12h momentum (ROC > 0), and volume filter.
-Designed for 12h timeframe: ~10-20 trades/year per symbol (40-80 total over 4 years).
-Works in bull/bear via momentum confirmation and pivot-based mean reversion.
+4h_Camarilla_R1S1_Breakout_TrendFilter_V1
+Strategy: 4h Camarilla pivot level R1/S1 breakout with daily EMA trend filter and volume confirmation.
+Long: Price breaks above R1 in daily uptrend with volume confirmation.
+Short: Price breaks below S1 in daily downtrend with volume filter.
+Designed for 4h timeframe: ~15-25 trades/year per symbol (60-100 total over 4 years).
+Works in bull/bear via trend filter and pivot structure.
 """
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,76 +22,78 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
+    # Get daily data for Camarilla pivot calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla pivot levels (R1, S1) from previous day
+    # Calculate Camarilla pivot levels from previous day
     # Pivot = (H + L + C) / 3
     # R1 = C + (H - L) * 1.1 / 12
     # S1 = C - (H - L) * 1.1 / 12
-    pivot = (high_1d + low_1d + close_1d) / 3
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12
+    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Align pivot levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Daily EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Momentum confirmation: 12-period ROC on 12h timeframe
-    roc = np.zeros_like(close)
-    roc[12:] = (close[12:] - close[:-12]) / close[:-12] * 100
+    # Daily volume average (20-period) for volume confirmation
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma = np.zeros_like(volume)
-    vol_ma[20:] = np.convolve(volume, np.ones(20)/20, mode='valid')
-    vol_ma = np.concatenate([np.full(19, np.nan), vol_ma])
-    vol_confirm = volume > 1.5 * vol_ma
+    # Align all daily data to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 12)  # need volume MA and ROC
+    start_idx = 50  # need enough for EMA50
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(roc[i]) or np.isnan(vol_ma[i])):
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Momentum confirmation: positive ROC for long, negative for short
-        mom_long = roc[i] > 0
-        mom_short = roc[i] < 0
+        # Trend condition
+        uptrend = close[i] > ema_50_aligned[i]
+        downtrend = close[i] < ema_50_aligned[i]
         
-        # Breakout conditions
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.3 * vol_ma_aligned[i]
+        
+        # Camarilla breakout conditions
         breakout_long = close[i] > r1_aligned[i]
         breakout_short = close[i] < s1_aligned[i]
         
         if position == 0:
-            # Long: breakout above R1 + volume + momentum
-            if breakout_long and vol_confirm[i] and mom_long:
+            # Long: uptrend + volume + breakout above R1
+            if uptrend and vol_confirm and breakout_long:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below S1 + volume + momentum
-            elif breakout_short and vol_confirm[i] and mom_short:
+            # Short: downtrend + volume + breakout below S1
+            elif downtrend and vol_confirm and breakout_short:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: breakdown below S1 or momentum reversal
-            if close[i] < s1_aligned[i] or roc[i] < 0:
+            # Long exit: trend change or breakdown below S1 (mean reversion)
+            if not uptrend or close[i] < s1_aligned[i]:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: breakout above R1 or momentum reversal
-            if close[i] > r1_aligned[i] or roc[i] > 0:
+            # Short exit: trend change or breakout above R1 (mean reversion)
+            if not downtrend or close[i] > r1_aligned[i]:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -100,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_R1S1_Breakout_Volume_Momentum_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_TrendFilter_V1"
+timeframe = "4h"
 leverage = 1.0
