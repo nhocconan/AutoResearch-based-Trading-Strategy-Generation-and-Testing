@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Donchian20_TrendVolume
-12h strategy using Donchian(20) breakouts with trend filter and volume confirmation.
-- Long: Close breaks above 20-period high + EMA50 > EMA200 + volume > 1.5x daily avg
-- Short: Close breaks below 20-period low + EMA50 < EMA200 + volume > 1.5x daily avg
-- Exit: Opposite breakout or trend reversal
-Designed for ~15-25 trades/year per symbol (60-100 total over 4 years)
-Works in bull markets (breakout continuation) and bear markets (breakdown continuation)
+1d_CAMARILLA_R1S1_Volume_Confirm
+1d strategy trading CAMARILLA pivot R1/S1 breakouts with volume confirmation.
+- Long: Close breaks above R1 + volume > 1.5x daily average volume
+- Short: Close breaks below S1 + volume > 1.5x daily average volume
+- Exit: Close reverts back inside the R1-S1 range
+Designed for 10-25 trades/year per symbol (40-100 total over 4 years)
+Uses weekly trend filter to avoid counter-trend trades in strong trends
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,79 +23,89 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian(20) channels
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    # Weekly EMA34 for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Get daily data for trend filter and volume average
+    # Get daily data for CAMARILLA pivots and volume average
     df_1d = get_htf_data(prices, '1d')
-    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Daily EMA50 and EMA200 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate CAMARILLA pivot levels for each day
+    # R1 = C + (H-L)*1.1/12
+    # S1 = C - (H-L)*1.1/12
+    pivot_range = (high_1d - low_1d) * 1.1 / 12
+    r1_level = close_1d + pivot_range
+    s1_level = close_1d - pivot_range
     
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Align R1/S1 levels to 1d timeframe (they're already daily)
+    r1_aligned = r1_level  # No alignment needed for same timeframe
+    s1_aligned = s1_level
     
     # Daily volume average (20-period)
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    vol_ma_aligned = vol_ma_20  # Already aligned
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # need enough for EMA200
+    start_idx = 34  # need enough for weekly EMA34
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend conditions
-        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
-        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
+        # Weekly trend filter
+        weekly_uptrend = ema_34_1w_aligned[i] > close_1d[i]  # price above weekly EMA34 = uptrend
+        weekly_downtrend = ema_34_1w_aligned[i] < close_1d[i]  # price below weekly EMA34 = downtrend
         
         # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
         
         # Breakout conditions
-        breakout_up = close[i] > donchian_high[i]
-        breakdown_down = close[i] < donchian_low[i]
+        breakout_r1 = close[i] > r1_aligned[i]
+        breakdown_s1 = close[i] < s1_aligned[i]
+        
+        # Mean reversion exit: price returns inside R1-S1 range
+        inside_range = (close[i] >= s1_aligned[i]) and (close[i] <= r1_aligned[i])
         
         if position == 0:
-            # Long: uptrend + volume + breakout above Donchian high
-            if uptrend and vol_confirm and breakout_up:
+            # Long: weekly uptrend + volume + breakout above R1
+            if weekly_uptrend and vol_confirm and breakout_r1:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + volume + breakdown below Donchian low
-            elif downtrend and vol_confirm and breakdown_down:
+            # Short: weekly downtrend + volume + breakdown below S1
+            elif weekly_downtrend and vol_confirm and breakdown_s1:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend change, volume confirmation, or breakdown below Donchian low
-            if not uptrend or (vol_confirm and breakdown_down):
-                signals[i] = -0.25  # reverse to short
-                position = -1
+            # Long exit: weekly trend turns down OR price returns inside range
+            if not weekly_uptrend or inside_range:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend change, volume confirmation, or breakout above Donchian high
-            if not downtrend or (vol_confirm and breakout_up):
-                signals[i] = 0.25  # reverse to long
-                position = 1
+            # Short exit: weekly trend turns up OR price returns inside range
+            if not weekly_downtrend or inside_range:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "12h_Donchian20_TrendVolume"
-timeframe = "12h"
+name = "1d_CAMARILLA_R1S1_Volume_Confirm"
+timeframe = "1d"
 leverage = 1.0
