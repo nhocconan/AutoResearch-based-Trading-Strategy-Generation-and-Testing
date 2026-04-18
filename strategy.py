@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-1d Weekly Donchian Breakout with Volume Spike and RSI Filter
-Breakout above/below weekly Donchian channels + volume spike + daily RSI filter
-Designed to capture long-term trends with low trade frequency
+6h 48-hour Donchian Breakout with 12h Volatility Filter and 12h Trend Confirmation
+Breakout above/below 48-hour high/low with volatility expansion and trend alignment
+Designed for low-frequency, high-conviction trades in both bull and bear markets
 """
 
 import numpy as np
@@ -11,45 +11,39 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Donchian channels
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Get 12h data for volatility and trend filters
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate weekly Donchian channels (20-period)
-    high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Calculate 12h ATR(10) for volatility measurement
+    high_low = high_12h - low_12h
+    high_close = np.abs(high_12h - np.roll(close_12h, 1))
+    low_close = np.abs(low_12h - np.roll(close_12h, 1))
+    high_close[0] = high_low[0]  # first value
+    low_close[0] = high_low[0]   # first value
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    atr_10_aligned = align_htf_to_ltf(prices, df_12h, atr_10)
     
-    # Align weekly Donchian to daily
-    high_20_aligned = align_htf_to_ltf(prices, df_1w, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1w, low_20)
+    # Calculate 12h EMA21 for trend filter
+    ema_21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_21_12h)
     
-    # Get daily data for RSI
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    
-    # Calculate daily RSI (14-period)
-    delta = pd.Series(close_1d).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
-    
-    # Align daily RSI to daily (no shift needed as it's already daily)
-    rsi_aligned = rsi_values  # Already at daily frequency
-    
-    # Volume spike detection (2x 20-day average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Calculate 48-hour Donchian channels (2 periods of 12h)
+    # Since we're on 6h timeframe, 48h = 8 periods
+    donchian_period = 8
+    high_max = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    low_min = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
@@ -57,41 +51,46 @@ def generate_signals(prices):
     start_idx = 40  # need enough history for calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(rsi_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(atr_10_aligned[i]) or np.isnan(ema_21_12h_aligned[i]) or
+            np.isnan(high_max[i]) or np.isnan(low_min[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        upper_channel = high_20_aligned[i]
-        lower_channel = low_20_aligned[i]
-        rsi_val = rsi_aligned[i]
+        atr_val = atr_10_aligned[i]
+        ema_trend = ema_21_12h_aligned[i]
+        donchian_high = high_max[i]
+        donchian_low = low_min[i]
+        
+        # Volatility expansion: current ATR > 1.2 * average ATR
+        # (using the aligned ATR as proxy for recent volatility)
+        vol_expansion = atr_val > (1.2 * np.nanmedian(atr_10_aligned[max(0, i-24):i+1]))
         
         if position == 0:
-            # Long: breakout above weekly upper channel + volume spike + RSI > 50
-            if (price > upper_channel and 
-                volume_spike[i] and 
-                rsi_val > 50):
+            # Long: breakout above 48h high + volatility expansion + above 12h EMA21
+            if (price > donchian_high and 
+                vol_expansion and 
+                price > ema_trend):
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below weekly lower channel + volume spike + RSI < 50
-            elif (price < lower_channel and 
-                  volume_spike[i] and 
-                  rsi_val < 50):
+            # Short: breakout below 48h low + volatility expansion + below 12h EMA21
+            elif (price < donchian_low and 
+                  vol_expansion and 
+                  price < ema_trend):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price closes below weekly lower channel or RSI < 40
-            if price < lower_channel or rsi_val < 40:
+            # Long exit: price closes below 48h low or trend reversal
+            if price < donchian_low or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price closes above weekly upper channel or RSI > 60
-            if price > upper_channel or rsi_val > 60:
+            # Short exit: price closes above 48h high or trend reversal
+            if price > donchian_high or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyDonchian_Breakout_Volume_RSI"
-timeframe = "1d"
+name = "6h_48hDonchian_VolExpansion_12hTrend"
+timeframe = "6h"
 leverage = 1.0
