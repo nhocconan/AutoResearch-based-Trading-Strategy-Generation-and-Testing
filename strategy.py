@@ -1,8 +1,9 @@
-#!/usr/bin/env python3
-"""
-12h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V1
-Hypothesis: Breakout at Camarilla R1/S1 levels on 12h with volume confirmation and ATR filter. Works in bull by capturing breakouts above R1, in bear by capturing breakdowns below S1. Volume > 1.5x 24-period average confirms breakout strength. ATR(24) > 0.5 * ATR(96) ensures sufficient volatility. Targets 15-30 trades/year via tight Camarilla levels and volume/volatility filters.
-"""
+# 6h_12hPivot_Direction_1dVolumeFilter
+# Hypothesis: Use 12h pivot points (R1/S1) as support/resistance levels, with 1d volume spike to confirm breakouts.
+# Long when price breaks above 12h R1 with volume > 2x 24-period average; short when breaks below 12h S1.
+# Exit when price returns to 12h pivot (mean reversion within the pivot range).
+# Works in bull by capturing breakouts, in bear by fading overextended moves back to pivot.
+# Targets 15-30 trades/year via strict 12h breakout levels + volume confirmation.
 
 import numpy as np
 import pandas as pd
@@ -10,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,94 +19,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels
+    # Get 12h data for pivot points
+    df_12h = get_htf_data(prices, '12h')
+    
+    # Calculate 12h pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
+    r1_12h = 2 * pivot_12h - low_12h
+    s1_12h = 2 * pivot_12h - high_12h
+    
+    # Align 12h pivot levels to 6h timeframe
+    pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    
+    # Get 1d data for volume filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for previous day
-    camarilla_R1 = np.full_like(close_1d, np.nan)
-    camarilla_S1 = np.full_like(close_1d, np.nan)
-    
-    for i in range(1, len(close_1d)):
-        # Use previous day's OHLC
-        prev_high = high_1d[i-1]
-        prev_low = low_1d[i-1]
-        prev_close = close_1d[i-1]
-        range_ = prev_high - prev_low
-        
-        camarilla_R1[i] = prev_close + 1.1 * range_ / 12
-        camarilla_S1[i] = prev_close - 1.1 * range_ / 12
-    
-    # Align Camarilla levels to 12h timeframe
-    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
-    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
-    
-    # Volume confirmation: volume > 1.5x 24-period average
-    vol_ma = np.full_like(volume, np.nan)
+    # 1d volume moving average (24-period)
+    volume_1d = df_1d['volume'].values
+    vol_ma_1d = np.full_like(volume_1d, np.nan)
     vol_period = 24
     
-    if len(volume) >= vol_period:
-        for i in range(vol_period, len(volume)):
-            vol_ma[i] = np.mean(volume[i - vol_period:i])
+    if len(volume_1d) >= vol_period:
+        for i in range(vol_period, len(volume_1d)):
+            vol_ma_1d[i] = np.mean(volume_1d[i - vol_period:i])
     
-    # ATR filter: ATR(24) > 0.5 * ATR(96) for volatility regime
-    def calculate_atr(high, low, close, period):
-        atr = np.full_like(close, np.nan)
-        if len(close) < period:
-            return atr
-        tr = np.zeros(len(close))
-        tr[0] = high[0] - low[0]
-        for i in range(1, len(close)):
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        # Wilder smoothing
-        atr[period-1] = np.mean(tr[:period])
-        for i in range(period, len(close)):
-            atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
-        return atr
-    
-    atr_24 = calculate_atr(high, low, close, 24)
-    atr_96 = calculate_atr(high, low, close, 96)
-    vol_filter = (atr_24 > 0.5 * atr_96) & ~np.isnan(atr_24) & ~np.isnan(atr_96)
+    # Align 1d volume MA to 6h timeframe
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, vol_period)  # Ensure sufficient data
+    start_idx = max(30, vol_period)  # Need enough data for calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(camarilla_R1_aligned[i]) or np.isnan(camarilla_S1_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(atr_24[i]) or np.isnan(atr_96[i])):
+        if (np.isnan(pivot_12h_aligned[i]) or np.isnan(r1_12h_aligned[i]) or 
+            np.isnan(s1_12h_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume and volatility confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
-        vol_regime = vol_filter[i]
+        # Volume confirmation: current 6h volume > 2x 1d volume MA
+        # Need to get corresponding 1d volume MA for this 6h bar
+        vol_confirm = volume[i] > 2.0 * vol_ma_1d_aligned[i]
         
         if position == 0:
-            # Long: Close > Camarilla R1 + volume + volatility
-            if close[i] > camarilla_R1_aligned[i] and vol_confirm and vol_regime:
+            # Long: price breaks above R1 with volume confirmation
+            if close[i] > r1_12h_aligned[i] and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close < Camarilla S1 + volume + volatility
-            elif close[i] < camarilla_S1_aligned[i] and vol_confirm and vol_regime:
+            # Short: price breaks below S1 with volume confirmation
+            elif close[i] < s1_12h_aligned[i] and vol_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Close < Camarilla S1 (reversal) or volatility collapse
-            if close[i] < camarilla_S1_aligned[i] or not vol_regime:
+            # Long exit: price returns to pivot level (mean reversion)
+            if close[i] <= pivot_12h_aligned[i]:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Close > Camarilla R1 (reversal) or volatility collapse
-            if close[i] > camarilla_R1_aligned[i] or not vol_regime:
+            # Short exit: price returns to pivot level (mean reversion)
+            if close[i] >= pivot_12h_aligned[i]:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -113,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V1"
-timeframe = "12h"
+name = "6h_12hPivot_Direction_1dVolumeFilter"
+timeframe = "6h"
 leverage = 1.0
