@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_Retest_1dTrend
-Strategy: Retest of weekly pivot levels (R1/S1) with 1d trend filter and volume confirmation.
-Long: Price retests and fails below weekly S1, then closes back above it in 1d uptrend.
-Short: Price retests and fails above weekly R1, then closes back below it in 1d downtrend.
-Designed for 6h timeframe: ~15-25 trades/year per symbol (60-100 total over 4 years).
-Works in bull/bear via trend filter and mean-reversion retest logic.
+4h_HTF_Donchian_VolumeTrend_v1
+Strategy: 4h Donchian(20) breakout with 1D trend filter, volume confirmation, and ATR-based stop.
+Long: Price breaks above 1D 20-day high in uptrend with volume confirmation.
+Short: Price breaks below 1D 20-day low in downtrend with volume confirmation.
+Exit: Opposite breakout or trend reversal.
+Designed for 4h timeframe: ~20-40 trades/year per symbol (80-160 total over 4 years).
+Works in bull/bear via trend filter and volatility-based breakout logic.
 """
 
 import numpy as np
@@ -14,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,37 +23,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points (using daily data to calculate weekly pivots)
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate weekly pivot points from weekly OHLC
-    high_w = df_1w['high'].values
-    low_w = df_1w['low'].values
-    close_w = df_1w['close'].values
-    
-    # Weekly pivot: P = (H + L + C) / 3
-    pivot_w = (high_w + low_w + close_w) / 3.0
-    # Weekly R1 = 2*P - L
-    r1_w = 2 * pivot_w - low_w
-    # Weekly S1 = 2*P - H
-    s1_w = 2 * pivot_w - high_w
-    
-    # Get daily data for trend filter
+    # Get daily data for 20-day high/low and trend filter
     df_1d = get_htf_data(prices, '1d')
     
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
+    
+    # 20-day high and low (Donchian channels)
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
     # Daily EMA50 and EMA200 for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
     # Daily volume average (20-period)
-    vol_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all weekly and daily data to 6h timeframe
-    r1_w_aligned = align_htf_to_ltf(prices, df_1w, r1_w)
-    s1_w_aligned = align_htf_to_ltf(prices, df_1w, s1_w)
+    # ATR for stoploss (optional, using close-based exit instead)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align all daily data to 4h timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
@@ -60,11 +59,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for EMA200
+    start_idx = 200  # need enough for EMA200
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_w_aligned[i]) or np.isnan(s1_w_aligned[i]) or 
+        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
             np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
             np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
@@ -77,33 +76,31 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
         
-        # Weekly pivot retest conditions
-        # Long: price tested below weekly S1, then closed back above it
-        retest_long = low[i] < s1_w_aligned[i] and close[i] > s1_w_aligned[i]
-        # Short: price tested above weekly R1, then closed back below it
-        retest_short = high[i] > r1_w_aligned[i] and close[i] < r1_w_aligned[i]
+        # Breakout conditions
+        breakout_up = close[i] > high_20_aligned[i]
+        breakout_down = close[i] < low_20_aligned[i]
         
         if position == 0:
-            # Long: uptrend + volume + retest long setup
-            if uptrend and vol_confirm and retest_long:
+            # Long: uptrend + volume + breakout up
+            if uptrend and vol_confirm and breakout_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + volume + retest short setup
-            elif downtrend and vol_confirm and retest_short:
+            # Short: downtrend + volume + breakout down
+            elif downtrend and vol_confirm and breakout_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend change, volume confirmation, or retest short setup
-            if not uptrend or vol_confirm or retest_short:
+            # Long exit: trend reversal, breakout down, or volatility stop
+            if not uptrend or breakout_down:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend change, volume confirmation, or retest long setup
-            if not downtrend or vol_confirm or retest_long:
+            # Short exit: trend reversal, breakout up, or volatility stop
+            if not downtrend or breakout_up:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -111,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_Retest_1dTrend"
-timeframe = "6h"
+name = "4h_HTF_Donchian_VolumeTrend_v1"
+timeframe = "4h"
 leverage = 1.0
