@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-12h 1D High/Low Breakout with Volume and Trend Filter
-Hypothesis: Price breaking above the prior day's high or below the prior day's low
-signifies institutional interest and momentum continuation. Volume confirms the breakout
-strength, while a 1-day EMA trend filter ensures alignment with the higher timeframe trend.
-This strategy targets medium-term moves in both bull and bear markets with low trade frequency.
+1d Donchian Breakout with Weekly Trend Filter and Volume Confirmation
+Hypothesis: Donchian breakouts capture strong momentum, weekly trend filter ensures
+alignment with higher timeframe direction, and volume confirmation filters false breakouts.
+This combination works in both bull and bear markets by catching sustained moves while
+avoiding chop. Designed for low trade frequency (target: 15-25 trades/year) to minimize
+fee drag.
 """
 
 import numpy as np
@@ -21,64 +22,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for prior day's high/low and EMA (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for trend filter (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Prior day's high and low (using previous day's values)
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
+    # Weekly EMA20 for trend filter
+    ema20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # 1D EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Daily Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align 1D indicators to 12H timeframe
-    prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high)
-    prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume spike: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup for indicators
+    start_idx = 40  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(prev_high_aligned[i]) or np.isnan(prev_low_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema20_1w_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
-        # Breakout conditions
-        breakout_high = high[i] > prev_high_aligned[i]
-        breakout_low = low[i] < prev_low_aligned[i]
-        vol_ok = vol_spike[i]
-        trend = ema34_1d_aligned[i]
+        weekly_trend = ema20_1w_aligned[i]
+        upper_channel = highest_high[i]
+        lower_channel = lowest_low[i]
+        vol_ok = vol_confirm[i]
         
         if position == 0:
-            # Enter long on upward breakout with volume and uptrend
-            if breakout_high and vol_ok and close[i] > trend:
+            # Enter long: price breaks above upper channel, weekly uptrend, volume confirmation
+            if close[i] > upper_channel and close[i] > weekly_trend and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Enter short on downward breakout with volume and downtrend
-            elif breakout_low and vol_ok and close[i] < trend:
+            # Enter short: price breaks below lower channel, weekly downtrend, volume confirmation
+            elif close[i] < lower_channel and close[i] < weekly_trend and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long on downward breakdown or trend change
-            if low[i] < prev_low_aligned[i] or close[i] < trend:
+            # Exit long: price returns to or below weekly EMA (trend change)
+            if close[i] <= weekly_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short on upward breakout or trend change
-            if high[i] > prev_high_aligned[i] or close[i] > trend:
+            # Exit short: price returns to or above weekly EMA (trend change)
+            if close[i] >= weekly_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -86,6 +82,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1D_High_Low_Breakout_Volume_Trend"
-timeframe = "12h"
+name = "1d_Donchian_Breakout_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
