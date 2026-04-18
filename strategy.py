@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_Pivot_R1_S1_Breakout_Volume_Trend
-Hypothesis: Camarilla pivot levels on 1d (R1/S1) act as strong support/resistance. 
-Price breaking above R1 or below S1 with volume confirmation and weekly trend alignment
-captures momentum moves. Weekly trend filter (EMA34) avoids counter-trend trades.
-Designed for 1d timeframe to reduce trade frequency and fee drag.
-Target: 10-25 trades/year (40-100 total over 4 years) to minimize fee drag.
-Works in both bull and bear markets by following the weekly trend direction.
+6h_12h_Trend_1d_Confluence_Breakout
+Hypothesis: On 6h timeframe, take long when price breaks above the 12h EMA20 with
+1d EMA50 uptrend and volume confirmation; take short when price breaks below
+12h EMA20 with 1d EMA50 downtrend and volume confirmation. Uses EMA trend
+alignment across timeframes to filter noise and capture sustained moves.
+Designed to work in both bull (buy dips in uptrend) and bear (sell rallies in
+downtrend) markets with tight entry conditions targeting 15-25 trades/year.
 """
 
 import numpy as np
@@ -23,73 +23,62 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly trend filter: EMA34 on weekly close
-    df_1w = get_htf_data(prices, '1w')
-    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # 12h EMA20 for trend and breakout level
+    df_12h = get_htf_data(prices, '12h')
+    ema_12h_20 = pd.Series(df_12h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_12h_20_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_20)
     
-    # Daily Camarilla pivot levels (based on previous day)
-    # R1 = close + 1.1*(high - low)/12
-    # S1 = close - 1.1*(high - low)/12
-    # Using previous day's OHLC to avoid look-ahead
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = 0
-    prev_low[0] = 0
-    prev_close[0] = 0
+    # 1d EMA50 for higher timeframe trend filter
+    df_1d = get_htf_data(prices, '1d')
+    ema_1d_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
     
-    camarilla_range = prev_high - prev_low
-    R1 = prev_close + 1.1 * camarilla_range / 12
-    S1 = prev_close - 1.1 * camarilla_range / 12
-    
-    # Volume filter: >1.5x 20-day average
+    # Volume filter: >1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 20  # Warmup for volume MA and to have previous day data
+    start_idx = 20  # Warmup for volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(R1[i]) or np.isnan(S1[i]) or
-            np.isnan(volume_filter[i]) or np.isnan(ema_34_1w_aligned[i])):
+        if (np.isnan(ema_12h_20_aligned[i]) or np.isnan(ema_1d_50_aligned[i]) or
+            np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        r1_level = R1[i]
-        s1_level = S1[i]
+        ema_12h = ema_12h_20_aligned[i]
+        ema_1d = ema_1d_50_aligned[i]
         vol_ok = volume_filter[i]
-        weekly_trend = ema_34_1w_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume in uptrend (weekly)
-            if price > r1_level and vol_ok and price > weekly_trend:
+            # Long: price breaks above 12h EMA20 with 1d uptrend and volume
+            if price > ema_12h and ema_1d > ema_12h and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume in downtrend (weekly)
-            elif price < s1_level and vol_ok and price < weekly_trend:
+            # Short: price breaks below 12h EMA20 with 1d downtrend and volume
+            elif price < ema_12h and ema_1d < ema_12h and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price returns to previous day's close or trend reverses
-            if price < prev_close[i] or price < weekly_trend:
+            # Exit: price returns below 12h EMA20 or 1d trend turns down
+            if price < ema_12h or ema_1d < ema_12h:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price returns to previous day's close or trend reverses
-            if price > prev_close[i] or price > weekly_trend:
+            # Exit: price returns above 12h EMA20 or 1d trend turns up
+            if price > ema_12h or ema_1d > ema_12h:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Camarilla_Pivot_R1_S1_Breakout_Volume_Trend"
-timeframe = "1d"
+name = "6h_12h_Trend_1d_Confluence_Breakout"
+timeframe = "6h"
 leverage = 1.0
