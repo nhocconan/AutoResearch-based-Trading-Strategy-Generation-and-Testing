@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_Volume
-Hypothesis: 4-hour breakouts above Camarilla R1 or below S1 with 1-day EMA34 trend filter and volume confirmation.
-Camarilla levels provide precise intraday support/resistance, daily EMA34 filters trend direction, volume confirms breakout strength.
+4h_Donchian_Breakout_Volume_ADX
+Hypothesis: 4-hour breakouts above/below 20-period Donchian channels with volume confirmation and ADX trend filter.
+Donchian channels provide dynamic support/resistance, volume confirms breakout strength, ADX ensures trending conditions.
 Designed for low trade frequency (target: 20-50/year) with strong performance in both bull and bear markets.
 """
 
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,37 +20,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-day EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Calculate 20-period Donchian channels
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
     
-    # Calculate EMA34 with proper smoothing
-    ema34_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 34:
-        ema34_1d[33] = np.mean(close_1d[0:34])
-        alpha = 2 / (34 + 1)
-        for i in range(34, len(close_1d)):
-            ema34_1d[i] = close_1d[i] * alpha + ema34_1d[i-1] * (1 - alpha)
+    # Calculate ADX (14-period) for trend strength
+    # Calculate True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Align 1-day EMA34 to 4h timeframe
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate Directional Movement
+    up_move = high[1:] - high[:-1]
+    down_move = low[:-1] - low[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # Calculate Camarilla levels from previous day
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_r1 = np.full(n, np.nan)
-    camarilla_s1 = np.full(n, np.nan)
+    # Smoothed values
+    def smooth_wilder(arr, period):
+        smoothed = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return smoothed
+        smoothed[period-1] = np.nansum(arr[1:period+1])
+        for i in range(period, len(arr)):
+            if not np.isnan(smoothed[i-1]):
+                smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + arr[i]
+        return smoothed
     
-    for i in range(1, n):
-        # Use previous day's OHLC from 1d data
-        daily_idx = i // 6  # 6 four-hour bars per day
-        if daily_idx >= 1 and daily_idx < len(df_1d):
-            prev_daily_idx = daily_idx - 1
-            prev_high = df_1d['high'].values[prev_daily_idx]
-            prev_low = df_1d['low'].values[prev_daily_idx]
-            prev_close = df_1d['close'].values[prev_daily_idx]
-            range_val = prev_high - prev_low
-            camarilla_r1[i] = prev_close + range_val * 1.1 / 12
-            camarilla_s1[i] = prev_close - range_val * 1.1 / 12
+    atr = smooth_wilder(tr, 14)
+    plus_di = 100 * smooth_wilder(plus_dm, 14) / atr
+    minus_di = 100 * smooth_wilder(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = smooth_wilder(dx, 14)
     
     # Volume spike: current volume > 1.8 x 20-period average
     vol_ma = np.full(n, np.nan)
@@ -61,37 +68,35 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20, 6)  # Ensure all indicators ready
+    start_idx = max(20, 14*3, 20)  # Ensure all indicators ready
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(adx[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: break above Camarilla R1 with volume spike and 1d uptrend
-            if (close[i] > camarilla_r1[i] and vol_spike[i] and 
-                close[i] > ema34_1d_aligned[i]):
+            # Long: break above Donchian high with volume spike and strong trend (ADX > 25)
+            if (close[i] > donchian_high[i] and vol_spike[i] and adx[i] > 25):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Camarilla S1 with volume spike and 1d downtrend
-            elif (close[i] < camarilla_s1[i] and vol_spike[i] and 
-                  close[i] < ema34_1d_aligned[i]):
+            # Short: break below Donchian low with volume spike and strong trend (ADX > 25)
+            elif (close[i] < donchian_low[i] and vol_spike[i] and adx[i] > 25):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: close below Camarilla S1 or 1d trend turns down
-            if (close[i] < camarilla_s1[i] or close[i] < ema34_1d_aligned[i]):
+            # Long exit: close below Donchian low or ADX weakens (< 20)
+            if (close[i] < donchian_low[i] or adx[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: close above Camarilla R1 or 1d trend turns up
-            if (close[i] > camarilla_r1[i] or close[i] > ema34_1d_aligned[i]):
+            # Short exit: close above Donchian high or ADX weakens (< 20)
+            if (close[i] > donchian_high[i] or adx[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+name = "4h_Donchian_Breakout_Volume_ADX"
 timeframe = "4h"
 leverage = 1.0
