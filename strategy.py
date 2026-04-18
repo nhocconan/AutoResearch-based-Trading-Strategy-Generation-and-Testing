@@ -13,29 +13,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points and ADX
+    # Get daily data for Donchian channels and ADX
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot points (standard)
-    pivot = np.full_like(high_1d, np.nan)
-    r1 = np.full_like(high_1d, np.nan)
-    s1 = np.full_like(low_1d, np.nan)
-    r2 = np.full_like(high_1d, np.nan)
-    s2 = np.full_like(low_1d, np.nan)
+    # Calculate 20-period Donchian channels (based on previous day)
+    upper = np.full_like(high_1d, np.nan)
+    lower = np.full_like(low_1d, np.nan)
     
-    for i in range(1, len(close_1d)):
-        prev_high = high_1d[i-1]
-        prev_low = low_1d[i-1]
-        prev_close = close_1d[i-1]
-        
-        pivot[i] = (prev_high + prev_low + prev_close) / 3.0
-        r1[i] = 2 * pivot[i] - prev_low
-        s1[i] = 2 * pivot[i] - prev_high
-        r2[i] = pivot[i] + (prev_high - prev_low)
-        s2[i] = pivot[i] - (prev_high - prev_low)
+    for i in range(20, len(high_1d)):
+        upper[i] = np.max(high_1d[i-20:i])
+        lower[i] = np.min(low_1d[i-20:i])
     
     # Calculate 14-period ADX for regime filtering
     def calculate_adx(high, low, close, period=14):
@@ -95,26 +85,12 @@ def generate_signals(prices):
     
     adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Align all 1d data to 1h timeframe
+    upper_1h = align_htf_to_ltf(prices, df_1d, upper)
+    lower_1h = align_htf_to_ltf(prices, df_1d, lower)
+    adx_1h = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Weekly EMA(34) for trend filter
-    if len(close_1w) >= 34:
-        ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False).mean().values
-    else:
-        ema_1w = np.full_like(close_1w, np.nan)
-    
-    # Align all 1d data to 12h timeframe
-    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
-    r2_12h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_12h = align_htf_to_ltf(prices, df_1d, s2)
-    adx_12h = align_htf_to_ltf(prices, df_1d, adx_1d)
-    ema_1w_12h = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Volume confirmation: volume > 1.5x 24-period average (moderate threshold)
+    # Volume confirmation: volume > 1.5x 24-period average
     vol_ma = np.full_like(volume, np.nan)
     vol_period = 24
     
@@ -125,52 +101,49 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(24, 14, 34) + 1  # Ensure we have enough data
+    start_idx = max(24, 20, 14) + 1  # Ensure we have enough data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
-            np.isnan(r2_12h[i]) or np.isnan(s2_12h[i]) or 
-            np.isnan(adx_12h[i]) or np.isnan(ema_1w_12h[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(upper_1h[i]) or np.isnan(lower_1h[i]) or 
+            np.isnan(adx_1h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Regime filters: daily ADX < 25 (range) AND price above weekly EMA (bullish bias)
-        range_regime = adx_12h[i] < 25
-        bullish_bias = close[i] > ema_1w_12h[i]
+        # Regime filter: daily ADX < 25 (range market)
+        range_regime = adx_1h[i] < 25
         
         if position == 0:
-            # Long: price breaks above R1 with volume in range regime
-            if close[i] > r1_12h[i] and vol_confirm and range_regime:
-                signals[i] = 0.25
+            # Long: price breaks above upper Donchian with volume in range regime
+            if close[i] > upper_1h[i] and vol_confirm and range_regime:
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below S1 with volume in range regime
-            elif close[i] < s1_12h[i] and vol_confirm and range_regime:
-                signals[i] = -0.25
+            # Short: price breaks below lower Donchian with volume in range regime
+            elif close[i] < lower_1h[i] and vol_confirm and range_regime:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below S1 OR ADX rises above 30 (trend emerging)
-            if close[i] < s1_12h[i] or adx_12h[i] > 30:
-                signals[i] = -0.25  # reverse to short
+            # Long exit: price breaks below lower Donchian OR ADX rises above 30 (trend emerging)
+            if close[i] < lower_1h[i] or adx_1h[i] > 30:
+                signals[i] = -0.20  # reverse to short
                 position = -1
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price breaks above R1 OR ADX rises above 30 (trend emerging)
-            if close[i] > r1_12h[i] or adx_12h[i] > 30:
-                signals[i] = 0.25  # reverse to long
+            # Short exit: price breaks above upper Donchian OR ADX rises above 30 (trend emerging)
+            if close[i] > upper_1h[i] or adx_1h[i] > 30:
+                signals[i] = 0.20  # reverse to long
                 position = 1
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "12h_Pivot_R1_S1_Breakout_Volume_Regime"
-timeframe = "12h"
+name = "1h_Donchian_Breakout_Volume_ADX_Filter"
+timeframe = "1h"
 leverage = 1.0
