@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA34 trend filter and volume confirmation.
-# Uses Donchian channels for breakout signals, 12h EMA34 for trend direction, and volume spike for confirmation.
-# Designed for 20-50 trades/year to minimize fee drag. Works in both bull and bear markets via trend filter.
+# Hypothesis: 4h 20-period Donchian breakout with 1-day EMA34 trend filter and volume confirmation.
+# Uses Donchian channels for breakout signals, 1d EMA34 for trend direction, and volume spike for confirmation.
+# Designed for 20-30 trades/year to minimize fee drift. Works in both bull and bear markets via trend filter.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,19 +18,19 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA34 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Get 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA(34) on 12h data
-    ema_34_12h = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= 34:
-        ema_34_12h[33] = np.mean(close_12h[:34])
-        for i in range(34, len(close_12h)):
-            ema_34_12h[i] = (close_12h[i] * 2/35) + (ema_34_12h[i-1] * 33/35)
+    # Calculate EMA(34) on 1d data
+    ema_34_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 34:
+        ema_34_1d[33] = np.mean(close_1d[:34])
+        for i in range(34, len(close_1d)):
+            ema_34_1d[i] = (close_1d[i] * 2/35) + (ema_34_1d[i-1] * 33/35)
     
-    # Align 12h EMA34 to 4h timeframe
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Align 1d EMA34 to 4h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate 4h ATR(14) for stop loss and breakout threshold
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
@@ -61,7 +61,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(upper_channel[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(upper_channel[i]) or 
             np.isnan(lower_channel[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -69,9 +69,9 @@ def generate_signals(prices):
         # Volume confirmation: current volume > 2.0 * 20-period average
         vol_confirmed = volume[i] > 2.0 * vol_ma[i]
         
-        # Trend filter: price above/below 12h EMA34
-        trend_up = close[i] > ema_34_12h_aligned[i]
-        trend_down = close[i] < ema_34_12h_aligned[i]
+        # Trend filter: price above/below 1d EMA34
+        trend_up = close[i] > ema_34_1d_aligned[i]
+        trend_down = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:
             # Long entry: close above upper Donchian channel + 0.2*ATR, with volume and trend filter
@@ -107,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_12hEMA34_VolumeFilter"
+name = "4h_Donchian20_1dEMA34_VolumeFilter"
 timeframe = "4h"
 leverage = 1.0
