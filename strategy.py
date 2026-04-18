@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h KAMA trend + RSI(14) mean reversion + volume spike filter.
-# KAMA adapts to market noise, identifying true trend direction.
-# RSI(14) < 30 or > 70 signals overextended conditions for mean reversion entries.
-# Volume spike (>1.8x 20-period average) confirms conviction at reversal points.
-# Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
-# Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag.
-name = "4h_KAMA_RSI_Volume_MeanReversion"
-timeframe = "4h"
+# Hypothesis: 1d Donchian breakout + weekly EMA trend + volume confirmation.
+# Donchian(20) breakout captures momentum, weekly EMA34 filters trend direction.
+# Volume spike (>1.5x 20-period average) confirms conviction.
+# Works in bull markets (breakouts above upper band) and bear markets (breakdowns below lower band).
+# Target: 10-25 trades/year (40-100 total over 4 years) to minimize fee drag.
+name = "1d_Donchian20_WeeklyEMA34_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,82 +22,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for KAMA calculation
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = pd.Series(df_4h['close'].values)
+    # Get daily data for Donchian channels (already daily from prices)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
     
-    # Calculate Efficiency Ratio (ER) for KAMA
-    change = abs(close_4h - close_4h.shift(10))
-    volatility = abs(close_4h - close_4h.shift(1)).rolling(window=10).sum()
-    er = change / volatility
-    er = er.fillna(0)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Get weekly data for EMA trend filter
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate KAMA
-    kama = np.zeros_like(close_4h)
-    kama[0] = close_4h.iloc[0]
-    for i in range(1, len(close_4h)):
-        kama[i] = kama[i-1] + sc.iloc[i] * (close_4h.iloc[i] - kama[i-1])
+    # Calculate EMA34 on weekly data
+    close_weekly = pd.Series(df_weekly['close'].values)
+    ema_34_weekly = close_weekly.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align KAMA to 4h timeframe (no additional delay needed)
-    kama_aligned = align_htf_to_ltf(prices, df_4h, kama.values)
+    # Align EMA to daily timeframe
+    ema_34_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_34_weekly)
     
-    # Calculate RSI(14) on 4h data
-    delta = close_4h.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50)  # neutral when undefined
-    rsi_aligned = align_htf_to_ltf(prices, df_4h, rsi.values)
-    
-    # Calculate volume spike: current volume > 1.8 * 20-period average volume
+    # Calculate volume spike: current volume > 1.5 * 20-period average volume
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma_20)
+    volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicator calculations
+    start_idx = 100  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
+            np.isnan(ema_34_weekly_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        kama_val = kama_aligned[i]
-        rsi_val = rsi_aligned[i]
+        donchian_upper_val = donchian_upper[i]
+        donchian_lower_val = donchian_lower[i]
+        ema_val = ema_34_weekly_aligned[i]
         
         if position == 0:
-            # Long: Price below KAMA (dip in uptrend) AND RSI oversold AND volume spike
-            if close_val < kama_val and rsi_val < 30 and volume_spike[i]:
+            # Long: Close above upper Donchian AND price above EMA34 AND volume spike
+            if close_val > donchian_upper_val and close_val > ema_val and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price above KAMA (rally in downtrend) AND RSI overbought AND volume spike
-            elif close_val > kama_val and rsi_val > 70 and volume_spike[i]:
+            # Short: Close below lower Donchian AND price below EMA34 AND volume spike
+            elif close_val < donchian_lower_val and close_val < ema_val and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price crosses above KAMA (trend resumption) OR RSI overbought
-            if close_val > kama_val or rsi_val > 70:
+            # Long exit: Close below EMA34 (trend change)
+            if close_val < ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price crosses below KAMA (trend resumption) OR RSI oversold
-            if close_val < kama_val or rsi_val < 30:
+            # Short exit: Close above EMA34 (trend change)
+            if close_val > ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
