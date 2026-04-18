@@ -1,30 +1,83 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with Volume Confirmation and ATR Filter
-Hypothesis: Donchian channel breakouts capture institutional moves. 
-Volume confirmation ensures follow-through. ATR filter avoids false breakouts 
-in low volatility. Works in both bull and bear by following breakout direction.
+1d Weekly Donchian Breakout with Volume Confirmation and ADX Trend Filter
+Hypothesis: Weekly Donchian channels (20-week) capture major trend breakouts.
+Daily timeframe provides entry precision with volume confirmation and ADX filter
+to avoid false breakouts in ranging markets. Works in both bull and bear markets
+by following breakout direction. Target: 10-25 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_atr(high, low, close, period):
-    """Calculate Average True Range with proper handling"""
-    if len(high) < period:
+def calculate_highest(arr, period):
+    """Calculate rolling highest with NaN for insufficient data"""
+    if len(arr) < period:
+        return np.full_like(arr, np.nan)
+    result = np.full(len(arr), np.nan)
+    for i in range(period-1, len(arr)):
+        result[i] = np.max(arr[i-period+1:i+1])
+    return result
+
+def calculate_lowest(arr, period):
+    """Calculate rolling lowest with NaN for insufficient data"""
+    if len(arr) < period:
+        return np.full_like(arr, np.nan)
+    result = np.full(len(arr), np.nan)
+    for i in range(period-1, len(arr)):
+        result[i] = np.min(arr[i-period+1:i+1])
+    return result
+
+def calculate_adx(high, low, close, period=14):
+    """Calculate Average Directional Index"""
+    if len(high) < period + 1:
         return np.full_like(high, np.nan)
+    
+    # True Range
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
+    tr[0] = tr1[0]
     
+    # Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
     atr = np.zeros_like(high)
     atr[0] = tr[0]
+    dm_plus_smooth = np.zeros_like(high)
+    dm_minus_smooth = np.zeros_like(high)
+    
     for i in range(1, len(tr)):
         atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-    return atr
+        dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period-1) + dm_plus[i]) / period
+        dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period-1) + dm_minus[i]) / period
+    
+    # Directional Indicators
+    plus_di = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
+    minus_di = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
+    
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, 
+                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    
+    adx = np.zeros_like(dx)
+    for i in range(len(dx)):
+        if i < period:
+            adx[i] = np.nan
+        elif i == period:
+            adx[i] = np.mean(dx[1:i+1])
+        else:
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+    
+    return adx
 
 def generate_signals(prices):
     n = len(prices)
@@ -36,32 +89,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian channels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for Donchian channels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 20-day Donchian channels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate weekly Donchian channels (20-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate rolling highest high and lowest low over 20 days
-    highest_20d = np.full_like(high_1d, np.nan)
-    lowest_20d = np.full_like(low_1d, np.nan)
+    donchian_high = calculate_highest(high_1w, 20)
+    donchian_low = calculate_lowest(low_1w, 20)
     
-    for i in range(len(high_1d)):
-        if i >= 19:
-            highest_20d[i] = np.max(high_1d[i-19:i+1])
-            lowest_20d[i] = np.min(low_1d[i-19:i+1])
-        else:
-            highest_20d[i] = np.max(high_1d[0:i+1])
-            lowest_20d[i] = np.min(low_1d[0:i+1])
+    # Align to daily timeframe (use previous week's levels)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
     
-    # Align to 4h timeframe (use previous day's levels to avoid look-ahead)
-    highest_20d_aligned = align_htf_to_ltf(prices, df_1d, highest_20d)
-    lowest_20d_aligned = align_htf_to_ltf(prices, df_1d, lowest_20d)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-day average
     vol_ma = np.zeros_like(volume)
     for i in range(len(volume)):
         if i < 20:
@@ -70,57 +114,46 @@ def generate_signals(prices):
             vol_ma[i] = np.mean(volume[i-19:i+1])
     vol_spike = volume > (vol_ma * 1.5)
     
-    # ATR filter: only trade when volatility is sufficient
-    atr_val = calculate_atr(high, low, close, 14)
-    atr_ma = np.zeros_like(atr_val)
-    for i in range(len(atr_val)):
-        if i < 14:
-            atr_ma[i] = np.mean(atr_val[max(0, i-13):i+1]) if not np.isnan(atr_val[max(0, i-13):i+1]).all() else atr_val[i]
-        else:
-            atr_ma[i] = np.mean(atr_val[i-13:i+1])
-    # Trade when ATR is above its 14-period average (avoid low volatility)
-    vol_filter = atr_val > atr_ma
+    # ADX trend filter: only trade when ADX > 25 (trending market)
+    adx = calculate_adx(high, low, close, 14)
+    trending_market = adx > 25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Warmup for indicators
+    start_idx = 35  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(highest_20d_aligned[i]) or np.isnan(lowest_20d_aligned[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(atr_val[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(adx[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long breakout: price breaks above 20-day high with volume and volatility
-            if (close[i] > highest_20d_aligned[i] and 
+            # Long breakout: price breaks above weekly Donchian high with volume in trending market
+            if (close[i] > donchian_high_aligned[i] and 
                 vol_spike[i] and 
-                vol_filter[i]):
+                trending_market[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below 20-day low with volume and volatility
-            elif (close[i] < lowest_20d_aligned[i] and 
+            # Short breakdown: price breaks below weekly Donchian low with volume in trending market
+            elif (close[i] < donchian_low_aligned[i] and 
                   vol_spike[i] and 
-                  vol_filter[i]):
+                  trending_market[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns below 20-day high or conditions fail
-            if (close[i] < highest_20d_aligned[i] or 
-                not vol_spike[i] or 
-                not vol_filter[i]):
+            # Exit long: price returns below weekly Donchian high or volatility spike ends
+            if close[i] < donchian_high_aligned[i] or not vol_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns above 20-day low or conditions fail
-            if (close[i] > lowest_20d_aligned[i] or 
-                not vol_spike[i] or 
-                not vol_filter[i]):
+            # Exit short: price returns above weekly Donchian low or volatility spike ends
+            if close[i] > donchian_low_aligned[i] or not vol_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -128,6 +161,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_ATRFilter"
-timeframe = "4h"
+name = "1d_Weekly_Donchian_Breakout_Volume_ADXFilter"
+timeframe = "1d"
 leverage = 1.0
