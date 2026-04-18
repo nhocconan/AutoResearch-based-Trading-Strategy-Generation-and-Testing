@@ -1,117 +1,102 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyPivot_TrendBreakout
-Hypothesis: Trade breakouts of weekly pivot levels (R1/S1) with daily trend filter and volume confirmation. Weekly pivots provide strong support/resistance levels that often hold in both bull and bear markets. Breakouts above/below these levels with volume and daily trend alignment capture momentum moves. Designed for low trade frequency (<20/year) to minimize fee drag while capturing significant moves.
+1d_RSI_MeanReversion_SmallCap
+Hypothesis: On the daily timeframe, extreme RSI values indicate exhaustion in BTC/ETH mean-reverting opportunities. 
+Enter long when RSI(14) < 30 and price > 200-day SMA (avoid dead cats), short when RSI(14) > 70 and price < 200-day SMA.
+Volume must be > 1.5x 20-day average to confirm participation. 
+Exit when RSI returns to neutral range (40-60) or opposite extreme is reached.
+Designed for low frequency (~10-20 trades/year) to minimize fee drag in choppy markets like 2025.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from typing import Tuple
 
-def generate_signals(prices):
+def calculate_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
+    """Calculate RSI with Wilder's smoothing."""
+    delta = np.diff(close)
+    up = np.where(delta > 0, delta, 0.0)
+    down = np.where(delta < 0, -delta, 0.0)
+    
+    roll_up = np.zeros_like(close)
+    roll_down = np.zeros_like(close)
+    
+    if len(close) >= period:
+        roll_up[period] = np.mean(up[:period])
+        roll_down[period] = np.mean(down[:period])
+        for i in range(period + 1, len(close)):
+            roll_up[i] = (roll_up[i-1] * (period - 1) + up[i-1]) / period
+            roll_down[i] = (roll_down[i-1] * (period - 1) + down[i-1]) / period
+    
+    rs = np.where(roll_down != 0, roll_up / roll_down, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[:period] = np.nan
+    return rsi
+
+def calculate_sma(arr: np.ndarray, period: int) -> np.ndarray:
+    """Simple moving average."""
+    sma = np.full_like(arr, np.nan)
+    for i in range(period - 1, len(arr)):
+        sma[i] = np.mean(arr[i - period + 1:i + 1])
+    return sma
+
+def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
+    # Indicators
+    rsi = calculate_rsi(close, 14)
+    sma_200 = calculate_sma(close, 200)
     
-    # Get daily data for trend filter and volume
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Weekly OHLC for pivot calculation
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly pivot points (using previous week's data)
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L
-    # S1 = 2*P - H
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_close_1w = np.roll(close_1w, 1)
-    
-    # Handle first bar
-    prev_high_1w[0] = high_1w[0]
-    prev_low_1w[0] = low_1w[0]
-    prev_close_1w[0] = close_1w[0]
-    
-    # Weekly pivot levels
-    pivot_1w = (prev_high_1w + prev_low_1w + prev_close_1w) / 3.0
-    r1_1w = 2.0 * pivot_1w - prev_low_1w
-    s1_1w = 2.0 * pivot_1w - prev_high_1w
-    
-    # Daily EMA trend filter (50-period)
-    close_1d = df_1d['close'].values
-    ema_period = 50
-    if len(close_1d) >= ema_period:
-        ema_1d = np.zeros_like(close_1d)
-        ema_1d[ema_period-1] = np.mean(close_1d[:ema_period])
-        for i in range(ema_period, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * 2 / (ema_period + 1)) + (ema_1d[i-1] * (ema_period - 1) / (ema_period + 1))
-    else:
-        ema_1d = np.full_like(close_1d, np.nan)
-    
-    # Volume confirmation: volume > 1.5x 20-day average
-    vol_ma = np.zeros_like(volume)
-    vol_period = 20
-    for i in range(vol_period, len(volume)):
-        vol_ma[i] = np.mean(volume[i-vol_period:i])
-    
-    # Align weekly pivot levels and daily EMA to daily timeframe
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Volume confirmation: >1.5x 20-day average
+    vol_ma_20 = np.full_like(volume, np.nan)
+    for i in range(20, len(volume)):
+        vol_ma_20[i] = np.mean(volume[i-20:i])
+    vol_confirm = volume > 1.5 * vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, vol_period, ema_period)
+    start_idx = max(200, 20)  # Need 200-day SMA and 20-day vol MA
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available
-        if (np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        # Skip if data not ready
+        if np.isnan(rsi[i]) or np.isnan(sma_200[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
-        
         if position == 0:
-            # Long: price breaks above R1 with volume and above daily EMA
-            if close[i] > r1_1w_aligned[i] and vol_confirm and close[i] > ema_1d_aligned[i]:
+            # Long: RSI oversold + price above 200-day SMA + volume confirmation
+            if rsi[i] < 30 and close[i] > sma_200[i] and vol_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume and below daily EMA
-            elif close[i] < s1_1w_aligned[i] and vol_confirm and close[i] < ema_1d_aligned[i]:
+            # Short: RSI overbought + price below 200-day SMA + volume confirmation
+            elif rsi[i] > 70 and close[i] < sma_200[i] and vol_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price closes below S1 (opposite pivot) or below daily EMA
-            if close[i] < s1_1w_aligned[i] or close[i] < ema_1d_aligned[i]:
-                signals[i] = -0.25  # reverse to short
-                position = -1
+            # Long exit: RSI returns to neutral (40-60) or becomes overbought
+            if rsi[i] >= 40:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price closes above R1 (opposite pivot) or above daily EMA
-            if close[i] > r1_1w_aligned[i] or close[i] > ema_1d_aligned[i]:
-                signals[i] = 0.25  # reverse to long
-                position = 1
+            # Short exit: RSI returns to neutral (40-60) or becomes oversold
+            if rsi[i] <= 60:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "1d_WeeklyPivot_TrendBreakout"
+name = "1d_RSI_MeanReversion_SmallCap"
 timeframe = "1d"
 leverage = 1.0
