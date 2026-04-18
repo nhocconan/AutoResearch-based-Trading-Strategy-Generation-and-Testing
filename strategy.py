@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_With_WeeklyTrend_Filter_v1
-Hypothesis: Use KAMA to capture trend direction on 1d timeframe, filtered by weekly trend (EMA34) and volume confirmation. KAMA adapts to market noise, reducing whipsaws in sideways markets while capturing strong trends. Weekly trend filter ensures we only trade in the direction of the higher timeframe trend, improving win rate in both bull and bear markets. Target: 15-25 trades/year.
+4h_Camarilla_R1S1_Breakout_Volume_Spike_ADXFilter
+Hypothesis: Improve prior version by adding ADX(14) > 25 trend filter to avoid whipsaws in ranging markets, while maintaining the core edge of institutional breakouts at Camarilla R1/S1 levels with volume confirmation. Designed for fewer, higher-quality trades in both bull and bear markets by requiring strong trend presence.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,87 +18,119 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA calculation (adaptive moving average)
-    # ER = Efficiency Ratio = abs(close - close[10]) / sum(abs(close - close[1:11]))
-    # SSC = [ER * (fastest - slowest) + slowest]^2
-    # KAMA = prevKAMA + SSC * (close - prevKAMA)
-    lookback = 10
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
+    # Calculate Camarilla levels from previous day (1d timeframe)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate change and volatility
-    change = np.abs(np.diff(close, n=lookback))
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)
+    # Camarilla calculation: R1/S1 from previous day
+    camarilla_range = high_1d - low_1d
+    r1_1d = close_1d + (1.1 * camarilla_range) / 12
+    s1_1d = close_1d - (1.1 * camarilla_range) / 12
     
-    # Avoid division by zero
-    volatility = np.where(volatility == 0, 1, volatility)
-    er = np.concatenate([np.full(lookback, np.nan), change / volatility])
+    # Align to 4h timeframe (use previous day's levels)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Calculate SSC
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # 12h EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate KAMA
-    kama = np.full(n, np.nan)
-    kama[lookback] = close[lookback]  # Initialize
-    
-    for i in range(lookback + 1, n):
-        if np.isnan(kama[i-1]) or np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # Weekly trend filter: EMA34 on weekly timeframe
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Volume confirmation: >1.5x 20-period average
+    # Volume confirmation: >2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
+    
+    # ADX(14) trend filter on 4h data
+    # Calculate True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    
+    # Calculate Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smooth TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        alpha = 1.0 / period
+        # First value is simple average
+        if len(data) >= period:
+            result[period-1] = np.nanmean(data[:period])
+            for i in range(period, len(data)):
+                result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+        return result
+    
+    tr_smooth = wilders_smoothing(tr, 14)
+    plus_dm_smooth = wilders_smoothing(plus_dm, 14)
+    minus_dm_smooth = wilders_smoothing(minus_dm, 14)
+    
+    # Calculate DI+ and DI-
+    plus_di = np.where(tr_smooth != 0, 100 * plus_dm_smooth / tr_smooth, 0)
+    minus_di = np.where(tr_smooth != 0, 100 * minus_dm_smooth / tr_smooth, 0)
+    
+    # Calculate DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = wilders_smoothing(dx, 14)
+    
+    # ADX > 25 indicates strong trend
+    adx_strong = adx > 25
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 50  # Wait for KAMA initialization
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(kama[i]) or np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(volume_confirmed[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema_12h_aligned[i]) or np.isnan(volume_spike[i]) or
+            np.isnan(adx_strong[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        kama_val = kama[i]
-        weekly_trend = ema_34_1w_aligned[i]
-        vol_conf = volume_confirmed[i]
+        r1 = r1_aligned[i]
+        s1 = s1_aligned[i]
+        ema_12h_val = ema_12h_aligned[i]
+        vol_spike = volume_spike[i]
+        strong_trend = adx_strong[i]
         
         if position == 0:
-            # Long: price above KAMA, above weekly trend, with volume confirmation
-            if price > kama_val and price > weekly_trend and vol_conf:
+            # Long: price breaks above R1 with volume, above 12h EMA, and strong trend
+            if price > r1 and vol_spike and price > ema_12h_val and strong_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA, below weekly trend, with volume confirmation
-            elif price < kama_val and price < weekly_trend and vol_conf:
+            # Short: price breaks below S1 with volume, below 12h EMA, and strong trend
+            elif price < s1 and vol_spike and price < ema_12h_val and strong_trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price below KAMA or below weekly trend
-            if price < kama_val or price < weekly_trend:
+            # Exit: price below S1 or below 12h EMA
+            if price < s1 or price < ema_12h_val:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price above KAMA or above weekly trend
-            if price > kama_val or price > weekly_trend:
+            # Exit: price above R1 or above 12h EMA
+            if price > r1 or price > ema_12h_val:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_KAMA_Trend_With_WeeklyTrend_Filter_v1"
-timeframe = "1d"
+name = "4h_Camarilla_R1S1_Breakout_Volume_Spike_ADXFilter"
+timeframe = "4h"
 leverage = 1.0
