@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla Pivot R1/S1 breakout with volume confirmation and daily ATR filter.
-# Camarilla pivots identify key support/resistance levels based on previous day's price action.
-# Breakouts above R1 or below S1 with volume confirmation indicate strong momentum.
-# Daily ATR filter ensures trades occur only when volatility is sufficient to avoid chop.
-# Designed for low trade frequency (20-50/year) to minimize fee drag in 4h timeframe.
-# Works in bull markets (breakouts above R1) and bear markets (breakouts below S1).
-name = "4h_Camarilla_R1S1_Breakout_Volume_ATR_Filter"
-timeframe = "4h"
+# Hypothesis: 12h Donchian(20) breakout with 1w ATR filter and volume confirmation.
+# Donchian channels capture breakouts from price extremes.
+# Weekly ATR filter ensures sufficient volatility to avoid chop (works in bull/bear).
+# Volume confirmation adds conviction. Designed for low trade frequency (12-37/year) to minimize fee drag.
+# Long: break above upper band + volume > avg + weekly ATR > threshold.
+# Short: break below lower band + volume > avg + weekly ATR > threshold.
+# Exit: opposite band break or volatility collapse (ATR <= threshold).
+name = "12h_Donchian20_WeeklyATR_Volume_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,26 +24,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and ATR (ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for ATR filter (ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate daily Camarilla pivot levels
-    high_d = df_1d['high'].values
-    low_d = df_1d['low'].values
-    close_d = df_1d['close'].values
+    # Calculate Donchian channels (20-period) using previous period's data to avoid look-ahead
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    upper_band = high_20
+    lower_band = low_20
     
-    # Pivot point and Camarilla levels (R1, S1)
-    pivot = (high_d + low_d + close_d) / 3
-    range_d = high_d - low_d
-    r1 = pivot + (range_d * 1.1 / 12)
-    s1 = pivot - (range_d * 1.1 / 12)
+    # Calculate weekly ATR (14-period)
+    high_w = df_1w['high'].values
+    low_w = df_1w['low'].values
+    close_w = df_1w['close'].values
     
-    # Calculate daily ATR (14-period) for volatility filter
-    tr1 = high_d[1:] - low_d[1:]
-    tr2 = np.abs(high_d[1:] - close_d[:-1])
-    tr3 = np.abs(low_d[1:] - close_d[:-1])
+    # True Range calculation
+    tr1 = high_w[1:] - low_w[1:]
+    tr2 = np.abs(high_w[1:] - close_w[:-1])
+    tr3 = np.abs(low_w[1:] - close_w[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
+    # ATR using Wilder's smoothing (EMA with alpha=1/14)
     atr_period = 14
     atr = np.full_like(tr, np.nan)
     if len(tr) >= atr_period:
@@ -57,10 +59,8 @@ def generate_signals(prices):
     atr_mult = 1.5
     atr_threshold = atr * atr_mult
     
-    # Align daily Camarilla levels and ATR threshold to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    atr_threshold_aligned = align_htf_to_ltf(prices, df_1d, atr_threshold)
+    # Align weekly ATR threshold to 12h timeframe
+    atr_threshold_aligned = align_htf_to_ltf(prices, df_1w, atr_threshold)
     
     # Calculate 20-period average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -71,11 +71,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicator calculations
+    start_idx = 60  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
             np.isnan(atr_threshold_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -94,19 +94,19 @@ def generate_signals(prices):
         vol_filter = not np.isnan(atr_threshold_aligned[i]) and atr_threshold_aligned[i] > 0
         
         if position == 0:
-            # Long: price breaks above R1 AND volume confirmation AND volatility filter
-            long_breakout = close[i] > r1_aligned[i]
+            # Long: price breaks above upper band AND volume confirmation AND volatility filter
+            long_breakout = close[i] > upper_band[i]
             if vol_confirm and vol_filter and long_breakout:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 AND volume confirmation AND volatility filter
-            elif vol_confirm and vol_filter and close[i] < s1_aligned[i]:
+            # Short: price breaks below lower band AND volume confirmation AND volatility filter
+            elif vol_confirm and vol_filter and close[i] < lower_band[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls below S1 OR ATR drops below threshold (volatility collapse)
-            exit_condition = close[i] < s1_aligned[i] or (np.isnan(atr_threshold_aligned[i]) or atr_threshold_aligned[i] <= 0)
+            # Long exit: price falls below lower band OR ATR drops below threshold (volatility collapse)
+            exit_condition = close[i] < lower_band[i] or (np.isnan(atr_threshold_aligned[i]) or atr_threshold_aligned[i] <= 0)
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
@@ -114,8 +114,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises above R1 OR ATR drops below threshold (volatility collapse)
-            exit_condition = close[i] > r1_aligned[i] or (np.isnan(atr_threshold_aligned[i]) or atr_threshold_aligned[i] <= 0)
+            # Short exit: price rises above upper band OR ATR drops below threshold (volatility collapse)
+            exit_condition = close[i] > upper_band[i] or (np.isnan(atr_threshold_aligned[i]) or atr_threshold_aligned[i] <= 0)
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
