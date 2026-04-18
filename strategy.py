@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Williams %R (14) + volume confirmation + 1w EMA20 trend filter.
-- Long: Williams %R crosses above -80 (oversold reversal), volume > 1.5x average, price > 1w EMA20
-- Short: Williams %R crosses below -20 (overbought reversal), volume > 1.5x average, price < 1w EMA20
-- Exit: Williams %R crosses opposite threshold (-20 for long, -80 for short)
-- Uses Williams %R for mean reversion in ranging markets, EMA20 for trend filter.
-Designed for 7-25 trades/year (30-100 total) to minimize fee drag.
+Hypothesis: 4h Williams %R with 12h EMA trend filter and volume confirmation.
+- Long: Williams %R crosses above -80, price > 12h EMA(34), volume > 1.5x average
+- Short: Williams %R crosses below -20, price < 12h EMA(34), volume > 1.5x average
+- Exit: Williams %R crosses back through -50 or volume < average
+- Uses Williams %R for mean reversion in extremes, EMA for trend filter, volume for confirmation.
+Designed for 20-50 trades/year to minimize fee drag and work in both bull/bear markets.
 """
 
 import numpy as np
@@ -40,16 +40,15 @@ def calculate_ema(close, period):
     
     ema = np.full(len(close), np.nan)
     multiplier = 2 / (period + 1)
-    ema[period - 1] = np.mean(close[:period])
-    
-    for i in range(period, len(close)):
-        ema[i] = (close[i] - ema[i - 1]) * multiplier + ema[i - 1]
+    ema[0] = close[0]
+    for i in range(1, len(close)):
+        ema[i] = (close[i] - ema[i-1]) * multiplier + ema[i-1]
     
     return ema
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -57,25 +56,18 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams %R
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate Williams %R (14-period) on 1d
-    williams_r_14_1d = calculate_williams_r(high_1d, low_1d, close_1d, 14)
+    # Calculate Williams %R (14-period) on 4h
+    williams_r = calculate_williams_r(high, low, close, 14)
     
-    # Get 1w data for EMA20 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Calculate EMA (34-period) on 12h
+    ema_34_12h = calculate_ema(close_12h, 34)
     
-    # Calculate EMA (20-period) on 1w
-    ema_20_1w = calculate_ema(close_1w, 20)
-    
-    # Align to 1d timeframe
-    williams_r_14_1d_aligned = align_htf_to_ltf(prices, df_1d, williams_r_14_1d)
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Align EMA to 4h timeframe
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
     # Calculate volume moving average (20-period)
     vol_ma = np.full(n, np.nan)
@@ -85,11 +77,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # need Williams %R, EMA, and volume MA
+    start_idx = 34  # need Williams %R, EMA, and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(williams_r_14_1d_aligned[i]) or np.isnan(ema_20_1w_aligned[i]) or 
+        if (np.isnan(williams_r[i]) or np.isnan(ema_34_12h_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -97,33 +89,33 @@ def generate_signals(prices):
         # Volume confirmation: current volume > 1.5 * 20-period average
         vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
+        # Williams %R cross signals
+        wr_cross_up = williams_r[i] > -80 and williams_r[i-1] <= -80
+        wr_cross_down = williams_r[i] < -20 and williams_r[i-1] >= -20
+        wr_cross_down_50 = williams_r[i] < -50 and williams_r[i-1] >= -50
+        wr_cross_up_50 = williams_r[i] > -50 and williams_r[i-1] <= -50
+        
         if position == 0:
-            # Long: Williams %R crosses above -80, volume confirmation, price > EMA20
-            if (williams_r_14_1d_aligned[i] > -80 and 
-                williams_r_14_1d_aligned[i-1] <= -80 and 
-                vol_confirmed and 
-                close[i] > ema_20_1w_aligned[i]):
+            # Long: Williams %R crosses above -80, price > 12h EMA, volume confirmation
+            if wr_cross_up and close[i] > ema_34_12h_aligned[i] and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R crosses below -20, volume confirmation, price < EMA20
-            elif (williams_r_14_1d_aligned[i] < -20 and 
-                  williams_r_14_1d_aligned[i-1] >= -20 and 
-                  vol_confirmed and 
-                  close[i] < ema_20_1w_aligned[i]):
+            # Short: Williams %R crosses below -20, price < 12h EMA, volume confirmation
+            elif wr_cross_down and close[i] < ema_34_12h_aligned[i] and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Williams %R crosses below -20
-            if williams_r_14_1d_aligned[i] < -20 and williams_r_14_1d_aligned[i-1] >= -20:
+            # Long exit: Williams %R crosses below -50 or volume drops below average
+            if wr_cross_down_50 or volume[i] < vol_ma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Williams %R crosses above -80
-            if williams_r_14_1d_aligned[i] > -80 and williams_r_14_1d_aligned[i-1] <= -80:
+            # Short exit: Williams %R crosses above -50 or volume drops below average
+            if wr_cross_up_50 or volume[i] < vol_ma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -131,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WilliamsR14_Volume_EMA20"
-timeframe = "1d"
+name = "4h_WilliamsR_12hEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
