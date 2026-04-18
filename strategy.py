@@ -1,15 +1,28 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Pivot_Breakout_With_Trend_Filter
-Hypothesis: Weekly (1w) CPR (Central Pivot Range) levels act as strong support/resistance.
-Breakout above weekly CPR high with volume > 1.5x 20-day average and price above weekly EMA20 = long.
-Breakdown below weekly CPR low with volume confirmation and price below weekly EMA20 = short.
-Designed for daily timeframe with ~10-25 trades/year to minimize fee drift and work in both bull and bear via trend filter.
+12h_Williams_Alligator_Trend_With_Volume_Confirmation
+Hypothesis: Williams Alligator (Jaw/Teeth/Lips) on daily timeframe defines trend direction.
+Trades occur on 12h timeframe when price crosses Lips with volume confirmation.
+Uses Williams Alligator crossover signals filtered by volume > 1.5x 20-period average.
+Designed for 12h timeframe with ~15-30 trades/year to minimize fee drag and work in both bull and bear markets via trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def williams_alligator(high, low, close, jaw_period=13, teeth_period=8, lips_period=5):
+    """Calculate Williams Alligator lines (Smoothed Medians)"""
+    median_price = (high + low) / 2
+    
+    # Jaw (Blue) - 13-period SMMA, shifted 8 bars forward
+    jaw = pd.Series(median_price).rolling(window=jaw_period, center=False).mean().shift(8)
+    # Teeth (Red) - 8-period SMMA, shifted 5 bars forward  
+    teeth = pd.Series(median_price).rolling(window=teeth_period, center=False).mean().shift(5)
+    # Lips (Green) - 5-period SMMA, shifted 3 bars forward
+    lips = pd.Series(median_price).rolling(window=lips_period, center=False).mean().shift(3)
+    
+    return jaw.values, teeth.values, lips.values
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,78 +34,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for CPR and EMA
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Daily Williams Alligator for trend direction
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Weekly OHLC
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly CPR (Central Pivot Range)
-    # TC = (H + L + 2C) / 4  (Top Central)
-    # BC = (H + L) / 2        (Bottom Central)
-    # PV = (H + L + C) / 3    (Pivot Point)
-    tc_1w = (high_1w + low_1w + 2 * close_1w) / 4
-    bc_1w = (high_1w + low_1w) / 2
-    pv_1w = (high_1w + low_1w + close_1w) / 3
+    jaw_1d, teeth_1d, lips_1d = williams_alligator(high_1d, low_1d, close_1d)
     
-    # CPR boundaries: higher of TC/PV as top, lower of BC/PV as bottom
-    cpr_top = np.maximum(tc_1w, pv_1w)
-    cpr_bottom = np.minimum(bc_1w, pv_1w)
+    # Align Daily Alligator lines to 12h timeframe (wait for daily bar close)
+    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
+    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
+    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
     
-    # Align weekly CPR to daily timeframe (wait for weekly bar close)
-    cpr_top_aligned = align_htf_to_ltf(prices, df_1w, cpr_top)
-    cpr_bottom_aligned = align_htf_to_ltf(prices, df_1w, cpr_bottom)
-    
-    # Weekly EMA trend filter (20-period)
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Daily volume filter: >1.5x 20-day average
+    # 12h volume filter: >1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Warmup for volume MA
+    start_idx = 30  # Warmup for volume MA and Alligator
     
     for i in range(start_idx, n):
-        if (np.isnan(cpr_top_aligned[i]) or np.isnan(cpr_bottom_aligned[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(jaw_1d_aligned[i]) or np.isnan(teeth_1d_aligned[i]) or 
+            np.isnan(lips_1d_aligned[i]) or np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        cpr_top_val = cpr_top_aligned[i]
-        cpr_bottom_val = cpr_bottom_aligned[i]
-        ema_trend = ema_20_1w_aligned[i]
+        jaw = jaw_1d_aligned[i]
+        teeth = teeth_1d_aligned[i]
+        lips = lips_1d_aligned[i]
         vol_ok = volume_filter[i]
         
+        # Alligator alignment: Jaw > Teeth > Lips = Uptrend, Jaw < Teeth < Lips = Downtrend
+        uptrend = jaw > teeth and teeth > lips
+        downtrend = jaw < teeth and teeth < lips
+        
         if position == 0:
-            # Long: price breaks above weekly CPR top with volume in uptrend
-            if price > cpr_top_val and vol_ok and price > ema_trend:
+            # Long: price crosses above Lips in uptrend with volume
+            if price > lips and uptrend and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly CPR bottom with volume in downtrend
-            elif price < cpr_bottom_val and vol_ok and price < ema_trend:
+            # Short: price crosses below Lips in downtrend with volume
+            elif price < lips and downtrend and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long if price returns below weekly CPR bottom or trend reverses
-            if price < cpr_bottom_val or price < ema_trend:
+            # Exit long if price crosses below Teeth or trend changes
+            if price < teeth or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short if price returns above weekly CPR top or trend reverses
-            if price > cpr_top_val or price > ema_trend:
+            # Exit short if price crosses above Teeth or trend changes
+            if price > teeth or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Weekly_Pivot_Breakout_With_Trend_Filter"
-timeframe = "1d"
+name = "12h_Williams_Alligator_Trend_With_Volume_Confirmation"
+timeframe = "12h"
 leverage = 1.0
