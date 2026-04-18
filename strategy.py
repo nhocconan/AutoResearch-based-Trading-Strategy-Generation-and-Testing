@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_TRIX_VolumeSpike_1dTrendFilter_v1
-Hypothesis: TRIX (triple EMA) momentum with volume spike and 1d EMA trend filter captures trend continuation in both bull and bear markets. Designed for 15-25 trades/year on 12h timeframe to minimize fee drag while capturing major moves.
+4h_KAMA_RSI_Trend_With_Volume_Filter_v1
+Hypothesis: KAMA trend direction combined with RSI momentum and volume confirmation captures sustained moves while avoiding whipsaws. Works in bull via trend-following and bear via mean-reversion at extremes. Designed for ~25 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,66 +18,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close']
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # KAMA trend filter (12h)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    # Calculate ER and SC for KAMA
+    change = np.abs(np.diff(close_12h, prepend=close_12h[0]))
+    volatility = np.abs(np.diff(close_12h))
+    er = np.zeros_like(close_12h)
+    for i in range(10, len(close_12h)):  # ER period=10
+        if np.sum(volatility[i-9:i+1]) > 0:
+            er[i] = change[i] / np.sum(volatility[i-9:i+1])
+        else:
+            er[i] = 0
+    sc = (er * (0.6667 - 0.0645) + 0.0645) ** 2  # fast=2, slow=30
+    kama = np.zeros_like(close_12h)
+    kama[0] = close_12h[0]
+    for i in range(1, len(close_12h)):
+        kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
+    kama_12h_aligned = align_htf_to_ltf(prices, df_12h, kama)
     
-    # TRIX: Triple EMA (15,15,15) - momentum oscillator
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
-    trix = 100 * (ema3 - ema3.shift(1)) / ema3.shift(1)
-    trix_values = trix.fillna(0).values
+    # RSI momentum (14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Volume spike: >2x 20-period average
+    # Volume spike: >1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 50
+    start_idx = 60
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(trix_values[i]) or 
-            np.isnan(volume_spike[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(kama_12h_aligned[i]) or np.isnan(rsi[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        trix_val = trix_values[i]
-        ema_trend = ema_50_1d_aligned[i]
+        price = close[i]
+        kama_val = kama_12h_aligned[i]
+        rsi_val = rsi[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: TRIX positive (bullish momentum) + above 1d EMA + volume spike
-            if trix_val > 0.1 and close[i] > ema_trend and vol_spike:
+            # Long: price above KAMA, RSI > 50, volume spike
+            if price > kama_val and rsi_val > 50 and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX negative (bearish momentum) + below 1d EMA + volume spike
-            elif trix_val < -0.1 and close[i] < ema_trend and vol_spike:
+            # Short: price below KAMA, RSI < 50, volume spike
+            elif price < kama_val and rsi_val < 50 and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: TRIX turns negative OR price breaks below 1d EMA
-            if trix_val < -0.05 or close[i] < ema_trend:
+            # Exit: price below KAMA or RSI < 40
+            if price < kama_val or rsi_val < 40:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: TRIX turns positive OR price breaks above 1d EMA
-            if trix_val > 0.05 or close[i] > ema_trend:
+            # Exit: price above KAMA or RSI > 60
+            if price > kama_val or rsi_val > 60:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_TRIX_VolumeSpike_1dTrendFilter_v1"
-timeframe = "12h"
+name = "4h_KAMA_RSI_Trend_With_Volume_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
