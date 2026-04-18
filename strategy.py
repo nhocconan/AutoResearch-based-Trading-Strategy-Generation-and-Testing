@@ -1,8 +1,12 @@
-# 1d_Weekly_High_Low_Breakout_With_Volume_Confirmation
-# Hypothesis: Breakouts above weekly high or below weekly low on daily chart, confirmed by volume spikes.
-# Weekly levels act as strong support/resistance; breakouts capture momentum moves.
-# Volume confirmation filters false breakouts. Designed for low trade frequency (7-25/year) to avoid fee drag.
-# Works in both bull (catch breakouts) and bear (catch breakdowns) markets.
+#!/usr/bin/env python3
+"""
+4h_Camarilla_R1S1_Breakout_Volume_Spike_TrendFilter
+Hypothesis: Camarilla R1/S1 breakouts on 4h with volume spike and 1d EMA trend filter.
+Buy when price breaks above R1 with volume spike and uptrend (price > EMA34).
+Sell when price breaks below S1 with volume spike and downtrend (price < EMA34).
+Designed for low trade frequency (20-50/year) to avoid fee drag while capturing
+significant momentum moves in both bull and bear markets via trend alignment.
+"""
 
 import numpy as np
 import pandas as pd
@@ -18,63 +22,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for high/low levels
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get 1d data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align weekly high/low to daily (wait for weekly bar to close)
-    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, high_1w)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, low_1w)
+    # Calculate Camarilla levels (using previous day's data)
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    rng = high_1d - low_1d
+    r1 = close_1d + rng * 1.1 / 12
+    s1 = close_1d - rng * 1.1 / 12
     
-    # Volume spike: >2.0x 20-day average
+    # Align to 4h timeframe (wait for daily bar to close)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # 1d EMA(34) for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume spike: >2.0x 20-period average (higher threshold to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(20, 5)  # Warmup for volume MA and weekly alignment
+    start_idx = max(30, 20)  # Warmup for EMA and volume
     
     for i in range(start_idx, n):
-        if (np.isnan(weekly_high_aligned[i]) or 
-            np.isnan(weekly_low_aligned[i]) or
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or
+            np.isnan(ema_34_aligned[i]) or
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        weekly_high = weekly_high_aligned[i]
-        weekly_low = weekly_low_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema34 = ema_34_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: break above weekly high with volume spike
-            if price > weekly_high and vol_spike:
+            # Long: price breaks above R1 with volume spike and uptrend
+            if price > r1_val and vol_spike and price > ema34:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below weekly low with volume spike
-            elif price < weekly_low and vol_spike:
+            # Short: price breaks below S1 with volume spike and downtrend
+            elif price < s1_val and vol_spike and price < ema34:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             signals[i] = 0.25
-            # Exit: price falls back below weekly high (failed breakout) or opposite signal
-            if price < weekly_high:
+            # Exit: price returns below R1 OR trend turns down
+            if price < r1_val or price < ema34:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             signals[i] = -0.25
-            # Exit: price rises back above weekly low (failed breakdown) or opposite signal
-            if price > weekly_low:
+            # Exit: price returns above S1 OR trend turns up
+            if price > s1_val or price > ema34:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Weekly_High_Low_Breakout_With_Volume_Confirmation"
-timeframe = "1d"
+name = "4h_Camarilla_R1S1_Breakout_Volume_Spike_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
