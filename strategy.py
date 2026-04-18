@@ -1,62 +1,79 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d ATR volatility filter and 1w RSI regime filter.
-Go long when price breaks above Donchian upper band in low volatility (ATR ratio < 0.8) and bullish regime (weekly RSI > 50).
-Go short when price breaks below Donchian lower band in low volatility and bearish regime (weekly RSI < 50).
-Uses volatility filter to avoid whipsaws and regime filter to align with higher timeframe trend.
-Designed for ~20-30 trades/year to minimize fee drag.
+12h Camarilla Pivot R1/S1 Breakout with Volume Confirmation and Weekly ADX Trend Filter.
+Long when price breaks above R1 with volume and weekly ADX > 25 (trending up).
+Short when price breaks below S1 with volume and weekly ADX > 25 (trending down).
+Uses weekly ADX to avoid whipsaws in ranging markets. Designed for 15-25 trades/year.
 """
 
 import numpy as np
 import pandas as pd
-from mtr_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_atr(high, low, close, period):
-    """Calculate Average True Range."""
-    if len(high) < period:
+def calculate_adx(high, low, close, period=14):
+    """Calculate Average Directional Index."""
+    if len(high) < period + 1:
         return np.full(len(high), np.nan)
     
-    tr = np.zeros(len(high))
-    tr[0] = high[0] - low[0]
-    for i in range(1, len(high)):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    atr = np.full(len(high), np.nan)
-    atr[period-1] = np.mean(tr[:period])
-    for i in range(period, len(high)):
-        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
-    return atr
+    # Directional Movement
+    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                       np.maximum(high[1:] - high[:-1], 0), 0)
+    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                        np.maximum(low[:-1] - low[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
+    
+    # Smoothed values
+    atr = np.full(len(tr), np.nan)
+    dm_plus_smooth = np.full(len(dm_plus), np.nan)
+    dm_minus_smooth = np.full(len(dm_minus), np.nan)
+    
+    if len(tr) >= period:
+        atr[period] = np.nanmean(tr[1:period+1])
+        dm_plus_smooth[period] = np.nanmean(dm_plus[1:period+1])
+        dm_minus_smooth[period] = np.nanmean(dm_minus[1:period+1])
+        
+        for i in range(period+1, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+            dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period-1) + dm_plus[i]) / period
+            dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period-1) + dm_minus[i]) / period
+    
+    # DI+ and DI-
+    di_plus = np.full(len(dm_plus), np.nan)
+    di_minus = np.full(len(dm_minus), np.nan)
+    for i in range(period, len(tr)):
+        if atr[i] != 0:
+            di_plus[i] = (dm_plus_smooth[i] / atr[i]) * 100
+            di_minus[i] = (dm_minus_smooth[i] / atr[i]) * 100
+    
+    # DX and ADX
+    dx = np.full(len(di_plus), np.nan)
+    for i in range(period, len(tr)):
+        if (di_plus[i] + di_minus[i]) != 0:
+            dx[i] = (np.abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])) * 100
+    
+    adx = np.full(len(dx), np.nan)
+    if len(tr) >= 2*period:
+        adx[2*period-1] = np.nanmean(dx[period:2*period])
+        for i in range(2*period, len(tr)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+    
+    return adx
 
-def calculate_rsi(close, period=14):
-    """Calculate Relative Strength Index."""
-    if len(close) < period + 1:
-        return np.full(len(close), np.nan)
-    
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.full(len(close), np.nan)
-    avg_loss = np.full(len(close), np.nan)
-    
-    avg_gain[period] = np.mean(gain[:period])
-    avg_loss[period] = np.mean(loss[:period])
-    
-    for i in range(period + 1, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
-    
-    rs = np.full(len(close), np.nan)
-    rsi = np.full(len(close), np.nan)
-    
-    for i in range(period, len(close)):
-        if avg_loss[i] != 0:
-            rs[i] = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs[i]))
-        else:
-            rsi[i] = 100
-    
-    return rsi
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels."""
+    pivot = (high + low + close) / 3.0
+    range_val = high - low
+    r1 = close + range_val * 1.1 / 12
+    s1 = close - range_val * 1.1 / 12
+    return pivot, r1, s1
 
 def generate_signals(prices):
     n = len(prices)
@@ -68,80 +85,70 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR(14)
+    # Get weekly data for ADX(14)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Get daily data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Get 1w data for RSI(14)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Calculate weekly ADX
+    adx_14_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
     
-    # Calculate ATR(14) on 1d
-    atr_14_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
+    # Calculate daily Camarilla pivots
+    _, r1_1d, s1_1d = calculate_camarilla(high_1d, low_1d, close_1d)
     
-    # Calculate RSI(14) on 1w
-    rsi_14_1w = calculate_rsi(close_1w, 14)
+    # Align to 12h timeframe
+    adx_14_1w_12h = align_htf_to_ltf(prices, df_1w, adx_14_1w)
+    r1_1d_12h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_12h = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Calculate Donchian channels (20-period) on 4h
-    donchian_up = np.full(n, np.nan)
-    donchian_down = np.full(n, np.nan)
+    # Calculate volume moving average (20-period)
+    vol_ma = np.full(n, np.nan)
     for i in range(20, n):
-        donchian_up[i] = np.max(high[i-20:i])
-        donchian_down[i] = np.min(low[i-20:i])
-    
-    # Calculate ATR ratio: current 14-period ATR / 50-period SMA of ATR
-    atr_sma_50 = np.full(n, np.nan)
-    for i in range(50, n):
-        atr_sma_50[i] = np.mean(atr_14_1d[i-50:i])
-    atr_ratio = np.full(n, np.nan)
-    for i in range(50, n):
-        if atr_sma_50[i] != 0:
-            atr_ratio[i] = atr_14_1d[i] / atr_sma_50[i]
-    
-    # Align to 4h timeframe
-    atr_14_1d_4h = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    rsi_14_1w_4h = align_htf_to_ltf(prices, df_1w, rsi_14_1w)
-    atr_ratio_4h = align_htf_to_ltf(prices, df_1d, atr_ratio)
+        vol_ma[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need ATR ratio calculation
+    start_idx = 20  # need volume MA calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_up[i]) or np.isnan(donchian_down[i]) or 
-            np.isnan(atr_14_1d_4h[i]) or np.isnan(rsi_14_1w_4h[i]) or 
-            np.isnan(atr_ratio_4h[i])):
+        if (np.isnan(adx_14_1w_12h[i]) or np.isnan(r1_1d_12h[i]) or 
+            np.isnan(s1_1d_12h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: low volatility (ATR ratio < 0.8)
-        vol_filter = atr_ratio_4h[i] < 0.8
+        # Volume confirmation: current volume > 1.5 * 20-period average
+        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: price breaks above Donchian upper, bullish regime, low volatility
-            if close[i] > donchian_up[i] and rsi_14_1w_4h[i] > 50 and vol_filter:
+            # Long: price breaks above R1 with volume and weekly ADX > 25
+            if close[i] > r1_1d_12h[i] and adx_14_1w_12h[i] > 25 and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower, bearish regime, low volatility
-            elif close[i] < donchian_down[i] and rsi_14_1w_4h[i] < 50 and vol_filter:
+            # Short: price breaks below S1 with volume and weekly ADX > 25
+            elif close[i] < s1_1d_12h[i] and adx_14_1w_12h[i] > 25 and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below Donchian lower or volatility increases
-            if close[i] < donchian_down[i] or atr_ratio_4h[i] >= 1.2:
+            # Long exit: price crosses below S1 or ADX weakens (< 20)
+            if close[i] < s1_1d_12h[i] or adx_14_1w_12h[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above Donchian upper or volatility increases
-            if close[i] > donchian_up[i] or atr_ratio_4h[i] >= 1.2:
+            # Short exit: price crosses above R1 or ADX weakens (< 20)
+            if close[i] > r1_1d_12h[i] or adx_14_1w_12h[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -149,6 +156,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_ATRFilter_1wRSI"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_Volume_ADX"
+timeframe = "12h"
 leverage = 1.0
