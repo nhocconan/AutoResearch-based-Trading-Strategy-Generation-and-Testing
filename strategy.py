@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_ThreeLineBreak_Trend_With_Volume
-Strategy: 12h trend using 3-line break chart with volume confirmation.
-Long: 3-line break bullish pattern (3 consecutive closes > prior high) with volume > 1.5x 20-period average.
-Short: 3-line break bearish pattern (3 consecutive closes < prior low) with volume > 1.5x 20-period average.
-Exit: Opposite pattern or volume drop below 0.8x average.
-Uses volume to filter false breakouts and reduce overtrading.
-Target: 20-30 trades/year per symbol (80-120 total over 4 years).
-Works in bull/bear via trend-following + volume confirmation.
+4h_Donchian_Breakout_Trend_Volume_V2
+Strategy: 4h Donchian channel breakout with 1d trend filter and volume confirmation.
+Long: Price breaks above Donchian(20) high + 1d close > 1d SMA(50) + volume > 1.5x avg.
+Short: Price breaks below Donchian(20) low + 1d close < 1d SMA(50) + volume > 1.5x avg.
+Exit: Opposite Donchian break or trend reversal.
+Target: 20-40 trades/year per symbol (80-160 total over 4 years).
+Works in bull via trend-following, in bear via short side.
 """
 
 import numpy as np
@@ -16,82 +15,68 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 3-line break calculation
-    # Track the last three closes to determine trend
-    line1 = np.full(n, np.nan)
-    line2 = np.full(n, np.nan)
-    line3 = np.full(n, np.nan)
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Initialize first three values
-    if n >= 3:
-        line1[0] = close[0]
-        line2[1] = close[1]
-        line3[2] = close[2]
+    # Daily SMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    sma_50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
     
-    # Calculate 3-line break values
-    for i in range(3, n):
-        # Bullish: three consecutive closes above prior high
-        if close[i] > line3[i-1] and close[i-1] > line2[i-1] and close[i-2] > line1[i-1]:
-            line1[i] = line2[i-1]
-            line2[i] = line3[i-1]
-            line3[i] = close[i]
-        # Bearish: three consecutive closes below prior low
-        elif close[i] < line1[i-1] and close[i-1] < line2[i-1] and close[i-2] < line3[i-1]:
-            line1[i] = close[i]
-            line2[i] = line1[i-1]
-            line3[i] = line2[i-1]
-        # No change - carry forward
-        else:
-            line1[i] = line1[i-1]
-            line2[i] = line2[i-1]
-            line3[i] = line3[i-1]
+    # Donchian channels (20-period) on 4h
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donch_high = high_series.rolling(window=20, min_periods=20).max().values
+    donch_low = low_series.rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: current volume > 1.5x 20-period average
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > 1.5 * vol_ma
-    vol_exit = volume < 0.8 * vol_ma  # Exit when volume drops significantly
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # need enough for volume MA
+    start_idx = 50  # need enough for Donchian and SMA
     
     for i in range(start_idx, n):
-        # Skip if required data is not available
-        if np.isnan(line1[i]) or np.isnan(line2[i]) or np.isnan(line3[i]) or np.isnan(vol_ma[i]):
+        # Skip if any required data is not available
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(sma_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        trend_up = close_1d[i] > sma_50_1d[i]  # daily trend
+        trend_down = close_1d[i] < sma_50_1d[i]
+        
         if position == 0:
-            # Long: bullish 3-line break with volume confirmation
-            if (close[i] > line3[i] and close[i-1] > line2[i] and close[i-2] > line1[i] and 
-                vol_confirm[i]):
+            # Long: Donchian breakout up + uptrend + volume
+            if close[i] > donch_high[i] and trend_up and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish 3-line break with volume confirmation
-            elif (close[i] < line1[i] and close[i-1] < line2[i] and close[i-2] < line3[i] and 
-                  vol_confirm[i]):
+            # Short: Donchian breakout down + downtrend + volume
+            elif close[i] < donch_low[i] and trend_down and vol_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: bearish 3-line break or volume drop
-            if (close[i] < line1[i] and close[i-1] < line2[i] and close[i-2] < line3[i]) or vol_exit[i]:
+            # Long exit: Donchian breakdown OR trend reversal
+            if close[i] < donch_low[i] or not trend_up:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: bullish 3-line break or volume drop
-            if (close[i] > line3[i] and close[i-1] > line2[i] and close[i-2] > line1[i]) or vol_exit[i]:
+            # Short exit: Donchian breakout OR trend reversal
+            if close[i] > donch_high[i] or not trend_down:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -99,6 +84,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_ThreeLineBreak_Trend_With_Volume"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_Trend_Volume_V2"
+timeframe = "4h"
 leverage = 1.0
