@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
+"""
+12h_3ATR_Breakout_Trend_Volume
+12h strategy using 3x ATR breakout from ATR-based channels with trend and volume filters.
+Long: Close breaks above upper band (mean + 3*ATR) + trend filter + volume confirmation
+Short: Close breaks below lower band (mean - 3*ATR) + trend filter + volume confirmation
+Exit: Opposite breakout or trend reversal
+Designed for ~20-30 trades/year per symbol (80-120 total over 4 years)
+ATR channels provide volatility-adaptive breakout levels that work in both bull and bear markets
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-"""
-Hypothesis: 1h momentum with 4h trend filter and volume confirmation.
-In bull markets: 4h EMA20 up + 1h price > EMA13 + volume spike = long.
-In bear markets: 4h EMA20 down + 1h price < EMA13 + volume spike = short.
-Uses 1h for entry timing, 4h for direction to avoid overtrading.
-Target: 20-40 trades/year per symbol.
-"""
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,67 +23,93 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Calculate ATR-based channels on primary timeframe
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
     
-    # 4h EMA20 for trend
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    atr = np.zeros_like(tr)
+    atr[0] = tr[0]
+    for i in range(1, len(tr)):
+        atr[i] = 0.9 * atr[i-1] + 0.1 * tr[i]  # Wilder's smoothing
     
-    # 1h EMA13 for entry
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate mean price (close) for channel center
+    mean_price = close
     
-    # Volume spike (2x 20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 2.0 * vol_ma_20
+    # Upper and lower bands (mean ± 3*ATR)
+    upper_band = mean_price + 3.0 * atr
+    lower_band = mean_price - 3.0 * atr
+    
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    
+    # Daily EMA50 and EMA200 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Daily volume average (20-period)
+    volume_1d = df_1d['volume'].values
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all daily data to 12h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # need for EMA20
+    start_idx = 50  # need enough for EMA200
     
     for i in range(start_idx, n):
-        if np.isnan(ema_20_4h_aligned[i]) or np.isnan(ema_13[i]):
+        # Skip if any required data is not available
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
+            np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # 4h trend
-        uptrend_4h = ema_20_4h_aligned[i] > ema_20_4h_aligned[i-1] if i > 0 else False
-        downtrend_4h = ema_20_4h_aligned[i] < ema_20_4h_aligned[i-1] if i > 0 else False
+        # Trend conditions
+        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
+        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
         
-        # 1h price vs EMA
-        price_above_ema = close[i] > ema_13[i]
-        price_below_ema = close[i] < ema_13[i]
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
+        
+        # Breakout conditions
+        breakout_up = close[i] > upper_band[i]
+        breakdown_down = close[i] < lower_band[i]
         
         if position == 0:
-            # Long: 4h uptrend + price > EMA13 + volume spike
-            if uptrend_4h and price_above_ema and vol_spike[i]:
-                signals[i] = 0.20
+            # Long: uptrend + volume + breakout above upper band
+            if uptrend and vol_confirm and breakout_up:
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h downtrend + price < EMA13 + volume spike
-            elif downtrend_4h and price_below_ema and vol_spike[i]:
-                signals[i] = -0.20
+            # Short: downtrend + volume + breakdown below lower band
+            elif downtrend and vol_confirm and breakdown_down:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: 4h trend change or price < EMA13
-            if not uptrend_4h or price_below_ema:
-                signals[i] = 0.0
-                position = 0
+            # Long exit: trend change, volume confirmation, or breakdown below lower band
+            if not uptrend or (vol_confirm and breakdown_down):
+                signals[i] = -0.25  # reverse to short
+                position = -1
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: 4h trend change or price > EMA13
-            if not downtrend_4h or price_above_ema:
-                signals[i] = 0.0
-                position = 0
+            # Short exit: trend change, volume confirmation, or breakout above upper band
+            if not downtrend or (vol_confirm and breakout_up):
+                signals[i] = 0.25  # reverse to long
+                position = 1
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_EMA13_EMA20_Trend_Volume"
-timeframe = "1h"
+name = "12h_3ATR_Breakout_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
