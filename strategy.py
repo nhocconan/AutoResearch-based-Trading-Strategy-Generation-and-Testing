@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-12h Bull/Bear Regime Detection with Volume-Confirmed Breakouts
-Strategy: Uses daily EMA crossovers to define bull/bear regimes, then enters
-          breakout trades in the direction of the regime with volume confirmation.
-          In bull regime: long on break above 12h high + volume, short on break below 12h low.
-          In bear regime: short on break below 12h low + volume, long on break above 12h high.
-          Exits when price reverses back to the regime's EMA or breaks opposite level.
-          Designed to capture trends in both bull and bear markets while avoiding chop.
+4h Camarilla Pivot Breakout with Volume Spike and 12h EMA Trend Filter
+Strategy: Enter long when price breaks above R1 with volume spike and 12h EMA34 > 0,
+          short when price breaks below S1 with volume spike and 12h EMA34 < 0.
+          Uses daily Camarilla levels for breakout levels, 12h EMA34 for trend filter,
+          and volume spike for confirmation. Designed for low trade frequency with clear breakout edge.
 """
 
 import numpy as np
@@ -23,25 +21,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for regime and breakout levels (once before loop)
+    # Get daily data for Camarilla pivot levels (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily EMA21 and EMA50 for regime detection
+    # Calculate daily close for Camarilla formula
     daily_close = df_1d['close'].values
-    ema_21_1d = pd.Series(daily_close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_50_1d = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
     
-    # Get 12h high/low for breakout levels (use rolling window)
-    high_12h = pd.Series(high).rolling(window=12, min_periods=12).max().values
-    low_12h = pd.Series(low).rolling(window=12, min_periods=12).min().values
+    # Calculate Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    daily_range = daily_high - daily_low
+    camarilla_r1 = daily_close + daily_range * 1.1 / 12
+    camarilla_s1 = daily_close - daily_range * 1.1 / 12
     
-    # Volume spike detection (1.8x 20-period average)
+    # Get 12h data for EMA34 trend filter (once before loop)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align daily Camarilla levels and 12h EMA to 4h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    
+    # Volume spike detection (2x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
-    
-    # Align daily EMAs to 12h timeframe
-    ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
@@ -49,59 +54,46 @@ def generate_signals(prices):
     start_idx = 100  # need enough history for calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(high_12h[i]) or 
-            np.isnan(low_12h[i]) or
-            np.isnan(ema_21_1d_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or
+        if (np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(ema_34_12h_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_21 = ema_21_1d_aligned[i]
-        ema_50 = ema_50_1d_aligned[i]
-        
-        # Determine regime: bull if EMA21 > EMA50, bear if EMA21 < EMA50
-        is_bull = ema_21 > ema_50
+        r1_level = camarilla_r1_aligned[i]
+        s1_level = camarilla_s1_aligned[i]
+        ema_34 = ema_34_12h_aligned[i]
         
         if position == 0:
-            if is_bull:
-                # Bull regime: long on break above 12h high with volume
-                if price > high_12h[i] and volume_spike[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short on break below 12h low with volume (counter-trend but valid in strong moves)
-                elif price < low_12h[i] and volume_spike[i]:
-                    signals[i] = -0.25
-                    position = -1
-            else:
-                # Bear regime: short on break below 12h low with volume
-                if price < low_12h[i] and volume_spike[i]:
-                    signals[i] = -0.25
-                    position = -1
-                # Long on break above 12h high with volume (counter-trend bounce)
-                elif price > high_12h[i] and volume_spike[i]:
-                    signals[i] = 0.25
-                    position = 1
+            # Long: break above R1 with volume spike and above 12h EMA34
+            if (price > r1_level and volume_spike[i] and ema_34 > 0):
+                signals[i] = 0.25
+                position = 1
+            # Short: break below S1 with volume spike and below 12h EMA34
+            elif (price < s1_level and volume_spike[i] and ema_34 < 0):
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
             # Long position management
             signals[i] = 0.25
-            # Exit: price breaks back below EMA21 (end of bull phase) or breaks 12h low
-            if price < ema_21 or price < low_12h[i]:
+            # Exit: price breaks below S1 or below 12h EMA34
+            if price < s1_level or ema_34 < 0:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position management
             signals[i] = -0.25
-            # Exit: price breaks back above EMA21 (end of bear phase) or breaks 12h high
-            if price > ema_21 or price > high_12h[i]:
+            # Exit: price breaks above R1 or above 12h EMA34
+            if price > r1_level or ema_34 > 0:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_BullBearRegime_Breakout_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_VolumeSpike_12hEMA34"
+timeframe = "4h"
 leverage = 1.0
