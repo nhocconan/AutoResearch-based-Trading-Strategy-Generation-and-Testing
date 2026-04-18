@@ -1,130 +1,124 @@
 #!/usr/bin/env python3
 """
-6h_1dIchimoku_TK_Cross_WeeklyTrend
-6h strategy using Ichimoku Tenkan/Kijun cross from daily timeframe with weekly trend filter.
-- Long: TK cross bullish (Tenkan > Kijun) on 1D + price > Kumo (cloud) on 1D + weekly EMA200 > weekly EMA200[5] (uptrend)
-- Short: TK cross bearish (Tenkan < Kijun) on 1D + price < Kumo (cloud) on 1D + weekly EMA200 < weekly EMA200[5] (downtrend)
-- Exit: Opposite TK cross or trend reversal
-Designed for ~20-40 trades/year per symbol (80-160 total over 4 years)
-Ichimoku provides institutional-grade support/resistance; weekly EMA trend filter avoids counter-trend whipsaws
+12h_WilliamsAlligator_Trend
+12h strategy using Williams Alligator for trend direction and Williams %R for momentum confirmation.
+- Long: Jaw < Teeth < Lips (bullish alignment) + %R crosses above -50 from below
+- Short: Jaw > Teeth > Lips (bearish alignment) + %R crosses below -50 from above
+- Exit: Opposite Alligator alignment
+Williams Alligator: Jaw (13-period SMMA, 8 offset), Teeth (8-period SMMA, 5 offset), Lips (5-period SMMA, 3 offset)
+Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100 over 14 periods
+Designed for ~20-30 trades/year per symbol (80-120 total over 4 years)
+Works in trending markets by catching trends early and avoiding whipsaws
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def smma(data, period):
+    """Smoothed Moving Average"""
+    if len(data) < period:
+        return np.full_like(data, np.nan, dtype=float)
+    result = np.full_like(data, np.nan, dtype=float)
+    # First value is simple average
+    result[period-1] = np.mean(data[:period])
+    # Subsequent values: (prev * (period-1) + current) / period
+    for i in range(period, len(data)):
+        result[i] = (result[i-1] * (period-1) + data[i]) / period
+    return result
+
+def williams_r(high, low, close, period=14):
+    """Williams %R indicator"""
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    # Avoid division by zero
+    rr = highest_high - lowest_low
+    wr = np.where(rr != 0, -100 * (highest_high - close) / rr, -50.0)
+    return wr
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # Get daily data for Ichimoku calculation
+    # Get daily data for Williams Alligator and Williams %R
     df_1d = get_htf_data(prices, '1d')
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Ichimoku parameters
-    tenkan_period = 9
-    kijun_period = 26
-    senkou_span_b_period = 52
+    # Williams Alligator components
+    # Jaw: 13-period SMMA of median price, 8 bars offset
+    median_price_1d = (high_1d + low_1d) / 2
+    jaw_raw = smma(median_price_1d, 13)
+    jaw_1d = np.roll(jaw_raw, 8)  # 8 bars forward offset
+    jaw_1d[:8] = np.nan  # First 8 values invalid due to offset
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    tenkan_sen = (pd.Series(high_1d).rolling(window=tenkan_period, min_periods=tenkan_period).max() + 
-                  pd.Series(low_1d).rolling(window=tenkan_period, min_periods=tenkan_period).min()) / 2
+    # Teeth: 8-period SMMA of median price, 5 bars offset
+    teeth_raw = smma(median_price_1d, 8)
+    teeth_1d = np.roll(teeth_raw, 5)  # 5 bars forward offset
+    teeth_1d[:5] = np.nan  # First 5 values invalid due to offset
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    kijun_sen = (pd.Series(high_1d).rolling(window=kijun_period, min_periods=kijun_period).max() + 
-                 pd.Series(low_1d).rolling(window=kijun_period, min_periods=kijun_period).min()) / 2
+    # Lips: 5-period SMMA of median price, 3 bars offset
+    lips_raw = smma(median_price_1d, 5)
+    lips_1d = np.roll(lips_raw, 3)  # 3 bars forward offset
+    lips_1d[:3] = np.nan  # First 3 values invalid due to offset
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    # Williams %R (14-period)
+    wr_1d = williams_r(high_1d, low_1d, close_1d, 14)
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
-    senkou_span_b = (pd.Series(high_1d).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).max() + 
-                     pd.Series(low_1d).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).min()) / 2
-    
-    # Kumo (Cloud) boundaries: Senkou Span A and B
-    # For cloud top/bottom in Ichimoku, we need to plot Senkou Span A/B 26 periods ahead
-    # But for current cloud, we use current Senkou Span A/B values
-    kumo_top = np.maximum(senkou_span_a, senkou_span_b)
-    kumo_bottom = np.minimum(senkou_span_a, senkou_span_b)
-    
-    # TK Cross signals
-    tk_cross_bullish = tenkan_sen > kijun_sen
-    tk_cross_bearish = tenkan_sen < kijun_sen
-    
-    # Price relative to cloud
-    price_above_kumo = close_1d > kumo_top
-    price_below_kumo = close_1d < kumo_bottom
-    
-    # Align Ichimoku components to 6h
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen.values)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen.values)
-    tk_cross_bullish_aligned = align_htf_to_ltf(prices, df_1d, tk_cross_bullish)
-    tk_cross_bearish_aligned = align_htf_to_ltf(prices, df_1d, tk_cross_bearish)
-    price_above_kumo_aligned = align_htf_to_ltf(prices, df_1d, price_above_kumo)
-    price_below_kumo_aligned = align_htf_to_ltf(prices, df_1d, price_below_kumo)
-    
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Weekly EMA200 for trend filter
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
-    
-    # Weekly EMA200 slope (5-period change) for trend strength
-    ema_200_1w_shift = np.roll(ema_200_1w_aligned, 5)
-    ema_200_1w_shift[:5] = np.nan
-    ema_200_slope = ema_200_1w_aligned - ema_200_1w_shift
-    ema_200_uptrend = ema_200_slope > 0
-    ema_200_downtrend = ema_200_slope < 0
+    # Align all indicators to 12h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
+    wr_aligned = align_htf_to_ltf(prices, df_1d, wr_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(52, 200)  # need enough for Ichomoku and EMA200
+    start_idx = 20  # need enough for Williams %R and smoothed averages
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
-            np.isnan(tk_cross_bullish_aligned[i]) or np.isnan(tk_cross_bearish_aligned[i]) or
-            np.isnan(price_above_kumo_aligned[i]) or np.isnan(price_below_kumo_aligned[i]) or
-            np.isnan(ema_200_1w_aligned[i]) or np.isnan(ema_200_slope[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(wr_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend conditions from weekly EMA200 slope
-        uptrend = ema_200_uptrend[i]
-        downtrend = ema_200_downtrend[i]
+        # Alligator alignment conditions
+        bullish_alignment = jaw_aligned[i] < teeth_aligned[i] < lips_aligned[i]
+        bearish_alignment = jaw_aligned[i] > teeth_aligned[i] > lips_aligned[i]
+        
+        # Williams %R momentum conditions
+        wr_cross_up = wr_aligned[i] > -50 and wr_aligned[i-1] <= -50  # Cross above -50
+        wr_cross_down = wr_aligned[i] < -50 and wr_aligned[i-1] >= -50  # Cross below -50
         
         if position == 0:
-            # Long: bullish TK cross + price above cloud + weekly uptrend
-            if tk_cross_bullish_aligned[i] and price_above_kumo_aligned[i] and uptrend:
+            # Long: bullish alignment + %R crosses above -50
+            if bullish_alignment and wr_cross_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish TK cross + price below cloud + weekly downtrend
-            elif tk_cross_bearish_aligned[i] and price_below_kumo_aligned[i] and downtrend:
+            # Short: bearish alignment + %R crosses below -50
+            elif bearish_alignment and wr_cross_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: bearish TK cross or price below cloud or weekly downtrend
-            if tk_cross_bearish_aligned[i] or not price_above_kumo_aligned[i] or downtrend:
+            # Long exit: bearish alignment or %R crosses below -50
+            if bearish_alignment or wr_cross_down:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: bullish TK cross or price above cloud or weekly uptrend
-            if tk_cross_bullish_aligned[i] or price_below_kumo_aligned[i] or uptrend:
+            # Short exit: bullish alignment or %R crosses above -50
+            if bullish_alignment or wr_cross_up:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -132,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1dIchimoku_TK_Cross_WeeklyTrend"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_Trend"
+timeframe = "12h"
 leverage = 1.0
