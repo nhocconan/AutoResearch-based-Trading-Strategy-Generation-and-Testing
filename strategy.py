@@ -1,8 +1,6 @@
-#!/usr/bin/env python3
-"""
-6h_Camarilla_R4_S4_Breakout_With_Volume_Filter
-Hypothesis: Use daily Camarilla pivot levels to identify breakout points. Go long when price breaks above S4 with volume confirmation, short when breaks below R4. Uses 1D Camarilla levels for structure and 6H volume for confirmation. Designed to work in both bull and bear markets by capturing strong momentum moves. Targets 15-25 trades/year with position size 0.25.
-"""
+# The hypothesis: 12h price action above/below weekly Ichimoku Cloud (Tenkan/Kijun) with volume confirmation and weekly trend filter (price above/below weekly Kijun-Sen).
+# Uses weekly Ichimoku for trend direction and 12h for entry timing, designed to work in both bull and bear markets by capturing strong momentum moves with proper trend alignment.
+# Targets 15-25 trades/year with position size 0.25.
 
 import numpy as np
 import pandas as pd
@@ -10,7 +8,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,21 +16,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get weekly data for Ichimoku
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla levels for each day
-    # R4 = Close + 1.5 * (High - Low)
-    # S4 = Close - 1.5 * (High - Low)
-    camarilla_r4 = close_1d + 1.5 * (high_1d - low_1d)
-    camarilla_s4 = close_1d - 1.5 * (high_1d - low_1d)
+    # Calculate Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    high_9 = pd.Series(high_1w).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(low_1w).rolling(window=9, min_periods=9).min().values
+    tenkan = (high_9 + low_9) / 2
     
-    # Align Camarilla levels to 6h timeframe (wait for daily bar close)
-    r4_6h = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    s4_6h = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    high_26 = pd.Series(high_1w).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(low_1w).rolling(window=26, min_periods=26).min().values
+    kijun = (high_26 + low_26) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    high_52 = pd.Series(high_1w).rolling(window=52, min_periods=52).max().values
+    low_52 = pd.Series(low_1w).rolling(window=52, min_periods=52).min().values
+    senkou_b = (high_52 + low_52) / 2
+    
+    # Align Ichimoku components to 12h timeframe (wait for weekly bar close)
+    tenkan_12h = align_htf_to_ltf(prices, df_1w, tenkan)
+    kijun_12h = align_htf_to_ltf(prices, df_1w, kijun)
+    senkou_a_12h = align_htf_to_ltf(prices, df_1w, senkou_a)
+    senkou_b_12h = align_htf_to_ltf(prices, df_1w, senkou_b)
     
     # Calculate volume average (20-period) for confirmation
     vol_ma = np.full(n, np.nan)
@@ -42,41 +55,46 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # need volume MA
+    start_idx = 52  # need Ichimoku data
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or 
+        if (np.isnan(tenkan_12h[i]) or np.isnan(kijun_12h[i]) or 
+            np.isnan(senkou_a_12h[i]) or np.isnan(senkou_b_12h[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
+        
+        # Determine cloud top and bottom
+        cloud_top = max(senkou_a_12h[i], senkou_b_12h[i])
+        cloud_bottom = min(senkou_a_12h[i], senkou_b_12h[i])
         
         # Volume confirmation: current volume > 1.5 * 20-period average
         vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long entry: price breaks above S4 with volume confirmation
-            if close[i] > s4_6h[i] and vol_confirmed:
+            # Long entry: price above cloud AND above Kijun with volume confirmation
+            if close[i] > cloud_top and close[i] > kijun_12h[i] and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below R4 with volume confirmation
-            elif close[i] < r4_6h[i] and vol_confirmed:
+            # Short entry: price below cloud AND below Kijun with volume confirmation
+            elif close[i] < cloud_bottom and close[i] < kijun_12h[i] and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price crosses back below S4
-            if close[i] < s4_6h[i]:
+            # Long exit: price crosses below Kijun or cloud bottom
+            if close[i] < kijun_12h[i] or close[i] < cloud_bottom:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back above R4
-            if close[i] > r4_6h[i]:
+            # Short exit: price crosses above Kijun or cloud top
+            if close[i] > kijun_12h[i] or close[i] > cloud_top:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -84,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R4_S4_Breakout_With_Volume_Filter"
-timeframe = "6h"
+name = "12h_Ichimoku_Cloud_Breakout_With_Volume_Filter"
+timeframe = "12h"
 leverage = 1.0
