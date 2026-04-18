@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_Breakout_RangeFilter_v1
-Hypothesis: Trade breakouts of weekly R1/S1 levels with 1d range filter to avoid false breakouts.
-Uses weekly pivot for structural levels and 1d ATR-based range filter to distinguish trending vs ranging markets.
-Target: 20-30 trades/year per symbol. Works in bull/bear via range filter that avoids chop.
+12h_1d_Camarilla_Pivot_R1S1_Breakout_Volume_Trend
+Hypothesis: Breakout of 1d R1/S1 levels with volume confirmation and 12h trend bias.
+Designed for both bull and bear markets: long only in 12h uptrend, short only in downtrend.
+Targets 12-37 trades per year by using strict daily pivot levels and volume confirmation.
 """
 
 import numpy as np
@@ -20,91 +20,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot levels
-    df_weekly = get_htf_data(prices, '1w')
+    # Get 1d data for pivot levels (HTF)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot and R1/S1
-    high_w = df_weekly['high'].values
-    low_w = df_weekly['low'].values
-    close_w = df_weekly['close'].values
+    # Calculate 1d Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    pivot_w = (high_w + low_w + close_w) / 3
-    range_w = high_w - low_w
-    r1_w = pivot_w + range_w * 1.1 / 12
-    s1_w = pivot_w - range_w * 1.1 / 12
+    rng_1d = high_1d - low_1d
+    r1_1d = close_1d + rng_1d * 1.1 / 12
+    s1_1d = close_1d - rng_1d * 1.1 / 12
     
-    # Align weekly levels to 6h timeframe
-    pivot_w_aligned = align_htf_to_ltf(prices, df_weekly, pivot_w)
-    r1_w_aligned = align_htf_to_ltf(prices, df_weekly, r1_w)
-    s1_w_aligned = align_htf_to_ltf(prices, df_weekly, s1_w)
+    # Calculate 1d pivot for trend bias
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
     
-    # Get daily data for range filter (ATR-based)
-    df_daily = get_htf_data(prices, '1d')
-    high_d = df_daily['high'].values
-    low_d = df_daily['low'].values
-    close_d = df_daily['close'].values
+    # Align all levels to 12h timeframe (wait for bar close)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     
-    # Calculate 14-day ATR for range filter
-    tr1 = high_d[1:] - low_d[1:]
-    tr2 = np.abs(high_d[1:] - close_d[:-1])
-    tr3 = np.abs(low_d[1:] - close_d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14d = np.full(n, np.nan)
-    for i in range(14, len(tr)):
-        atr_14d[i] = np.mean(tr[i-13:i+1])
+    # Get 12h trend (EMA34) for directional bias
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Align ATR to 6h timeframe
-    atr_14d_aligned = align_htf_to_ltf(prices, df_daily, atr_14d)
-    
-    # Calculate 6-day average true range for normalization
-    tr_6h1 = high[1:] - low[1:]
-    tr_6h2 = np.abs(high[1:] - close[:-1])
-    tr_6h3 = np.abs(low[1:] - close[:-1])
-    tr_6h = np.concatenate([[np.nan], np.maximum(tr_6h1, np.maximum(tr_6h2, tr_6h3))])
-    atr_6h = np.full(n, np.nan)
-    for i in range(6, len(tr_6h)):
-        atr_6h[i] = np.mean(tr_6h[i-5:i+1])
-    
-    # Range filter: current 6h ATR < 1.5 * 14d ATR (avoid choppy markets)
-    range_filter = (atr_6h < 1.5 * atr_14d_aligned) & (~np.isnan(atr_6h)) & (~np.isnan(atr_14d_aligned))
+    # Volume confirmation: current volume > 2.0 x 20-period average
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    vol_confirm = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 14, 6)  # Ensure enough data for all indicators
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_w_aligned[i]) or np.isnan(r1_w_aligned[i]) or 
-            np.isnan(s1_w_aligned[i]) or np.isnan(range_filter[i])):
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(pivot_1d_aligned[i]) or np.isnan(ema_12h_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long entry: price breaks above weekly R1, with range filter (trending market)
-            if close[i] > r1_w_aligned[i] and range_filter[i]:
+            # Long entry: price breaks above 1d R1, above 1d pivot, with volume, and 12h uptrend
+            if (close[i] > r1_1d_aligned[i] and 
+                close[i] > pivot_1d_aligned[i] and vol_confirm[i] and 
+                close[i] > ema_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below weekly S1, with range filter (trending market)
-            elif close[i] < s1_w_aligned[i] and range_filter[i]:
+            # Short entry: price breaks below 1d S1, below 1d pivot, with volume, and 12h downtrend
+            elif (close[i] < s1_1d_aligned[i] and 
+                  close[i] < pivot_1d_aligned[i] and vol_confirm[i] and 
+                  close[i] < ema_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price returns to weekly pivot or breaks below weekly S1
-            if (not np.isnan(pivot_w_aligned[i]) and close[i] < pivot_w_aligned[i]) or \
-               (not np.isnan(s1_w_aligned[i]) and close[i] < s1_w_aligned[i]):
+            # Long exit: price returns to 1d S1 or 12h downtrend
+            if (not np.isnan(s1_1d_aligned[i]) and close[i] < s1_1d_aligned[i]) or \
+               (close[i] < ema_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to weekly pivot or breaks above weekly R1
-            if (not np.isnan(pivot_w_aligned[i]) and close[i] > pivot_w_aligned[i]) or \
-               (not np.isnan(r1_w_aligned[i]) and close[i] > r1_w_aligned[i]):
+            # Short exit: price returns to 1d R1 or 12h uptrend
+            if (not np.isnan(r1_1d_aligned[i]) and close[i] > r1_1d_aligned[i]) or \
+               (close[i] > ema_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_Breakout_RangeFilter_v1"
-timeframe = "6h"
+name = "12h_1d_Camarilla_Pivot_R1S1_Breakout_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
