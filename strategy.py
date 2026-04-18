@@ -1,8 +1,10 @@
-#!/usr/bin/env python3
-"""
-4h_Camarilla_R1S1_Breakout_Volume
-Hypothesis: Camarilla pivot levels act as strong support/resistance. Price breaking through R1/S1 with volume indicates institutional breakout. Works in both bull (breakouts up) and bear (breakdowns down) by following price action. Uses volume confirmation to avoid false breakouts and limits trades to reduce fee drag.
-"""
+# 1h_TRIX_Momentum_Trend
+# Hypothesis: TRIX (Triple Exponential Average) filters out market noise and identifies momentum trends.
+# In trending markets, TRIX crossovers with signal line provide reliable entry signals.
+# Works in both bull and bear markets by capturing momentum shifts.
+# Uses 4h trend filter and volume confirmation to reduce false signals.
+# Limits trades via momentum strength filter and session filter (08-20 UTC).
+# Target: 15-37 trades/year (~60-150 total over 4 years).
 
 import numpy as np
 import pandas as pd
@@ -10,88 +12,91 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Calculate TRIX (15-period) and signal line (9-period EMA of TRIX)
+    # TRIX = EMA(EMA(EMA(close, 15), 15), 15) * 100
+    ema1 = pd.Series(close).ewm(span=15, adjust=False).values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False).values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False).values
+    trix = ema3 * 100
+    
+    # Signal line: 9-period EMA of TRIX
+    signal_line = pd.Series(trix).ewm(span=9, adjust=False).values
+    
+    # Histogram: TRIX - signal line
+    histogram = trix - signal_line
+    
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 4h EMA34 for trend direction
+    ema34_4h = pd.Series(df_4h['close'].values).ewm(span=34, adjust=False).values
+    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
     
-    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_r1 = np.zeros_like(close_1d)
-    camarilla_s1 = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
-        if i == 0:
-            camarilla_r1[i] = close_1d[i]  # placeholder
-            camarilla_s1[i] = close_1d[i]
-        else:
-            rang = high_1d[i-1] - low_1d[i-1]
-            camarilla_r1[i] = close_1d[i-1] + rang * 1.1 / 12
-            camarilla_s1[i] = close_1d[i-1] - rang * 1.1 / 12
-    
-    # Align to 4h timeframe (use previous day's levels)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = np.zeros_like(volume)
     for i in range(len(volume)):
         if i < 20:
             vol_ma[i] = np.mean(volume[0:i+1]) if i >= 0 else volume[i]
         else:
             vol_ma[i] = np.mean(volume[i-20+1:i+1])
-    vol_spike = volume > (vol_ma * 1.8)
+    vol_filter = volume > (vol_ma * 1.5)
+    
+    # Momentum strength: |histogram| > 0.1
+    mom_filter = np.abs(histogram) > 0.1
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 25  # Warmup
+    start_idx = 30  # Warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(trix[i]) or np.isnan(signal_line[i]) or 
+            np.isnan(ema34_4h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with volume spike
-            if close[i] > camarilla_r1_aligned[i] and vol_spike[i]:
-                signals[i] = 0.25
+            # Long: TRIX crosses above signal line with bullish 4h trend and volume/momentum
+            if (trix[i] > signal_line[i] and trix[i-1] <= signal_line[i-1] and
+                ema34_4h_aligned[i] > ema34_4h_aligned[i-1] and
+                vol_filter[i] and mom_filter[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below S1 with volume spike
-            elif close[i] < camarilla_s1_aligned[i] and vol_spike[i]:
-                signals[i] = -0.25
+            # Short: TRIX crosses below signal line with bearish 4h trend and volume/momentum
+            elif (trix[i] < signal_line[i] and trix[i-1] >= signal_line[i-1] and
+                  ema34_4h_aligned[i] < ema34_4h_aligned[i-1] and
+                  vol_filter[i] and mom_filter[i]):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns below S1 (mean reversion) or volume dies
-            if close[i] < camarilla_s1_aligned[i] or not vol_spike[i]:
+            # Exit long: TRIX crosses below signal line or trend turns bearish
+            if (trix[i] < signal_line[i] and trix[i-1] >= signal_line[i-1]) or \
+               ema34_4h_aligned[i] < ema34_4h_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: price returns above R1 or volume dies
-            if close[i] > camarilla_r1_aligned[i] or not vol_spike[i]:
+            # Exit short: TRIX crosses above signal line or trend turns bullish
+            if (trix[i] > signal_line[i] and trix[i-1] <= signal_line[i-1]) or \
+               ema34_4h_aligned[i] > ema34_4h_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_Volume"
-timeframe = "4h"
+name = "1h_TRIX_Momentum_Trend"
+timeframe = "1h"
 leverage = 1.0
