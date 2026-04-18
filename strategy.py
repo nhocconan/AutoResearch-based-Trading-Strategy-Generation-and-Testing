@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_1D_Camarilla_R1S1_Breakout_Volume_Target_V1
-Hypothesis: Use daily (1D) Camarilla R1/S1 levels for directional bias on 12H timeframe.
-Long when price breaks above daily R1 with volume > 1.5x 20-period average.
-Short when price breaks below daily S1 with volume > 1.5x 20-period average.
+4h_1D_Camarilla_R1S1_Breakout_Volume_V2
+Hypothesis: Use 1D Camarilla R1/S1 for directional bias with 4H entry, but with stricter volume confirmation and session filtering to reduce trade frequency.
+Long when price breaks above daily R1 with volume > 2.0x average (much stricter) during active session (08-20 UTC).
+Short when price breaks below daily S1 with volume > 2.0x average during active session.
 Fixed position size 0.25. Added volatility filter (ATR) to avoid chop.
-Target: 20-40 trades/year per symbol (80-160 total over 4 years) to minimize fee drift.
-Works in bull/bear via volatility regime filter.
+Target: 20-40 trades/year per symbol (80-160 total over 4 years) to minimize fee drag.
+Works in bull/bear via volatility regime filter and session timing.
 """
 
 import numpy as np
@@ -50,25 +50,19 @@ def generate_signals(prices):
     tr[0] = high_1d[0] - low_1d[0]  # first day
     atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Align all daily data to 12h timeframe
+    # Align all daily data to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     atr_20_aligned = align_htf_to_ltf(prices, df_1d, atr_20)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > 1.5 * vol_ma
-    vol_confirm[0:20] = False  # not enough data for MA
-    
-    # Volatility filter: avoid extreme volatility (stop hunting)
-    vol_ma_long = pd.Series(atr_20_aligned).rolling(window=50, min_periods=50).mean().values
-    vol_filter = atr_20_aligned < vol_ma_long * 2
-    vol_filter[0:50] = False  # not enough data for MA
+    # Precompute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for ATR and volume MA
+    start_idx = 50  # need enough for ATR
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
@@ -77,27 +71,38 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation: current volume > 2.0x 20-period average (much stricter)
+        vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        vol_confirm = volume[i] > 2.0 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
+        
+        # Volatility filter: avoid extreme volatility (stop hunting)
+        vol_ma_long = pd.Series(atr_20_aligned).rolling(window=50, min_periods=50).mean().values
+        vol_filter = atr_20_aligned[i] < vol_ma_long[i] * 2 if not np.isnan(vol_ma_long[i]) else False
+        
+        # Only trade during active session
+        in_session = session_mask[i]
+        
         if position == 0:
-            # Long: price breaks above R1 with volume and volatility filter
-            if close[i] > r1_aligned[i] and vol_confirm[i] and vol_filter[i]:
+            # Long: price breaks above R1 with volume and volatility filter during session
+            if close[i] > r1_aligned[i] and vol_confirm and vol_filter and in_session:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume and volatility filter
-            elif close[i] < s1_aligned[i] and vol_confirm[i] and vol_filter[i]:
+            # Short: price breaks below S1 with volume and volatility filter during session
+            elif close[i] < s1_aligned[i] and vol_confirm and vol_filter and in_session:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns below R1 or volatility filter fails
-            if close[i] < r1_aligned[i] or not vol_filter[i]:
+            # Long exit: price returns below R1 or volatility spike or outside session
+            if close[i] < r1_aligned[i] or not vol_filter or not in_session:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns above S1 or volatility filter fails
-            if close[i] > s1_aligned[i] or not vol_filter[i]:
+            # Short exit: price returns above S1 or volatility spike or outside session
+            if close[i] > s1_aligned[i] or not vol_filter or not in_session:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -105,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1D_Camarilla_R1S1_Breakout_Volume_Target_V1"
-timeframe = "12h"
+name = "4h_1D_Camarilla_R1S1_Breakout_Volume_V2"
+timeframe = "4h"
 leverage = 1.0
