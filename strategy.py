@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Pivot_S1R1_Breakout_Volume_v2 - Revised with stricter filters to reduce trades
-Long: Close breaks above daily R1 + volume > 1.5x daily avg + daily EMA50 > EMA200 + RSI(14) < 70
-Short: Close breaks below daily S1 + volume > 1.5x daily avg + daily EMA50 < EMA200 + RSI(14) > 30
-Exit: Opposite breakout or trend reversal
+6h_Keltner_WickReversal_V1
+Hypothesis: Price often reverses after piercing the Keltner Channel (ATR-based volatility band) 
+with a long wick, indicating exhaustion. We combine this with a daily trend filter (EMA50/EMA200)
+and volume confirmation to avoid false signals. Works in both bull and bear markets because 
+wick reversals occur at exhaustion points during trends and at support/resistance in ranges.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -20,57 +22,62 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and filters
+    # Keltner Channel parameters
+    atr_period = 10
+    kc_multiplier = 1.5
+    ema_period = 20
+    
+    # Calculate EMA and ATR for Keltner Channel
+    close_series = pd.Series(close)
+    ema = close_series.ewm(span=ema_period, adjust=False, min_periods=ema_period).mean()
+    
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean()
+    
+    upper_keltner = ema + kc_multiplier * atr
+    lower_keltner = ema - kc_multiplier * atr
+    
+    # Wick rejection detection: long upper wick (sell signal) or long lower wick (buy signal)
+    body_size = np.abs(close - open_) if 'open_' in locals() else np.abs(close - prices['open'].values)
+    upper_wick = high - np.maximum(close, prices['open'].values)
+    lower_wick = np.minimum(close, prices['open'].values) - low
+    
+    # Significant wick: at least 2x body size
+    significant_upper_wick = upper_wick > 2 * body_size
+    significant_lower_wick = lower_wick > 2 * body_size
+    
+    # Wick rejection conditions: price rejects Keltner band with long wick
+    reject_upper = (high > upper_keltner) & significant_upper_wick  # pierced upper band but closed back inside
+    reject_lower = (low < lower_keltner) & significant_lower_wick   # pierced lower band but closed back inside
+    
+    # Daily trend filter
     df_1d = get_htf_data(prices, '1d')
-    
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
-    
-    # Calculate Camarilla pivot points for daily timeframe
-    # Pivot = (H + L + C) / 3
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    # R1 = C + (H - L) * 1.1 / 12
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    # S1 = C - (H - L) * 1.1 / 12
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
-    
-    # Daily EMA50 and EMA200 for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Daily RSI(14) for momentum filter
-    delta = pd.Series(close_1d).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d = rsi_1d.values
-    
-    # Daily volume average (20-period)
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all daily data to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align daily EMA to 6h timeframe
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > 1.5 * vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for EMA200 and RSI
+    start_idx = max(ema_period, atr_period, 50)  # warmup period
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
-            np.isnan(rsi_aligned[i]) or np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -78,38 +85,27 @@ def generate_signals(prices):
         uptrend = ema_50_aligned[i] > ema_200_aligned[i]
         downtrend = ema_50_aligned[i] < ema_200_aligned[i]
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
-        
-        # RSI filters to avoid overbought/oversold extremes
-        rsi_not_overbought = rsi_aligned[i] < 70
-        rsi_not_oversold = rsi_aligned[i] > 30
-        
-        # Breakout conditions
-        breakout_up = close[i] > r1_aligned[i]
-        breakdown_down = close[i] < s1_aligned[i]
-        
         if position == 0:
-            # Long: uptrend + volume + breakout above daily R1 + not overbought
-            if uptrend and vol_confirm and breakout_up and rsi_not_overbought:
+            # Long: uptrend + volume + lower wick rejection (price bounced off lower Keltner)
+            if uptrend and vol_confirm[i] and reject_lower[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + volume + breakdown below daily S1 + not oversold
-            elif downtrend and vol_confirm and breakdown_down and rsi_not_oversold:
+            # Short: downtrend + volume + upper wick rejection (price rejected at upper Keltner)
+            elif downtrend and vol_confirm[i] and reject_upper[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend change, volume confirmation with breakdown, or RSI overbought
-            if not uptrend or (vol_confirm and breakdown_down) or rsi_aligned[i] >= 70:
+            # Long exit: trend reversal or upper wick rejection (exhaustion)
+            if not uptrend or reject_upper[i]:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend change, volume confirmation with breakout, or RSI oversold
-            if not downtrend or (vol_confirm and breakout_up) or rsi_aligned[i] <= 30:
+            # Short exit: trend reversal or lower wick rejection (exhaustion)
+            if not downtrend or reject_lower[i]:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -117,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_S1R1_Breakout_Volume_v2"
-timeframe = "12h"
+name = "6h_Keltner_WickReversal_V1"
+timeframe = "6h"
 leverage = 1.0
