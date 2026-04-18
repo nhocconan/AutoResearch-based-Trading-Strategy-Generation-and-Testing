@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-1h Intraday Trend + Volume + 4h Trend Filter
-Hypothesis: 1h momentum with volume confirmation, filtered by 4h trend, captures intraday moves
-while avoiding counter-trend trades. Volume filters out low-quality moves, 4h trend ensures
-we trade with the higher timeframe momentum. Designed for low trade frequency (15-30/year).
-Works in bull via trend continuation, in bear via counter-trend bounces within 4h trend context.
+6h Weekly Pivot Breakout with Volume and 1d EMA Filter
+Hypothesis: Weekly pivot levels act as strong support/resistance. Breaking through R1/S1 with volume confirmation and 1d EMA trend filter captures institutional breakout moves. Works in bull (breaks above R1) and bear (breaks below S1) markets by following the breakout direction.
 """
 
 import numpy as np
@@ -13,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,71 +18,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter (once before loop)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for pivot calculation (once before loop)
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 2:
         return np.zeros(n)
     
-    # 4h EMA50 for trend filter
-    ema50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate weekly pivot points (standard floor trader method)
+    # P = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # Volume spike: current volume > 1.8x 20-period average (avoid too many triggers)
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    
+    # Align weekly pivots to 6h timeframe (wait for weekly bar to close)
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
+    
+    # Get 1d EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume spike: current volume > 1.5x 20-period average (more sensitive for 6h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.8)
-    
-    # 1h price momentum: close > open (bullish candle)
-    bullish_candle = close > prices['open'].values
-    bearish_candle = close < prices['open'].values
-    
-    # Price position relative to 4h EMA: only trade in direction of 4h trend
-    price_above_4h_ema = close > ema50_4h_aligned
-    price_below_4h_ema = close < ema50_4h_aligned
+    vol_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Warmup for indicators
+    start_idx = 100  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_4h_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
+        pivot = pivot_aligned[i]
+        r1 = r1_aligned[i]
+        s1 = s1_aligned[i]
+        ema_trend = ema34_1d_aligned[i]
         vol_ok = vol_spike[i]
-        bullish = bullish_candle[i]
-        bearish = bearish_candle[i]
-        above_ema = price_above_4h_ema[i]
-        below_ema = price_below_4h_ema[i]
         
         if position == 0:
-            # Enter long: volume spike + bullish candle + price above 4h EMA (uptrend)
-            if vol_ok and bullish and above_ema:
-                signals[i] = 0.20
+            # Enter long: price breaks above R1 with volume + above 1d EMA (bullish bias)
+            if close[i] > r1 and vol_ok and close[i] > ema_trend:
+                signals[i] = 0.25
                 position = 1
-            # Enter short: volume spike + bearish candle + price below 4h EMA (downtrend)
-            elif vol_ok and bearish and below_ema:
-                signals[i] = -0.20
+            # Enter short: price breaks below S1 with volume + below 1d EMA (bearish bias)
+            elif close[i] < s1 and vol_ok and close[i] < ema_trend:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: momentum loss or price crosses below 4h EMA
-            if not bullish or below_ema:
+            # Exit long: price returns below pivot or volume dries up
+            if close[i] < pivot or not vol_ok:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: momentum loss or price crosses above 4h EMA
-            if not bearish or above_ema:
+            # Exit short: price returns above pivot or volume dries up
+            if close[i] > pivot or not vol_ok:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Intraday_Trend_Volume_4hFilter"
-timeframe = "1h"
+name = "6h_Weekly_Pivot_Breakout_Volume_EMAFilter"
+timeframe = "6h"
 leverage = 1.0
