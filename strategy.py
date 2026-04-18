@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_LowVolatilityBreakout_v1
-Strategy: 12h breakout from low volatility periods with trend filter and volume confirmation.
-Long: Price breaks above Bollinger Upper Band after low volatility period in uptrend.
-Short: Price breaks below Bollinger Lower Band after low volatility period in downtrend.
-Designed for 12h timeframe: ~15-25 trades/year per symbol (60-100 total over 4 years).
-Works in bull/bear via trend filter and volatility-based breakout logic.
+12h_Turtle_Soup_v2
+Strategy: 12h Turtle Soup pattern with 1D trend filter and volume confirmation.
+Reduced trading frequency via stricter entry conditions:
+- Requires both volume confirmation AND price action confirmation
+- Uses hysteresis in trend filter to reduce whipsaw
+- Implements minimum holding period to prevent churn
+Designed for 12h timeframe: ~10-20 trades/year per symbol (40-80 total over 4 years).
+Works in bull/bear via trend filter and mean-reversion breakout logic.
 """
 
 import numpy as np
@@ -17,96 +19,107 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Bollinger Bands and trend filter
+    # Get daily data for 20-day high/low and trend filter
     df_1d = get_htf_data(prices, '1d')
     
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Daily Bollinger Bands (20, 2)
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
+    # 20-day high and low (Donchian channels)
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Daily EMA50 and EMA200 for trend filter
+    # Daily EMA50 and EMA200 for trend filter with hysteresis
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
     # Daily volume average (20-period)
-    vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
     # Align all daily data to 12h timeframe
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
-    # Bollinger Band Width for volatility regime
-    bb_width = (upper_bb - lower_bb) / sma_20
-    bb_width_aligned = align_htf_to_ltf(prices, df_1d, bb_width)
-    
-    # Low volatility threshold (20th percentile of BB width)
-    bb_width_20th = np.nanpercentile(bb_width[~np.isnan(bb_width)], 20) if np.sum(~np.isnan(bb_width)) > 0 else 0.02
-    low_vol = bb_width_aligned < bb_width_20th
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    consecutive_bars = 0  # count bars in current position
     
     start_idx = 50  # need enough for EMA200
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
+        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
             np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
-            np.isnan(vol_ma_aligned[i]) or np.isnan(low_vol[i])):
+            np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend conditions
-        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
-        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
+        # Trend conditions with hysteresis to reduce whipsaw
+        uptrend = ema_50_aligned[i] > ema_200_aligned[i] * 1.001  # 0.1% buffer
+        downtrend = ema_50_aligned[i] < ema_200_aligned[i] * 0.999  # 0.1% buffer
         
         # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
         
-        # Breakout conditions
-        breakout_up = high[i] > upper_bb_aligned[i] and close[i] > upper_bb_aligned[i]
-        breakout_down = low[i] < lower_bb_aligned[i] and close[i] < lower_bb_aligned[i]
+        # Turtle Soup conditions
+        # Long: price tested below 20-day low, then closed back above it
+        soup_long = low[i] < low_20_aligned[i] and close[i] > low_20_aligned[i]
+        # Short: price tested above 20-day high, then closed back below it
+        soup_short = high[i] > high_20_aligned[i] and close[i] < high_20_aligned[i]
         
         if position == 0:
-            # Long: uptrend + low volatility + volume + breakout up
-            if uptrend and low_vol[i] and vol_confirm and breakout_up:
+            consecutive_bars = 0
+            # Long: uptrend + volume + soup long setup
+            if uptrend and vol_confirm and soup_long:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + low volatility + volume + breakout down
-            elif downtrend and low_vol[i] and vol_confirm and breakout_down:
+            # Short: downtrend + volume + soup short setup
+            elif downtrend and vol_confirm and soup_short:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend change, volatility expansion, or breakout down
-            if not uptrend or not low_vol[i] or breakout_down:
+            consecutive_bars += 1
+            # Minimum holding period: 2 bars to reduce churn
+            if consecutive_bars < 2:
+                signals[i] = 0.25
+                continue
+            
+            # Long exit: trend change OR soup short setup (removed vol_confirm to reduce exits)
+            if (not uptrend) or soup_short:
                 signals[i] = -0.25  # reverse to short
                 position = -1
+                consecutive_bars = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend change, volatility expansion, or breakout up
-            if not downtrend or not low_vol[i] or breakout_up:
+            consecutive_bars += 1
+            # Minimum holding period: 2 bars to reduce churn
+            if consecutive_bars < 2:
+                signals[i] = -0.25
+                continue
+            
+            # Short exit: trend change OR soup long setup (removed vol_confirm to reduce exits)
+            if (not downtrend) or soup_long:
                 signals[i] = 0.25  # reverse to long
                 position = 1
+                consecutive_bars = 0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "12h_LowVolatilityBreakout_v1"
+name = "12h_Turtle_Soup_v2"
 timeframe = "12h"
 leverage = 1.0
