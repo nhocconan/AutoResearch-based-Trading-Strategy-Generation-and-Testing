@@ -3,73 +3,56 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R with daily ADX trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions for mean reversion.
-# Daily ADX ensures we only trade in trending markets (ADX > 25) to avoid whipsaws.
-# Volume confirmation filters low-quality signals.
-# Designed for ~20-40 trades/year to minimize fee drag while capturing strong moves.
+# Hypothesis: Weekly pivot point (from weekly high/low/close) combined with weekly EMA trend
+# and volume confirmation on 6h timeframe. Pivot points act as dynamic support/resistance.
+# EMA trend filter ensures we trade with the weekly trend. Volume confirms breakout strength.
+# Designed for 6h timeframe with target 50-150 trades over 4 years (12-37/year) to avoid fee drag.
+# Works in both bull and bear markets by following weekly trend and fading at pivot extremes.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Williams %R and ADX
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get weekly data for pivot points and EMA
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Williams %R(14) on daily data
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    wr = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
-    wr = np.where((highest_high - lowest_low) == 0, -50, wr)  # avoid division by zero
+    # Calculate weekly pivot point (P) = (H + L + C)/3
+    # Support 1 (S1) = 2*P - H
+    # Resistance 1 (R1) = 2*P - L
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
     
-    # Align daily Williams %R to 12h timeframe
-    wr_aligned = align_htf_to_ltf(prices, df_1d, wr)
+    # Calculate weekly EMA(21) for trend filter
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Calculate ADX(14) on daily data
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Align weekly data to 6h timeframe
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Calculate 6h ATR for entry threshold
+    tr_6h_1 = high - low
+    tr_6h_2 = np.abs(high - np.roll(close, 1))
+    tr_6h_3 = np.abs(low - np.roll(close, 1))
+    tr_6h_1[0] = high[0] - low[0]
+    tr_6h_2[0] = np.abs(high[0] - close[0])
+    tr_6h_3[0] = np.abs(low[0] - close[0])
+    tr_6h = np.maximum(tr_6h_1, np.maximum(tr_6h_2, tr_6h_3))
+    atr_6h = pd.Series(tr_6h).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Smoothed values
-    tr14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_plus14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus14 / tr14
-    di_minus = 100 * dm_minus14 / tr14
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    dx = np.where((di_plus + di_minus) == 0, 0, dx)
-    
-    # ADX
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Align daily ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate 12h volume moving average (20-period)
+    # Calculate volume moving average (20-period)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -77,50 +60,50 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(14, 20)  # need Williams %R, ADX, volume MA
+    start_idx = max(21, 20)  # need weekly EMA21 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(wr_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or 
+            np.isnan(s1_1w_aligned[i]) or np.isnan(ema_21_1w_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(atr_6h[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.3 * 20-period average
         vol_confirmed = volume[i] > 1.3 * vol_ma[i]
         
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx_aligned[i] > 25
+        # Trend filter: price above weekly EMA21 (uptrend) or below (downtrend)
+        trend_up = close[i] > ema_21_1w_aligned[i]
+        trend_down = close[i] < ema_21_1w_aligned[i]
         
         if position == 0:
-            # Long entry: Williams %R oversold (< -80) in trending market with volume
-            if (wr_aligned[i] < -80 and 
-                trending and 
-                vol_confirmed):
+            # Long entry: price crosses above R1 with volume and uptrend
+            if (close[i] > r1_1w_aligned[i] and 
+                vol_confirmed and 
+                trend_up):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Williams %R overbought (> -20) in trending market with volume
-            elif (wr_aligned[i] > -20 and 
-                  trending and 
-                  vol_confirmed):
+            # Short entry: price crosses below S1 with volume and downtrend
+            elif (close[i] < s1_1w_aligned[i] and 
+                  vol_confirmed and 
+                  trend_down):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: Williams %R returns to overbought (> -20) or ADX weakens
-            if (wr_aligned[i] > -20 or 
-                adx_aligned[i] < 20):
+            # Long exit: price crosses below pivot or EMA21
+            if close[i] < pivot_1w_aligned[i] or close[i] < ema_21_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Williams %R returns to oversold (< -80) or ADX weakens
-            if (wr_aligned[i] < -80 or 
-                adx_aligned[i] < 20):
+            # Short exit: price crosses above pivot or EMA21
+            if close[i] > pivot_1w_aligned[i] or close[i] > ema_21_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -128,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsR_ADX25_VolumeFilter"
-timeframe = "12h"
+name = "6h_WeeklyPivot_EMA21_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
