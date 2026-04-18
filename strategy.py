@@ -1,80 +1,113 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d ADX(14) trend filter and volume confirmation.
-In trending markets (ADX>25), breakouts above/below Donchian channel continue with momentum.
-In ranging markets (ADX<20), avoid false breakouts by requiring stronger volume spikes.
-Volume confirmation: current volume > 1.5x 20-period average to filter low-conviction moves.
-Designed for 15-25 trades/year to minimize fee drag on 12h timeframe.
+Hypothesis: 4h Donchian(20) breakout with volume confirmation and ADX trend filter.
+Long when price breaks above upper band with ADX>25 and volume spike.
+Short when price breaks below lower band with ADX>25 and volume spike.
+Exit when price crosses opposite Donchian band or ADX<20 (trend weakening).
+Designed for 20-30 trades/year to minimize fee drag while capturing trends.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian Channel upper and lower bands."""
-    upper = np.full(len(high), np.nan)
-    lower = np.full(len(low), np.nan)
-    for i in range(period-1, len(high)):
-        upper[i] = np.max(high[i-period+1:i+1])
-        lower[i] = np.min(low[i-period+1:i+1])
-    return upper, lower
+def calculate_atr(high, low, close, period):
+    """Calculate Average True Range."""
+    if len(high) < period:
+        return np.full(len(high), np.nan)
+    
+    tr = np.zeros(len(high))
+    tr[0] = high[0] - low[0]
+    for i in range(1, len(high)):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = np.full(len(high), np.nan)
+    atr[period-1] = np.mean(tr[:period])
+    for i in range(period, len(high)):
+        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
+    return atr
 
 def calculate_adx(high, low, close, period):
     """Calculate Average Directional Index."""
-    if len(high) < period + 1:
+    if len(high) < period * 2:
         return np.full(len(high), np.nan)
     
     # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
+    tr = np.zeros(len(high))
+    tr[0] = high[0] - low[0]
+    for i in range(1, len(high)):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
     # Directional Movement
-    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
-                       np.maximum(high[1:] - high[:-1], 0), 0)
-    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
-                        np.maximum(low[:-1] - low[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
+    plus_dm = np.zeros(len(high))
+    minus_dm = np.zeros(len(high))
+    for i in range(1, len(high)):
+        up_move = high[i] - high[i-1]
+        down_move = low[i-1] - low[i]
+        if up_move > down_move and up_move > 0:
+            plus_dm[i] = up_move
+        else:
+            plus_dm[i] = 0
+        if down_move > up_move and down_move > 0:
+            minus_dm[i] = down_move
+        else:
+            minus_dm[i] = 0
     
     # Smoothed values
     atr = np.full(len(high), np.nan)
-    dm_plus_smooth = np.full(len(high), np.nan)
-    dm_minus_smooth = np.full(len(high), np.nan)
-    
-    if len(high) >= period:
-        atr[period] = np.nanmean(tr[1:period+1])
-        dm_plus_smooth[period] = np.nanmean(dm_plus[1:period+1])
-        dm_minus_smooth[period] = np.nanmean(dm_minus[1:period+1])
-        
-        for i in range(period+1, len(high)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-            dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period-1) + dm_plus[i]) / period
-            dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period-1) + dm_minus[i]) / period
-    
-    # Directional Indicators
     plus_di = np.full(len(high), np.nan)
     minus_di = np.full(len(high), np.nan)
-    dx = np.full(len(high), np.nan)
+    
+    atr[period-1] = np.mean(tr[:period])
+    plus_dm_sum = np.sum(plus_dm[:period])
+    minus_dm_sum = np.sum(minus_dm[:period])
     
     for i in range(period, len(high)):
+        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
+        plus_dm_smoothed = (plus_dm_sum - (plus_dm_sum / period) + plus_dm[i]) if i == period else (plus_di[i-1] * (period - 1) + plus_dm[i]) / period
+        minus_dm_smoothed = (minus_dm_sum - (minus_dm_sum / period) + minus_dm[i]) if i == period else (minus_di[i-1] * (period - 1) + minus_dm[i]) / period
+        
+        if i == period:
+            plus_dm_sum = plus_dm_smoothed * period
+            minus_dm_sum = minus_dm_smoothed * period
+        else:
+            plus_dm_sum = plus_dm_smoothed * period
+            minus_dm_sum = minus_dm_smoothed * period
+        
         if atr[i] != 0:
-            plus_di[i] = 100 * dm_plus_smooth[i] / atr[i]
-            minus_di[i] = 100 * dm_minus_smooth[i] / atr[i]
-            if plus_di[i] + minus_di[i] != 0:
-                dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+            plus_di[i] = 100 * plus_dm_smoothed / atr[i]
+            minus_di[i] = 100 * minus_dm_smoothed / atr[i]
+        else:
+            plus_di[i] = 0
+            minus_di[i] = 0
     
-    # ADX
+    # DX and ADX
+    dx = np.full(len(high), np.nan)
     adx = np.full(len(high), np.nan)
-    if len(high) >= 2*period:
-        adx[2*period-1] = np.nanmean(dx[period:2*period])
-        for i in range(2*period, len(high)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+    
+    for i in range(period, len(high)):
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum != 0:
+            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
+        else:
+            dx[i] = 0
+    
+    adx[2*period-1] = np.mean(dx[period:2*period])
+    for i in range(2*period, len(high)):
+        adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
     
     return adx
+
+def calculate_donchian(high, low, period):
+    """Calculate Donchian Channels."""
+    upper = np.full(len(high), np.nan)
+    lower = np.full(len(high), np.nan)
+    
+    for i in range(period-1, len(high)):
+        upper[i] = np.max(high[i-period+1:i+1])
+        lower[i] = np.min(low[i-period+1:i+1])
+    
+    return upper, lower
 
 def generate_signals(prices):
     n = len(prices)
@@ -86,27 +119,20 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian channels
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    
-    # Get 1d data for ADX
+    # Get 1d data for ADX filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Donchian(20) on 12h
-    upper_12h, lower_12h = calculate_donchian_channels(high_12h, low_12h, 20)
-    
     # Calculate ADX(14) on 1d
     adx_14_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    # Align to main timeframe
-    upper_12h_aligned = align_htf_to_ltf(prices, df_12h, upper_12h)
-    lower_12h_aligned = align_htf_to_ltf(prices, df_12h, lower_12h)
-    adx_14_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_14_1d)
+    # Align ADX to 4h timeframe
+    adx_14_1d_4h = align_htf_to_ltf(prices, df_1d, adx_14_1d)
+    
+    # Calculate Donchian(20) on 4h
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
     
     # Calculate volume moving average (20-period)
     vol_ma = np.full(n, np.nan)
@@ -116,12 +142,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # need volume MA calculation
+    start_idx = 35  # need ADX and Donchian calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_12h_aligned[i]) or np.isnan(lower_12h_aligned[i]) or 
-            np.isnan(adx_14_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(adx_14_1d_4h[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -129,33 +155,26 @@ def generate_signals(prices):
         vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: price breaks above upper Donchian with volume confirmation
-            # In trending markets (ADX>25), require standard volume
-            # In ranging markets (ADX<20), require stronger volume (2.0x)
-            if adx_14_1d_aligned[i] > 25:
-                vol_req = vol_confirmed
-            else:
-                vol_req = volume[i] > 2.0 * vol_ma[i]
-            
-            if close[i] > upper_12h_aligned[i] and vol_req:
+            # Long: price breaks above upper Donchian band with ADX>25 and volume
+            if close[i] > donchian_upper[i] and adx_14_1d_4h[i] > 25 and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian with volume confirmation
-            elif close[i] < lower_12h_aligned[i] and vol_req:
+            # Short: price breaks below lower Donchian band with ADX>25 and volume
+            elif close[i] < donchian_lower[i] and adx_14_1d_4h[i] > 25 and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below lower Donchian or ADX weakens significantly
-            if close[i] < lower_12h_aligned[i] or adx_14_1d_aligned[i] < 15:
+            # Long exit: price crosses below lower band or ADX weakens (<20)
+            if close[i] < donchian_lower[i] or adx_14_1d_4h[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above upper Donchian or ADX weakens significantly
-            if close[i] > upper_12h_aligned[i] or adx_14_1d_aligned[i] < 15:
+            # Short exit: price crosses above upper band or ADX weakens (<20)
+            if close[i] > donchian_upper[i] or adx_14_1d_4h[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -163,6 +182,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dADX_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_ADX14_Volume"
+timeframe = "4h"
 leverage = 1.0
