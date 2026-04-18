@@ -3,17 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Weekly 52-week high breakout with volume confirmation and ADX trend filter
-# Targets long-term trends in BTC/ETH/SOL by buying breakouts of annual resistance
-# Works in bull markets (continuation) and bear markets (mean reversion off extreme levels)
-# Weekly timeframe reduces noise, daily provides entry precision
-name = "1d_Weekly52W_HighBreakout_Volume_ADXFilter"
-timeframe = "1d"
+name = "6h_Pivot_R1_S1_Breakout_VolumeATRFilter_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 250:  # Need ~1 year for 52-week high
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,86 +17,81 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for 52-week high and ADX
-    df_1w = get_htf_data(prices, '1w')
+    # Daily data for pivot and ATR
+    df_1d = get_htf_data(prices, '1d')
     
-    # 52-week high (252 trading days ≈ 52 weeks)
-    # Using weekly high over 52 periods
-    weekly_high = df_1w['high'].values
-    high_52w = pd.Series(weekly_high).rolling(window=52, min_periods=52).max().values
+    # Previous daily OHLC
+    prev_close_d = df_1d['close'].shift(1).values
+    prev_high_d = df_1d['high'].shift(1).values
+    prev_low_d = df_1d['low'].shift(1).values
     
-    # ADX(14) for trend strength
-    # Calculate +DM, -DM, TR
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Pivot levels: R1, S1
+    pivot_d = (prev_high_d + prev_low_d + prev_close_d) / 3
+    range_d = prev_high_d - prev_low_d
+    R1_d = pivot_d + range_d
+    S1_d = pivot_d - range_d
     
-    plus_dm = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    minus_dm = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    # ATR(14) for filter
+    tr1 = prev_high_d - prev_low_d
+    tr2 = np.abs(prev_high_d - prev_close_d)
+    tr3 = np.abs(prev_low_d - prev_close_d)
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Smooth with Wilder's smoothing (equivalent to RMA)
-    def rma(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) >= period:
-            result[period-1] = np.nansum(arr[:period])
-            for i in range(period, len(arr)):
-                result[i] = result[i-1] - (result[i-1] / period) + arr[i]
-        return result
+    # Align to 6h
+    R1_d_aligned = align_htf_to_ltf(prices, df_1d, R1_d)
+    S1_d_aligned = align_htf_to_ltf(prices, df_1d, S1_d)
+    pivot_d_aligned = align_htf_to_ltf(prices, df_1d, pivot_d)
+    atr_d_aligned = align_htf_to_ltf(prices, df_1d, atr_d)
     
-    plus_dm_smooth = rma(np.concatenate([[0], plus_dm]), 14)
-    minus_dm_smooth = rma(np.concatenate([[0], minus_dm]), 14)
-    tr_smooth = rma(np.concatenate([[0], tr]), 14)
-    
-    # Avoid division by zero
-    plus_di = np.where(tr_smooth != 0, 100 * plus_dm_smooth / tr_smooth, 0)
-    minus_di = np.where(tr_smooth != 0, 100 * minus_dm_smooth / tr_smooth, 0)
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = rma(dx, 14)
-    
-    # Align weekly indicators to daily
-    high_52w_aligned = align_htf_to_ltf(prices, df_1w, high_52w)
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Volume filter: current volume > 1.5 * 20-day average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    # Volume filter: current volume > 2.0 * 4-period average (4 * 6h = 1 day)
+    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    volume_filter = volume > (2.0 * vol_ma_4)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 250  # Wait for 52-week high calculation
+    start_idx = 50  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(high_52w_aligned[i]) or np.isnan(adx_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(R1_d_aligned[i]) or np.isnan(S1_d_aligned[i]) or
+            np.isnan(pivot_d_aligned[i]) or np.isnan(atr_d_aligned[i]) or
+            np.isnan(vol_ma_4[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        high_52w_val = high_52w_aligned[i]
-        adx_val = adx_aligned[i]
+        R1_val = R1_d_aligned[i]
+        S1_val = S1_d_aligned[i]
+        pivot_val = pivot_d_aligned[i]
+        atr_val = atr_d_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: break above 52-week high with volume and ADX > 20 (trending market)
-            if close_val > high_52w_val and vol_filter and adx_val > 20:
+            # Long: break above R1 with volume and ATR filter (avoid low-vol breakouts)
+            if close_val > R1_val and vol_filter and atr_val > 0:
                 signals[i] = 0.25
                 position = 1
+            # Short: break below S1 with volume and ATR filter
+            elif close_val < S1_val and vol_filter and atr_val > 0:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit: close below 50-day MA or ADX drops below 15 (trend weakening)
-            ma_50 = pd.Series(close[:i+1]).rolling(window=50, min_periods=50).mean().iloc[-1]
-            if close_val < ma_50 or adx_val < 15:
+            # Long exit: price falls back below pivot
+            if close_val < pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
+        
+        elif position == -1:
+            # Short exit: price rises back above pivot
+            if close_val > pivot_val:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
