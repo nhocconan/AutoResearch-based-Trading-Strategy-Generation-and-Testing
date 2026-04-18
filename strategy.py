@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Trend_With_1d_Trend_Filter
-Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market noise, providing a smooth trend line that reduces whipsaws in ranging markets. Combined with a 1-day EMA trend filter and volume confirmation, this strategy aims to capture medium-term trends while avoiding false breakouts. Designed for 12-hour timeframe with ~15-30 trades/year to minimize fee drag and work in both bull and bear markets via adaptive trend filtering.
+4h_Pivot_R1S1_Breakout_With_Volume_and_Trend_Filter
+Hypothesis: 4-hour breakouts above 12-hour R1 or below S1 with volume > 1.5x 20-period average
+and price > 12-hour EMA34 for longs (or < for shorts) capture momentum in both bull and bear markets.
+The 12-hour EMA filter ensures alignment with higher timeframe trend, reducing whipsaws.
 """
 
 import numpy as np
@@ -10,86 +12,83 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # KAMA parameters
-    er_length = 10
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1) # EMA(30)
-    
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(close, n=er_length))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    # Handle edge case for volatility calculation
-    volatility_padded = np.concatenate([np.zeros(er_length-1), volatility])
-    er = np.where(volatility_padded != 0, change / volatility_padded, 0)
-    er = np.concatenate([np.full(er_length-1, np.nan), er])
-    
-    # Smoothing constant
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # KAMA calculation
-    kama = np.full_like(close, np.nan)
-    kama[er_length-1] = close[er_length-1]  # Seed
-    
-    for i in range(er_length, n):
-        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # 1-day EMA trend filter (34-period)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12-hour data for pivot and trend calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # 12-hour OHLC arrays
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Volume filter: >1.3x 20-period average
+    # Calculate Camarilla pivot levels for 12h timeframe
+    # P = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    pivot_12h = (high_12h + low_12h + close_12h) / 3
+    r1_12h = close_12h + (high_12h - low_12h) * 1.1 / 12
+    s1_12h = close_12h - (high_12h - low_12h) * 1.1 / 12
+    
+    # Align 12h levels to 4h timeframe (wait for 12h bar close)
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
+    
+    # 12-hour EMA trend filter (34-period)
+    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    
+    # 4h volume filter: >1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.3 * vol_ma)
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Warmup for KAMA and volume MA
+    start_idx = 20  # Warmup for volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(kama[i]) or np.isnan(ema_1d_aligned[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or 
+            np.isnan(ema_12h_aligned[i]) or np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        kama_val = kama[i]
-        ema_trend = ema_1d_aligned[i]
+        r1 = r1_12h_aligned[i]
+        s1 = s1_12h_aligned[i]
+        ema_trend = ema_12h_aligned[i]
         vol_ok = volume_filter[i]
         
         if position == 0:
-            # Long: price above KAMA and EMA1d with volume
-            if price > kama_val and price > ema_trend and vol_ok:
+            # Long: price breaks above 12h R1 with volume in uptrend
+            if price > r1 and vol_ok and price > ema_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA and EMA1d with volume
-            elif price < kama_val and price < ema_trend and vol_ok:
+            # Short: price breaks below 12h S1 with volume in downtrend
+            elif price < s1 and vol_ok and price < ema_trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long if price crosses below KAMA or trend fails
-            if price < kama_val or price < ema_trend:
+            # Exit long if price returns below 12h pivot or trend reverses
+            if price < pivot_12h_aligned[i] or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short if price crosses above KAMA or trend fails
-            if price > kama_val or price > ema_trend:
+            # Exit short if price returns above 12h pivot or trend reverses
+            if price > pivot_12h_aligned[i] or price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_KAMA_Trend_With_1d_Trend_Filter"
-timeframe = "12h"
+name = "4h_Pivot_R1S1_Breakout_With_Volume_and_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
