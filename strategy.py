@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_Breakout_Volume_Trend_Plus
-Hypothesis: Donchian(20) breakouts on 4h timeframe with volume confirmation and 12h EMA trend filter capture institutional moves.
-Works in both bull and bear by following breakout direction with trend filter. Target: 20-50 trades/year (80-200 total over 4 years).
+1h_Pivot_R2_S2_Breakout_1dTrend_VolumeFilter
+Hypothesis: Daily pivot levels R2/S2 act as strong support/resistance.
+Breakouts above R2 or below S2 with volume confirmation and daily EMA trend
+filter capture institutional moves. Works in both bull and bear by following
+institutional flow. Uses 4h for directional bias and 1h only for entry timing.
+Target: 15-37 trades/year (60-150 total over 4 years) to balance opportunity and fee drag.
 """
 
 import numpy as np
@@ -11,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,70 +22,100 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian(20) channels - 20-period high/low
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
-    
-    # 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # 1-day data for pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 12h EMA(34) trend filter
-    ema_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Previous day's OHLC for Camarilla pivot
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Camarilla levels: R2 = C + (H-L)*1.1/6, S2 = C - (H-L)*1.1/6
+    r2 = prev_close + (prev_high - prev_low) * 1.1 / 6
+    s2 = prev_close - (prev_high - prev_low) * 1.1 / 6
+    
+    # Align to 1h timeframe (waits for daily bar to close)
+    r2_1h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_1h = align_htf_to_ltf(prices, df_1d, s2)
     
     # Volume filter: >1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
     
+    # 1-day EMA trend filter
+    ema_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_1h = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # 4h directional bias filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
+        return np.zeros(n)
+    ema_4h = pd.Series(df_4h['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_4h_1h = align_htf_to_ltf(prices, df_4h, ema_4h)
+    
     signals = np.zeros(n)
     position = 0
+    bars_since_entry = 0
     
-    start_idx = 20  # Warmup for Donchian and volume MA
+    start_idx = 20  # Warmup for volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(ema_12h_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(r2_1h[i]) or np.isnan(s2_1h[i]) or
+            np.isnan(volume_filter[i]) or np.isnan(ema_1d_1h[i]) or
+            np.isnan(ema_4h_1h[i])):
             signals[i] = 0.0
+            bars_since_entry = 0
             continue
         
         price = close[i]
-        upper = donchian_high[i]
-        lower = donchian_low[i]
-        trend = ema_12h_aligned[i]
+        r2_val = r2_1h[i]
+        s2_val = s2_1h[i]
         vol_ok = volume_filter[i]
+        ema_trend = ema_1d_1h[i]
+        ema_bias = ema_4h_1h[i]
         
         if position == 0:
-            # Long: break above upper band with volume in uptrend
-            if price > upper and vol_ok and price > trend:
-                signals[i] = 0.25
+            # Long: break above R2 with volume in uptrend, aligned with 4h bias
+            if price > r2_val and vol_ok and price > ema_trend and price > ema_bias:
+                signals[i] = 0.20
                 position = 1
-            # Short: break below lower band with volume in downtrend
-            elif price < lower and vol_ok and price < trend:
-                signals[i] = -0.25
+                bars_since_entry = 0
+            # Short: break below S2 with volume in downtrend, aligned with 4h bias
+            elif price < s2_val and vol_ok and price < ema_trend and price < ema_bias:
+                signals[i] = -0.20
                 position = -1
+                bars_since_entry = 0
         
         elif position == 1:
-            # Long: exit when price returns to lower band or trend reverses
-            if price < lower or price < trend:
-                signals[i] = 0.0
-                position = 0
+            bars_since_entry += 1
+            # Minimum holding period: 6 bars (6 hours)
+            if bars_since_entry < 6:
+                signals[i] = 0.20
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
+                # Exit: price returns to S2 or trend reverses
+                if price < s2_val or price < ema_trend:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
         
         elif position == -1:
-            # Short: exit when price returns to upper band or trend reverses
-            if price > upper or price > trend:
-                signals[i] = 0.0
-                position = 0
+            bars_since_entry += 1
+            # Minimum holding period: 6 bars (6 hours)
+            if bars_since_entry < 6:
+                signals[i] = -0.20
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
+                # Exit: price returns to R2 or trend reverses
+                if price > r2_val or price > ema_trend:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_Trend_Plus"
-timeframe = "4h"
+name = "1h_Pivot_R2_S2_Breakout_1dTrend_VolumeFilter"
+timeframe = "1h"
 leverage = 1.0
