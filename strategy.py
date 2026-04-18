@@ -1,52 +1,17 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_RSI_ChopFilter_v3
-1d strategy using KAMA direction, RSI extremes, and Choppiness Index regime filter.
-- Long: KAMA trending up + RSI > 50 + Chop > 61.8 (range) → mean reversion long from oversold
-- Short: KAMA trending down + RSI < 50 + Chop > 61.8 (range) → mean reversion short from overbought
-- Uses daily timeframe with weekly trend filter (EMA34) for alignment
-- Designed for 50-80 total trades over 4 years (12-20/year)
-Works in choppy/range markets (2025-2026) and captures mean reversion in trends
+4h_RSI2_Regime_Breakout
+4h strategy using 2-period RSI for mean reversion in ranging markets and breakout in trending markets.
+- Long: RSI2 < 10 + price > 200 EMA + volume > 1.5x 20-period volume MA (mean reversion long in uptrend)
+- Short: RSI2 > 90 + price < 200 EMA + volume > 1.5x 20-period volume MA (mean reversion short in downtrend)
+- Exit: Opposite RSI2 extreme or trend reversal
+Designed for ~20-40 trades/year per symbol (80-160 total over 4 years)
+Works in bull markets (mean reversion longs) and bear markets (mean reversion shorts)
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_kama(close, er_len=10, fast=2, slow=30):
-    """Kaufman's Adaptive Moving Average"""
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(change) < len(close) else np.nansum(np.abs(np.diff(close, axis=0)), axis=0) if hasattr(change, 'axis') else np.nansum(np.abs(np.diff(close)))
-    # Simplified volatility calculation for 1D array
-    volatility = np.array([np.sum(np.abs(np.diff(close[max(0, i-er_len+1):i+1]))) for i in range(len(close))])
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    return kama
-
-def calculate_chop(high, low, close, period=14):
-    """Choppiness Index"""
-    atr = np.zeros_like(close)
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first TR is just high-low
-    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
-    
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    
-    chop = np.zeros_like(close)
-    for i in range(period-1, len(close)):
-        if atr[i] > 0 and (highest_high[i] - lowest_low[i]) > 0:
-            chop[i] = 100 * np.log10(atr[i] * period / (highest_high[i] - lowest_low[i])) / np.log10(period)
-        else:
-            chop[i] = 50.0
-    return chop
 
 def generate_signals(prices):
     n = len(prices)
@@ -58,80 +23,91 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for indicators
+    # Get daily data for trend filter and volume average
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate KAMA on daily close
     close_1d = df_1d['close'].values
-    kama = calculate_kama(close_1d, er_len=10, fast=2, slow=30)
+    volume_1d = df_1d['volume'].values
     
-    # Calculate RSI on daily close
-    delta = np.diff(close_1d, prepend=close_1d[0])
+    # Daily EMA200 for trend filter
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Daily volume average (20-period)
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align daily data to 4h timeframe
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    
+    # Calculate 2-period RSI on 4h close
+    delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    gain_ma = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    loss_ma = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(loss_ma != 0, gain_ma / loss_ma, 0)
-    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate Choppiness Index on daily OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    chop = calculate_chop(high_1d, low_1d, close_1d, period=14)
+    # Wilder's smoothing: first average is simple average, then smoothed
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[1] = gain[1]  # first value after seed
+    avg_loss[1] = loss[1]
     
-    # Weekly EMA34 for trend filter (alignment only)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    for i in range(2, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Align all daily data to 1d timeframe (no alignment needed as same timeframe)
-    kama_aligned = kama  # already daily
-    rsi_aligned = rsi    # already daily
-    chop_aligned = chop  # already daily
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi2 = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # need enough for weekly EMA34 and RSI
+    start_idx = 200  # need enough for daily EMA200
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or np.isnan(ema_34_1w_aligned[i])):
+        if (np.isnan(ema_200_aligned[i]) or np.isnan(vol_ma_aligned[i]) or
+            np.isnan(rsi2[i])):
             signals[i] = 0.0
             continue
         
-        # KAMA direction (trend)
-        kama_up = kama_aligned[i] > kama_aligned[i-1] if i > 0 else False
-        kama_down = kama_aligned[i] < kama_aligned[i-1] if i > 0 else False
+        # Trend conditions from daily timeframe
+        uptrend = ema_200_aligned[i] > close[i]  # price above daily EMA200 = uptrend
+        downtrend = ema_200_aligned[i] < close[i]  # price below daily EMA200 = downtrend
         
-        # RSI conditions
-        rsi_over = rsi_aligned[i] > 50
-        rsi_under = rsi_aligned[i] < 50
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
         
-        # Chop regime (range market)
-        chop_range = chop_aligned[i] > 61.8
+        # RSI2 extremes for mean reversion
+        rsi_oversold = rsi2[i] < 10
+        rsi_overbought = rsi2[i] > 90
         
-        # Entry conditions
-        if chop_range:
-            # In range: mean reversion
-            if kama_up and rsi_under and close[i] < close_1d[i]:  # price below daily close = oversold
+        if position == 0:
+            # Long: uptrend + volume + RSI2 oversold (mean reversion long)
+            if uptrend and vol_confirm and rsi_oversold:
                 signals[i] = 0.25
-            elif kama_down and rsi_over and close[i] > close_1d[i]:  # price above daily close = overbought
+                position = 1
+            # Short: downtrend + volume + RSI2 overbought (mean reversion short)
+            elif downtrend and vol_confirm and rsi_overbought:
                 signals[i] = -0.25
+                position = -1
+        
+        elif position == 1:
+            # Long exit: RSI2 overbought or trend reversal to downtrend
+            if rsi_overbought or downtrend:
+                signals[i] = -0.25  # reverse to short
+                position = -1
             else:
-                signals[i] = 0.0
-        else:
-            # In trend: follow KAMA direction
-            if kama_up:
                 signals[i] = 0.25
-            elif kama_down:
-                signals[i] = -0.25
+        
+        elif position == -1:
+            # Short exit: RSI2 oversold or trend reversal to uptrend
+            if rsi_oversold or uptrend:
+                signals[i] = 0.25  # reverse to long
+                position = 1
             else:
-                signals[i] = 0.0
+                signals[i] = -0.25
     
     return signals
 
-name = "1d_KAMA_RSI_ChopFilter_v3"
-timeframe = "1d"
+name = "4h_RSI2_Regime_Breakout"
+timeframe = "4h"
 leverage = 1.0
