@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,22 +13,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian channel and ATR
+    # Get daily data for Donchian channels and ATR
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 20-period Donchian channel
-    def calculate_donchian_channel(high, low, period=20):
+    # Calculate 20-period Donchian channels (upper/lower) and middle
+    def calculate_donchian_channels(high, low, period=20):
+        if len(high) < period:
+            upper = np.full_like(high, np.nan)
+            lower = np.full_like(high, np.nan)
+            middle = np.full_like(high, np.nan)
+            return upper, middle, lower
+        
         upper = np.full_like(high, np.nan)
         lower = np.full_like(high, np.nan)
+        middle = np.full_like(high, np.nan)
         
         for i in range(period-1, len(high)):
             upper[i] = np.max(high[i-period+1:i+1])
             lower[i] = np.min(low[i-period+1:i+1])
         
-        return upper, lower
+        middle = (upper + lower) / 2
+        return upper, middle, lower
     
     # Calculate 14-period ATR
     def calculate_atr(high, low, close, period=14):
@@ -49,6 +57,9 @@ def generate_signals(prices):
         
         return atr
     
+    donch_upper, donch_middle, donch_lower = calculate_donchian_channels(high_1d, low_1d, 20)
+    atr_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
+    
     # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
@@ -59,15 +70,16 @@ def generate_signals(prices):
     else:
         ema_1w = np.full_like(close_1w, np.nan)
     
-    # Align all data to 4h timeframe
-    donch_upper_4h = align_htf_to_ltf(prices, df_1d, calculate_donchian_channel(high_1d, low_1d, 20)[0])
-    donch_lower_4h = align_htf_to_ltf(prices, df_1d, calculate_donchian_channel(high_1d, low_1d, 20)[1])
-    atr_4h = align_htf_to_ltf(prices, df_1d, calculate_atr(high_1d, low_1d, close_1d, 14))
-    ema_1w_4h = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Align all data to 12h timeframe
+    donch_upper_12h = align_htf_to_ltf(prices, df_1d, donch_upper)
+    donch_lower_12h = align_htf_to_ltf(prices, df_1d, donch_lower)
+    donch_middle_12h = align_htf_to_ltf(prices, df_1d, donch_middle)
+    atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    ema_1w_12h = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Volume confirmation: volume > 1.8x 20-period average
+    # Volume confirmation: volume > 1.5x 12-period average
     vol_ma = np.full_like(volume, np.nan)
-    vol_period = 20
+    vol_period = 12
     
     if len(volume) >= vol_period:
         for i in range(vol_period, len(volume)):
@@ -80,36 +92,40 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donch_upper_4h[i]) or np.isnan(donch_lower_4h[i]) or 
-            np.isnan(atr_4h[i]) or np.isnan(ema_1w_4h[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(donch_upper_12h[i]) or np.isnan(donch_lower_12h[i]) or 
+            np.isnan(donch_middle_12h[i]) or np.isnan(atr_12h[i]) or 
+            np.isnan(ema_1w_12h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
-        vol_confirm = volume[i] > 1.8 * vol_ma[i]
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        
+        # Trend filter: price above/below weekly EMA34
+        price_above_weekly_ema = close[i] > ema_1w_12h[i]
+        price_below_weekly_ema = close[i] < ema_1w_12h[i]
         
         if position == 0:
-            # Long: price breaks above upper Donchian with volume and bullish weekly trend
-            if close[i] > donch_upper_4h[i] and vol_confirm and close[i] > ema_1w_4h[i]:
+            # Long: price breaks above upper Donchian with volume and above weekly EMA
+            if close[i] > donch_upper_12h[i] and vol_confirm and price_above_weekly_ema:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian with volume and bearish weekly trend
-            elif close[i] < donch_lower_4h[i] and vol_confirm and close[i] < ema_1w_4h[i]:
+            # Short: price breaks below lower Donchian with volume and below weekly EMA
+            elif close[i] < donch_lower_12h[i] and vol_confirm and price_below_weekly_ema:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below lower Donchian OR trailing stop (2*ATR below high)
-            if close[i] < donch_lower_4h[i]:
+            # Long exit: price crosses below middle Donchian OR volatility expands (ATR > 1.5x average)
+            if close[i] < donch_middle_12h[i] or atr_12h[i] > 1.5 * np.nanmean(atr_12h[max(0, i-20):i]):
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above upper Donchian OR trailing stop (2*ATR above low)
-            if close[i] > donch_upper_4h[i]:
+            # Short exit: price crosses above middle Donchian OR volatility expands
+            if close[i] > donch_middle_12h[i] or atr_12h[i] > 1.5 * np.nanmean(atr_12h[max(0, i-20):i]):
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -117,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_WeeklyTrend_Volume_Filter"
-timeframe = "4h"
+name = "12h_Donchian_WeeklyEMA_Volume"
+timeframe = "12h"
 leverage = 1.0
