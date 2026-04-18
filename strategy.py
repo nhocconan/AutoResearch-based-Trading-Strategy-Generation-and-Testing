@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+"""
+Hypothesis: 6h Elder Ray Power + 1w Trend Filter
+- Bull Power (High - EMA13) and Bear Power (EMA13 - Low) measure buying/selling pressure
+- In strong weekly uptrend (price > weekly EMA34), only take long when Bull Power > 0 and rising
+- In strong weekly downtrend (price < weekly EMA34), only take short when Bear Power > 0 and rising
+- Weekly trend filter prevents counter-trend trades in strong trends
+- Works in both bull and bear markets by adapting to weekly trend direction
+- Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -11,139 +21,72 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get daily data for Donchian channels and ADX
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate EMA13 for Elder Ray
+    if len(close) >= 13:
+        ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    else:
+        ema13 = np.full_like(close, np.nan)
     
-    # Calculate 20-period Donchian channels (based on previous day)
-    upper = np.full_like(high_1d, np.nan)
-    lower = np.full_like(low_1d, np.nan)
+    # Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    bull_power = high - ema13
+    bear_power = ema13 - low
     
-    for i in range(20, len(high_1d)):
-        upper[i] = np.max(high_1d[i-20:i])
-        lower[i] = np.min(low_1d[i-20:i])
+    # Weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 14-period ADX for regime filtering
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high[1:] - low[1:]
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])
-        
-        # Directional Movement
-        dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
-                           np.maximum(high[1:] - high[:-1], 0), 0)
-        dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
-                            np.maximum(low[:-1] - low[1:], 0), 0)
-        dm_plus = np.concatenate([[np.nan], dm_plus])
-        dm_minus = np.concatenate([[np.nan], dm_minus])
-        
-        # Smooth TR, DM+
-        atr = np.full_like(tr, np.nan)
-        dm_plus_smooth = np.full_like(dm_plus, np.nan)
-        dm_minus_smooth = np.full_like(dm_minus, np.nan)
-        
-        if len(tr) >= period:
-            # Initial values
-            atr[period] = np.nanmean(tr[1:period+1])
-            dm_plus_smooth[period] = np.nanmean(dm_plus[1:period+1])
-            dm_minus_smooth[period] = np.nanmean(dm_minus[1:period+1])
-            
-            # Wilder smoothing
-            for i in range(period+1, len(tr)):
-                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-                dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period-1) + dm_plus[i]) / period
-                dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period-1) + dm_minus[i]) / period
-        
-        # DI+ and DI-
-        di_plus = np.full_like(dm_plus_smooth, np.nan)
-        di_minus = np.full_like(dm_minus_smooth, np.nan)
-        valid = ~np.isnan(atr) & (atr != 0)
-        di_plus[valid] = 100 * dm_plus_smooth[valid] / atr[valid]
-        di_minus[valid] = 100 * dm_minus_smooth[valid] / atr[valid]
-        
-        # DX and ADX
-        dx = np.full_like(di_plus, np.nan)
-        dx_valid = ~np.isnan(di_plus) & ~np.isnan(di_minus) & ((di_plus + di_minus) != 0)
-        dx[dx_valid] = 100 * np.abs(di_plus[dx_valid] - di_minus[dx_valid]) / (di_plus[dx_valid] + di_minus[dx_valid])
-        
-        adx = np.full_like(dx, np.nan)
-        if len(dx) >= period:
-            # Initial ADX
-            adx[2*period-1] = np.nanmean(dx[period:2*period])
-            # Wilder smoothing for ADX
-            for i in range(2*period, len(dx)):
-                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
+    if len(close_1w) >= 34:
+        ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    else:
+        ema34_1w = np.full_like(close_1w, np.nan)
     
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    
-    # Align all 1d data to 1h timeframe
-    upper_1h = align_htf_to_ltf(prices, df_1d, upper)
-    lower_1h = align_htf_to_ltf(prices, df_1d, lower)
-    adx_1h = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Volume confirmation: volume > 1.5x 24-period average
-    vol_ma = np.full_like(volume, np.nan)
-    vol_period = 24
-    
-    if len(volume) >= vol_period:
-        for i in range(vol_period, len(volume)):
-            vol_ma[i] = np.mean(volume[i - vol_period:i])
+    # Align weekly EMA to 6h
+    ema34_1w_6h = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(24, 20, 14) + 1  # Ensure we have enough data
+    start_idx = 13
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available
-        if (np.isnan(upper_1h[i]) or np.isnan(lower_1h[i]) or 
-            np.isnan(adx_1h[i]) or np.isnan(vol_ma[i])):
+        # Skip if weekly EMA not available
+        if np.isnan(ema34_1w_6h[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
-        
-        # Regime filter: daily ADX < 25 (range market)
-        range_regime = adx_1h[i] < 25
+        # Determine weekly trend
+        weekly_uptrend = close[i] > ema34_1w_6h[i]
+        weekly_downtrend = close[i] < ema34_1w_6h[i]
         
         if position == 0:
-            # Long: price breaks above upper Donchian with volume in range regime
-            if close[i] > upper_1h[i] and vol_confirm and range_regime:
-                signals[i] = 0.20
+            # Long conditions: weekly uptrend + bull power positive and rising
+            if weekly_uptrend and bull_power[i] > 0 and i > start_idx and bull_power[i] > bull_power[i-1]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian with volume in range regime
-            elif close[i] < lower_1h[i] and vol_confirm and range_regime:
-                signals[i] = -0.20
+            # Short conditions: weekly downtrend + bear power positive and rising
+            elif weekly_downtrend and bear_power[i] > 0 and i > start_idx and bear_power[i] > bear_power[i-1]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below lower Donchian OR ADX rises above 30 (trend emerging)
-            if close[i] < lower_1h[i] or adx_1h[i] > 30:
-                signals[i] = -0.20  # reverse to short
+            # Exit long: weekly trend turns down OR bull power turns negative
+            if not weekly_uptrend or bull_power[i] <= 0:
+                signals[i] = -0.25  # reverse to short
                 position = -1
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above upper Donchian OR ADX rises above 30 (trend emerging)
-            if close[i] > upper_1h[i] or adx_1h[i] > 30:
-                signals[i] = 0.20  # reverse to long
+            # Exit short: weekly trend turns up OR bear power turns negative
+            if not weekly_downtrend or bear_power[i] <= 0:
+                signals[i] = 0.25  # reverse to long
                 position = 1
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Donchian_Breakout_Volume_ADX_Filter"
-timeframe = "1h"
+name = "6h_ElderRay_Power_WeeklyTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
