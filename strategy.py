@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_20_Breakout_Volume_Trend_Filter
-Hypothesis: Use 20-period Donchian channel breakouts on 4h timeframe with volume confirmation (>1.5x 20-period average volume) and 4h ADX > 25 trend filter. Only trade during active session (08-20 UTC). Long on breakout above upper band, short on breakout below lower band. Exit on opposite band touch. Position size fixed at 0.25 to balance risk and reward. Designed for ~30-50 trades/year to avoid excessive fee drag while capturing strong trends in both bull and bear markets.
+12h_1D_1W_Camarilla_R1S1_Breakout_Volume_Trend_v3
+Hypothesis: Use daily and weekly Camarilla R1/S1 levels for directional bias on 12h timeframe, with volume confirmation (>1.5x 20-period average) and trend filter from weekly ADX > 25. Enter only on breakouts of both daily and weekly levels. Exit on reversal of either level. Position size fixed at 0.25 to balance risk and reward. Designed for 15-35 trades/year to avoid fee drag, targeting 60-140 total trades over 4 years.
 """
 
 import numpy as np
@@ -18,29 +18,62 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian channels and ADX
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1d data for daily Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
     
-    # 4h calculations
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Get 1w data for weekly trend filter and levels
+    df_1w = get_htf_data(prices, '1w')
     
-    # Donchian Channel (20-period)
-    period = 20
-    upper = pd.Series(high_4h).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low_4h).rolling(window=period, min_periods=period).min().values
+    # 1d calculations for entry levels (using previous day's OHLC)
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # ADX calculation for trend strength
+    # Previous day's OHLC for Camarilla calculation
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d[0] = close_1d[0]
+    prev_high_1d[0] = high_1d[0]
+    prev_low_1d[0] = low_1d[0]
+    
+    # 1d Camarilla levels: R1 = close + (high-low)*1.1/12, S1 = close - (high-low)*1.1/12
+    range_1d = prev_high_1d - prev_low_1d
+    r1_1d = prev_close_1d + range_1d * 1.1 / 12
+    s1_1d = prev_close_1d - range_1d * 1.1 / 12
+    
+    # 1w calculations for trend filter and levels
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # Previous week's OHLC for Camarilla calculation
+    prev_close_1w = np.roll(close_1w, 1)
+    prev_high_1w = np.roll(high_1w, 1)
+    prev_low_1w = np.roll(low_1w, 1)
+    prev_close_1w[0] = close_1w[0]
+    prev_high_1w[0] = high_1w[0]
+    prev_low_1w[0] = low_1w[0]
+    
+    # 1w Camarilla levels: R1 = close + (high-low)*1.1/12, S1 = close - (high-low)*1.1/12
+    range_1w = prev_high_1w - prev_low_1w
+    r1_1w = prev_close_1w + range_1w * 1.1 / 12
+    s1_1w = prev_close_1w - range_1w * 1.1 / 12
+    
+    # 1w ADX for trend strength filter (avoid chop)
+    high_1w_arr = df_1w['high'].values
+    low_1w_arr = df_1w['low'].values
+    close_1w_arr = df_1w['close'].values
+    
     # True Range
-    tr1 = np.maximum(high_4h - low_4h, np.abs(high_4h - np.roll(close_4h, 1)))
-    tr2 = np.abs(np.roll(close_4h, 1) - low_4h)
+    tr1 = np.maximum(high_1w_arr - low_1w_arr, np.abs(high_1w_arr - np.roll(close_1w_arr, 1)))
+    tr2 = np.abs(np.roll(close_1w_arr, 1) - low_1w_arr)
     tr = np.maximum(tr1, tr2)
-    tr[0] = high_4h[0] - low_4h[0]
+    tr[0] = high_1w_arr[0] - low_1w_arr[0]
     
     # Directional Movement
-    up_move = np.maximum(high_4h - np.roll(high_4h, 1), 0)
-    down_move = np.maximum(np.roll(low_4h, 1) - low_4h, 0)
+    up_move = np.maximum(high_1w_arr - np.roll(high_1w_arr, 1), 0)
+    down_move = np.maximum(np.roll(low_1w_arr, 1) - low_1w_arr, 0)
     up_move[0] = 0
     down_move[0] = 0
     
@@ -71,62 +104,53 @@ def generate_signals(prices):
     for i in range(2*adx_period + 1, len(dx)):
         adx[i] = (adx[i-1] * (adx_period - 1) + dx[i]) / adx_period
     
-    # Align all higher timeframe data to 4h (actually 4h to 4h is identity, but keeping for consistency)
-    upper_aligned = align_htf_to_ltf(prices, df_4h, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_4h, lower)
-    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx)
+    # Align all higher timeframe data to 12h
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
-    # Precompute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_mask = (hours >= 8) & (hours <= 20)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Precompute volume confirmation (1.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 2*adx_period + 1)  # need enough for ADX and averages
+    start_idx = 50  # need enough for ADX and averages
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(adx_4h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or 
+            np.isnan(adx_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
-        
-        # Trend filter: 4h ADX > 25 to avoid chop
-        trend_filter = adx_4h_aligned[i] > 25
-        
-        # Only trade during active session
-        in_session = session_mask[i]
-        
         if position == 0:
-            # Long: price breaks above upper Donchian band with volume and trend filter
-            if close[i] > upper_aligned[i] and vol_confirm and trend_filter and in_session:
+            # Long: price breaks above both 1d R1 and 1w R1 with volume and trend filter
+            if (close[i] > r1_1d_aligned[i] and close[i] > r1_1w_aligned[i] and 
+                vol_confirm[i] and adx_1w_aligned[i] > 25):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian band with volume and trend filter
-            elif close[i] < lower_aligned[i] and vol_confirm and trend_filter and in_session:
+            # Short: price breaks below both 1d S1 and 1w S1 with volume and trend filter
+            elif (close[i] < s1_1d_aligned[i] and close[i] < s1_1w_aligned[i] and 
+                  vol_confirm[i] and adx_1w_aligned[i] > 25):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price touches or goes below lower Donchian band (mean reversion)
-            # or trend filter fails or outside session
-            if close[i] < lower_aligned[i] or not trend_filter or not in_session:
+            # Long exit: price returns below either 1d R1 or 1w R1
+            if close[i] < r1_1d_aligned[i] or close[i] < r1_1w_aligned[i]:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price touches or goes above upper Donchian band
-            # or trend filter fails or outside session
-            if close[i] > upper_aligned[i] or not trend_filter or not in_session:
+            # Short exit: price returns above either 1d S1 or 1w S1
+            if close[i] > s1_1d_aligned[i] or close[i] > s1_1w_aligned[i]:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -134,6 +158,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_20_Breakout_Volume_Trend_Filter"
-timeframe = "4h"
+name = "12h_1D_1W_Camarilla_R1S1_Breakout_Volume_Trend_v3"
+timeframe = "12h"
 leverage = 1.0
