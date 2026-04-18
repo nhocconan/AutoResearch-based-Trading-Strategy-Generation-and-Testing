@@ -1,28 +1,25 @@
-# 4h_Camarilla_Reversal_ADX_Volume
-# Strategy: Fades extreme levels (S3/R3) in ranging markets, breaks S4/R4 in trending markets
-# Uses 1d ADX for trend filter and volume confirmation to reduce false signals
-# Designed for 20-30 trades/year to minimize fee drag
-# Works in both bull and bear markets by adapting to regime
+# 6h Weekly Pivot Breakout with Volume Confirmation and ADX Trend Filter
+# Hypothesis: In trending markets (ADX >= 25), weekly pivot levels act as breakout levels - 
+# price breaking above R1 or below S1 with volume continues the trend. In ranging markets (ADX < 25),
+# price reverts to the weekly pivot point. Weekly pivots derived from prior week's OHLC provide
+# institutional reference points. Volume confirms institutional participation. Designed for 6h timeframe
+# to capture fewer, higher-quality trades (target: 20-40 trades/year) minimizing fee drag.
+# Works in bull markets (breakouts above R1) and bear markets (breakdowns below S1).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given high, low, close."""
-    range_val = high - low
-    if range_val == 0:
-        return close, close, close, close, close, close, close, close
-    c = close
-    h4 = c + range_val * 1.1 / 2
-    l4 = c - range_val * 1.1 / 2
-    h3 = c + range_val * 1.1 / 4
-    l3 = c - range_val * 1.1 / 4
-    h2 = c + range_val * 1.1 / 6
-    l2 = c - range_val * 1.1 / 6
-    h1 = c + range_val * 1.1 / 12
-    l1 = c - range_val * 1.1 / 12
-    return h4, l4, h3, l3, h2, l2, h1, l1
+def calculate_weekly_pivot(high, low, close):
+    """Calculate weekly pivot points from prior week's OHLC."""
+    if high <= 0 or low <= 0 or close <= 0:
+        return close, close, close, close, close, close
+    pp = (high + low + close) / 3.0
+    r1 = 2 * pp - low
+    s1 = 2 * pp - high
+    r2 = pp + (high - low)
+    s2 = pp - (high - low)
+    return pp, r1, s1, r2, s2
 
 def generate_signals(prices):
     n = len(prices)
@@ -34,13 +31,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get weekly data for pivot points
+    df_weekly = get_htf_data(prices, '1w')
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
     
-    # Calculate ADX(14) on 1d data
+    # Get daily data for ADX trend filter
+    df_daily = get_htf_data(prices, '1d')
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    close_daily = df_daily['close'].values
+    
+    # Calculate weekly pivot points (using prior week's data)
+    pp = np.full(n, np.nan)
+    r1 = np.full(n, np.nan)
+    s1 = np.full(n, np.nan)
+    r2 = np.full(n, np.nan)
+    s2 = np.full(n, np.nan)
+    
+    for i in range(len(df_weekly)):
+        pp_val, r1_val, s1_val, r2_val, s2_val = calculate_weekly_pivot(
+            high_weekly[i], low_weekly[i], close_weekly[i]
+        )
+        # These values are valid for the entire following week
+        # We'll align them to 6h timeframe with proper delay
+        pass
+    
+    # Calculate ADX on daily data for trend filter
     def calculate_adx(high, low, close, period=14):
         n = len(high)
         if n < period * 2:
@@ -60,18 +78,16 @@ def generate_signals(prices):
         plus_dm = np.concatenate([[0], plus_dm])
         minus_dm = np.concatenate([[0], minus_dm])
         
-        # Smoothed values
+        # Smoothed values (Wilder's smoothing)
         atr = np.full(n, np.nan)
         plus_dm_smooth = np.full(n, np.nan)
         minus_dm_smooth = np.full(n, np.nan)
         
-        # Initial values
         if n >= period:
             atr[period-1] = np.nanmean(tr[1:period+1])
             plus_dm_smooth[period-1] = np.nanmean(plus_dm[1:period+1])
             minus_dm_smooth[period-1] = np.nanmean(minus_dm[1:period+1])
             
-            # Wilder smoothing
             for i in range(period, n):
                 atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
                 plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
@@ -98,68 +114,88 @@ def generate_signals(prices):
         
         return adx
     
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_1d_4h = align_htf_to_ltf(prices, df_1d, adx_1d)
+    adx_daily = calculate_adx(high_daily, low_daily, close_daily, 14)
     
-    # Calculate volume moving average (20-period)
+    # Calculate volume moving average (24-period for 6h = 6 days)
     vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+    for i in range(24, n):
+        vol_ma[i] = np.mean(volume[i-24:i])
+    
+    # Align weekly pivots and daily ADX to 6h timeframe
+    # For weekly pivots, we need to use the prior week's values
+    # Create arrays of weekly pivot values shifted by one week to avoid look-ahead
+    pp_weekly = np.full(len(df_weekly), np.nan)
+    r1_weekly = np.full(len(df_weekly), np.nan)
+    s1_weekly = np.full(len(df_weekly), np.nan)
+    r2_weekly = np.full(len(df_weekly), np.nan)
+    s2_weekly = np.full(len(df_weekly), np.nan)
+    
+    for i in range(1, len(df_weekly)):  # Start from 1 to use prior week
+        pp_val, r1_val, s1_val, r2_val, s2_val = calculate_weekly_pivot(
+            high_weekly[i-1], low_weekly[i-1], close_weekly[i-1]
+        )
+        pp_weekly[i] = pp_val
+        r1_weekly[i] = r1_val
+        s1_weekly[i] = s1_val
+        r2_weekly[i] = r2_val
+        s2_weekly[i] = s2_val
+    
+    # Align to 6h timeframe
+    pp_6h = align_htf_to_ltf(prices, df_weekly, pp_weekly)
+    r1_6h = align_htf_to_ltf(prices, df_weekly, r1_weekly)
+    s1_6h = align_htf_to_ltf(prices, df_weekly, s1_weekly)
+    r2_6h = align_htf_to_ltf(prices, df_weekly, r2_weekly)
+    s2_6h = align_htf_to_ltf(prices, df_weekly, s2_weekly)
+    adx_6h = align_htf_to_ltf(prices, df_daily, adx_daily)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # need Camarilla calculation and volume MA
+    start_idx = 30  # need indicators ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(adx_1d_4h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(pp_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or 
+            np.isnan(adx_6h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Calculate Camarilla levels for current 4h bar
-        h4, l4, h3, l3, h2, l2, h1, l1 = calculate_camarilla(high[i], low[i], close[i-1])
-        
-        # Volume confirmation: current volume > 2.0 * 20-period average
-        vol_confirmed = volume[i] > 2.0 * vol_ma[i]
+        # Volume confirmation: current volume > 1.5 * 24-period average
+        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         # Trend filter: ADX threshold
-        trending = adx_1d_4h[i] >= 25
-        ranging = adx_1d_4h[i] < 25
+        trending = adx_6h[i] >= 25
+        ranging = adx_6h[i] < 25
         
         if position == 0:
-            # Ranging market: fade extremes (S3/R3)
             if ranging:
-                # Long near S3 with volume confirmation
-                if close[i] <= l3 * 1.001 and vol_confirmed:  # Allow small buffer
+                # In ranging markets, revert to weekly pivot (PP)
+                if close[i] <= pp_6h[i] * 1.002 and vol_confirmed:  # Near PP with volume
                     signals[i] = 0.25
                     position = 1
-                # Short near R3 with volume confirmation
-                elif close[i] >= h3 * 0.999 and vol_confirmed:  # Allow small buffer
+                elif close[i] >= pp_6h[i] * 0.998 and vol_confirmed:  # Near PP with volume
                     signals[i] = -0.25
                     position = -1
-            # Trending market: breakout of S4/R4
             else:
-                # Long breakout above R4 with volume
-                if close[i] > h4 and vol_confirmed:
+                # In trending markets, trade breakouts of R1/S1
+                if close[i] > r1_6h[i] and vol_confirmed:  # Break above R1
                     signals[i] = 0.25
                     position = 1
-                # Short breakdown below S4 with volume
-                elif close[i] < l4 and vol_confirmed:
+                elif close[i] < s1_6h[i] and vol_confirmed:  # Break below S1
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Long exit: mean reversion to pivot or stop
-            if close[i] >= (h3 + l3) / 2:  # Return to midpoint
+            # Long exit: price reaches R2 or returns to PP
+            if close[i] >= r2_6h[i] or close[i] <= pp_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: mean reversion to pivot or stop
-            if close[i] <= (h3 + l3) / 2:  # Return to midpoint
+            # Short exit: price reaches S2 or returns to PP
+            if close[i] <= s2_6h[i] or close[i] >= pp_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -167,6 +203,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_Reversal_ADX_Volume"
-timeframe = "4h"
+name = "6h_WeeklyPivot_Breakout_ADX_Volume"
+timeframe = "6h"
 leverage = 1.0
