@@ -1,14 +1,17 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_Volume_Session
-1h strategy using daily Camarilla pivot levels (R1/S1) with volume spike and session filter.
-- Long: Price breaks above R1 + volume > 2x average + session (08-20 UTC)
-- Short: Price breaks below S1 + volume > 2x average + session (08-20 UTC)
-- Exit: Opposite signal or price crosses daily EMA34
-- Position size: 0.20 (20% of capital)
-Designed for ~15-30 trades/year per symbol (60-120 total over 4 years)
-Uses daily trend filter to work in both bull and bear markets.
-Session filter reduces noise trades outside active hours.
+6h_BB_Width_Squeeze_Breakout_With_Volume
+6h strategy using Bollinger Band width squeeze + breakout with volume confirmation.
+- Bollinger Band width (BBW) calculated on 1d close (20-period, 2 std)
+- BBW squeeze: current BBW < 20-period lowest BBW (volatility contraction)
+- Breakout: price breaks above/below 20-period Bollinger Bands
+- Volume confirmation: volume > 1.5x 20-period average
+- Long: squeeze + breakout up + volume confirmation
+- Short: squeeze + breakout down + volume confirmation
+- Exit: opposite signal or price crosses 20-period Bollinger middle band (SMA20)
+- Designed for low frequency: ~10-20 trades/year per symbol (40-80 total over 4 years)
+- Works in both bull and bear markets by capturing volatility breakouts after consolidation
 """
 
 import numpy as np
@@ -25,93 +28,78 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels and trend filter
+    # Get 1d data for Bollinger Bands calculation
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d Camarilla levels (R1, S1)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d Bollinger Bands (20, 2)
     close_1d = df_1d['close'].values
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
+    bb_width = upper_bb - lower_bb  # Band width
     
-    # Previous day's values for pivot calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = high_1d[0]  # first bar uses current
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # Bollinger Band width squeeze: current width < 20-period lowest width
+    bb_width_min = pd.Series(bb_width).rolling(window=20, min_periods=20).min().values
+    bb_squeeze = bb_width < bb_width_min
     
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_val = prev_high - prev_low
-    r1 = pivot + (range_val * 1.1 / 12)
-    s1 = pivot - (range_val * 1.1 / 12)
+    # Align BB squeeze and Bollinger Bands to 6h timeframe
+    bb_squeeze_aligned = align_htf_to_ltf(prices, df_1d, bb_squeeze)
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    sma_20_aligned = align_htf_to_ltf(prices, df_1d, sma_20)
     
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Daily EMA34 for regime filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike filter (2x 20-period average)
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC (precomputed for efficiency)
-    session_hours = prices.index.hour
-    in_session = (session_hours >= 8) & (session_hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # need 20 for volume MA + buffer
+    start_idx = 40  # need 20 for BB calculations + buffer
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available or outside session
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]) or
-            not in_session[i]):
+        # Skip if any required data is not available
+        if (np.isnan(bb_squeeze_aligned[i]) or np.isnan(upper_bb_aligned[i]) or 
+            np.isnan(lower_bb_aligned[i]) or np.isnan(sma_20_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: daily EMA34
-        bull_regime = close[i] > ema_34_1d_aligned[i]
-        bear_regime = close[i] < ema_34_1d_aligned[i]
-        
         # Breakout conditions
-        breakout_up = close[i] > r1_aligned[i]
-        breakdown_down = close[i] < s1_aligned[i]
+        breakout_up = close[i] > upper_bb_aligned[i]
+        breakout_down = close[i] < lower_bb_aligned[i]
         
-        # Volume spike filter
-        volume_spike = volume[i] > 2.0 * vol_ma[i]
+        # Volume confirmation
+        volume_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: bull regime + breakout above R1 + volume spike + session
-            if bull_regime and breakout_up and volume_spike:
-                signals[i] = 0.20
+            # Long: BB squeeze + breakout up + volume confirmation
+            if bb_squeeze_aligned[i] and breakout_up and volume_confirm:
+                signals[i] = 0.25
                 position = 1
-            # Short: bear regime + breakdown below S1 + volume spike + session
-            elif bear_regime and breakdown_down and volume_spike:
-                signals[i] = -0.20
+            # Short: BB squeeze + breakout down + volume confirmation
+            elif bb_squeeze_aligned[i] and breakout_down and volume_confirm:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: regime change or price breaks below S1
-            if not bull_regime or breakdown_down:
-                signals[i] = -0.20  # reverse to short
+            # Long exit: opposite signal or price crosses below SMA20 (mean reversion)
+            if bb_squeeze_aligned[i] and breakout_down and volume_confirm or close[i] < sma_20_aligned[i]:
+                signals[i] = -0.25  # reverse to short
                 position = -1
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: regime change or price breaks above R1
-            if not bear_regime or breakout_up:
-                signals[i] = 0.20  # reverse to long
+            # Short exit: opposite signal or price crosses above SMA20 (mean reversion)
+            if bb_squeeze_aligned[i] and breakout_up and volume_confirm or close[i] > sma_20_aligned[i]:
+                signals[i] = 0.25  # reverse to long
                 position = 1
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_R1_S1_Breakout_Volume_Session"
-timeframe = "1h"
+name = "6h_BB_Width_Squeeze_Breakout_With_Volume"
+timeframe = "6h"
 leverage = 1.0
