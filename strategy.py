@@ -13,38 +13,8 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h and 1d data for calculations (HTF)
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1d data for calculations (HTF)
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate 4h ADX (14-period) for trend strength
-    # TR calculation
-    tr1 = df_4h['high'] - df_4h['low']
-    tr2 = np.abs(df_4h['high'] - np.roll(df_4h['close'], 1))
-    tr3 = np.abs(df_4h['low'] - np.roll(df_4h['close'], 1))
-    tr2[0] = np.nan
-    tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # +DM and -DM
-    up_move = df_4h['high'] - np.roll(df_4h['high'], 1)
-    down_move = np.roll(df_4h['low'], 1) - df_4h['low']
-    up_move[0] = np.nan
-    down_move[0] = np.nan
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed +DM, -DM, TR
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values
-    tr_smooth = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # DI and DX
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx_4h = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
     
     # Calculate 1d EMA200 for long-term trend
     ema200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
@@ -58,16 +28,25 @@ def generate_signals(prices):
     tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
     atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     
-    # Align indicators to 1h timeframe
-    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
+    # Align indicators to 6h timeframe
     ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate 1h Bollinger Bands (20, 2.0) for mean reversion
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_band = sma_20 + 2 * std_20
-    lower_band = sma_20 - 2 * std_20
+    # Calculate 6h Donchian Channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 6h ATR (14-period) for breakout filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = np.nan
+    tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_6h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate 6h ATR Moving Average (20-period) for volatility filter
+    atr_ma_6h = pd.Series(atr_6h).rolling(window=20, min_periods=20).mean().values
     
     # Session filter: 08-20 UTC
     hour_index = pd.DatetimeIndex(prices['open_time']).hour
@@ -79,11 +58,12 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(adx_4h_aligned[i]) or
-            np.isnan(ema200_1d_aligned[i]) or
+        if (np.isnan(ema200_1d_aligned[i]) or
             np.isnan(atr_1d_aligned[i]) or
-            np.isnan(sma_20[i]) or
-            np.isnan(std_20[i])):
+            np.isnan(high_20[i]) or
+            np.isnan(low_20[i]) or
+            np.isnan(atr_6h[i]) or
+            np.isnan(atr_ma_6h[i])):
             signals[i] = 0.0
             continue
         
@@ -94,47 +74,45 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: ADX > 25 for strong trend
-        trend_filter = adx_4h_aligned[i] > 25
+        # Trend filter: Price above/below 1d EMA200
+        trend_up = close[i] > ema200_1d_aligned[i]
+        trend_down = close[i] < ema200_1d_aligned[i]
         
         # Volatility filter: ATR > 20-period average
-        if i >= 20:
-            atr_ma_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
-            atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
-            vol_filter = not np.isnan(atr_ma_1d_aligned[i]) and atr_1d_aligned[i] > atr_ma_1d_aligned[i]
-        else:
-            vol_filter = False
+        vol_filter = atr_6h[i] > atr_ma_6h[i]
         
-        trade_allowed = trend_filter and vol_filter
+        # Breakout conditions
+        breakout_up = close[i] > high_20[i-1]  # Break above 20-period high
+        breakout_down = close[i] < low_20[i-1]  # Break below 20-period low
         
         if position == 0:
-            # Long: Price touches lower BB with long-term uptrend
-            if trade_allowed and close[i] <= lower_band[i] and close[i] > ema200_1d_aligned[i]:
-                signals[i] = 0.20
+            # Long: Breakout up with uptrend and volatility
+            if trend_up and vol_filter and breakout_up:
+                signals[i] = 0.25
                 position = 1
-            # Short: Price touches upper BB with long-term downtrend
-            elif trade_allowed and close[i] >= upper_band[i] and close[i] < ema200_1d_aligned[i]:
-                signals[i] = -0.20
+            # Short: Breakout down with downtrend and volatility
+            elif trend_down and vol_filter and breakout_down:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price touches middle band or reverses to upper band
-            if close[i] >= sma_20[i] or close[i] >= upper_band[i]:
+            # Long exit: price closes below 20-period low or trend reversal
+            if close[i] < low_20[i] or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price touches middle band or reverses to lower band
-            if close[i] <= sma_20[i] or close[i] <= lower_band[i]:
+            # Short exit: price closes above 20-period high or trend reversal
+            if close[i] > high_20[i] or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_ADX25_EMA200_BollingerMeanReversion_v1"
-timeframe = "1h"
+name = "6h_Donchian20_1dEMA200_VolumeFilter_v1"
+timeframe = "6h"
 leverage = 1.0
