@@ -1,20 +1,58 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout + Volume Spike + Weekly EMA Trend Filter
-Trades breakouts of 20-period Donchian channels on 12h timeframe.
-Long when price breaks above upper band with volume spike and weekly EMA uptrend.
-Short when price breaks below lower band with volume spike and weekly EMA downtrend.
-Uses weekly EMA50 as higher timeframe trend filter to avoid counter-trend trades.
-Designed for low trade frequency with clear trend-following edge in both bull and bear markets.
+4h Triple Supertrend + Volume Spike + 1d Trend Filter
+Uses three Supertrend indicators with different ATR multipliers to confirm trend strength.
+Long when all three Supertrends are bullish with volume spike.
+Short when all three are bearish with volume spike.
+Uses 1d EMA50 as higher timeframe trend filter to avoid counter-trend trades.
+Designed for low trade frequency with strong trend-following edge.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def supertrend(high, low, close, atr_period, multiplier):
+    """Calculate Supertrend indicator."""
+    tr1 = pd.DataFrame(high - low)
+    tr2 = pd.DataFrame(abs(high - close.shift(1)))
+    tr3 = pd.DataFrame(abs(low - close.shift(1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1/atr_period, adjust=False, min_periods=atr_period).mean()
+    
+    hl_avg = (high + low) / 2
+    upper = hl_avg + (multiplier * atr)
+    lower = hl_avg - (multiplier * atr)
+    
+    supertrend = pd.Series(index=close.index, dtype=float)
+    direction = pd.Series(index=close.index, dtype=int)
+    
+    for i in range(len(close)):
+        if i == 0:
+            supertrend.iloc[i] = 0.0
+            direction.iloc[i] = 1
+        else:
+            if close.iloc[i] > upper.iloc[i-1]:
+                direction.iloc[i] = 1
+            elif close.iloc[i] < lower.iloc[i-1]:
+                direction.iloc[i] = -1
+            else:
+                direction.iloc[i] = direction.iloc[i-1]
+                if direction.iloc[i] < 0 and lower.iloc[i] > lower.iloc[i-1]:
+                    lower.iloc[i] = lower.iloc[i-1]
+                if direction.iloc[i] > 0 and upper.iloc[i] < upper.iloc[i-1]:
+                    upper.iloc[i] = upper.iloc[i-1]
+            
+            if direction.iloc[i] == 1:
+                supertrend.iloc[i] = lower.iloc[i]
+            else:
+                supertrend.iloc[i] = upper.iloc[i]
+    
+    return supertrend.values, direction.values
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,21 +60,22 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA50 trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for EMA50 trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA50 for trend direction
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA50 for trend direction
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian channels (20-period high/low)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Triple Supertrend with different ATR multipliers
+    st1, dir1 = supertrend(high, low, close, 10, 3.0)  # Standard
+    st2, dir2 = supertrend(high, low, close, 10, 3.5)  # Wider
+    st3, dir3 = supertrend(high, low, close, 10, 2.5)  # Tighter
     
-    # Volume spike detection (2x 20-period average)
+    # Volume spike detection (2.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (2.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
@@ -44,46 +83,48 @@ def generate_signals(prices):
     start_idx = 50  # need enough history for calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(high_20[i]) or np.isnan(low_20[i]) or
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(st1[i]) or np.isnan(st2[i]) or np.isnan(st3[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        above_upper = price > high_20[i]
-        below_lower = price < low_20[i]
-        weekly_uptrend = price > ema_50_1w_aligned[i]
-        weekly_downtrend = price < ema_50_1w_aligned[i]
+        above_1d_ema = price > ema_50_1d_aligned[i]
+        below_1d_ema = price < ema_50_1d_aligned[i]
+        
+        # Triple Supertrend alignment
+        bullish_alignment = (dir1[i] == 1) and (dir2[i] == 1) and (dir3[i] == 1)
+        bearish_alignment = (dir1[i] == -1) and (dir2[i] == -1) and (dir3[i] == -1)
         
         if position == 0:
-            # Long: breakout above upper band, weekly uptrend, volume spike
-            if above_upper and weekly_uptrend and volume_spike[i]:
+            # Long: all Supertrends bullish, price above 1d EMA, volume spike
+            if (bullish_alignment and above_1d_ema and volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below lower band, weekly downtrend, volume spike
-            elif below_lower and weekly_downtrend and volume_spike[i]:
+            # Short: all Supertrends bearish, price below 1d EMA, volume spike
+            elif (bearish_alignment and below_1d_ema and volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long position management
             signals[i] = 0.25
-            # Exit: price breaks below lower band (contrary signal) or weekly trend turns down
-            if below_lower or not weekly_uptrend:
+            # Exit: any Supertrend turns bearish or price breaks below 1d EMA
+            if not bullish_alignment or below_1d_ema:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position management
             signals[i] = -0.25
-            # Exit: price breaks above upper band (contrary signal) or weekly trend turns up
-            if above_upper or not weekly_downtrend:
+            # Exit: any Supertrend turns bullish or price breaks above 1d EMA
+            if not bearish_alignment or above_1d_ema:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Donchian_Breakout_VolumeSpike_WeeklyEMA50"
-timeframe = "12h"
+name = "4h_TripleSupertrend_1dEMA50_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
