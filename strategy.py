@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
+"""
+Strategy: 4h_OrderBlock_Breakout_Volume
+Hypothesis: Institutional order blocks (OB) act as strong support/resistance. 
+Breakouts from OB with volume confirmation and trend filter (EMA21) capture 
+institutional flow. Works in bull/bear markets by trading breakouts in 
+direction of higher-timeframe trend. Targets 20-40 trades/year to avoid 
+fee drag.
+"""
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -13,131 +21,152 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for higher timeframe context
-    df_1w = get_htf_data(prices, '1w')
+    # Get 4h data for order block detection and EMA
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate weekly ADX for trend strength filter
-    # ADX calculation requires high, low, close
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Order block: bullish OB = bearish candle before strong up move
+    # Bearish OB = bullish candle before strong down move
+    # Using 4h close/open for simplicity
+    open_4h = df_4h['open'].values
+    close_4h = df_4h['close'].values
     
-    # True Range
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align length
+    # Bullish OB: previous candle bearish (close < open) and current bullish
+    # Bearish OB: previous candle bullish (close > open) and current bearish
+    bullish_ob = (close_4h[:-1] < open_4h[:-1]) & (close_4h[1:] > open_4h[1:])
+    bearish_ob = (close_4h[:-1] > open_4h[:-1]) & (close_4h[1:] < open_4h[1:])
     
-    # Directional Movement
-    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # OB levels: use the high/low of the OB candle
+    # Bullish OB forms support at its low
+    bullish_ob_low = np.concatenate([[np.nan], low_4h[:-1]])  # shift right
+    # Bearish OB forms resistance at its high
+    bearish_ob_high = np.concatenate([[np.nan], high_4h[:-1]])  # shift right
     
-    # Smooth TR and DM
-    def smooth_wilder(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(arr[1:period])  # skip first NaN
-        for i in range(period, len(arr)):
-            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
-        return result
+    # EMA21 for trend filter on 4h
+    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    atr = smooth_wilder(tr, 14)
-    dm_plus_smooth = smooth_wilder(dm_plus, 14)
-    dm_minus_smooth = smooth_wilder(dm_minus, 14)
+    # Volume average (20-period) on 4h
+    vol_ma_20_4h = pd.Series(df_4h['volume'].values).rolling(window=20, min_periods=20).mean().values
     
-    # DI+ and DI-
-    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
+    # Align to 4h timeframe (already 4h, but using for consistency)
+    bullish_ob_low_4h = align_htf_to_ltf(prices, df_4h, bullish_ob_low)
+    bearish_ob_high_4h = align_htf_to_ltf(prices, df_4h, bearish_ob_high)
+    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
+    vol_ma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
     
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = smooth_wilder(dx, 14)
+    # For 1h timeframe, we need to align 4h data to 1h
+    # But since we're using 4h as primary, we'll use close prices directly
+    # Actually, we need to work on the 4h timeframe signals
     
-    # Get daily data for entry signals
-    df_1d = get_htf_data(prices, '1d')
+    # Let's switch approach: work directly on 4h data and generate signals per 4h bar
+    # But the function expects same length as prices (which is 1h)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    # Revert: use 1h prices, get 4h data for signals
     
-    # Calculate 20-day Donchian channels
-    def rolling_max(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i >= window - 1:
-                result[i] = np.max(arr[i-window+1:i+1])
-        return result
+    # Recalculate with proper alignment
     
-    def rolling_min(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i >= window - 1:
-                result[i] = np.min(arr[i-window+1:i+1])
-        return result
+    # Get 1h data for entry timing
+    # Actually, let's keep it simple: use 4h data but align to 1h index
     
-    donchian_high = rolling_max(high_1d, 20)
-    donchian_low = rolling_min(low_1d, 20)
+    # Start over with clear approach
     
-    # Calculate daily volume average (20-period)
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Use 1h prices for the array length
+    # Get 4h data for signal generation
     
-    # Align all data to daily timeframe (since we're using 1d timeframe)
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Reset and simplify
     
+    # Get 4h data
+    df_4h = get_htf_data(prices, '4h')
+    
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    # Calculate indicators on 4h
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    vol_4h = df_4h['volume'].values
+    
+    # EMA21 trend
+    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    
+    # Volume MA
+    vol_ma_20_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
+    
+    # Order blocks: simple definition
+    # Bullish OB: when we have a down candle followed by up candle that closes above midpoint of down candle
+    # Bearish OB: up candle followed by down candle that closes below midpoint of up candle
+    
+    # Initialize OB arrays
+    bullish_ob = np.full_like(close_4h, np.nan)
+    bearish_ob = np.full_like(close_4h, np.nan)
+    
+    for i in range(1, len(close_4h)):
+        # Bullish OB: previous candle bearish, current bullish and closes above midpoint of prev
+        if close_4h[i-1] < open_4h[i-1] and close_4h[i] > open_4h[i]:
+            midpoint = (open_4h[i-1] + close_4h[i-1]) / 2
+            if close_4h[i] > midpoint:
+                bullish_ob[i] = low_4h[i-1]  # OB low is the low of the bearish candle
+        
+        # Bearish OB: previous candle bullish, current bearish and closes below midpoint of prev
+        if close_4h[i-1] > open_4h[i-1] and close_4h[i] < open_4h[i]:
+            midpoint = (open_4h[i-1] + close_4h[i-1]) / 2
+            if close_4h[i] < midpoint:
+                bearish_ob[i] = high_4h[i-1]  # OB high is the high of the bullish candle
+    
+    # Align 4h data to 1h timeframe
+    ema_21_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
+    bullish_ob_aligned = align_htf_to_ltf(prices, df_4h, bullish_ob)
+    bearish_ob_aligned = align_htf_to_ltf(prices, df_4h, bearish_ob)
+    
+    # Signals array
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough for ADX and Donchian
+    # Start after warmup period
+    start_idx = 30  # need enough for EMA and OB
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available
-        if (np.isnan(adx_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ma_aligned[i])):
+        # Skip if data not available
+        if (np.isnan(ema_21_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or
+            np.isnan(bullish_ob_aligned[i]) or np.isnan(bearish_ob_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend strength filter: ADX > 25 indicates strong trend
-        strong_trend = adx_aligned[i] > 25
+        # Trend filter
+        uptrend = close[i] > ema_21_aligned[i]
+        downtrend = close[i] < ema_21_aligned[i]
         
         # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
+        vol_confirm = volume[i] > 1.5 * vol_ma_20_aligned[i]
         
         # Breakout conditions
-        breakout_up = close[i] > donchian_high_aligned[i]
-        breakdown_down = close[i] < donchian_low_aligned[i]
+        # Long: price breaks above bearish OB (resistance) with volume in uptrend
+        # Short: price breaks below bullish OB (support) with volume in downtrend
+        breakout_long = close[i] > bearish_ob_aligned[i]
+        breakdown_short = close[i] < bullish_ob_aligned[i]
         
         if position == 0:
-            # Long: strong trend + volume + breakout above Donchian high
-            if strong_trend and vol_confirm and breakout_up:
+            # Long: uptrend + volume + break above bearish OB
+            if uptrend and vol_confirm and breakout_long:
                 signals[i] = 0.25
                 position = 1
-            # Short: strong trend + volume + breakdown below Donchian low
-            elif strong_trend and vol_confirm and breakdown_down:
+            # Short: downtrend + volume + break below bullish OB
+            elif downtrend and vol_confirm and breakdown_short:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend weakness or breakdown below Donchian low
-            if not strong_trend or breakdown_down:
+            # Long exit: trend breakdown or break below bullish OB (support)
+            if not uptrend or breakdown_short:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend weakness or breakout above Donchian high
-            if not strong_trend or breakout_up:
+            # Short exit: trend reversal or break above bearish OB (resistance)
+            if not downtrend or breakout_long:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -145,6 +174,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_ADX_Donchian_Breakout_Volume"
-timeframe = "1d"
+name = "4h_OrderBlock_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
