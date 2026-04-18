@@ -1,10 +1,21 @@
+# 4h_KAMA_Direction_Trend_Confirmation_v2
+# Hypothesis: Use KAMA (Kaufman Adaptive Moving Average) to capture trend direction on 4h,
+# filtered by 12h EMA trend and volume confirmation. KAMA adapts to market noise,
+# reducing false signals in choppy conditions. Works in both bull and bear by following
+# the dominant trend as defined by higher timeframe EMA. Volume ensures breakouts
+# have participation. Target: 20-40 trades/year to avoid fee drag.
+# Entry: Long when KAMA > 12h EMA and price > KAMA with volume confirmation.
+# Short when KAMA < 12h EMA and price < KAMA with volume confirmation.
+# Exit: Reverse signal or when price crosses back through KAMA.
+# Position size: 0.25 to limit drawdown.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_DailyPivot_R1S1_Breakout_VolumeATRFilter_v1"
-timeframe = "12h"
+name = "4h_KAMA_Direction_Trend_Confirmation_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,78 +28,77 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for pivot and ATR
-    df_1d = get_htf_data(prices, '1d')
+    # KAMA parameters
+    kama_period = 10
+    fast_ema = 2
+    slow_ema = 30
     
-    # Previous daily OHLC
-    prev_close_d = df_1d['close'].shift(1).values
-    prev_high_d = df_1d['high'].shift(1).values
-    prev_low_d = df_1d['low'].shift(1).values
+    # Calculate Efficiency Ratio (ER) and Smoothing Constant (SC)
+    change = np.abs(np.diff(close, kama_period))  # |close(t) - close(t-kama_period)|
+    vol = np.sum(np.abs(np.diff(close)), axis=1)  # sum of absolute changes over kama_period
+    # Pad the beginning with NaN
+    change = np.concatenate([np.full(kama_period, np.nan), change])
+    vol = np.concatenate([np.full(kama_period, np.nan), vol])
+    # Avoid division by zero
+    er = np.where(vol != 0, change / vol, 0)
+    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[kama_period] = close[kama_period]  # seed
+    for i in range(kama_period + 1, n):
+        if not np.isnan(kama[i-1]) and not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # Pivot levels: R1, S1
-    pivot_d = (prev_high_d + prev_low_d + prev_close_d) / 3
-    range_d = prev_high_d - prev_low_d
-    R1_d = pivot_d + range_d
-    S1_d = pivot_d - range_d
+    # 12h EMA for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # ATR(14) for stop filter
-    tr1 = prev_high_d - prev_low_d
-    tr2 = np.abs(prev_high_d - prev_close_d)
-    tr3 = np.abs(prev_low_d - prev_close_d)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Align to 12h
-    R1_d_aligned = align_htf_to_ltf(prices, df_1d, R1_d)
-    S1_d_aligned = align_htf_to_ltf(prices, df_1d, S1_d)
-    pivot_d_aligned = align_htf_to_ltf(prices, df_1d, pivot_d)
-    atr_d_aligned = align_htf_to_ltf(prices, df_1d, atr_d)
-    
-    # Volume filter: current volume > 2.0 * 2-period average (2 * 12h = 1 day)
-    vol_ma_2 = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
-    volume_filter = volume > (2.0 * vol_ma_2)
+    # Volume filter: current volume > 1.5 * 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicator calculations
+    start_idx = max(50, kama_period + 1, 34)  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(R1_d_aligned[i]) or np.isnan(S1_d_aligned[i]) or
-            np.isnan(pivot_d_aligned[i]) or np.isnan(atr_d_aligned[i]) or
-            np.isnan(vol_ma_2[i])):
+        if (np.isnan(kama[i]) or np.isnan(ema_12h_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         close_val = close[i]
-        R1_val = R1_d_aligned[i]
-        S1_val = S1_d_aligned[i]
-        pivot_val = pivot_d_aligned[i]
-        atr_val = atr_d_aligned[i]
+        kama_val = kama[i]
+        ema_12h_val = ema_12h_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Long: break above R1 with volume and ATR filter (avoid low-vol breakouts)
-            if close_val > R1_val and vol_filter and atr_val > 0:
+            # Long: KAMA above 12h EMA (uptrend) and price > KAMA with volume
+            if kama_val > ema_12h_val and close_val > kama_val and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with volume and ATR filter
-            elif close_val < S1_val and vol_filter and atr_val > 0:
+            # Short: KAMA below 12h EMA (downtrend) and price < KAMA with volume
+            elif kama_val < ema_12h_val and close_val < kama_val and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price falls back below pivot
-            if close_val < pivot_val:
+            # Long exit: price crosses below KAMA or trend changes
+            if close_val < kama_val or kama_val < ema_12h_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises back above pivot
-            if close_val > pivot_val:
+            # Short exit: price crosses above KAMA or trend changes
+            if close_val > kama_val or kama_val > ema_12h_val:
                 signals[i] = 0.0
                 position = 0
             else:
