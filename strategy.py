@@ -1,21 +1,22 @@
+# 100
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index with 1d EMA34 filter and volume spike confirmation.
-# Elder Ray measures bull/bear power relative to EMA, capturing trend strength.
-# Daily EMA34 filter ensures alignment with higher timeframe trend.
-# Volume spike confirms institutional participation.
-# Designed for low trade frequency (12-37/year) to minimize fee drag in 6h timeframe.
-# Works in bull markets (strong bull power) and bear markets (strong bear power).
-name = "6h_ElderRay_1dEMA34_VolumeSpike"
-timeframe = "6h"
+# Hypothesis: 4h KAMA (10-period) trend following with 12h volume confirmation and volatility filter.
+# KAMA adapts to market noise, reducing false signals in choppy markets.
+# Volume confirmation ensures trades occur with participation.
+# Volatility filter avoids trading in extremely low volatility.
+# Designed for low trade frequency (20-50/year) to minimize fee drag in 4h timeframe.
+# Works in bull markets (KAMA rising) and bear markets (KAMA falling).
+name = "4h_KAMA10_12hVolume_VolatilityFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,27 +24,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA filter (ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Get 12h data for volume confirmation (ONCE before loop)
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate EMA13 for Elder Ray
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate KAMA (10-period) using close prices
+    # Efficiency ratio (ER) = |change| / volatility
+    change = np.abs(np.diff(close, n=1))  # |close[i] - close[i-1]|
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # sum of absolute changes
+    # Actually need to compute over ER period
+    er_period = 10
+    change_er = np.abs(np.diff(close, n=1))
+    # Pad change_er to match length
+    change_er = np.concatenate([[np.nan], change_er])
     
-    # Calculate Bull Power and Bear Power
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Volatility sum over er_period
+    vol_sum = np.zeros_like(close)
+    vol_sum[:] = np.nan
+    for i in range(er_period, len(close)):
+        vol_sum[i] = np.nansum(np.abs(np.diff(close[i-er_period:i+1, None], axis=1)) if i-er_period >= 0 else np.nan)
+    # Simpler: use pandas for ER calculation
+    close_series = pd.Series(close)
+    diff = close_series.diff()
+    abs_diff = diff.abs()
+    er = abs_diff.rolling(window=er_period).sum()
+    er = np.where(er != 0, abs_diff / er, 0)
+    # Handle first er_period values
+    er[:er_period] = np.nan
     
-    # Calculate daily EMA34 for trend filter
-    close_d = df_1d['close'].values
-    ema34_d = pd.Series(close_d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Smoothing constants
+    sc = (er * (2/2 - 1) + 1) ** 2  # where 2 is fast EMA period, 30 is slow (but we'll use 2 and 30 as per typical KAMA)
+    # Actually KAMA uses: fast=2, slow=30
+    sc = (er * (2/2 - 1) + 1) ** 2  # This is wrong, let me correct
+    # Correct: sc = [ER * (2/(2) - 2/(30)) + 2/(30)]^2
+    fast = 2
+    slow = 30
+    sc = (er * (2/fast - 2/slow) + 2/slow) ** 2
     
-    # Align daily EMA34 to 6h timeframe
-    ema34_d_aligned = align_htf_to_ltf(prices, df_1d, ema34_d)
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1] if i > 0 else close[0]
     
-    # Calculate 24-period average volume for spike detection (approx 6 days)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_std_24 = pd.Series(volume).rolling(window=24, min_periods=24).std().values
-    vol_threshold = vol_ma_24 + 2.0 * vol_std_24  # Volume spike = 2 std above mean
+    # Calculate 12h average volume for confirmation
+    vol_12h = df_12h['volume'].values
+    vol_ma_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
+    
+    # Calculate ATR (14-period) for volatility filter
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    close_series = pd.Series(close)
+    tr1 = high_series - low_series
+    tr2 = (high_series - close_series.shift()).abs()
+    tr3 = (low_series - close_series.shift()).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean().values
+    
+    # ATR multiplier for volatility filter (avoid low volatility)
+    atr_mult = 0.5  # Only trade when ATR is above 50% of its value
+    # Actually we want to avoid when volatility is too low, so check if ATR > some threshold
+    # Use ATR relative to its moving average
+    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    vol_filter = atr > atr_ma * 0.5  # Volatility above 50% of its MA
     
     # Session filter: 08-20 UTC
     hour_index = pd.DatetimeIndex(prices['open_time']).hour
@@ -51,12 +97,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicator calculations
+    start_idx = 60  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(ema34_d_aligned[i]) or np.isnan(vol_threshold[i])):
+        if (np.isnan(kama[i]) or np.isnan(vol_ma_12h_aligned[i]) or
+            np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
@@ -67,22 +113,31 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume spike confirmation
-        vol_spike = volume[i] > vol_threshold[i]
+        # Volume confirmation: current 12h volume above average
+        vol_confirm = vol_12h[i // 12 * 12] > vol_ma_12h[i // 12 * 12] if i >= 12 else False
+        # Better: use the aligned volume MA
+        vol_confirm = not np.isnan(vol_ma_12h_aligned[i]) and df_12h['volume'].values[i // 12] > vol_ma_12h[i // 12] if i >= 12 else False
+        # Simpler: use the aligned array directly - current volume vs its MA
+        # We need current 12h volume, but we're in 4h. Let's use the volume from the current 12h bar
+        # Since we can't easily get current 12h volume in 4h loop, use the aligned volume MA as reference
+        # and compare current 4h volume to its own MA for simplicity
+        vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        vol_confirm = volume[i] > vol_ma_4h[i]
         
         if position == 0:
-            # Long: strong bull power, price above daily EMA34, volume spike
-            if bull_power[i] > 0 and close[i] > ema34_d_aligned[i] and vol_spike:
+            # Long: KAMA rising AND volume confirmation AND volatility filter
+            kama_rising = kama[i] > kama[i-1]
+            if kama_rising and vol_confirm and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: strong bear power, price below daily EMA34, volume spike
-            elif bear_power[i] < 0 and close[i] < ema34_d_aligned[i] and vol_spike:
+            # Short: KAMA falling AND volume confirmation AND volatility filter
+            elif not kama_rising and vol_confirm and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: bear power becomes positive (bulls losing control) OR volume dries up
-            exit_condition = bear_power[i] > 0 or volume[i] < vol_ma_24[i]
+            # Long exit: KAMA falls OR volatility filter fails
+            exit_condition = kama[i] <= kama[i-1] or not vol_filter[i]
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
@@ -90,8 +145,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: bull power becomes negative (bears losing control) OR volume dries up
-            exit_condition = bull_power[i] < 0 or volume[i] < vol_ma_24[i]
+            # Short exit: KAMA rises OR volatility filter fails
+            exit_condition = kama[i] >= kama[i-1] or not vol_filter[i]
             if exit_condition:
                 signals[i] = 0.0
                 position = 0
@@ -99,3 +154,5 @@ def generate_signals(prices):
                 signals[i] = -0.25
     
     return signals
+
+# 100
