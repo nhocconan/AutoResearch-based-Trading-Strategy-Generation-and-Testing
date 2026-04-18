@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,20 +13,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for weekly trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 34-period EMA on 1d for trend filter
+    # Calculate 34-period EMA on 1d for weekly trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA to 4h
+    # Align 1d EMA34 to daily
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 4h ATR (14-period)
+    # Calculate daily ATR (14-period)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -35,14 +32,19 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 4h volume spike (volume > 1.8x 30-period average)
+    # Calculate daily volume spike (volume > 2.0x 30-period average)
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
-    # Calculate 1d volume spike for stronger confirmation
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = volume_1d > (1.5 * vol_ma_1d)
-    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
+    # Calculate 14-period RSI for mean reversion
+    delta = pd.Series(close).diff().values
+    delta[0] = 0
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -53,7 +55,7 @@ def generate_signals(prices):
         # Skip if any required data is not available
         if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(atr[i]) or
-            np.isnan(volume_spike_1d_aligned[i])):
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
@@ -61,30 +63,34 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Volume confirmation: both 4h and 1d spike
-        vol_confirmed = volume_spike[i] and (volume_spike_1d_aligned[i] > 0.5)
+        # Volume confirmation
+        vol_confirmed = volume_spike[i]
+        
+        # Mean reversion filter: RSI extreme
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
         
         if position == 0:
-            # Long: price above 1d EMA34 with volume spike
-            if uptrend and vol_confirmed:
+            # Long: price above 1d EMA34 with volume spike and RSI oversold
+            if uptrend and vol_confirmed and rsi_oversold:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below 1d EMA34 with volume spike
-            elif downtrend and vol_confirmed:
+            # Short: price below 1d EMA34 with volume spike and RSI overbought
+            elif downtrend and vol_confirmed and rsi_overbought:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below 1d EMA34 OR volume dries up
-            if close[i] < ema_34_1d_aligned[i] or not volume_spike[i]:
+            # Long exit: price crosses below 1d EMA34 OR RSI overbought
+            if close[i] < ema_34_1d_aligned[i] or rsi[i] > 70:
                 signals[i] = -0.25  # reverse to short
                 position = -1
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above 1d EMA34 OR volume dries up
-            if close[i] > ema_34_1d_aligned[i] or not volume_spike[i]:
+            # Short exit: price crosses above 1d EMA34 OR RSI oversold
+            if close[i] > ema_34_1d_aligned[i] or rsi[i] < 30:
                 signals[i] = 0.25  # reverse to long
                 position = 1
             else:
@@ -92,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dEMA34_DoubleVolumeSpike_v1"
-timeframe = "4h"
+name = "1d_EMA34_RSI_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
