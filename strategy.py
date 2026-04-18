@@ -1,43 +1,57 @@
 #!/usr/bin/env python3
 """
-12h Williams Alligator with Volume Spike and EMA50 Trend Filter
-Hypothesis: Williams Alligator identifies trend periods when jaws, teeth, and lips are aligned. 
-Price trading outside the Alligator's mouth with volume confirmation indicates strong momentum.
-In bull markets, buy when price > lips with bullish alignment; in bear markets, sell when price < teeth with bearish alignment.
-Volume filter reduces false signals. Weekly trend filter ensures we trade with the higher timeframe momentum.
-Designed for low-frequency trading (~20-40 trades/year) to minimize fee drag on 12h timeframe.
+4h Candlestick Momentum with Volume Spike and ADX Trend Filter
+Hypothesis: Strong bullish/bearish candles with volume spikes signal momentum, but only in trending markets (ADX > 25).
+In ranging markets (ADX < 20), we avoid trades to reduce false signals. Works in bull/bear by following momentum direction.
+Uses volume confirmation to avoid weak moves and limits trades to reduce fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_alligator(high, low, close, jaw_period=13, teeth_period=8, lips_period=5):
-    """Calculate Williams Alligator: Jaw (13), Teeth (8), Lips (5) SMAs with future shift"""
-    if len(close) < max(jaw_period, teeth_period, lips_period):
-        return np.full_like(close, np.nan), np.full_like(close, np.nan), np.full_like(close, np.nan)
+def calculate_adx(high, low, close, period=14):
+    """Calculate Average Directional Index"""
+    if len(high) < period:
+        return np.full_like(high, np.nan)
     
-    # Calculate SMAs
-    jaw = np.full_like(close, np.nan)
-    teeth = np.full_like(close, np.nan)
-    lips = np.full_like(close, np.nan)
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    for i in range(len(close)):
-        if i >= jaw_period - 1:
-            jaw[i] = np.mean(close[i - jaw_period + 1:i + 1])
-        if i >= teeth_period - 1:
-            teeth[i] = np.mean(close[i - teeth_period + 1:i + 1])
-        if i >= lips_period - 1:
-            lips[i] = np.mean(close[i - lips_period + 1:i + 1])
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Williams Alligator shifts the lines forward: Jaw by 8, Teeth by 5, Lips by 3 bars
-    # To avoid look-ahead, we use the unshifted values for signal generation
-    # The alignment happens naturally through price relationship
-    return jaw, teeth, lips
+    # Smoothed values
+    def smooth(val, p):
+        result = np.full_like(val, np.nan)
+        if len(val) < p:
+            return result
+        result[p-1] = np.mean(val[:p])
+        for i in range(p, len(val)):
+            result[i] = (result[i-1] * (p-1) + val[i]) / p
+        return result
+    
+    atr = smooth(tr, period)
+    plus_di = 100 * smooth(plus_dm, period) / atr
+    minus_di = 100 * smooth(minus_dm, period) / atr
+    dx = np.abs(plus_di - minus_di) / (np.abs(plus_di + minus_di)) * 100
+    adx = smooth(dx, period)
+    return adx
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -45,73 +59,65 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # ADX for trend strength (1h timeframe for better signal)
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 20:
         return np.zeros(n)
     
-    # Calculate weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = np.full_like(close_1w, np.nan)
-    for i in range(len(close_1w)):
-        if i < 49:
-            ema_50_1w[i] = np.mean(close_1w[0:i+1])
-        else:
-            ema_50_1w[i] = np.mean(close_1w[i-49:i+1])
+    adx = calculate_adx(df_1h['high'].values, df_1h['low'].values, df_1h['close'].values, 14)
+    adx_aligned = align_htf_to_ltf(prices, df_1h, adx)
     
-    # Align weekly EMA50 to 12h timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Calculate Williams Alligator on 12h data
-    jaw, teeth, lips = calculate_alligator(high, low, close)
-    
-    # Volume confirmation: current volume > 2.0x 30-period average
-    vol_ma = np.full_like(volume, np.nan)
+    # Volume confirmation: current volume > 2.0x 20-period average
+    vol_ma = np.zeros_like(volume)
     for i in range(len(volume)):
-        if i < 29:
+        if i < 20:
             vol_ma[i] = np.mean(volume[0:i+1]) if i >= 0 else volume[i]
         else:
-            vol_ma[i] = np.mean(volume[i-29:i+1])
+            vol_ma[i] = np.mean(volume[i-20+1:i+1])
     vol_spike = volume > (vol_ma * 2.0)
+    
+    # Candlestick momentum: strong bullish/bearish candle
+    body_size = np.abs(close - open_)
+    candle_range = high - low
+    # Avoid division by zero
+    body_ratio = np.where(candle_range > 0, body_size / candle_range, 0)
+    
+    open_ = prices['open'].values
+    bullish_candle = (close > open_) & (body_ratio > 0.6)
+    bearish_candle = (close < open_) & (body_ratio > 0.6)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup for indicators
+    start_idx = 30  # Warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(bullish_candle[i]) or np.isnan(bearish_candle[i])):
             signals[i] = 0.0
             continue
         
-        # Determine Alligator alignment
-        bullish_alignment = (lips[i] > teeth[i] > jaw[i])  # Lips > Teeth > Jaw
-        bearish_alignment = (jaw[i] > teeth[i] > lips[i])  # Jaw > Teeth > Lips
-        
         if position == 0:
-            # Long: Price above Lips, bullish alignment, volume spike, and above weekly EMA50
-            if (close[i] > lips[i] and bullish_alignment and vol_spike[i] and 
-                close[i] > ema_50_1w_aligned[i]):
+            # Long: bullish candle with volume spike in trending market (ADX > 25)
+            if bullish_candle[i] and vol_spike[i] and adx_aligned[i] > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below Teeth, bearish alignment, volume spike, and below weekly EMA50
-            elif (close[i] < teeth[i] and bearish_alignment and vol_spike[i] and 
-                  close[i] < ema_50_1w_aligned[i]):
+            # Short: bearish candle with volume spike in trending market (ADX > 25)
+            elif bearish_candle[i] and vol_spike[i] and adx_aligned[i] > 25:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price crosses below Jaw or Alligator loses bullish alignment
-            if close[i] < jaw[i] or not bullish_alignment:
+            # Exit: bearish candle or ADX weakening
+            if bearish_candle[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price crosses above Teeth or Alligator loses bearish alignment
-            if close[i] > teeth[i] or not bearish_alignment:
+            # Exit: bullish candle or ADX weakening
+            if bullish_candle[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -119,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Williams_Alligator_VolumeSpike_EMA50Trend"
-timeframe = "12h"
+name = "4h_Candlestick_Momentum_Volume_ADX"
+timeframe = "4h"
 leverage = 1.0
