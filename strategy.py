@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Supertrend with 12-hour ADX filter and volume confirmation
-# Supertrend adapts to volatility using ATR, effective in both trending and ranging markets
-# 12-hour ADX > 25 ensures we only trade when trend strength is sufficient
-# Volume spike (>1.5x 20-period average) confirms conviction
-# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag
-name = "4h_Supertrend_12hADX_Volume"
-timeframe = "4h"
+# Hypothesis: 1d KAMA with RSI filter and 1w trend confirmation
+# KAMA adapts to market noise - efficient in trending, avoids whipsaws in chop
+# RSI(14) < 30 for long, > 70 for short with 1w trend filter prevents counter-trend trades
+# Target: 20-25 trades/year (80-100 total over 4 years) to minimize fee drag
+name = "1d_KAMA_RSI_1wTrendFilter"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,124 +21,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for ADX filter (ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
+    # Get 1w data for trend filter (ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate ATR(10) for Supertrend
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]
-    tr2[0] = high[0] - close[0]
-    tr3[0] = low[0] - close[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
-    
-    # Supertrend parameters
-    factor = 3.0
-    upperband = (high + low) / 2 + factor * atr
-    lowerband = (high + low) / 2 - factor * atr
-    
-    # Initialize Supertrend
-    supertrend = np.zeros(n)
-    direction = np.ones(n)  # 1 for uptrend, -1 for downtrend
-    
-    for i in range(1, n):
-        if close[i] > upperband[i-1]:
-            direction[i] = 1
-        elif close[i] < lowerband[i-1]:
-            direction[i] = -1
+    # Calculate KAMA (adaptive moving average)
+    close_s = pd.Series(close)
+    # Efficiency ratio
+    change = abs(close_s - close_s.shift(10))
+    volatility = abs(close_s.diff()).rolling(window=10, min_periods=1).sum()
+    er = change / volatility.replace(0, np.nan)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # KAMA calculation
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        if not np.isnan(sc.iloc[i]):
+            kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
         else:
-            direction[i] = direction[i-1]
-            if direction[i] == 1 and lowerband[i] < lowerband[i-1]:
-                lowerband[i] = lowerband[i-1]
-            if direction[i] == -1 and upperband[i] > upperband[i-1]:
-                upperband[i] = upperband[i-1]
-        
-        if direction[i] == 1:
-            supertrend[i] = lowerband[i]
-        else:
-            supertrend[i] = upperband[i]
+            kama[i] = kama[i-1]
     
-    # Calculate ADX(14) on 12h data
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate 1w EMA34 for trend filter
+    close_1w = pd.Series(df_1w['close'].values)
+    ema34_1w = close_1w.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # True Range
-    tr_12h1 = high_12h - low_12h
-    tr_12h2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr_12h3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr_12h1[0] = high_12h[0] - low_12h[0]
-    tr_12h2[0] = high_12h[0] - close_12h[0]
-    tr_12h3[0] = low_12h[0] - close_12h[0]
-    tr_12h = np.maximum(tr_12h1, np.maximum(tr_12h2, tr_12h3))
-    
-    # Directional Movement
-    up_move = high_12h - np.roll(high_12h, 1)
-    down_move = np.roll(low_12h, 1) - low_12h
-    up_move[0] = 0
-    down_move[0] = 0
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    tr_14 = pd.Series(tr_12h).rolling(window=14, min_periods=14).sum().values
-    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
-    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_14 / tr_14
-    minus_di = 100 * minus_dm_14 / tr_14
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
-    
-    # Volume confirmation: current volume > 1.5 * 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20)
+    # Calculate RSI(14)
+    delta = close_s.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
+    rs = gain / loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicator calculations
+    start_idx = 34  # Wait for indicator calculations
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(supertrend[i]) or np.isnan(adx_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(kama[i]) or np.isnan(ema34_1w_aligned[i]) or
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: ADX > 25 indicates strong trend
-        strong_trend = adx_aligned[i] > 25
+        # Trend filter: price above/below 1w EMA34
+        uptrend = close[i] > ema34_1w_aligned[i]
+        downtrend = close[i] < ema34_1w_aligned[i]
         
         if position == 0:
-            # Long: price above Supertrend AND strong trend AND volume spike
-            if close[i] > supertrend[i] and strong_trend and volume_spike[i]:
+            # Long: price > KAMA AND RSI < 30 AND uptrend
+            if close[i] > kama[i] and rsi[i] < 30 and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below Supertrend AND strong trend AND volume spike
-            elif close[i] < supertrend[i] and strong_trend and volume_spike[i]:
+            # Short: price < KAMA AND RSI > 70 AND downtrend
+            elif close[i] < kama[i] and rsi[i] > 70 and downtrend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price below Supertrend OR trend weakens
-            if close[i] <= supertrend[i] or not strong_trend:
+            # Long exit: price < KAMA OR RSI > 50 OR trend reverses
+            if close[i] < kama[i] or rsi[i] > 50 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price above Supertrend OR trend weakens
-            if close[i] >= supertrend[i] or not strong_trend:
+            # Short exit: price > KAMA OR RSI < 50 OR trend reverses
+            if close[i] > kama[i] or rsi[i] < 50 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
