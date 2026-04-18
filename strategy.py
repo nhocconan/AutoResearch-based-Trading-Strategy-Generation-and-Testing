@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-1h EMA Pullback + Volume Spike + 4h Trend Filter
-Trades pullbacks to 21 EMA in 4h trend direction with volume confirmation.
-Designed for low trade frequency (15-30/year) with high win rate in trending markets.
-Uses 4h EMA for trend direction, 1h EMA for entry timing, volume spike for confirmation.
+6h Elder Ray Power + Weekly Trend Filter + Volume Confirmation
+Uses Elder Ray (bull/bear power) from 6h data combined with weekly EMA trend filter.
+Long when bull power > 0 and price above weekly EMA, short when bear power < 0 and price below weekly EMA.
+Volume confirmation ensures institutional participation.
+Designed for low trade frequency with clear trend-following edge in both bull and bear markets.
 """
 
 import numpy as np
@@ -20,16 +21,18 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend direction (once before loop)
-    df_4h = get_htf_data(prices, '4h')
+    # Get weekly data for trend filter (once before loop)
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h EMA21 for trend direction
-    close_4h = df_4h['close'].values
-    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
+    # Calculate weekly EMA34 for trend direction
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # 1h EMA21 for entry timing
-    ema_21_1h = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Elder Ray components (13-period EMA for power calculation)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13  # Bull Power = High - EMA13
+    bear_power = low - ema_13   # Bear Power = Low - EMA13
     
     # Volume spike detection (2x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -38,52 +41,47 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
     
-    start_idx = 40  # need enough history for calculations
+    start_idx = 50  # need enough history for calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(ema_21_1h[i]) or 
+        if (np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        ema_4h = ema_21_4h_aligned[i]
-        ema_1h = ema_21_1h[i]
+        above_weekly_ema = price > ema_34_1w_aligned[i]
+        below_weekly_ema = price < ema_34_1w_aligned[i]
         
         if position == 0:
-            # Long: price above 4h EMA (uptrend) + pulls back to 1h EMA + volume spike
-            if (price > ema_4h and 
-                price <= ema_1h * 1.005 and  # within 0.5% above EMA (pullback)
-                price >= ema_1h * 0.995 and  # within 0.5% below EMA
-                volume_spike[i]):
-                signals[i] = 0.20
+            # Long: bull power positive, price above weekly EMA, volume spike
+            if (bull_power[i] > 0 and above_weekly_ema and volume_spike[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price below 4h EMA (downtrend) + pulls back to 1h EMA + volume spike
-            elif (price < ema_4h and 
-                  price <= ema_1h * 1.005 and  # within 0.5% above EMA (pullback)
-                  price >= ema_1h * 0.995 and  # within 0.5% below EMA
-                  volume_spike[i]):
-                signals[i] = -0.20
+            # Short: bear power negative, price below weekly EMA, volume spike
+            elif (bear_power[i] < 0 and below_weekly_ema and volume_spike[i]):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Long position management
-            signals[i] = 0.20
-            # Exit: price breaks below 1h EMA (trend weakness)
-            if price < ema_1h:
+            signals[i] = 0.25
+            # Exit: bear power turns negative (trend weakening)
+            if bear_power[i] < 0:
                 signals[i] = 0.0
                 position = 0
         
         elif position == -1:
             # Short position management
-            signals[i] = -0.20
-            # Exit: price breaks above 1h EMA (trend weakness)
-            if price > ema_1h:
+            signals[i] = -0.25
+            # Exit: bull power turns positive (trend weakening)
+            if bull_power[i] > 0:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1h_EMA_Pullback_VolumeSpike_4hTrend"
-timeframe = "1h"
+name = "6h_ElderRay_Power_WeeklyTrend_Filter_Volume"
+timeframe = "6h"
 leverage = 1.0
